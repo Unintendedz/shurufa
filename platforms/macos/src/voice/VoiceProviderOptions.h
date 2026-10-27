@@ -22,6 +22,35 @@ static inline BOOL MSIMEVoiceLocalModelMissing(NSString *provider, BOOL provider
         (!provider || [provider.lowercaseString isEqual:@"local"]);
 }
 
+// 未设置识别服务时的出厂默认：本机 TextStream 流式识别。
+static NSString *const MSIMEVoiceDefaultASRProvider = @"textstream";
+
+// 偏好里的服务 id 换算成实际使用的小写 id：未设置或为空就是出厂默认。
+static inline NSString *MSIMEVoiceEffectiveASRProvider(NSString *provider) {
+    return provider.length ? provider.lowercaseString : MSIMEVoiceDefaultASRProvider;
+}
+
+// `textstream` 经随包的 shurufa-textstream 启动器流式识别，与 `local` 的 msime-voice-local 是两个进程，在同一条控制器通道上显示 partial 文本。有外部 provider socket 时，provider 路由全部交给它。
+static inline BOOL MSIMEVoiceUsesTextStream(NSString *provider, BOOL providerSocketAvailable) {
+    return !providerSocketAvailable && [MSIMEVoiceEffectiveASRProvider(provider) isEqual:@"textstream"];
+}
+
+// `textstream` 的运行环境和模型没装好（没有 .ready 标记）时，录音前就拒绝并指向语音设置，不让用户说完才失败。
+static inline BOOL MSIMEVoiceTextStreamMissing(NSString *provider, BOOL providerSocketAvailable, BOOL ready) {
+    return MSIMEVoiceUsesTextStream(provider, providerSocketAvailable) && !ready;
+}
+
+// `textstream` 默认开启整理：用户还没动过整理开关时按开处理，整理自己仍要求有凭据才会发请求；用户明确保存过开关就照它，且 `polish_text` 同步，这样开关能真正关掉整理。
+static inline NSDictionary *MSIMEVoiceTextStreamPolishOptions(NSDictionary *query, NSUserDefaults *defaults) {
+    id stored = [defaults objectForKey:@"MSIMEClientVoicePolish"];
+    const BOOL valid = [stored isKindOfClass:NSNumber.class] && CFGetTypeID((__bridge CFTypeRef)stored) == CFBooleanGetTypeID();
+    const BOOL enabled = valid ? [stored boolValue] : YES;
+    NSMutableDictionary *result = [query mutableCopy];
+    result[@"polish_enabled"] = @(enabled);
+    result[@"polish_text"] = @(enabled);
+    return [result copy];
+}
+
 // MSIME-Windows StartRecording 在当前识别服务没有 API Token 时拒绝录音，并告诉用户去哪里填。这里覆盖本宿主自己带 Token 调用的服务——HTTPS 预设和豆包；本地模型（未设置时的出厂默认）、系统语音和外部 socket 都不从这项偏好取 Token，不在此列。
 static inline BOOL MSIMEVoiceASRTokenMissing(NSString *provider, NSString *token, BOOL providerSocketAvailable) {
     if (providerSocketAvailable || token.length) return NO;

@@ -2,6 +2,8 @@
 #import "VoiceProviderSettingsKeys.h"
 #import "VoiceCaptureDevice.h"
 #import "VoiceSettings.h"
+#import "TextStreamSupport.h"
+#import "OpenLessImport.h"
 #import "../settings/SettingsLayout.h"
 NSNotificationName const MSIMEVoiceProviderSettingsDidChangeNotification = @"MSIMEClientVoiceProviderSettingsDidChange";
 #import <Security/Security.h>
@@ -48,6 +50,7 @@ NSArray<NSDictionary<NSString *, NSString *> *> *ProviderSpecs()
             NSString *identifier = text(preset.id);
             if (![priority containsObject:identifier]) [ordered addObject:remote[identifier]];
         }
+        [ordered insertObject:@{@"id" : @"textstream", @"title" : @"本地流式识别（TextStream）", @"endpoint" : @"", @"model" : @""} atIndex:0];
         [ordered addObjectsFromArray:@[
             @{@"id" : @"system", @"title" : @"macOS 系统识别", @"endpoint" : @"", @"model" : @""},
             @{@"id" : @"local", @"title" : @"本地模型", @"endpoint" : @"", @"model" : @""}
@@ -98,7 +101,7 @@ BOOL MSIMEVoiceASRProviderUsesService(NSString *provider)
 {
     NSString *identifier = provider.lowercaseString ?: @"";
     return [MSIMEVoiceASRProviderIDs() containsObject:identifier] &&
-           ![@[ @"system", @"local" ] containsObject:identifier];
+           ![@[ @"system", @"local", @"textstream" ] containsObject:identifier];
 }
 
 /// Which of the form's two cards a message is about. A message is only useful next to the field it is about, and this form has two groups of fields with two independent sets of failures — an unreachable recognition endpoint and an unconfigured polish service are separate problems and used to be reported by the same red line under both cards, so neither said which one it meant.
@@ -217,9 +220,9 @@ static NSString *SharedSetting(NSString *key, NSString *fallback)
     if (!saved)
         saved = @{};
     NSString *rawProvider =
-        SharedSetting(@"provider", @"local").lowercaseString;
+        SharedSetting(@"provider", @"textstream").lowercaseString;
     if (![MSIMEVoiceASRProviderIDs() containsObject:rawProvider])
-        rawProvider = @"local";
+        rawProvider = @"textstream";
     value.provider = rawProvider;
     value.endpoint = SharedSetting(@"endpoint", @"");
     value.model = SharedSetting(@"model", @"");
@@ -265,6 +268,9 @@ static NSString *SharedSetting(NSString *key, NSString *fallback)
         [defaults stringForKey:@"MSIMEClientVoicePolishToken"]);
     value.polishToken = sharedPolishToken.length
         ? sharedPolishToken : ReadToken(@"polish", polishProvider, value.polishEndpoint);
+    // 本地流式识别默认开着整理，前提是整理服务的密钥已经填好；没填时开着只会让保存被校验拦下。
+    if (!saved[@"polishEnabled"] && [rawProvider isEqualToString:@"textstream"] && value.polishToken.length)
+        value.polishEnabled = YES;
     return value;
 }
 - (BOOL)validate:(NSError **)error
@@ -396,7 +402,9 @@ static NSString *SharedSetting(NSString *key, NSString *fallback)
     NSPopUpButton *_polishPromptID;
     NSSwitch *_polish;
     /// The rows the recognition card shows only for the providers they belong to. A local model has no endpoint, no model name and no key, and a row that is present but grey still takes its height: 本地 Whisper left three dead fields occupying half the card above the one field it does use.
-    NSView *_endpointRow, *_modelRow, *_tokenRow, *_modelPathRow;
+    NSView *_endpointRow, *_modelRow, *_tokenRow, *_modelPathRow, *_textStreamRow;
+    NSTextField *_textStreamStatus, *_polishKeyStatus;
+    NSButton *_textStreamInstall, *_openLessImport;
     /// One message per card, on the card that owns the field it is about.
     NSTextField *_recognitionNotice, *_polishNotice;
     NSString *_loadedProvider;
@@ -465,6 +473,19 @@ static void ShowNotice(NSTextField *label, NSString *message, NSColor *color)
     _polishPromptID.action = @selector(polishPromptIDChanged:);
     _polishPrompt = [self fieldLabelled:@"整理提示词" secure:NO];
 
+    _textStreamStatus = MSIMEDetailLabel(@"");
+    _textStreamStatus.accessibilityLabel = @"语音模型状态";
+    _textStreamInstall = [NSButton buttonWithTitle:@"安装语音模型" target:self action:@selector(installTextStream:)];
+    NSStackView *textStreamControls = [NSStackView stackViewWithViews:@[ _textStreamStatus, _textStreamInstall ]];
+    textStreamControls.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    textStreamControls.spacing = 8.0;
+    _polishKeyStatus = MSIMEDetailLabel(@"");
+    _polishKeyStatus.accessibilityLabel = @"整理密钥状态";
+    _openLessImport = [NSButton buttonWithTitle:@"从 OpenLess 导入" target:self action:@selector(importFromOpenLess:)];
+    NSStackView *importControls = [NSStackView stackViewWithViews:@[ _polishKeyStatus, _openLessImport ]];
+    importControls.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    importControls.spacing = 8.0;
+
     _recognitionNotice = MSIMEDetailLabel(@"");
     _recognitionNotice.accessibilityLabel = @"语音设置状态";
     _recognitionNotice.hidden = YES;
@@ -476,12 +497,14 @@ static void ShowNotice(NSTextField *label, NSString *message, NSColor *color)
     _modelRow = MSIMEPreferenceRow(@"识别模型", _model);
     _tokenRow = MSIMEPreferenceRow(@"API 密钥", _token);
     _modelPathRow = MSIMEPreferenceRow(@"本地模型", modelPathRow);
+    _textStreamRow = MSIMEPreferenceRow(@"语音模型", textStreamControls);
     NSBox *recognitionCard = MSIMECardWithViews(@[
         MSIMEPreferenceRow(@"识别方式", _provider),
         _endpointRow,
         _modelRow,
         _tokenRow,
         _modelPathRow,
+        _textStreamRow,
         MSIMEPreferenceRow(@"录音设备", _captureDevice),
         _recognitionNotice,
     ], 0.0);
@@ -494,13 +517,16 @@ static void ShowNotice(NSTextField *label, NSString *message, NSColor *color)
         MSIMEPreferenceRow(@"整理方案", _polishPromptID),
         MSIMEPreferenceRowWithDetail(@"整理提示词", @"留空使用所选方案自带的提示词；选中自定义方案时，这里写的内容保存在该方案里。",
                                      _polishPrompt),
+        MSIMEPreferenceRowWithDetail(@"从 OpenLess 导入", @"读取 OpenLess 的 Ark 接口、模型、密钥和当前整理风格的提示词；会弹出系统钥匙串授权框，点“允许”。",
+                                     importControls),
         _polishNotice,
     ], 0.0);
     polishCard.accessibilityLabel = @"文本整理卡片";
 
     NSTextField *hint = [NSTextField
         wrappingLabelWithString:@"Control+Option+V 开始/结束，Esc "
-                                @"取消。云端识别会发送本次录音；本地识别使用所选模型。密钥保存在系统钥匙串中。"];
+                                @"取消。云端识别会发送本次录音；本地识别使用所选模型。密钥保存在系统钥匙串中。"
+                                @"本地流式识别在本机运行，不上传录音；整理会把识别出的文字发给上面的整理服务，失败或超时时直接输入原文。"];
     hint.font = [NSFont systemFontOfSize:11.0];
     hint.textColor = NSColor.secondaryLabelColor;
 
@@ -666,6 +692,12 @@ static void ShowNotice(NSTextField *label, NSString *message, NSColor *color)
     _modelRow.hidden = !service || [provider isEqualToString:@"doubao"];
     _tokenRow.hidden = !service;
     _modelPathRow.hidden = ![provider isEqualToString:@"local"];
+    _textStreamRow.hidden = ![provider isEqualToString:@"textstream"];
+    const BOOL installing = MSIMETextStreamInstalling();
+    _textStreamStatus.stringValue = installing ? @"正在安装…" : (MSIMETextStreamReady() ? @"已就绪" : @"未安装");
+    _textStreamInstall.title = MSIMETextStreamReady() ? @"修复语音模型" : @"安装语音模型";
+    _textStreamInstall.enabled = !installing;
+    _polishKeyStatus.stringValue = _polishToken.stringValue.length ? @"整理密钥：已设置" : @"整理密钥：未设置";
     BOOL polish = _polish.state == NSControlStateValueOn;
     _polishEndpoint.enabled = polish;
     _polishModel.enabled = polish;
@@ -774,6 +806,48 @@ static void ShowNotice(NSTextField *label, NSString *message, NSColor *color)
     ShowNotice(_polishNotice, [scope isEqual:MSIMEVoiceProviderPolishScope] ? message : nil, NSColor.systemRedColor);
 }
 
+- (void)installTextStream:(id)sender
+{
+    (void)sender;
+    ShowNotice(_recognitionNotice, @"正在安装语音模型：首次需要下载运行环境和约 1.9 GB 的模型，可能要几分钟。", NSColor.secondaryLabelColor);
+    __weak MetasequoiaVoiceProviderSettingsView *weakSelf = self;
+    MSIMETextStreamInstall(^(BOOL success, NSString *summary) {
+        MetasequoiaVoiceProviderSettingsView *strongSelf = weakSelf;
+        if (!strongSelf) return;
+        ShowNotice(strongSelf->_recognitionNotice, summary, success ? NSColor.secondaryLabelColor : NSColor.systemRedColor);
+        [strongSelf updateEnabled:nil];
+    });
+    [self updateEnabled:nil];
+}
+
+- (void)importFromOpenLess:(id)sender
+{
+    (void)sender;
+    _openLessImport.enabled = NO;
+    ShowNotice(_polishNotice, @"正在读取 OpenLess 的配置；如果弹出钥匙串授权框，请点“允许”。", NSColor.secondaryLabelColor);
+    __weak MetasequoiaVoiceProviderSettingsView *weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSError *error = nil;
+        NSDictionary *plan = nil;
+        NSData *payload = [MSIMEOpenLessImport readKeychainPayloadWithService:MSIMEOpenLessKeychainService
+                                                                      account:MSIMEOpenLessKeychainAccount error:&error];
+        if (payload) plan = [MSIMEOpenLessImport planFromCredentialPayload:payload directory:MSIMEOpenLessSupportDirectory() error:&error];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            MetasequoiaVoiceProviderSettingsView *strongSelf = weakSelf;
+            if (!strongSelf) return;
+            strongSelf->_openLessImport.enabled = YES;
+            NSError *failure = error;
+            if (!plan || ![MSIMEOpenLessImport applyPlan:plan toDefaults:NSUserDefaults.standardUserDefaults error:&failure]) {
+                ShowNotice(strongSelf->_polishNotice, failure.localizedDescription ?: @"导入失败。", NSColor.systemRedColor);
+                return;
+            }
+            [strongSelf reloadSettings];
+            ShowNotice(strongSelf->_polishNotice, [MSIMEOpenLessImport summaryForPlan:plan], NSColor.secondaryLabelColor);
+            [[NSNotificationCenter defaultCenter] postNotificationName:MSIMEVoiceProviderSettingsDidChangeNotification object:strongSelf];
+        });
+    });
+}
+
 - (void)browse:(id)sender
 {
     (void)sender;
@@ -807,7 +881,7 @@ static void ShowNotice(NSTextField *label, NSString *message, NSColor *color)
 }
 - (instancetype)init
 {
-    NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 620, 560)
+    NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 620, 720)
                                                    styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                                                              NSWindowStyleMaskResizable
                                                      backing:NSBackingStoreBuffered

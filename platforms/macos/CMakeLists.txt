@@ -120,7 +120,7 @@ target_link_libraries(usage-reporting-termination-test PRIVATE apple-client)
 add_test(NAME usage-reporting-termination COMMAND usage-reporting-termination-test)
 set_tests_properties(usage-reporting-termination PROPERTIES TIMEOUT 60)
 # src/cloud 的 CloudClipboardClient、CloudClipboardWindowController、CloudDictionaryClient、CloudURLSession 是账号和云端改走 Rust（#8201）以前的 Objective-C 实现，输入法里已经没有代码引用它们，不再编进输入法；它们仍由下面的 cloud-clipboard-deletion、cloud-clipboard-selection、cloud-dictionary-client 三个测试目标编译，scripts/test-macos-cloud-query-encoding.py 和 test-macos-cloud-redirect-policy.py 也读它们的源码，所以文件留着，删不删由负责人定。同一批里没人引用的 CloudFileTransfer 和 src/core/Account{AuthClient,Keychain,SessionManager,WindowController} 已经删掉。
-add_executable(MSIMEClientInputMethod MACOSX_BUNDLE src/input/input_method_main.mm src/settings/PreferencesWindowController.mm src/core/SupportWindowController.mm src/voice/VoiceInputService.mm src/voice/VoiceWaveOverlay.mm src/voice/VoiceCuePlayer.mm src/voice/VoiceAudioMuter.mm src/voice/VoiceSettings.mm src/voice/VoiceProviderSettings.mm src/input/InputController.mm src/input/InputModeHUDPanel.mm src/input/InputModeStatusItem.mm src/candidate/CandidateSkinAppearance.mm src/settings/AppearancePreferences.mm src/core/DiagnosticLog.cpp src/core/BoundedFileReader.mm src/candidate/CandidateSkin.cpp src/candidate/CandidateSkinPreviewView.mm src/candidate/SkinSettingsView.mm src/core/ChineseTextConversion.mm src/settings/ShuangpinKeymapPanel.mm src/input/InputSourceRegistration.mm src/core/FloatingToolbarPanel.mm src/core/UpdateController.mm src/dictionary/DictionaryWindowController.mm src/core/ClientDictionaryRuntime.mm src/dictionary/DictionaryInstaller.mm ../../crates/host-macos/native/uninstaller.mm)
+add_executable(MSIMEClientInputMethod MACOSX_BUNDLE src/input/input_method_main.mm src/settings/PreferencesWindowController.mm src/core/SupportWindowController.mm src/voice/VoiceInputService.mm src/voice/VoiceWaveOverlay.mm src/voice/VoiceCuePlayer.mm src/voice/VoiceAudioMuter.mm src/voice/VoiceSettings.mm src/voice/VoiceProviderSettings.mm src/voice/TextStreamSupport.mm src/voice/OpenLessImport.mm src/input/InputController.mm src/input/InputModeHUDPanel.mm src/input/InputModeStatusItem.mm src/candidate/CandidateSkinAppearance.mm src/settings/AppearancePreferences.mm src/core/DiagnosticLog.cpp src/core/BoundedFileReader.mm src/candidate/CandidateSkin.cpp src/candidate/CandidateSkinPreviewView.mm src/candidate/SkinSettingsView.mm src/core/ChineseTextConversion.mm src/settings/ShuangpinKeymapPanel.mm src/input/InputSourceRegistration.mm src/core/FloatingToolbarPanel.mm src/core/UpdateController.mm src/dictionary/DictionaryWindowController.mm src/core/ClientDictionaryRuntime.mm src/dictionary/DictionaryInstaller.mm ../../crates/host-macos/native/uninstaller.mm)
 target_sources(MSIMEClientInputMethod PRIVATE src/core/AISettingsWindow.mm src/core/ScreenKeyboardPanel.mm src/cloud/CloudCandidateRequest.mm src/core/CustomTranslationBatch.mm src/voice/VoicePCMBuffer.mm src/voice/HTTPVoiceRequest.mm)
 target_sources(MSIMEClientInputMethod PRIVATE src/voice/DoubaoVoiceRequest.mm src/voice/LocalVoiceRequest.mm)
 target_sources(MSIMEClientInputMethod PRIVATE src/core/DesktopInputSession.mm)
@@ -780,7 +780,7 @@ target_link_libraries(doubao-voice-request-test PRIVATE apple-client "-framework
 add_test(NAME doubao-voice-request COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/voice/doubao_voice_fixture.py" "$<TARGET_FILE:doubao-voice-request-test>")
 # Above the fixture's own 60 s client limit plus the 3 s stack sample it takes of a hung client, so a hang reports where it is stuck instead of being killed silently.
 set_tests_properties(doubao-voice-request PROPERTIES TIMEOUT 80)
-add_executable(local-voice-request-test tests/voice/LocalVoiceRequestTest.mm src/voice/LocalVoiceRequest.mm)
+add_executable(local-voice-request-test tests/voice/LocalVoiceRequestTest.mm src/voice/LocalVoiceRequest.mm src/voice/TextStreamSupport.mm)
 target_compile_options(local-voice-request-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(local-voice-request-test PRIVATE apple-client "-framework Foundation")
 # The protocol against a scripted stand-in for msime-voice-local, so it needs neither the runtime nor a model.
@@ -795,6 +795,26 @@ if(MSIME_LOCAL_ASR_TEST_MODEL AND MSIME_LOCAL_ASR_TEST_WAV)
   set_tests_properties(local-voice-model PROPERTIES TIMEOUT 180 ENVIRONMENT
     "MSIME_VOICE_LOCAL_HELPER=$<TARGET_FILE:msime-voice-local>;MSIME_SHERPA_ONNX_LIBRARY=${MSIME_VOICE_RUNTIME_LIBRARY}")
 endif()
+add_executable(textstream-request-test tests/voice/TextStreamRequestTest.mm src/voice/LocalVoiceRequest.mm src/voice/TextStreamSupport.mm)
+target_compile_options(textstream-request-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(textstream-request-test PRIVATE apple-client "-framework Foundation")
+# TextStream 通道对着脚本化的启动器替身：正常路径、取消，以及运行环境不可用时的错误。
+foreach(MSIME_TEXTSTREAM_MODE normal unavailable)
+  add_test(NAME textstream-request-${MSIME_TEXTSTREAM_MODE} COMMAND textstream-request-test ${MSIME_TEXTSTREAM_MODE})
+  set_tests_properties(textstream-request-${MSIME_TEXTSTREAM_MODE} PROPERTIES TIMEOUT 90 ENVIRONMENT
+    "MSIME_TEXTSTREAM_LAUNCHER=${CMAKE_CURRENT_SOURCE_DIR}/tests/voice/textstream_launcher_fixture.py;MSIME_TS_FIXTURE_MODE=${MSIME_TEXTSTREAM_MODE};MSIME_TS_FIXTURE_LOG=${CMAKE_CURRENT_BINARY_DIR}/textstream-request-${MSIME_TEXTSTREAM_MODE}.log")
+endforeach()
+# 真启动器加已安装的运行环境：把合成录音流式识别一遍。没装好时跳过（退出码 77）。
+add_test(NAME textstream-real COMMAND textstream-request-test real "${CMAKE_CURRENT_SOURCE_DIR}/textstream/tests/audio/s1.wav")
+set_tests_properties(textstream-real PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77 ENVIRONMENT
+  "MSIME_TEXTSTREAM_LAUNCHER=${CMAKE_CURRENT_SOURCE_DIR}/textstream/shurufa-textstream")
+# 随包协议自测：真实的 worker 对着协议跑全套用例，需要已装好的运行环境。
+add_test(NAME textstream-protocol COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/textstream/tests/test_protocol.py" all)
+set_tests_properties(textstream-protocol PROPERTIES TIMEOUT 600 SKIP_RETURN_CODE 77)
+add_executable(openless-import-test tests/voice/OpenLessImportTest.mm src/voice/OpenLessImport.mm)
+target_compile_options(openless-import-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(openless-import-test PRIVATE "-framework Foundation" "-framework Security")
+add_test(NAME openless-import COMMAND openless-import-test)
 add_executable(preference-save-state-test tests/settings/PreferenceSaveStateTest.cpp)
 target_compile_options(preference-save-state-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
 add_test(NAME preference-save-state COMMAND preference-save-state-test)
@@ -1007,7 +1027,7 @@ target_link_libraries(shortcut-test PRIVATE apple-client "-framework AppKit" "-f
 target_link_libraries(shortcut-test PRIVATE "-framework IOKit")
 target_compile_options(shortcut-test PRIVATE ${MSIME_SPARKLE_COMPILE_OPTIONS})
 target_link_libraries(shortcut-test PRIVATE "${MSIME_SPARKLE_FRAMEWORK}")
-target_sources(shortcut-test PRIVATE src/settings/PreferencesWindowController.mm src/core/SupportWindowController.mm src/candidate/CandidateSkinAppearance.mm src/core/ScreenKeyboardPanel.mm src/voice/VoiceInputService.mm src/voice/VoicePCMBuffer.mm src/voice/VoiceWaveOverlay.mm src/voice/VoiceCuePlayer.mm src/voice/VoiceAudioMuter.mm src/voice/VoiceSettings.mm src/voice/VoiceProviderSettings.mm src/cloud/CloudCandidateRequest.mm src/core/CustomTranslationBatch.mm)
+target_sources(shortcut-test PRIVATE src/settings/PreferencesWindowController.mm src/core/SupportWindowController.mm src/candidate/CandidateSkinAppearance.mm src/core/ScreenKeyboardPanel.mm src/voice/VoiceInputService.mm src/voice/VoicePCMBuffer.mm src/voice/VoiceWaveOverlay.mm src/voice/VoiceCuePlayer.mm src/voice/VoiceAudioMuter.mm src/voice/VoiceSettings.mm src/voice/VoiceProviderSettings.mm src/voice/TextStreamSupport.mm src/voice/OpenLessImport.mm src/cloud/CloudCandidateRequest.mm src/core/CustomTranslationBatch.mm)
 target_sources(shortcut-test PRIVATE src/voice/HTTPVoiceRequest.mm src/voice/DoubaoVoiceRequest.mm src/voice/LocalVoiceRequest.mm src/core/DesktopInputSession.mm)
 target_sources(shortcut-test PRIVATE src/core/DesktopCloudClipboard.mm)
 target_link_libraries(shortcut-test PRIVATE msime-voice-providers)
@@ -1138,19 +1158,19 @@ target_compile_features(common-dictionary-quiesce-lease-test PRIVATE cxx_std_17)
 target_compile_options(common-dictionary-quiesce-lease-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
 add_test(NAME common-dictionary-quiesce-lease COMMAND common-dictionary-quiesce-lease-test)
 add_executable(voice-provider-settings-keys-test tests/voice/VoiceProviderSettingsKeysTest.mm
-  src/voice/VoiceProviderSettings.mm)
+  src/voice/VoiceProviderSettings.mm src/voice/TextStreamSupport.mm src/voice/OpenLessImport.mm)
 target_compile_options(voice-provider-settings-keys-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(voice-provider-settings-keys-test PRIVATE "-framework AppKit" "-framework Security"
   "-framework CoreAudio" "-framework AudioToolbox")
 add_test(NAME voice-provider-settings-keys COMMAND voice-provider-settings-keys-test)
 add_executable(voice-provider-catalog-test tests/voice/VoiceProviderCatalogTest.mm
-  src/voice/VoiceProviderSettings.mm)
+  src/voice/VoiceProviderSettings.mm src/voice/TextStreamSupport.mm src/voice/OpenLessImport.mm)
 target_compile_options(voice-provider-catalog-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(voice-provider-catalog-test PRIVATE "-framework AppKit" "-framework Security"
   "-framework CoreAudio" "-framework AudioToolbox")
 add_test(NAME voice-provider-catalog COMMAND voice-provider-catalog-test)
 add_executable(voice-provider-settings-validation-test tests/voice/VoiceSettingsTests.mm
-  src/voice/VoiceProviderSettings.mm)
+  src/voice/VoiceProviderSettings.mm src/voice/TextStreamSupport.mm src/voice/OpenLessImport.mm)
 target_compile_options(voice-provider-settings-validation-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(voice-provider-settings-validation-test PRIVATE "-framework AppKit" "-framework Security"
   "-framework CoreAudio" "-framework AudioToolbox")

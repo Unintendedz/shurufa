@@ -36,6 +36,15 @@ int main() {
         assert(!MSIMEVoiceASRTokenMissing(nil, nil, NO));
         for (NSString *provider in @[@"local", @"system", @"", @"unknown"])
             assert(!MSIMEVoiceASRTokenMissing(provider, nil, NO));
+        // textstream 是未设置时的默认服务；录音前要求安装完成，不需要 Token，也不占用 local 的模型目录通道。
+        assert([MSIMEVoiceEffectiveASRProvider(nil) isEqual:@"textstream"] && [MSIMEVoiceEffectiveASRProvider(@"") isEqual:@"textstream"]);
+        assert([MSIMEVoiceEffectiveASRProvider(@"OpenAI") isEqual:@"openai"]);
+        assert(MSIMEVoiceUsesTextStream(nil, NO) && MSIMEVoiceUsesTextStream(@"TextStream", NO) && !MSIMEVoiceUsesTextStream(@"textstream", YES));
+        for (NSString *provider in @[@"local", @"doubao", @"system", @"openai"])
+            assert(!MSIMEVoiceUsesTextStream(provider, NO));
+        assert(MSIMEVoiceTextStreamMissing(nil, NO, NO) && !MSIMEVoiceTextStreamMissing(nil, NO, YES) && !MSIMEVoiceTextStreamMissing(@"textstream", YES, NO));
+        assert(!MSIMEVoiceTextStreamMissing(@"local", NO, NO) && !MSIMEVoiceASRTokenMissing(@"textstream", nil, NO));
+        assert(!MSIMEVoiceLocalModelMissing(MSIMEVoiceEffectiveASRProvider(nil), NO, NO));
         NSDictionary *base = @{@"generation": @42, @"language": @"en-us", @"asr_provider": @"doubao"};
         NSDictionary *query = MSIMEVoiceProviderOptions(base, defaults);
         assert([query[@"commit_mode"] isEqual:@"tsf"]);
@@ -52,6 +61,18 @@ int main() {
         assert([query[@"doubao_enable_itn"] isEqual:@YES]);
         assert([query[@"doubao_enable_punc"] isEqual:@YES]);
         assert([query[@"doubao_enable_ddc"] isEqual:@YES]);
+        // textstream 的整理：用户没碰过开关时默认开；明确存过就照存的，且 polish_text 同步，开关能真正关掉整理。
+        {
+            NSUserDefaults *polishDefaults = [[NSUserDefaults alloc] initWithSuiteName:[suite stringByAppendingString:@".polish"]];
+            NSDictionary *unset = MSIMEVoiceTextStreamPolishOptions(@{@"asr_provider": @"textstream", @"polish_text": @YES}, polishDefaults);
+            assert([unset[@"polish_enabled"] isEqual:@YES] && [unset[@"polish_text"] isEqual:@YES] && [unset[@"asr_provider"] isEqual:@"textstream"]);
+            [polishDefaults setBool:NO forKey:@"MSIMEClientVoicePolish"];
+            NSDictionary *off = MSIMEVoiceTextStreamPolishOptions(@{@"polish_text": @YES}, polishDefaults);
+            assert([off[@"polish_enabled"] isEqual:@NO] && [off[@"polish_text"] isEqual:@NO]);
+            [polishDefaults setBool:YES forKey:@"MSIMEClientVoicePolish"];
+            assert([MSIMEVoiceTextStreamPolishOptions(@{}, polishDefaults)[@"polish_enabled"] isEqual:@YES]);
+            [polishDefaults removePersistentDomainForName:[suite stringByAppendingString:@".polish"]];
+        }
         assert(MSIMEVoiceMuteSystemAudioEnabled(defaults));
         MSIMEApplySharedVoicePreferences(@{@"mute_system_audio": @NO}, defaults);
         assert(!MSIMEVoiceMuteSystemAudioEnabled(defaults));

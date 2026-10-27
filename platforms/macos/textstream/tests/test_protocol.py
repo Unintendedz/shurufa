@@ -25,7 +25,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 LAUNCHER = HERE.parent / "shurufa-textstream"
-MODEL = Path.home() / "Library/Application Support/Shurufa/textstream/model"
+ROOT = Path(os.environ.get("SHURUFA_TEXTSTREAM_ROOT") or Path.home() / "Library/Application Support/Shurufa/textstream")
+MODEL = ROOT / "model"
 LOGS = Path(os.environ.get("TEXTSTREAM_TEST_LOGS") or tempfile.mkdtemp(prefix="textstream-test-"))
 SENTENCES = [
     "今天天气很好，我们一起去公园散步吧。",
@@ -474,6 +475,9 @@ def main():
     s = sub.add_parser("sweep")
     s.add_argument("values", nargs="+", type=float)
     args = p.parse_args()
+    if not (ROOT / ".ready").exists():
+        print("TextStream runtime is not installed (run install-runtime.sh); skipping")
+        return 77
     LOGS.mkdir(parents=True, exist_ok=True)
     if args.cmd == "one":
         print(json.dumps(run_dictation(combined_pcm(), "".join(SENTENCES), args.value, f"combined-{args.value}"), ensure_ascii=False))

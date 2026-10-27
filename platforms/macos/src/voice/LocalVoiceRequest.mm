@@ -183,12 +183,14 @@ NSString *MSIMELocalVoiceRuntimePath(NSDictionary *hostOptions) {
 @property(nonatomic, readonly) dispatch_queue_t queue;
 @property(nonatomic, weak) MSIMELocalVoiceRequest *activeRequest; // main only
 + (instancetype)shared;
++ (instancetype)textStream;
 - (BOOL)startSession:(NSNumber *)session request:(MSIMELocalVoiceRequest *)request message:(NSDictionary *)message runtime:(NSString *)runtime error:(NSError **)error;
 - (void)sendMessage:(NSDictionary *)message session:(NSNumber *)session;
 - (void)endSession:(NSNumber *)session;
 @end
 
 @implementation MSIMELocalVoiceHelper {
+    BOOL _textStream;
     NSTask *_task;
     NSFileHandle *_input;
     uint64_t _generation;
@@ -204,9 +206,19 @@ NSString *MSIMELocalVoiceRuntimePath(NSDictionary *hostOptions) {
     return helper;
 }
 
-- (instancetype)init {
++ (instancetype)textStream {
+    static MSIMELocalVoiceHelper *helper;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ helper = [[MSIMELocalVoiceHelper alloc] initForTextStream:YES]; });
+    return helper;
+}
+
+- (instancetype)init { return [self initForTextStream:NO]; }
+
+- (instancetype)initForTextStream:(BOOL)textStream {
     if (!(self = [super init])) return nil;
-    _queue = dispatch_queue_create("app.msime.client.voice.local", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0));
+    _textStream = textStream;
+    _queue = dispatch_queue_create(textStream ? "app.msime.client.voice.textstream" : "app.msime.client.voice.local", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0));
     return self;
 }
 
@@ -216,14 +228,15 @@ NSString *MSIMELocalVoiceRuntimePath(NSDictionary *hostOptions) {
 
 // `runtime` 是 MSIMELocalVoiceRuntimePath 的结果：非空时作为 `--runtime` 交给辅助进程。已经在运行的辅助进程沿用它启动时加载的运行库。
 - (BOOL)launch:(NSString *)runtime error:(NSError **)error {
-    NSString *path = MSIMELocalVoiceHelperPath();
+    NSString *path = _textStream ? MSIMETextStreamLauncherPath() : MSIMELocalVoiceHelperPath();
     if (!path) {
-        if (error) *error = LocalVoiceFailure(@"找不到本地识别组件 msime-voice-local，请重新安装输入法。");
+        if (error) *error = LocalVoiceFailure(_textStream ? @"找不到本地识别组件 shurufa-textstream，请重新安装输入法。" : @"找不到本地识别组件 msime-voice-local，请重新安装输入法。");
         return NO;
     }
     NSTask *task = [NSTask new];
     task.executableURL = [NSURL fileURLWithPath:path];
-    if (runtime.length) task.arguments = @[ @"--runtime", runtime ];
+    if (_textStream) task.arguments = @[ @"--idle-exit", @"120" ];
+    else if (runtime.length) task.arguments = @[ @"--runtime", runtime ];
     NSPipe *input = [NSPipe pipe];
     NSPipe *output = [NSPipe pipe];
     task.standardInput = input;
@@ -275,7 +288,7 @@ NSString *MSIMELocalVoiceRuntimePath(NSDictionary *hostOptions) {
     NSError *launchError = nil;
     if (![task launchAndReturnError:&launchError]) {
         output.fileHandleForReading.readabilityHandler = nil;
-        if (error) *error = LocalVoiceFailure(@"无法启动本地识别组件 msime-voice-local。");
+        if (error) *error = LocalVoiceFailure(_textStream ? @"无法启动本地识别组件 shurufa-textstream。" : @"无法启动本地识别组件 msime-voice-local。");
         return NO;
     }
     // A helper that has died between two writes must fail the write, not raise SIGPIPE in the input method.
@@ -351,6 +364,8 @@ enum class LocalRequestState : int { idle, streaming, finishing, closed };
 }
 
 @implementation MSIMELocalVoiceRequest {
+    BOOL _textStream;
+    MSIMELocalVoiceHelper *_helper;
     NSString *_model;
     NSString *_runtime;
     NSString *_language;
@@ -386,6 +401,29 @@ enum class LocalRequestState : int { idle, streaming, finishing, closed };
     id hotwords = manifest[@"hotwords"];
     _hotwordMode = [hotwords isKindOfClass:NSString.class] ? [hotwords copy] : @"";
     _hostOptions = [hostOptions isKindOfClass:NSDictionary.class] ? [hostOptions copy] : nil;
+    _helper = MSIMELocalVoiceHelper.shared;
+    _state.store(LocalRequestState::idle);
+    return self;
+}
+
+- (instancetype)initWithTextStreamOptions:(NSDictionary *)options hostOptions:(NSDictionary *)hostOptions error:(NSError **)error {
+    if (!(self = [super init])) return nil;
+    if (!MSIMETextStreamReady()) {
+        if (error) *error = LocalVoiceFailure(@"本地语音模型还没有安装，请在输入法的语音设置里点“安装语音模型”。");
+        return nil;
+    }
+    if (!MSIMETextStreamLauncherPath()) {
+        if (error) *error = LocalVoiceFailure(@"找不到本地识别组件 shurufa-textstream，请重新安装输入法。");
+        return nil;
+    }
+    _textStream = YES;
+    _helper = MSIMELocalVoiceHelper.textStream;
+    _model = [MSIMETextStreamModelDirectory() copy];
+    _runtime = @"";
+    id language = options[@"language"];
+    _language = [language isKindOfClass:NSString.class] ? [language copy] : @"";
+    _hotwordMode = @"native";
+    _hostOptions = [hostOptions isKindOfClass:NSDictionary.class] ? [hostOptions copy] : nil;
     _state.store(LocalRequestState::idle);
     return self;
 }
@@ -393,7 +431,7 @@ enum class LocalRequestState : int { idle, streaming, finishing, closed };
 - (void)dealloc {
     const LocalRequestState previous = _state.exchange(LocalRequestState::closed);
     if (previous == LocalRequestState::streaming || previous == LocalRequestState::finishing) {
-        MSIMELocalVoiceHelper *helper = MSIMELocalVoiceHelper.shared;
+        MSIMELocalVoiceHelper *helper = _helper;
         NSNumber *session = _session;
         dispatch_async(helper.queue, ^{
             [helper sendMessage:@{@"op" : @"cancel"} session:session];
@@ -411,7 +449,7 @@ enum class LocalRequestState : int { idle, streaming, finishing, closed };
     static uint64_t sessions = 0;
     _session = @(++sessions);
     _result = [result copy];
-    MSIMELocalVoiceHelper *helper = MSIMELocalVoiceHelper.shared;
+    MSIMELocalVoiceHelper *helper = _helper;
     helper.activeRequest = self;
     NSNumber *session = _session;
     NSDictionary *hostOptions = _hostOptions;
@@ -426,7 +464,11 @@ enum class LocalRequestState : int { idle, streaming, finishing, closed };
         NSArray<NSDictionary *> *hotwords = (native || pinyin) && hostOptions ? FetchHotwords(hostOptions) : @[];
         request->_hotwords = pinyin ? hotwords : @[];
         NSMutableDictionary *message = [start mutableCopy];
-        if (native) message[@"hotwords"] = [hotwords valueForKey:@"text"];
+        if (native) {
+            NSArray *words = [hotwords valueForKey:@"text"];
+            // TextStream 把热词当作解码提示的上下文，太长会拖慢每次解码。
+            message[@"hotwords"] = request->_textStream && words.count > 40 ? [words subarrayWithRange:NSMakeRange(0, 40)] : words;
+        }
         NSError *failure = nil;
         if (![helper startSession:session request:request message:message runtime:request->_runtime error:&failure])
             dispatch_async(dispatch_get_main_queue(), ^{ [request helperFailed:failure session:session]; });
@@ -450,7 +492,7 @@ enum class LocalRequestState : int { idle, streaming, finishing, closed };
         bytes[2 * index + 1] = static_cast<uint8_t>(value >> 8);
     }
     NSString *encoded = [[NSData dataWithBytes:bytes.data() length:bytes.size()] base64EncodedStringWithOptions:0];
-    MSIMELocalVoiceHelper *helper = MSIMELocalVoiceHelper.shared;
+    MSIMELocalVoiceHelper *helper = _helper;
     NSNumber *session = _session;
     dispatch_async(helper.queue, ^{ [helper sendMessage:@{@"op" : @"audio", @"pcm16" : encoded} session:session]; });
     return YES;
@@ -462,7 +504,7 @@ enum class LocalRequestState : int { idle, streaming, finishing, closed };
         if (error) *error = LocalVoiceFailure();
         return NO;
     }
-    MSIMELocalVoiceHelper *helper = MSIMELocalVoiceHelper.shared;
+    MSIMELocalVoiceHelper *helper = _helper;
     NSNumber *session = _session;
     dispatch_async(helper.queue, ^{ [helper sendMessage:@{@"op" : @"finish"} session:session]; });
     return YES;
@@ -471,7 +513,7 @@ enum class LocalRequestState : int { idle, streaming, finishing, closed };
 - (void)cancel {
     const LocalRequestState previous = _state.exchange(LocalRequestState::closed);
     _result = nil;
-    MSIMELocalVoiceHelper *helper = MSIMELocalVoiceHelper.shared;
+    MSIMELocalVoiceHelper *helper = _helper;
     if (helper.activeRequest == self) helper.activeRequest = nil;
     if (previous != LocalRequestState::streaming && previous != LocalRequestState::finishing) return;
     NSNumber *session = _session;
@@ -484,7 +526,7 @@ enum class LocalRequestState : int { idle, streaming, finishing, closed };
 // Ends the request with its last callback. Later helper messages for this session find it closed.
 - (void)closeWithText:(NSString *)text error:(NSError *)error {
     _state.store(LocalRequestState::closed);
-    MSIMELocalVoiceHelper *helper = MSIMELocalVoiceHelper.shared;
+    MSIMELocalVoiceHelper *helper = _helper;
     if (helper.activeRequest == self) helper.activeRequest = nil;
     NSNumber *session = _session;
     dispatch_async(helper.queue, ^{ [helper endSession:session]; });
@@ -494,6 +536,14 @@ enum class LocalRequestState : int { idle, streaming, finishing, closed };
 }
 
 - (void)helperMessage:(NSDictionary *)message {
+    if (_textStream && [message[@"type"] isEqual:@"hello"] && [message[@"available"] isEqual:@NO]) {
+        const LocalRequestState current = _state.load();
+        if (current != LocalRequestState::streaming && current != LocalRequestState::finishing) return;
+        id why = message[@"error"];
+        NSString *detail = [why isKindOfClass:NSString.class] && [why length] ? [NSString stringWithFormat:@"本地语音识别运行环境不可用（%@），请在语音设置里重新安装语音模型。", why] : @"本地语音识别运行环境不可用，请在语音设置里重新安装语音模型。";
+        [self closeWithText:nil error:LocalVoiceFailure(detail)];
+        return;
+    }
     if (![message[@"id"] isEqual:_session]) return;
     const LocalRequestState state = _state.load();
     if (state != LocalRequestState::streaming && state != LocalRequestState::finishing) return;
@@ -503,7 +553,7 @@ enum class LocalRequestState : int { idle, streaming, finishing, closed };
         if (_result) _result(text, NO, nil);
     } else if ([type isEqual:@"final"]) {
         _state.store(LocalRequestState::closed);
-        MSIMELocalVoiceHelper *helper = MSIMELocalVoiceHelper.shared;
+        MSIMELocalVoiceHelper *helper = _helper;
         if (!text.length) { [self closeWithText:text error:nil]; return; }
         // Pinyin correction reads the hotwords the start fetched, which only the helper queue touches.
         __weak MSIMELocalVoiceRequest *weakSelf = self;
