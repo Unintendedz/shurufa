@@ -6964,6 +6964,10 @@ static void TestCapsLockTap() {
     // 系统撤回锁定后紧跟着送来的旧 Caps Lock 修饰位不能让英文重新变成大写。
     assert([controller handleEvent:LayoutKey(0, @"A", NSEventModifierFlagCapsLock) client:client]);
     assert([client.insertions.lastObject isEqual:@"a"] && !session.capsLock);
+    // 撤回锁定位只消除 Caps Lock 的影响，用户显式按住 Shift 仍要输出大写。
+    const NSUInteger beforeShift = client.insertions.count;
+    const BOOL shiftedHandled = [controller handleEvent:LayoutKey(0, @"A", NSEventModifierFlagCapsLock | NSEventModifierFlagShift) client:client];
+    assert(!shiftedHandled || (client.insertions.count == beforeShift + 1 && [client.insertions.lastObject isEqual:@"A"]));
     // 撤回之后系统报来的「大写锁定关」不会再切换，也不用报告。
     assert(![controller handleEvent:capsOff(1.2) client:client]);
     assert(prefs.englishMode && session.capsLockCalls == reports);

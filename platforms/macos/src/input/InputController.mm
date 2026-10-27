@@ -7789,7 +7789,8 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
             const BOOL chinese = [_appearance.punctuationLock isEqual:@"chinese"] ||
                 ([_appearance.punctuationLock isEqual:@"follow"] && _appearance.runtimeChinesePunctuation);
             unichar character = [event.characters characterAtIndex:0];
-            if (_capsLockTapReleased && character >= 'A' && character <= 'Z') character = (unichar)(character + ('a' - 'A'));
+            if (_capsLockTapReleased && !(event.modifierFlags & NSEventModifierFlagShift) &&
+                character >= 'A' && character <= 'Z') character = (unichar)(character + ('a' - 'A'));
             const std::string output = msime::input::english_mode_output(
                 character, keypad, chinese, _appearance.runtimeFullWidthInput, _englishPunctuation,
                 MSIMEViewPunctuationMarks(_view));

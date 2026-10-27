@@ -16,6 +16,7 @@
 #import "../voice/VoiceAudioMuter.h"
 #include "../core/DiagnosticLog.h"
 #import "../core/InstalledHost.h"
+#import "../settings/ShurufaPreferenceMigration.h"
 #include "msime_client.h"
 #include "MSIMERustClient.h"
 #include <cstdio>
@@ -104,6 +105,16 @@ int main(int argc, const char *argv[]) {
             return 1;
         }
         for (int index = 1; index < argc; ++index) {
+            if (strcmp(argv[index], "--migrate-caps-lock") == 0) {
+                if (!MSIMEEditionIsShurufa()) return 1;
+                NSString *directory = MSIMEDefaultClientStateDirectory(NSFileManager.defaultManager).path;
+                const BOOL migrated = MSIMEMigrateShurufaCapsLock(NSUserDefaults.standardUserDefaults,
+                    ^NSDictionary *{ return [MSIMEClientSession loadPreferencesInDirectory:directory error:nil]; },
+                    ^NSDictionary *(uint64_t revision, NSDictionary *snapshot) {
+                        return [MSIMEClientSession savePreferencesInDirectory:directory expectedRevision:revision snapshot:snapshot error:nil];
+                    });
+                return migrated && MSIMEPrepareShurufaHost() ? 0 : 1;
+            }
             if (strcmp(argv[index], "--prepare-host") == 0) return 0;
         }
         [NSApplication sharedApplication];
