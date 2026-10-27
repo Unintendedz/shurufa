@@ -153,6 +153,12 @@ pub struct MacosIdentity {
     pub input_method_name: String,
     /// 设置应用的 bundle identifier，也是 Application Support 下状态目录的名字。
     pub settings_bundle_id: String,
+    /// 与设置应用标识分开的本机数据目录名；未声明时沿用设置应用标识。
+    #[serde(default)]
+    pub state_directory_name: Option<String>,
+    /// 本版本随包的本地语音辅助进程名。
+    #[serde(default)]
+    pub voice_helper_name: Option<String>,
     /// 原生账号窗口存访问令牌的钥匙串服务名，刷新令牌在它加 `.refresh` 的服务名下。
     pub keychain_service: String,
     /// Homebrew cask 名。
@@ -265,6 +271,9 @@ impl Edition {
                 "../../../resources/desktop-dictionary.lock.json"
             )),
             "pinyin" => Some(include_str!("../../../resources/editions/pinyin.lock.json")),
+            "shurufa" => Some(include_str!(
+                "../../../resources/editions/shurufa.lock.json"
+            )),
             "wubi" => Some(include_str!("../../../resources/editions/wubi.lock.json")),
             "japanese" => Some(include_str!(
                 "../../../resources/editions/japanese.lock.json"

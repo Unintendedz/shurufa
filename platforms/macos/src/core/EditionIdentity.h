@@ -29,6 +29,9 @@ static inline NSString *MSIMEEditionIdentifierIn(NSDictionary *info) {
 static inline BOOL MSIMEEditionIsFullIn(NSDictionary *info) {
     return [MSIMEEditionIdentifierIn(info) isEqualToString:MSIMEFullEditionIdentifier];
 }
+static inline BOOL MSIMEEditionIsShurufaIn(NSDictionary *info) {
+    return [MSIMEEditionIdentifierIn(info) isEqualToString:@"shurufa"];
+}
 
 // 输入法 bundle 的标识：输入模式标识符的前缀、NSUserDefaults 域和统一日志的子系统。
 static inline NSString *MSIMEInputMethodBundleIdentifierIn(NSDictionary *info) {
@@ -55,6 +58,14 @@ static inline NSString *MSIMESettingsBundleIdentifierIn(NSDictionary *info) {
     return MSIMEEditionStringIn(info, @"MSIMESettingsBundleIdentifier") ?: MSIMEFullSettingsBundleIdentifier;
 }
 
+// Shurufa 的数据目录独立于应用标识；其他版本沿用已有目录。
+static inline NSString *MSIMEStateDirectoryNameIn(NSDictionary *info) {
+    return MSIMEEditionStringIn(info, @"MSIMEStateDirectoryName") ?: MSIMESettingsBundleIdentifierIn(info);
+}
+static inline NSString *MSIMELocalVoiceHelperNameIn(NSDictionary *info) {
+    return MSIMEEditionStringIn(info, @"MSIMELocalVoiceHelperName") ?: @"msime-voice-local";
+}
+
 static inline NSString *MSIMEKeychainServiceIn(NSDictionary *info) {
     if (MSIMEEditionIsFullIn(info)) return MSIMEFullKeychainService;
     return MSIMEEditionStringIn(info, @"MSIMEKeychainService") ?: MSIMEFullKeychainService;
@@ -68,6 +79,7 @@ static inline NSString *MSIMEVoiceProviderKeychainServiceIn(NSDictionary *info) 
 
 // 使用统计（install_id、事件队列、每日活跃标记、崩溃记录）放在 Application Support 下的哪个相对目录。full 是今天的 MSIME/telemetry；其他版本是 MSIME/<版本 id>/telemetry，同时安装的版本各有各的 install_id 和队列，日活不会被另一个版本去重掉，崩溃记录也不会在另一个版本启动时报出去。
 static inline NSString *MSIMEUsageReportingDirectoryNameIn(NSDictionary *info) {
+    if (MSIMEEditionIsShurufaIn(info)) return @"Shurufa/telemetry";
     if (MSIMEEditionIsFullIn(info)) return MSIMEFullUsageReportingDirectoryName;
     return [NSString stringWithFormat:@"MSIME/%@/telemetry", MSIMEEditionIdentifierIn(info)];
 }
@@ -110,6 +122,9 @@ static inline NSString *MSIMEEditionNotificationNameIn(NSDictionary *info, NSStr
 
 static inline NSString *MSIMEEditionIdentifier(void) { return MSIMEEditionIdentifierIn(MSIMEEditionInfo()); }
 static inline BOOL MSIMEEditionIsFull(void) { return MSIMEEditionIsFullIn(MSIMEEditionInfo()); }
+static inline BOOL MSIMEEditionIsShurufa(void) { return MSIMEEditionIsShurufaIn(MSIMEEditionInfo()); }
+static inline NSString *MSIMEStateDirectoryName(void) { return MSIMEStateDirectoryNameIn(MSIMEEditionInfo()); }
+static inline NSString *MSIMELocalVoiceHelperName(void) { return MSIMELocalVoiceHelperNameIn(MSIMEEditionInfo()); }
 static inline NSString *MSIMEInputMethodBundleIdentifier(void) { return MSIMEInputMethodBundleIdentifierIn(MSIMEEditionInfo()); }
 static inline NSString *MSIMEEditionDisplayName(void) { return MSIMEEditionDisplayNameIn(MSIMEEditionInfo()); }
 static inline NSString *MSIMEInputMethodBundleName(void) { return MSIMEInputMethodBundleNameIn(MSIMEEditionInfo()); }

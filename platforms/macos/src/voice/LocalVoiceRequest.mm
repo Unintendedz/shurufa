@@ -1,4 +1,5 @@
 #import "LocalVoiceRequest.h"
+#import "../core/EditionIdentity.h"
 #import "VoiceFailureMessages.h"
 #include "msime_client.h"
 #include "../../../common/HostApiString.h"
@@ -146,16 +147,16 @@ BOOL MSIMELocalVoiceModelDirectory(NSString *path) {
 
 NSString *MSIMELocalVoiceHelperPath(void) {
     NSFileManager *files = NSFileManager.defaultManager;
-    NSString *configured = NSProcessInfo.processInfo.environment[@"MSIME_VOICE_LOCAL_HELPER"];
+    NSString *configured = NSProcessInfo.processInfo.environment[MSIMEEditionIsShurufa() ? @"SHURUFA_VOICE_LOCAL_HELPER" : @"MSIME_VOICE_LOCAL_HELPER"];
     if (configured.length) return configured.isAbsolutePath && [files isExecutableFileAtPath:configured] ? configured : nil;
-    NSString *bundled = [NSBundle.mainBundle.executablePath.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"msime-voice-local"];
+    NSString *bundled = [NSBundle.mainBundle.executablePath.stringByDeletingLastPathComponent stringByAppendingPathComponent:MSIMELocalVoiceHelperName()];
     return bundled.isAbsolutePath && [files isExecutableFileAtPath:bundled] ? bundled : nil;
 }
 
 NSString *MSIMELocalVoiceRuntimePath(NSDictionary *hostOptions) {
     static NSString *const Library = @"libsherpa-onnx-c-api.dylib";
     NSFileManager *files = NSFileManager.defaultManager;
-    const char *helper = std::getenv("MSIME_VOICE_LOCAL_HELPER");
+    const char *helper = std::getenv(MSIMEEditionIsShurufa() ? "SHURUFA_VOICE_LOCAL_HELPER" : "MSIME_VOICE_LOCAL_HELPER");
     if (helper && *helper) return @"";
     NSString *bundled = [[NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"Contents/Frameworks"] stringByAppendingPathComponent:Library];
     if ([files fileExistsAtPath:bundled]) return @"";

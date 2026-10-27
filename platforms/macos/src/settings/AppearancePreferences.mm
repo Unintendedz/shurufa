@@ -760,6 +760,20 @@ typedef NS_ENUM(NSInteger, MSIMESettingsPage) {
     MSIMESettingsPageAbout,
     MSIMESettingsPageCount,
 };
+static BOOL ShurufaSettingsPageVisible(NSInteger page) {
+    if (!MSIMEEditionIsShurufa()) return YES;
+    return page != MSIMESettingsPageSkin && page != MSIMESettingsPageStatusBar &&
+        page != MSIMESettingsPageAccount && page != MSIMESettingsPageSupport;
+}
+static BOOL ShurufaHiddenSetting(NSString *title) {
+    if (!MSIMEEditionIsShurufa()) return NO;
+    for (NSString *word in @[@"云候选", @"翻译", @"释义", @"五笔", @"日语", @"日文", @"粤拼",
+            @"注音", @"越南", @"藏文", @"韩语", @"Emoji", @"表情", @"颜文字", @"剪贴板",
+            @"账号", @"同步", @"皮肤", @"插件", @"浮动工具栏", @"悬浮工具栏", @"屏幕键盘",
+            @"手写", @"检查更新", @"立即检查", @"自动更新", @"自动检查", @"使用统计", @"打字统计", @"徽章"])
+        if ([title containsString:word]) return YES;
+    return NO;
+}
 /// The account page hosts a view owned by the Swift backend, so showing and leaving it has to
 /// attach and detach that view.
 constexpr NSInteger kAccountPageIndex = MSIMESettingsPageAccount;
@@ -1616,7 +1630,7 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     NSMutableDictionary *sentence = [merged[@"sentence_association"] mutableCopy] ?: [NSMutableDictionary dictionary];
     if (_sharedInputPreferencesApplied || _sharedSentenceAssociationNeuralDesktop != nil ||
         [_defaults objectForKey:SentenceAssociationNeuralDesktopKey] != nil)
-        sentence[@"neural_desktop"] = @(self.sentenceAssociationNeuralDesktop);
+        sentence[MSIMEEditionIsShurufa() ? @"neural_keyboard" : @"neural_desktop"] = @(self.sentenceAssociationNeuralDesktop);
     if (_sharedInputPreferencesApplied || _sharedSentenceAssociationShowNextOnDuplicate != nil ||
         [_defaults objectForKey:SentenceAssociationShowNextOnDuplicateKey] != nil)
         sentence[@"show_next_on_duplicate"] = @(self.sentenceAssociationShowNextOnDuplicate);
@@ -2018,7 +2032,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     [self setFuzzyPinyinRule:sender.identifier enabled:sender.state == NSControlStateValueOn];
 }
 // 没有任何已存选择时与共享默认值一致（关闭），否则设置开关会显示开启而输入法实际不发请求。
-- (BOOL)cloudCandidates { if (_sharedCloudCandidates) return _sharedCloudCandidates.boolValue; return [_defaults boolForKey:CloudCandidatesKey]; }
+- (BOOL)cloudCandidates { if (MSIMEEditionIsShurufa()) return NO; if (_sharedCloudCandidates) return _sharedCloudCandidates.boolValue; return [_defaults boolForKey:CloudCandidatesKey]; }
 - (void)setCloudCandidates:(BOOL)value { _sharedCloudCandidates = nil; [_defaults setBool:value forKey:CloudCandidatesKey]; [self preferencesChanged]; }
 - (void)resolveCloudCandidatesConsentWithPreferencesDirectory:(NSString *)directory userDataDirectory:(NSString *)userDataDirectory {
     if ([_defaults objectForKey:CloudCandidatesConsentKey] != nil) return;
@@ -2038,9 +2052,9 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     [_defaults setInteger:CloudCandidatesConsentAnswered forKey:CloudCandidatesConsentKey];
     self.cloudCandidates = enabled;
 }
-- (BOOL)candidateTranslations { if (_sharedCandidateTranslations) return _sharedCandidateTranslations.boolValue; return [_defaults objectForKey:CandidateTranslationsKey] == nil ? YES : [_defaults boolForKey:CandidateTranslationsKey]; }
+- (BOOL)candidateTranslations { if (MSIMEEditionIsShurufa()) return NO; if (_sharedCandidateTranslations) return _sharedCandidateTranslations.boolValue; return [_defaults objectForKey:CandidateTranslationsKey] == nil ? YES : [_defaults boolForKey:CandidateTranslationsKey]; }
 - (void)setCandidateTranslations:(BOOL)value { _sharedCandidateTranslations = nil; [_defaults setBool:value forKey:CandidateTranslationsKey]; [self preferencesChanged]; }
-- (BOOL)candidateEnglishGloss { if (_sharedCandidateEnglishGloss) return _sharedCandidateEnglishGloss.boolValue; return [_defaults boolForKey:CandidateEnglishGlossKey]; }
+- (BOOL)candidateEnglishGloss { if (MSIMEEditionIsShurufa()) return NO; if (_sharedCandidateEnglishGloss) return _sharedCandidateEnglishGloss.boolValue; return [_defaults boolForKey:CandidateEnglishGlossKey]; }
 - (void)setCandidateEnglishGloss:(BOOL)value { _sharedCandidateEnglishGloss = nil; [_defaults setBool:value forKey:CandidateEnglishGlossKey]; [self preferencesChanged]; }
 - (BOOL)autocorrectTransposition { id value = _sharedTransposition ?: [_defaults objectForKey:TranspositionKey]; return LocalModeBoolean(value) ? [value boolValue] : YES; }
 - (BOOL)autocorrectNeighbor { id value = _sharedNeighbor ?: [_defaults objectForKey:NeighborKey]; return LocalModeBoolean(value) ? [value boolValue] : YES; }
@@ -2190,6 +2204,8 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     [self preferencesChanged];
 }
 - (BOOL)sentenceAssociationNeuralDesktop {
+    if (MSIMEEditionIsShurufa() && _sharedSentenceAssociationNeuralDesktop == nil &&
+        [_defaults objectForKey:SentenceAssociationNeuralDesktopKey] == nil) return YES;
     if (_sharedSentenceAssociationNeuralDesktop) return _sharedSentenceAssociationNeuralDesktop.boolValue;
     return [_defaults boolForKey:SentenceAssociationNeuralDesktopKey];
 }
@@ -2359,8 +2375,9 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     if (LocalModeBoolean(wubiFifthCodeTopCommit)) _sharedWubiFifthCodeTopCommit = wubiFifthCodeTopCommit;
     id sentenceAssociation = preferences[@"sentence_association"];
     if ([sentenceAssociation isKindOfClass:NSDictionary.class]) {
-        if (LocalModeBoolean(sentenceAssociation[@"neural_desktop"]))
-            _sharedSentenceAssociationNeuralDesktop = sentenceAssociation[@"neural_desktop"];
+        NSString *neuralKey = MSIMEEditionIsShurufa() ? @"neural_keyboard" : @"neural_desktop";
+        if (LocalModeBoolean(sentenceAssociation[neuralKey]))
+            _sharedSentenceAssociationNeuralDesktop = sentenceAssociation[neuralKey];
         if (LocalModeBoolean(sentenceAssociation[@"show_next_on_duplicate"]))
             _sharedSentenceAssociationShowNextOnDuplicate = sentenceAssociation[@"show_next_on_duplicate"];
     }
@@ -2545,7 +2562,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     if (![_defaults boolForKey:WubiAutoCommitUniqueAdoptedKey]) return YES;
     return [_defaults objectForKey:WubiKey] == nil ? YES : [_defaults boolForKey:WubiKey];
 }
-- (BOOL)floatingToolbarEnabled { return _sharedToolbarEnabled ? _sharedToolbarEnabled.boolValue : ([_defaults objectForKey:FloatingToolbarKey] == nil ? YES : [_defaults boolForKey:FloatingToolbarKey]); }
+- (BOOL)floatingToolbarEnabled { if (MSIMEEditionIsShurufa()) return NO; return _sharedToolbarEnabled ? _sharedToolbarEnabled.boolValue : ([_defaults objectForKey:FloatingToolbarKey] == nil ? YES : [_defaults boolForKey:FloatingToolbarKey]); }
 - (void)setFloatingToolbarEnabled:(BOOL)value { _sharedToolbarEnabled = nil; [_defaults setBool:value forKey:FloatingToolbarKey]; [self preferencesChanged]; }
 - (void)applySharedToolbarVisibility:(BOOL)enabled { _sharedToolbarEnabled = @(enabled); [self refreshControls]; }
 - (NSDictionary *)floatingToolbarValues {
@@ -4014,7 +4031,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     _wubiFifthCodeTopCommitToggle =
         MSIMESettingSwitch(self, @selector(wubiFifthCodeTopCommitChanged:), @"第五码将首选上屏");
     _sentenceNeuralDesktopToggle =
-        MSIMESettingSwitch(self, @selector(sentenceNeuralDesktopChanged:), @"桌面神经联想");
+        MSIMESettingSwitch(self, @selector(sentenceNeuralDesktopChanged:), MSIMEEditionIsShurufa() ? @"本地神经排序" : @"桌面神经联想");
     _sentenceShowNextOnDuplicateToggle =
         MSIMESettingSwitch(self, @selector(sentenceShowNextOnDuplicateChanged:), @"去重后补充次选");
     _punctuationToggle = MSIMESettingSwitch(self, @selector(punctuationChanged:), @"中文标点");
@@ -4506,7 +4523,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
         [self settingRow:@"显示候选释义" control:_candidateTranslationsToggle aka:@[@"翻译"]],
         [self settingRow:@"显示离线英文释义" control:_candidateEnglishGlossToggle aka:@[@"英文"]],
         [self settingRow:@"AI 联想" control:aiButton],
-        [self settingRow:@"桌面神经联想"
+        [self settingRow:MSIMEEditionIsShurufa() ? @"本地神经排序" : @"桌面神经联想"
                   detail:@"使用神经模型重排整句候选；没有模型时保持现有候选。"
                  control:_sentenceNeuralDesktopToggle],
         [self settingRow:@"去重后补充次选"
@@ -4550,6 +4567,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     _automaticUpdateLabel.accessibilityLabel = @"自动更新状态";
     _updatePageButton = [NSButton buttonWithTitle:@"检查更新…" target:self action:@selector(checkForUpdates:)];
     _updatePageButton.accessibilityLabel = @"立即检查更新";
+    _updatePageButton.hidden = MSIMEEditionIsShurufa();
     NSBox *updateCard = MSIMECardWithViews(@[
         [self settingRow:@"当前版本" control:_versionLabel aka:@[@"版本号"]],
         [self settingRow:@"自动更新" control:_automaticUpdateLabel],
@@ -4726,7 +4744,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
 
     // ---- 账号 -------------------------------------------------------------------------------
     NSView *accountPaneView = nil;
-    if (MSIMEAccountPaneView != nullptr) {
+    if (!MSIMEEditionIsShurufa() && MSIMEAccountPaneView != nullptr) {
         accountPaneView = MSIMEAccountPaneView();
         [accountPaneView.heightAnchor constraintGreaterThanOrEqualToConstant:520.0].active = YES;
     } else {
@@ -4852,6 +4870,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
         NSMutableArray<MSIMESettingsSidebarItem *> *members = [NSMutableArray array];
         for (NSNumber *pageIndex in navigationGroups[groupIndex]) {
             const NSInteger index = pageIndex.integerValue;
+            if (!ShurufaSettingsPageVisible(index)) continue;
             MSIMESettingsSidebarItem *member = [MSIMESettingsSidebarItem new];
             member.title = navigationLabels[index];
             member.symbolName = navigationSymbols[index];
@@ -5093,6 +5112,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     return MSIMECheckboxGrid(boxes, columns);
 }
 - (NSView *)registerSearchRow:(NSView *)row named:(NSString *)title aka:(NSArray<NSString *> *)synonyms {
+    if (ShurufaHiddenSetting(title)) row.hidden = YES;
     NSArray<NSString *> *spellings = PinyinSpellings(title);
     MSIMESettingsSearchEntry *entry = [MSIMESettingsSearchEntry new];
     entry.title = title;
@@ -5153,6 +5173,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
 }
 // 标签内的设置始终可由搜索到达；方案自身隐藏的选项仍不进入结果。
 - (BOOL)searchEntryReachable:(MSIMESettingsSearchEntry *)entry {
+    if (!ShurufaSettingsPageVisible(entry.pageIndex) || ShurufaHiddenSetting(entry.title)) return NO;
     if (entry.pageIndex < 0 || (NSUInteger)entry.pageIndex >= _preferencePages.count) return NO;
     NSView *page = _preferencePages[(NSUInteger)entry.pageIndex];
     for (NSView *view = entry.row; view != nil && view != page; view = view.superview) {
@@ -5456,6 +5477,10 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     return YES;
 }
 - (void)showPreferencesPageAtIndex:(NSInteger)pageIndex navigationIndex:(NSInteger)navigationIndex {
+    if (!ShurufaSettingsPageVisible(pageIndex)) {
+        pageIndex = MSIMESettingsPageInputScheme;
+        navigationIndex = pageIndex;
+    }
     _selectedPageIndex = pageIndex;
     if (pageIndex >= 0 && pageIndex < (NSInteger)_pageIdentifiers.count)
         [_defaults setObject:_pageIdentifiers[pageIndex] forKey:LastSettingsPageKey];

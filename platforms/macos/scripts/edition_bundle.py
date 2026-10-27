@@ -125,6 +125,10 @@ def edition_keys(entry: dict) -> str:
         f"<key>MSIMESettingsBundleIdentifier</key><string>{macos['settings_bundle_id']}</string>",
         f"<key>MSIMEKeychainService</key><string>{escape(macos['keychain_service'])}</string>",
     ]
+    for field, key in (("state_directory_name", "MSIMEStateDirectoryName"),
+                       ("voice_helper_name", "MSIMELocalVoiceHelperName")):
+        if macos.get(field):
+            lines.append(f"<key>{key}</key><string>{escape(macos[field])}</string>")
     mixed = entry["preference_defaults"].get("wubi_mixed_pinyin")
     if mixed is not None:
         lines.append(f"<key>MSIMEWubiMixedPinyinDefault</key><{'true' if mixed else 'false'}/>")

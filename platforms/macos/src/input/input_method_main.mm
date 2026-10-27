@@ -45,6 +45,26 @@ static void MSIMEConfigureMovableState(void) {
 
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
+        for (int index = 1; index < argc; ++index) {
+            if (strcmp(argv[index], "--describe-host") != 0) continue;
+            NSDictionary *identity = @{
+                @"bundle_id": MSIMEInputMethodBundleIdentifier(),
+                @"edition": MSIMEEditionIdentifier(),
+                @"state_directory": MSIMEDefaultClientStateDirectory(NSFileManager.defaultManager).path,
+                @"preferences_domain": MSIMEInputMethodBundleIdentifier(),
+                @"settings_bundle_id": MSIMESettingsBundleIdentifier(),
+                @"account_keychain": MSIMEKeychainService(),
+                @"voice_keychain": MSIMEVoiceProviderKeychainService(),
+                @"voice_helper": MSIMELocalVoiceHelperName(),
+                @"dictionary_notification": MSIMEEditionNotificationName(@"MSIMEDictionaryMaintenanceWillBeginNotification"),
+                @"statistics_notification": MSIMEEditionNotificationName(@"MetasequoiaTypingStatisticsEnabledChangedNotification")
+            };
+            NSData *data = [NSJSONSerialization dataWithJSONObject:identity options:NSJSONWritingSortedKeys error:nil];
+            if (!data) return 1;
+            std::fwrite(data.bytes, 1, data.length, stdout);
+            std::putchar('\n');
+            return 0;
+        }
         if (MSIMEShouldRegisterInputSource(argc, argv)) {
             NSURL *bundleURL = NSBundle.mainBundle.bundleURL;
             NSString *identifier = NSBundle.mainBundle.bundleIdentifier;
@@ -73,6 +93,13 @@ int main(int argc, const char *argv[]) {
             std::printf("%s\n", MSIMEInputSourceIsEnabled(NSBundle.mainBundle.bundleIdentifier) ? "true" : "false");
             return 0;
         }
+        if (!MSIMEPrepareShurufaHost()) {
+            std::fprintf(stderr, "Shurufa: cannot prepare bundled input resources\n");
+            return 1;
+        }
+        for (int index = 1; index < argc; ++index) {
+            if (strcmp(argv[index], "--prepare-host") == 0) return 0;
+        }
         [NSApplication sharedApplication];
         // Host API reports failures it recovers from by itself (a sound, music or helpcode pack that does not load, an audio device that does not open) as one line on stderr, which launchd points at /dev/null for an input method; this sends them to diagnostic.log instead. Before the first session, whose creation reports the helpcode fallback; lines that arrive before the log is configured or while it is off are dropped, not kept for later (DiagnosticLog.h).
         msime_client_set_diagnostic_sink(msime_macos_diagnostic_host_line);
@@ -99,7 +126,8 @@ int main(int argc, const char *argv[]) {
             using MSIMEInstallRustClient = bool (*)(const msime_rust_client *);
             const msime_rust_client table = msime_rust_client_linked();
             auto install = reinterpret_cast<MSIMEInstallRustClient>(dlsym(backend, "MSIMEInstallRustClient"));
-            if (install == nullptr || !install(&table)) NSLog(@"MSIME backend did not accept the Rust client table");
+            if (!MSIMEEditionIsShurufa() && (install == nullptr || !install(&table)))
+                NSLog(@"MSIME backend did not accept the Rust client table");
         }
         // 独立设置窗口也要检查模式是否已加入输入法列表，所以在进入该分支前初始化探针。
         MSIMEInputModeEnabledProbe = MSIMEInputSourceIsEnabled;
@@ -119,11 +147,12 @@ int main(int argc, const char *argv[]) {
             return 0;
         }
         // 脚本插件只在输入法进程里运行，上面的独立设置窗口已经返回。在第一个会话之前打开开关，开发构建和 release 构建一样（msime_client.h）。
-        msime_client_scripts_enable(true);
+        msime_client_scripts_enable(!MSIMEEditionIsShurufa());
         // One input method process is one usage session; the standalone preferences window above is not.
         NSDictionary *reportingOptions = MSIMELoadRuntimeOptions();
         id reportingPreferences = reportingOptions[@"preferences_directory"];
-        MSIMEUsageReportingStart([reportingPreferences isKindOfClass:NSString.class] && [reportingPreferences isAbsolutePath] ? reportingPreferences : nil);
+        if (!MSIMEEditionIsShurufa())
+            MSIMEUsageReportingStart([reportingPreferences isKindOfClass:NSString.class] && [reportingPreferences isAbsolutePath] ? reportingPreferences : nil);
         // Recover a prior crashed capture before accepting new IMK sessions.
         // A running owner holds the journal lock, so this cannot undo its mute.
         [[[MSIMEVoiceAudioMuter alloc] init] restore];
@@ -186,13 +215,13 @@ int main(int argc, const char *argv[]) {
         }
         Class bridge = NSClassFromString(@"MSIMEBackendWindowBridge");
         id shared = [bridge respondsToSelector:@selector(shared)] ? [bridge performSelector:@selector(shared)] : nil;
-        if ([shared respondsToSelector:@selector(startClipboardCaptureWithOptions:)]) {
+        if (!MSIMEEditionIsShurufa() && [shared respondsToSelector:@selector(startClipboardCaptureWithOptions:)]) {
             [shared performSelector:@selector(startClipboardCaptureWithOptions:) withObject:MSIMELoadRuntimeOptions() ?: @{}];
         }
         [NSApp run];
         if ([shared respondsToSelector:@selector(stopClipboardCapture)]) [shared performSelector:@selector(stopClipboardCapture)];
         [sourceMonitor stop];
-        MSIMEUsageReportingStop();
+        if (!MSIMEEditionIsShurufa()) MSIMEUsageReportingStop();
         (void)server;
     }
     return 0;

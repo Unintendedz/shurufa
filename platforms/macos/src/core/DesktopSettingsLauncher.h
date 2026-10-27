@@ -9,6 +9,10 @@ enum class MSIMEDesktopSettingsPage { Appearance, Voice, Translation, AI, Skin }
 static inline void MSIMEOpenDesktopRouteWithContext(NSString *route, NSString *optionsPath,
     NSDictionary<NSString *, NSString *> *environment, NSWorkspace *workspace,
     void (^launched)(NSRunningApplication *), dispatch_block_t fallback) {
+    if (MSIMEEditionIsShurufa()) {
+        fallback();
+        return;
+    }
     os_log(MSIMEUILog(), "desktop_route_requested route=%{public}@ options=%{public}s", route,
            optionsPath ? (optionsPath.isAbsolutePath ? "absolute" : "relative") : "none");
     if (optionsPath && !optionsPath.isAbsolutePath) {

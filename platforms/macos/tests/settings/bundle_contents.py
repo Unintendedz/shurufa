@@ -172,9 +172,9 @@ def main() -> int:
 
     # Installed on-device models run in the msime-voice-local helper, which loads the sherpa-onnx runtime from ../Frameworks. The input method spawns it from beside its own executable, so a bundle missing either one accepts a model directory in settings and then fails every recognition.
     # 省略运行库的构建（--without-voice-runtime）由输入法把下载的 voice-runtime-macos 资源包以 --runtime 交给辅助进程；那时 bundle 里出现运行库说明省略没有生效。
-    helper = contents / "MacOS" / "msime-voice-local"
+    helper = contents / "MacOS" / plist.get("MSIMELocalVoiceHelperName", "msime-voice-local")
     if not helper.is_file() or not os.access(helper, os.X_OK):
-        failures.append("Contents/MacOS/msime-voice-local is missing or not executable; installed voice models cannot run")
+        failures.append(f"Contents/MacOS/{helper.name} is missing or not executable; installed voice models cannot run")
     runtime = contents / "Frameworks" / "libsherpa-onnx-c-api.dylib"
     if arguments.without_voice_runtime:
         if runtime.exists():

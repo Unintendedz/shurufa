@@ -48,12 +48,12 @@ static inline NSURL *MSIMEClientStateDirectory(NSFileManager *fileManager, NSStr
 }
 
 static inline NSString *MSIMEDefaultRuntimeOptionsPath(NSFileManager *fileManager) {
-    return [[MSIMEClientStateDirectory(fileManager, MSIMEClientApplicationIdentifier) URLByAppendingPathComponent:@"runtime-options.json"] path];
+    return [[MSIMEClientStateDirectory(fileManager, MSIMEStateDirectoryName()) URLByAppendingPathComponent:@"runtime-options.json"] path];
 }
 
 // Where default state lives: the settings app's state directory under Application Support.
 static inline NSURL *MSIMEDefaultClientStateDirectory(NSFileManager *fileManager) {
-    return MSIMEClientStateDirectory(fileManager, MSIMEClientApplicationIdentifier);
+    return MSIMEClientStateDirectory(fileManager, MSIMEStateDirectoryName());
 }
 
 static inline NSString *MSIMERuntimeOptionsPath(void) {

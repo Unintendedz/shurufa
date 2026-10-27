@@ -39,6 +39,13 @@ static inline NSString *MSIMEVoiceProviderSocketFromOptionsPath(NSString *option
 }
 
 static inline NSString *MSIMEVoiceProviderSocket(void) {
+    if (MSIMEEditionIsShurufa()) {
+        NSDictionary *environment = NSProcessInfo.processInfo.environment;
+        NSString *socket = environment[@"SHURUFA_VOICE_PROVIDER_SOCKET"];
+        NSDictionary *isolated = socket ? @{@"MSIME_VOICE_PROVIDER_SOCKET": socket} : @{};
+        return MSIMEVoiceProviderSocketFromOptionsPath(MSIMEDefaultRuntimeOptionsPath(NSFileManager.defaultManager),
+            isolated, NSFileManager.defaultManager);
+    }
     NSString *optionsPath = NSProcessInfo.processInfo.environment[@"MSIME_CLIENT_HOST_OPTIONS"];
     if (![optionsPath isKindOfClass:NSString.class] || !optionsPath.isAbsolutePath)
         optionsPath = [[NSBundle.mainBundle pathForResource:@"runtime-options" ofType:@"json"] copy];

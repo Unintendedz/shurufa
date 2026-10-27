@@ -94,6 +94,51 @@
         "macos": { "input_method_bundle_id": "app.msime.inputmethod.tibetan", "input_method_name": "水杉藏文", "settings_bundle_id": "app.msime.macos.tibetan", "keychain_service": "com.metasequoia.msime.tibetan.account", "cask": "msime-tibetan", "dmg_prefix": "msime-macos-tibetan" },
         "windows": {"langid": "0x0451", "clsid": "{93DEEE80-9145-4257-BF11-957FDFE0A75E}", "profile_guid": "{FF28C1D8-F988-405A-B848-E991E0FE9C4C}", "tsf_guids": {"preserve_key_ime_mode": "{FB237C2D-65A3-416B-A709-427579008737}", "preserve_key_ime_mode_02": "{AC73E25B-3D16-4E7B-A199-1315FDD3473B}", "preserve_key_ime_mode_03": "{B6E46B2E-E601-41A7-97C6-88237F908D45}", "preserve_key_english_input_mode": "{F7A86CE9-B208-4F1C-8575-86517D69D5AC}", "preserve_key_double_single_byte": "{F21A05E4-353D-4CA7-AEB5-258F2EAF4FAB}", "preserve_key_punctuation": "{ABAC3481-C889-4FC3-80D1-C57B6CF2E37A}", "compartment_double_single_byte": "{9E5438E1-6324-453C-9C72-C1A400196CAE}", "compartment_punctuation": "{AAC2AA02-2D08-4081-9A65-7D1D933BD53F}", "langbar_ime_mode": "{67BB3FFD-44B9-4C22-A3DB-0AC7F3F8A4AF}", "langbar_double_single_byte": "{E7274EF0-511E-4FBC-B296-5F49BE8AFEC3}", "langbar_punctuation": "{9F608870-FA01-4391-8A19-0EA1FE838DAA}", "display_attribute_input": "{6715E480-CC20-4CC2-BE53-52A80C258EB3}", "display_attribute_converted": "{E8996C52-89D9-4901-B8FF-406E343703C4}", "candidate_ui_element": "{10EF3E30-138A-43B1-8BDC-DBB1B00C5525}"}, "inno_app_id": "{68802231-3EDF-4B67-B80F-DFB95A1BAD01}", "app_name": "Metasequoia IME 水杉藏文", "text_service_description": "Metasequoia 水杉藏文", "install_dir": "metasequoiaime-tibetan", "registry_key": "Software\\Metasequoia\\MetasequoiaIME-Tibetan", "state_directory": "MSIME-Client-tibetan", "user_data_directory": "MSIME-tibetan", "data_dir_environment_variable": "METASEQUOIA_IME_TIBETAN_DATA_DIR", "name_suffix": ".tibetan", "watchdog_task": "Metasequoia IME Watchdog (Tibetan)", "host_dll": "msime_host_api_tibetan.dll", "tauri_identifier": "app.msime.windows.tibetan", "installer_base_name": "MetasequoiaIME-Tibetan_Setup"}, "linux": {"package": "msime-linux-tibetan", "install_prefix": "/opt/msime-linux-tibetan", "client_directory": "msime-client-tibetan", "ibus_engine": "msime-linux-tibetan", "fcitx5_addon": "msime-tibetan", "tauri_identifier": "app.msime.linux.tibetan"}, "android": { "application_id": "app.msime.android.tibetan", "apk_name": "msime-android-tibetan" }, "ios": null, "harmony": null
       }
+    },
+    {
+      "id": "shurufa",
+      "display_name": {
+        "zh-Hans": "Shurufa",
+        "en": "Shurufa"
+      },
+      "input_schemes": [
+        "quanpin",
+        "shuangpin"
+      ],
+      "default_scheme": "quanpin",
+      "preference_defaults": {},
+      "resources": {
+        "components": [
+          "core",
+          "chinese-main",
+          "ngram",
+          "sentence-model"
+        ]
+      },
+      "features": {
+        "temporary_japanese": false,
+        "neural_keyboard": true,
+        "offline_glosses": false,
+        "handwriting": false
+      },
+      "language_dictionaries": [],
+      "platforms": {
+        "macos": {
+          "input_method_bundle_id": "dev.shurufa.inputmethod.Shurufa",
+          "input_method_name": "Shurufa",
+          "settings_bundle_id": "dev.shurufa.settings",
+          "state_directory_name": "Shurufa",
+          "voice_helper_name": "shurufa-voice-local",
+          "keychain_service": "dev.shurufa.account",
+          "cask": "shurufa",
+          "dmg_prefix": "shurufa-macos"
+        },
+        "windows": null,
+        "linux": null,
+        "android": null,
+        "ios": null,
+        "harmony": null
+      }
     }
   ]
 }

@@ -194,6 +194,9 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter)
 set(MSIME_EDITION_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/scripts/edition_bundle.py")
 # Sparkle 只在发布包里打开：package-release.sh 拿得到签更新的私钥时传入 appcast 所在的目录，这里拼出本版本的 SUFeedURL（appcast-<版本 id>.xml，edition_bundle.py 把 full 的改成别的版本的；它始终是稳定版的 feed，用户在设置页选了测试版或每日构建时，UpdateController 由它推出同目录下的 appcast-<通道>-<版本 id>.xml，见 src/core/UpdateChannelFeed.h），写入 sparkle-public-key.txt 里的公钥，并打开每天一次的后台检查与静默更新。开发构建不带这些键：带了的话，本机编的输入法会被正式版覆盖。没有 feed 时 UpdateController 走官网下载页（MSIMEUpdateRouteForHost）。
 option(MSIME_ENABLE_SPARKLE "Link the Sparkle application updater" ON)
+if(MSIME_EDITION STREQUAL "shurufa")
+  set(MSIME_ENABLE_SPARKLE OFF CACHE BOOL "Link the Sparkle application updater" FORCE)
+endif()
 set(MSIME_SPARKLE_APPCAST_BASE_URL "" CACHE STRING "URL prefix of the appcast-<edition>.xml feeds; empty leaves Sparkle off")
 set(MSIME_SPARKLE_PLIST_KEYS "")
 if(MSIME_ENABLE_SPARKLE AND MSIME_SPARKLE_APPCAST_BASE_URL)
@@ -401,10 +404,28 @@ add_custom_target(macos-voice-runtime DEPENDS "${MSIME_VOICE_RUNTIME_STAMP}")
 # 发布包在 resources/voice-runtime-macos.lock.json 固定了重签的运行库、并且用同一个 Team ID 签名时关掉它（package-release.sh）：运行库不进 bundle，由设置应用作为 voice-runtime-macos 资源包下载，输入法以 --runtime 交给辅助进程（src/voice/LocalVoiceRequest.h）。开发构建照旧内置，签名身份不同的开发者也能直接用本地识别。
 option(MSIME_BUNDLE_VOICE_RUNTIME "Stage the sherpa-onnx runtime into Contents/Frameworks; off leaves it to the voice-runtime-macos resource pack" ON)
 add_dependencies(MSIMEClientInputMethod msime-voice-local)
+set(MSIME_LOCAL_VOICE_HELPER_NAME "msime-voice-local")
+if(MSIME_EDITION STREQUAL "shurufa")
+  execute_process(COMMAND "${Python3_EXECUTABLE}" "${MSIME_EDITION_SCRIPT}" field
+    --edition "${MSIME_EDITION}" voice_helper_name
+    OUTPUT_VARIABLE MSIME_LOCAL_VOICE_HELPER_NAME OUTPUT_STRIP_TRAILING_WHITESPACE
+    COMMAND_ERROR_IS_FATAL ANY)
+  set(MSIME_SHURUFA_RESOURCES "${CMAKE_CURRENT_SOURCE_DIR}/../../target/macos/EngineResources")
+  if(NOT EXISTS "${MSIME_SHURUFA_RESOURCES}/sentence-model.safetensors")
+    message(FATAL_ERROR "Stage the Shurufa dictionaries and neural model before configuring its bundle")
+  endif()
+  file(GLOB_RECURSE MSIME_SHURUFA_RESOURCE_FILES CONFIGURE_DEPENDS "${MSIME_SHURUFA_RESOURCES}/*")
+  foreach(resource IN LISTS MSIME_SHURUFA_RESOURCE_FILES)
+    file(RELATIVE_PATH relative "${MSIME_SHURUFA_RESOURCES}" "${resource}")
+    get_filename_component(directory "${relative}" DIRECTORY)
+    target_sources(MSIMEClientInputMethod PRIVATE "${resource}")
+    set_source_files_properties("${resource}" PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/EngineResources/${directory}")
+  endforeach()
+endif()
 add_custom_command(TARGET MSIMEClientInputMethod POST_BUILD
   COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>/Contents/Frameworks"
   COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${MSIME_SWIFT_BACKEND_OUTPUT}" "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>/Contents/Frameworks/MSIMEBackend.dylib"
-  COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:msime-voice-local>" "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>/Contents/MacOS/msime-voice-local")
+  COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:msime-voice-local>" "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>/Contents/MacOS/${MSIME_LOCAL_VOICE_HELPER_NAME}")
 if(MSIME_BUNDLE_VOICE_RUNTIME)
   add_dependencies(MSIMEClientInputMethod macos-voice-runtime)
   # 上游的 sherpa-onnx 运行库是 x86_64 + arm64 的通用二进制（约 55 MB）。拷进 bundle 时只抽出 MSIME_BUNDLE_ARCHITECTURES 里的架构：universal 包两种都留，开发构建只编宿主架构时省下另一半。lipo 会破坏上游签名，install.sh 和 package-release.sh 之后都会用 --deep 重新签名整个 bundle。

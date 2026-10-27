@@ -1,5 +1,6 @@
 #import "DesktopInputSession.h"
 #include <sys/socket.h>
+#import "EditionIdentity.h"
 #include <sys/un.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -49,7 +50,8 @@ struct Submission {
     _stopped.store(false);
     _clipboard = clipboard;
     if (pid <= 0 || !std::isfinite(launched) || launched <= 0 || !handler) return nil;
-    char directory[] = "/tmp/msime-panel-XXXXXX";
+    char directory[64];
+    strlcpy(directory, MSIMEEditionIsShurufa() ? "/tmp/shurufa-panel-XXXXXX" : "/tmp/msime-panel-XXXXXX", sizeof(directory));
     if (!mkdtemp(directory)) return nil;
     _directory = [NSString stringWithUTF8String:directory];
     _path = [_directory stringByAppendingPathComponent:@"input.sock"];

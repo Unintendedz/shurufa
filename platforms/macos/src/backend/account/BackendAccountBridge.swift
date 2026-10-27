@@ -48,6 +48,7 @@ enum BackendAccountState {
 /// 只想决定要不要提示登录的原生设置界面用的同步状态，令牌不经过这里。登录账号读缓存，本机匿名账号读 App Group 里的会话文件（「本机账号」留在 Swift）。
 @_cdecl("MSIMEBackendAccountSignedIn")
 public func msimeBackendAccountSignedIn() -> Bool {
+  guard Bundle.main.object(forInfoDictionaryKey: "MSIMEEdition") as? String != "shurufa" else { return false }
   if BackendAccountState.signedIn { return true }
   return ((try? BackendAnonymousAccount.sessionStorage().load()) ?? nil) != nil
 }
@@ -75,5 +76,6 @@ private actor AnonymousAccountBootstrap {
 
 @_cdecl("MSIMEEnsureAnonymousAccount")
 public func msimeEnsureAnonymousAccount() {
+  guard Bundle.main.object(forInfoDictionaryKey: "MSIMEEdition") as? String != "shurufa" else { return }
   Task { await AnonymousAccountBootstrap.shared.runOnce() }
 }

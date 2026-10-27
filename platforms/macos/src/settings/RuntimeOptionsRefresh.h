@@ -1,6 +1,7 @@
 #pragma once
 
 #import <Foundation/Foundation.h>
+#import "RuntimeOptions.h"
 
 #include "msime_client.h"
 #include "../../../common/HostApiString.h"
@@ -46,4 +47,26 @@ static inline MSIMERuntimeOptionsRefreshResult MSIMERefreshRuntimeOptionsWith(
 
 static inline MSIMERuntimeOptionsRefreshResult MSIMERefreshRuntimeOptions(NSString *path) {
     return MSIMERefreshRuntimeOptionsWith(path, NSBundle.mainBundle.bundlePath, msime_client_refresh_host);
+}
+
+// 原生独立版在首次启动时准备随包词库，始终使用自己的状态目录。
+// 这条路径只读已校验的本地资源，不下载词库，也不导入其他输入法的配置。
+static inline BOOL MSIMEPrepareShurufaHost(void) {
+    if (!MSIMEEditionIsShurufa()) return YES;
+    NSString *resources = [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"EngineResources"];
+    NSString *state = MSIMEDefaultClientStateDirectory(NSFileManager.defaultManager).path;
+    if (!resources.isAbsolutePath || !state.isAbsolutePath) return NO;
+    NSDictionary *request = @{@"resources": resources, @"state_root": state, @"edition": @"shurufa"};
+    NSData *input = [NSJSONSerialization dataWithJSONObject:request options:0 error:nil];
+    if (!input) return NO;
+    auto raw = msime::host_api::own_string(msime_client_prepare_host(
+        static_cast<const uint8_t *>(input.bytes), input.length));
+    if (!raw) return NO;
+    NSData *data = [NSData dataWithBytes:raw.get() length:strlen(raw.get())];
+    id response = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if (![response isKindOfClass:NSDictionary.class] || response[@"ok"] != (__bridge id)kCFBooleanTrue ||
+        ![response[@"value"] isKindOfClass:NSDictionary.class]) return NO;
+    NSData *options = [NSJSONSerialization dataWithJSONObject:response[@"value"] options:NSJSONWritingPrettyPrinted error:nil];
+    return options && [options writeToFile:[state stringByAppendingPathComponent:@"runtime-options.json"]
+                                   options:NSDataWritingAtomic error:nil];
 }

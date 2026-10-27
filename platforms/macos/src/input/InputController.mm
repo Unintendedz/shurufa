@@ -138,6 +138,7 @@ static std::atomic_bool MSIMETypingStatisticsEnabled{false};
 
 static void MSIMEReloadTypingStatisticsEnabled(NSString *directory) {
     MSIMETypingStatisticsEnabled.store(false, std::memory_order_relaxed);
+    if (MSIMEEditionIsShurufa()) return;
     if (![directory isKindOfClass:NSString.class] || !directory.isAbsolutePath) return;
     NSData *bytes = [directory dataUsingEncoding:NSUTF8StringEncoding];
     if (!bytes || bytes.length > 16384) return;
@@ -4892,6 +4893,25 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     NSMenuItem *about = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"关于%@…", MSIMEEditionDisplayName()] action:@selector(showAbout:) keyEquivalent:@""];
     about.target = self;
     [menu addItem:about];
+    if (MSIMEEditionIsShurufa()) {
+        // 复用现有菜单项和动作，只保留本版的输入入口。
+        NSSet<NSString *> *actions = [NSSet setWithArray:@[
+            @"retryUnavailableSession:", @"restartUnavailableInputMethod:",
+            @"selectChineseMode:", @"selectEnglishMode:", @"toggleDedicatedEnglishMode:",
+            @"toggleTraditionalOutput:", @"toggleFullWidthInput:", @"toggleChinesePunctuation:",
+            @"showVoicePanel", @"showAppearance:", @"showAbout:"]];
+        for (NSMenuItem *item in menu.itemArray.copy) {
+            if (item.separatorItem) continue;
+            if (item == scheme || [actions containsObject:NSStringFromSelector(item.action) ?: @""]) continue;
+            [menu removeItem:item];
+        }
+        BOOL separator = YES;
+        for (NSMenuItem *item in menu.itemArray.copy) {
+            if (item.separatorItem && separator) [menu removeItem:item];
+            separator = item.separatorItem;
+        }
+        settings.title = @"设置…";
+    }
     return menu;
 }
 - (void)showAccount:(id)sender {
@@ -4908,6 +4928,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     });
 }
 - (void)showCloudClipboard:(id)sender {
+    if (MSIMEEditionIsShurufa()) return;
     // Cloud history is never listed, let alone pasted, while a password field or a terminal's secure keyboard entry holds the keyboard.
     if ([self secureEventInputActive]) { NSBeep(); return; }
     NSRunningApplication *application = NSWorkspace.sharedWorkspace.frontmostApplication;
@@ -4924,6 +4945,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     });
 }
 - (void)showCloudDictionary:(id)sender {
+    if (MSIMEEditionIsShurufa()) return;
     (void)sender;
     // 只捕获弱引用，理由同 showCloudClipboard:。
     __weak MSIMEInputController *weakSelf = self;
@@ -4942,6 +4964,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     [self showSharedTextTool:@"handwriting" options:[self runtimeOptions] bridge:shared];
 }
 - (void)showEmoji:(id)sender {
+    if (MSIMEEditionIsShurufa()) return;
     (void)sender;
     Class bridge = NSClassFromString(@"MSIMEBackendWindowBridge");
     id shared = [bridge respondsToSelector:@selector(shared)] ? [bridge performSelector:@selector(shared)] : nil;
@@ -5123,6 +5146,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
         }, fallback);
 }
 - (void)showScreenKeyboard:(id)sender {
+    if (MSIMEEditionIsShurufa()) return;
     (void)sender;
     MSIMEOpenDesktopRoute(@"keyboard", NSWorkspace.sharedWorkspace, ^{ [[MSIMEScreenKeyboardPanel sharedPanel] showKeyboard]; });
 }
@@ -6012,7 +6036,14 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
 }
 - (void)openWebsite:(id)sender { (void)sender; [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:@"https://msime.app/"]]; }
 - (void)showHelp:(id)sender { (void)sender; MSIMEOpenDesktopRoute(@"settings:help", NSWorkspace.sharedWorkspace, ^{ [[MSIMESupportWindowController sharedController] showPage:MSIMESupportPageHelp]; }); }
-- (void)showAbout:(id)sender { (void)sender; MSIMEOpenDesktopRoute(@"settings:about", NSWorkspace.sharedWorkspace, ^{ [[MSIMESupportWindowController sharedController] showPage:MSIMESupportPageAbout]; }); }
+- (void)showAbout:(id)sender {
+    (void)sender;
+    if (MSIMEEditionIsShurufa()) {
+        [[MSIMEPreferencesWindowController sharedController] showAndActivateWithPageIdentifier:@"about"];
+        return;
+    }
+    MSIMEOpenDesktopRoute(@"settings:about", NSWorkspace.sharedWorkspace, ^{ [[MSIMESupportWindowController sharedController] showPage:MSIMESupportPageAbout]; });
+}
 - (void)showFeedback:(id)sender { (void)sender; MSIMEOpenDesktopRoute(@"settings:feedback", NSWorkspace.sharedWorkspace, ^{ [[MSIMESupportWindowController sharedController] showPage:MSIMESupportPageFeedback]; }); }
 - (void)openCharacterPalette:(id)sender {
     (void)sender;
@@ -6029,7 +6060,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     // on its own 外观 page rather than on whichever one it happens to be showing. Which page the
     // route named was the one thing the fallback threw away.
     MSIMEOpenDesktopSettings(MSIMEDesktopSettingsPage::Appearance, NSWorkspace.sharedWorkspace, ^{
-        [[MSIMEPreferencesWindowController sharedController] showAndActivateWithPageIdentifier:@"appearance"];
+        [[MSIMEPreferencesWindowController sharedController] showAndActivateWithPageIdentifier:MSIMEEditionIsShurufa() ? @"input" : @"appearance"];
     });
 }
 - (void)showDictionary:(id)sender {
@@ -6239,6 +6270,7 @@ static BOOL MSIMECloudConsentPrompting = NO;
 ///
 /// The Windows installer asks this on its 联网功能 page. macOS has no installer step that every user passes through, and the IME types without the settings app ever being opened, so the IME process asks itself. Until an answer arrives nothing is sent; a prompt closed without an answer is asked again on the next activation.
 - (void)requestCloudCandidatesConsentIfNeeded {
+    if (MSIMEEditionIsShurufa()) return;
     if (!_appearance || _appearance.cloudCandidatesAnswered || MSIMECloudConsentPrompting) return;
     MSIMECloudConsentPrompting = YES;
     MSIMEAppearancePreferences *appearance = _appearance;
@@ -6527,7 +6559,7 @@ static NSString *MSIMESessionUnavailableReason(NSDictionary *options, NSError *e
 
 - (void)prepareSession {
     // The device's anonymous MSIME account is registered the first time the input method activates, so a new install has one before any feature asks for it. It runs once per process and returns at once when a signed-in or anonymous session is already saved; only the random identity is sent, never input.
-    if (MSIMEEnsureAnonymousAccount != nullptr) MSIMEEnsureAnonymousAccount();
+    if (!MSIMEEditionIsShurufa() && MSIMEEnsureAnonymousAccount != nullptr) MSIMEEnsureAnonymousAccount();
     BOOL reopened = NO;
     BOOL created = NO;
     if (!_session) {

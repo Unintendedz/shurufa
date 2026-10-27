@@ -214,7 +214,8 @@ struct BackendDesktopSessionFile: BackendSessionStorage {
   static var standardDirectory: URL? {
     let edition = Bundle.main.object(forInfoDictionaryKey: "MSIMEEdition") as? String
     let declared = edition.map { !$0.isEmpty && $0 != "full" } ?? false
-    let identifier = declared ? (Bundle.main.object(forInfoDictionaryKey: "MSIMESettingsBundleIdentifier") as? String ?? "app.msime.macos") : "app.msime.macos"
+    let identifier = (Bundle.main.object(forInfoDictionaryKey: "MSIMEStateDirectoryName") as? String)
+      ?? (declared ? (Bundle.main.object(forInfoDictionaryKey: "MSIMESettingsBundleIdentifier") as? String ?? "app.msime.macos") : "app.msime.macos")
     return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
       .appendingPathComponent(identifier, isDirectory: true)
   }
