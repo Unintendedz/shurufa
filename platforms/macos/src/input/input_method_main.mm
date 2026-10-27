@@ -15,6 +15,7 @@
 #import "../candidate/CandidateSkin.h"
 #import "../voice/VoiceAudioMuter.h"
 #include "../core/DiagnosticLog.h"
+#import "../core/InstalledHost.h"
 #include "msime_client.h"
 #include "MSIMERustClient.h"
 #include <cstdio>
@@ -65,16 +66,6 @@ int main(int argc, const char *argv[]) {
             std::putchar('\n');
             return 0;
         }
-        if (MSIMEShouldRegisterInputSource(argc, argv)) {
-            NSURL *bundleURL = NSBundle.mainBundle.bundleURL;
-            NSString *identifier = NSBundle.mainBundle.bundleIdentifier;
-            OSStatus status = MSIMERegisterAndEnableInputSources(bundleURL, identifier,
-                TISRegisterInputSource, TISCreateInputSourceList,
-                [](TISInputSourceRef source, CFStringRef key) -> void * {
-                    return (void *)TISGetInputSourceProperty(source, key);
-                }, TISEnableInputSource);
-            return status == noErr ? 0 : 1;
-        }
         if (MSIMEShouldReportInputSourceRegistration(argc, argv)) {
             return MSIMEInputSourceRegistryExitCode(
                 MSIMEInputSourceRegistryStateFor(NSBundle.mainBundle.bundleIdentifier, TISCreateInputSourceList));
@@ -92,6 +83,21 @@ int main(int argc, const char *argv[]) {
         if (MSIMEShouldReportInputSourceEnabled(argc, argv)) {
             std::printf("%s\n", MSIMEInputSourceIsEnabled(NSBundle.mainBundle.bundleIdentifier) ? "true" : "false");
             return 0;
+        }
+        if (!MSIMEHostCanServeIn(MSIMEEditionInfo(), NSBundle.mainBundle.bundlePath, NSHomeDirectory())) {
+            MSIMEUnregisterUninstalledHost();
+            std::fprintf(stderr, "Shurufa: install the bundle before starting the input method\n");
+            return 78;
+        }
+        if (MSIMEShouldRegisterInputSource(argc, argv)) {
+            NSURL *bundleURL = NSBundle.mainBundle.bundleURL;
+            NSString *identifier = NSBundle.mainBundle.bundleIdentifier;
+            OSStatus status = MSIMERegisterAndEnableInputSources(bundleURL, identifier,
+                TISRegisterInputSource, TISCreateInputSourceList,
+                [](TISInputSourceRef source, CFStringRef key) -> void * {
+                    return (void *)TISGetInputSourceProperty(source, key);
+                }, TISEnableInputSource);
+            return status == noErr ? 0 : 1;
         }
         if (!MSIMEPrepareShurufaHost()) {
             std::fprintf(stderr, "Shurufa: cannot prepare bundled input resources\n");

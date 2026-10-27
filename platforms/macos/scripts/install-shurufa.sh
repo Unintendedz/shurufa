@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 只安装 Shurufa；不替换水杉，不结束其他进程，也不选择当前输入源。
+# 只安装 Shurufa；结束所有 Shurufa 副本，不替换其他输入法，也不选择当前输入源。
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 source_bundle="${1:-$root/target/macos-isolated/Shurufa.app}"
@@ -8,18 +8,22 @@ identifier="$(/usr/libexec/PlistBuddy -c Print:CFBundleIdentifier "$source_bundl
 destination_root="$HOME/Library/Input Methods"
 destination="$destination_root/Shurufa.app"
 mkdir -p "$destination_root"
+codesign --verify --deep --strict "$source_bundle"
 staging="$(mktemp -d "$destination_root/.shurufa-install.XXXXXX")"
 trap 'rm -rf "$staging"' EXIT
 ditto "$source_bundle" "$staging/Shurufa.app"
-codesign --force --deep --sign - --entitlements "$root/platforms/macos/resources/VoiceInput.entitlements" "$staging/Shurufa.app"
 codesign --verify --deep --strict "$staging/Shurufa.app"
+python3 "$root/platforms/macos/scripts/shurufa_installation.py" prepare
 if [[ -e "$destination" ]]; then
   backup="$HOME/Library/Application Support/Shurufa/installation-backups/$(date +%Y%m%d-%H%M%S)"
   mkdir -p "$backup"
   mv "$destination" "$backup/Shurufa.app"
-  printf 'Previous Shurufa preserved: %s\n' "$backup/Shurufa.app"
+  python3 "$root/platforms/macos/scripts/shurufa_installation.py" preserve "$backup/Shurufa.app"
 fi
 mv "$staging/Shurufa.app" "$destination"
+lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+python3 "$root/platforms/macos/scripts/shurufa_installation.py" unregister "$source_bundle"
+"$lsregister" -f "$destination"
 executable="$destination/Contents/MacOS/Shurufa"
 "$executable" --prepare-host
 set +e
@@ -34,3 +38,5 @@ if [[ "$listed" -ne 0 ]]; then
   exit 2
 fi
 "$executable" --enabled-input-modes
+# 系统已有实例时 open 会复用它，不直接派生第二个服务器。
+open -g "$destination"

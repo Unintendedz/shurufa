@@ -1349,6 +1349,11 @@ if(MSIME_ENABLE_SPARKLE)
 endif()
 add_test(NAME update-controller COMMAND update-controller-test)
 set_tests_properties(update-controller PROPERTIES TIMEOUT 20)
+add_executable(installed-host-test tests/core/InstalledHostTest.mm)
+target_compile_options(installed-host-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(installed-host-test PRIVATE "-framework Foundation")
+add_test(NAME installed-host COMMAND installed-host-test)
+add_test(NAME shurufa-installation COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/shurufa_installation_test.py")
 add_executable(support-window-test tests/core/SupportWindowTest.mm src/core/SupportWindowController.mm)
 target_compile_options(support-window-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(support-window-test PRIVATE "-framework AppKit")
@@ -1583,3 +1588,9 @@ add_executable(typing-effect-panel-test tests/input/TypingEffectPanelTest.mm src
 target_compile_options(typing-effect-panel-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(typing-effect-panel-test PRIVATE "-framework AppKit" "-framework QuartzCore")
 add_test(NAME typing-effect-panel COMMAND typing-effect-panel-test)
+
+# 构建产物不能成为系统按 bundle id 查找的输入法副本。
+if(MSIME_EDITION STREQUAL "shurufa")
+  add_custom_command(TARGET MSIMEClientInputMethod POST_BUILD
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/shurufa_installation.py" unregister "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>")
+endif()
