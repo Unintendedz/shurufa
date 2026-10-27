@@ -5451,6 +5451,9 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     return MSIMEVoiceUsesLocalModelHelper(provider, MSIMEVoiceProviderSocket() != nil,
                                           MSIMELocalVoiceModelDirectory([defaults stringForKey:@"MSIMEClientVoiceASRModelPath"]));
 }
+- (BOOL)usesTextStreamVoice {
+    return MSIMEVoiceUsesTextStream([NSUserDefaults.standardUserDefaults stringForKey:@"MSIMEClientVoiceASRProvider"], MSIMEVoiceProviderSocket() != nil);
+}
 - (BOOL)usesNativeHTTPVoice {
     NSString *provider = [NSUserDefaults.standardUserDefaults stringForKey:@"MSIMEClientVoiceASRProvider"] ?: @"";
     // An installed model directory streams through the helper instead; "local" naming anything else never records (MSIMEVoiceLocalModelMissing).
@@ -5459,7 +5462,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
 }
 - (BOOL)usesNativeDoubaoVoice {
     NSString *provider = [NSUserDefaults.standardUserDefaults stringForKey:@"MSIMEClientVoiceASRProvider"] ?: @"local";
-    return (!MSIMEVoiceProviderSocket() && [provider.lowercaseString isEqual:@"doubao"]) || [self usesLocalModelVoice];
+    return (!MSIMEVoiceProviderSocket() && [provider.lowercaseString isEqual:@"doubao"]) || [self usesLocalModelVoice] || [self usesTextStreamVoice];
 }
 - (void)dealloc {
     [self stopCandidateFrameAnimation];
@@ -5499,8 +5502,13 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
 - (id<MSIMEStreamingVoiceRequest>)makeLocalVoiceRequest:(NSDictionary *)options error:(NSError **)error {
     return [[MSIMELocalVoiceRequest alloc] initWithOptions:options hostOptions:_session.hostOptions error:error];
 }
+- (id<MSIMEStreamingVoiceRequest>)makeTextStreamVoiceRequest:(NSDictionary *)options error:(NSError **)error {
+    return [[MSIMELocalVoiceRequest alloc] initWithTextStreamOptions:options hostOptions:_session.hostOptions error:error];
+}
 - (id<MSIMEStreamingVoiceRequest>)makeStreamingVoiceRequest:(NSDictionary *)options error:(NSError **)error {
     id provider = options[@"asr_provider"];
+    if ([provider isKindOfClass:NSString.class] && [[provider lowercaseString] isEqual:@"textstream"])
+        return [self makeTextStreamVoiceRequest:options error:error];
     if ([provider isKindOfClass:NSString.class] && [[provider lowercaseString] isEqual:@"local"])
         return [self makeLocalVoiceRequest:options error:error];
     return [self makeDoubaoVoiceRequest:options error:error];
@@ -5963,7 +5971,11 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
         [self reportVoiceFailure:MSIMEVoiceFailureMissingToken];
         return;
     }
-    if (MSIMEVoiceLocalModelMissing([voiceDefaults stringForKey:@"MSIMEClientVoiceASRProvider"], MSIMEVoiceProviderSocket() != nil,
+    if (MSIMEVoiceTextStreamMissing([voiceDefaults stringForKey:@"MSIMEClientVoiceASRProvider"], MSIMEVoiceProviderSocket() != nil, MSIMETextStreamReady())) {
+        [self reportVoiceFailure:MSIMEVoiceFailureMissingLocalModel];
+        return;
+    }
+    if (MSIMEVoiceLocalModelMissing(MSIMEVoiceEffectiveASRProvider([voiceDefaults stringForKey:@"MSIMEClientVoiceASRProvider"]), MSIMEVoiceProviderSocket() != nil,
                                     MSIMELocalVoiceModelDirectory([voiceDefaults stringForKey:@"MSIMEClientVoiceASRModelPath"]))) {
         [self reportVoiceFailure:MSIMEVoiceFailureMissingLocalModel];
         return;
@@ -5979,8 +5991,9 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
         [controller->_voiceOverlay setListening:YES];
         NSString *language = [[NSUserDefaults standardUserDefaults] stringForKey:@"MSIMEClientVoiceLanguage"] ?: @"zh-CN";
         NSString *socket = MSIMEVoiceProviderSocket();
-        NSDictionary *query = @{ @"language": language.lowercaseString, @"generation": @(controller->_voiceGeneration), @"stream": @([defaults objectForKey:@"MSIMEClientVoiceStreamInlinePreedit"] == nil || [defaults boolForKey:@"MSIMEClientVoiceStreamInlinePreedit"]), @"asr_provider": [defaults stringForKey:@"MSIMEClientVoiceASRProvider"] ?: @"local", @"asr_endpoint": [defaults stringForKey:@"MSIMEClientVoiceASREndpoint"] ?: @"", @"asr_model": [defaults stringForKey:@"MSIMEClientVoiceASRModel"] ?: @"", @"asr_model_path": [defaults stringForKey:@"MSIMEClientVoiceASRModelPath"] ?: @"", @"asr_token": [defaults stringForKey:@"MSIMEClientVoiceASRToken"] ?: @"", @"doubao_boosting_table_id": [defaults stringForKey:@"MSIMEClientVoiceDoubaoBoostingTableID"] ?: @"", @"asr_app_key": [defaults stringForKey:@"MSIMEClientVoiceDoubaoAppKey"] ?: @"", @"asr_resource_id": [defaults stringForKey:@"MSIMEClientVoiceDoubaoResourceID"] ?: @"", @"polish_enabled": @([defaults boolForKey:@"MSIMEClientVoicePolish"]), @"polish_prompt_id": [defaults stringForKey:@"MSIMEClientVoicePolishPromptID"] ?: @"cleanup", @"polish_provider": [defaults stringForKey:@"MSIMEClientVoicePolishProvider"] ?: MSIMEVoicePolishDefaultProvider, @"polish_model": [defaults stringForKey:@"MSIMEClientVoicePolishModel"] ?: @"", @"polish_endpoint": [defaults stringForKey:@"MSIMEClientVoicePolishEndpoint"] ?: @"", @"polish_token": [defaults stringForKey:@"MSIMEClientVoicePolishToken"] ?: @"", @"polish_thinking": [defaults stringForKey:@"MSIMEClientVoicePolishThinking"] ?: @"", @"polish_prompt_custom_1": [defaults stringForKey:@"MSIMEClientVoicePolishPromptCustom1"] ?: @"", @"polish_prompt_custom_2": [defaults stringForKey:@"MSIMEClientVoicePolishPromptCustom2"] ?: @"", @"polish_prompt_custom_3": [defaults stringForKey:@"MSIMEClientVoicePolishPromptCustom3"] ?: @"" };
+        NSDictionary *query = @{ @"language": language.lowercaseString, @"generation": @(controller->_voiceGeneration), @"stream": @([defaults objectForKey:@"MSIMEClientVoiceStreamInlinePreedit"] == nil || [defaults boolForKey:@"MSIMEClientVoiceStreamInlinePreedit"]), @"asr_provider": MSIMEVoiceEffectiveASRProvider([defaults stringForKey:@"MSIMEClientVoiceASRProvider"]), @"asr_endpoint": [defaults stringForKey:@"MSIMEClientVoiceASREndpoint"] ?: @"", @"asr_model": [defaults stringForKey:@"MSIMEClientVoiceASRModel"] ?: @"", @"asr_model_path": [defaults stringForKey:@"MSIMEClientVoiceASRModelPath"] ?: @"", @"asr_token": [defaults stringForKey:@"MSIMEClientVoiceASRToken"] ?: @"", @"doubao_boosting_table_id": [defaults stringForKey:@"MSIMEClientVoiceDoubaoBoostingTableID"] ?: @"", @"asr_app_key": [defaults stringForKey:@"MSIMEClientVoiceDoubaoAppKey"] ?: @"", @"asr_resource_id": [defaults stringForKey:@"MSIMEClientVoiceDoubaoResourceID"] ?: @"", @"polish_enabled": @([defaults boolForKey:@"MSIMEClientVoicePolish"]), @"polish_prompt_id": [defaults stringForKey:@"MSIMEClientVoicePolishPromptID"] ?: @"cleanup", @"polish_provider": [defaults stringForKey:@"MSIMEClientVoicePolishProvider"] ?: MSIMEVoicePolishDefaultProvider, @"polish_model": [defaults stringForKey:@"MSIMEClientVoicePolishModel"] ?: @"", @"polish_endpoint": [defaults stringForKey:@"MSIMEClientVoicePolishEndpoint"] ?: @"", @"polish_token": [defaults stringForKey:@"MSIMEClientVoicePolishToken"] ?: @"", @"polish_thinking": [defaults stringForKey:@"MSIMEClientVoicePolishThinking"] ?: @"", @"polish_prompt_custom_1": [defaults stringForKey:@"MSIMEClientVoicePolishPromptCustom1"] ?: @"", @"polish_prompt_custom_2": [defaults stringForKey:@"MSIMEClientVoicePolishPromptCustom2"] ?: @"", @"polish_prompt_custom_3": [defaults stringForKey:@"MSIMEClientVoicePolishPromptCustom3"] ?: @"" };
         query = MSIMEVoiceProviderOptions(query, defaults);
+        if (MSIMEVoiceUsesTextStream(query[@"asr_provider"], socket.length > 0)) query = MSIMEVoiceTextStreamPolishOptions(query, defaults);
         if (socket.length) {
             id token = [controller beginLiveVoiceWithOptions:query socket:socket];
             if (!token) return;

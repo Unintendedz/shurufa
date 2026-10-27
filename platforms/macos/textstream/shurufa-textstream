@@ -1,0 +1,10 @@
+#!/bin/bash
+# 启动 TextStream 工作进程；参数原样透传。输入法通过 spawn 本脚本使用它。
+ROOT="${SHURUFA_TEXTSTREAM_ROOT:-$HOME/Library/Application Support/Shurufa/textstream}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PY="$ROOT/venv/bin/python"
+if [ ! -x "$PY" ]; then
+  echo '{"type":"hello","version":1,"available":false,"error":"runtime not installed; run install-runtime.sh"}'
+  exit 0
+fi
+exec "$PY" "$HERE/textstream_worker.py" "$@"

@@ -227,7 +227,7 @@ static void TestForeignCaptureBackendReadsAsAutomaticAndPickingClaimsIt()
 static void TestEveryRuntimeProviderIsEditable()
 {
     NSArray *providers = MSIMEVoiceASRProviderIDs();
-    NSArray *expected = @[ @"doubao", @"openai", @"siliconflow", @"groq", @"everyapi", @"mistral",
+    NSArray *expected = @[ @"textstream", @"doubao", @"openai", @"siliconflow", @"groq", @"everyapi", @"mistral",
                            @"bailian", @"zhipu", @"minimax", @"custom", @"system", @"local" ];
     assert([providers isEqual:expected]);
     assert(MSIMEVoiceASRProviderTitles().count == providers.count);

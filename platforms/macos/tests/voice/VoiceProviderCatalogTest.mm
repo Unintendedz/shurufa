@@ -13,7 +13,7 @@ int main()
 {
     @autoreleasepool {
         // 顺序属于 macOS；名称和默认值必须实际读取共享目录。
-        NSArray *expected = @[@"doubao", @"openai", @"siliconflow", @"groq", @"everyapi",
+        NSArray *expected = @[@"textstream", @"doubao", @"openai", @"siliconflow", @"groq", @"everyapi",
                               @"mistral", @"bailian", @"zhipu", @"minimax", @"custom",
                               @"system", @"local"];
         NSArray *identifiers = MSIMEVoiceASRProviderIDs();
@@ -31,7 +31,7 @@ int main()
         }
         assert([titles[titles.count - 2] isEqual:@"macOS 系统识别"]);
         assert([titles.lastObject isEqual:@"本地模型"]);
-        for (NSString *identifier in @[@"system", @"local"]) {
+        for (NSString *identifier in @[@"textstream", @"system", @"local"]) {
             assert(MSIMEVoiceASRProviderDefaultEndpoint(identifier).length == 0);
             assert(MSIMEVoiceASRProviderDefaultModel(identifier).length == 0);
             assert(!MSIMEVoiceASRProviderUsesService(identifier));

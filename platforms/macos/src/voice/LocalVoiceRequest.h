@@ -1,6 +1,7 @@
 #pragma once
 #import <Foundation/Foundation.h>
 #import "DoubaoVoiceRequest.h"
+#import "TextStreamSupport.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -20,6 +21,10 @@ FOUNDATION_EXPORT NSString * _Nullable MSIMELocalVoiceRuntimePath(NSDictionary *
 - (nullable instancetype)initWithOptions:(NSDictionary *)options
                              hostOptions:(nullable NSDictionary *)hostOptions
                                    error:(NSError **)error;
+// TextStream：同一套协议，换成随包启动器和固定的模型目录；`options` 只用到 `language`。
+- (nullable instancetype)initWithTextStreamOptions:(NSDictionary *)options
+                                       hostOptions:(nullable NSDictionary *)hostOptions
+                                             error:(NSError **)error;
 @end
 
 NS_ASSUME_NONNULL_END
