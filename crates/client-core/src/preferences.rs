@@ -4153,8 +4153,8 @@ fn default_shuangpin_helpcode() -> HelpcodePreferences {
     }
 }
 
-/// Persisted recognition provider identifiers. Hosts expose only the providers they implement: `system` is the platform speech adapter, not a cloud profile, and `local` is an installed on-device sherpa-onnx model directory named by `asr_model_path`, which needs a host built with the recognizer behind it.
-pub const ASR_PROVIDERS: [&str; 12] = [
+/// Persisted recognition provider identifiers. Hosts expose only the providers they implement (`textstream` is the macOS Shurufa edition's local streaming recognizer): `system` is the platform speech adapter, not a cloud profile, and `local` is an installed on-device sherpa-onnx model directory named by `asr_model_path`, which needs a host built with the recognizer behind it.
+pub const ASR_PROVIDERS: [&str; 13] = [
     "doubao",
     "siliconflow",
     "openai",
@@ -4167,6 +4167,7 @@ pub const ASR_PROVIDERS: [&str; 12] = [
     "custom",
     "system",
     "local",
+    "textstream",
 ];
 /// OpenAI-compatible AI services exposed by the Apple settings surface and
 /// shared by every host. Providers that need special request fields are still
@@ -4232,7 +4233,7 @@ impl Preferences {
         }
         preferences.touch_keyboard_schemes = TouchKeyboardSchemePreferences::for_edition(edition);
         if edition.id == "shurufa" {
-            // Shurufa 新装只提供本地输入；AI 候选和语音整理须单独开启。
+            // Shurufa 新装只提供本地输入；AI 候选须单独开启，语音整理默认开启但需要用户配置整理服务的凭据才会生效。
             preferences.usage_reporting = false;
             preferences.cloud_candidates = false;
             preferences.candidate_translations = false;
@@ -4253,9 +4254,10 @@ impl Preferences {
             preferences.local_modes.temporary_japanese = false;
             preferences.plugins = PluginPreferences::default();
             preferences.voice_input.enabled = true;
-            preferences.voice_input.asr_provider = "local".into();
-            preferences.voice_input.polish_enabled = false;
-            preferences.voice_input.polish_text = false;
+            // 本机 TextStream 流式识别；整理默认开，宿主仍要求有整理服务的凭据才会发请求。
+            preferences.voice_input.asr_provider = "textstream".into();
+            preferences.voice_input.polish_enabled = true;
+            preferences.voice_input.polish_text = true;
         }
         preferences
     }

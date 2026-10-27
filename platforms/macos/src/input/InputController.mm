@@ -4899,7 +4899,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
             @"retryUnavailableSession:", @"restartUnavailableInputMethod:",
             @"selectChineseMode:", @"selectEnglishMode:", @"toggleDedicatedEnglishMode:",
             @"toggleTraditionalOutput:", @"toggleFullWidthInput:", @"toggleChinesePunctuation:",
-            @"showVoicePanel", @"showAppearance:", @"showAbout:"]];
+            @"showVoicePanel", @"showVoiceSettings:", @"showAppearance:", @"showAbout:"]];
         for (NSMenuItem *item in menu.itemArray.copy) {
             if (item.separatorItem) continue;
             if (item == scheme || [actions containsObject:NSStringFromSelector(item.action) ?: @""]) continue;

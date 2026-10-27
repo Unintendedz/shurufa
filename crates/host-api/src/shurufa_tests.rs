@@ -50,6 +50,9 @@ fn bundled_input_learning_and_neural_model() {
     assert_eq!(options["preferences"]["usage_reporting"], false);
     assert_eq!(options["preferences"]["cloud_candidates"], false);
     assert_eq!(options["preferences"]["ai_assistant"]["enabled"], false);
+    assert_eq!(options["preferences"]["voice_input"]["asr_provider"], "textstream");
+    assert_eq!(options["preferences"]["voice_input"]["polish_enabled"], true);
+    assert_eq!(options["preferences"]["voice_input"]["polish_text"], true);
     assert_eq!(
         options["preferences"]["sentence_association"]["neural_keyboard"],
         true
