@@ -63,7 +63,7 @@ try:
     assert result.returncode == 0 and not errors
     assert counts == {"/polish": 1, "/failure": 1, "/empty": 1,
                       "/length": 1, "/content_filter": 1, "/error": 1,
-                      "/stall-headers": 1, "/stall-body": 1}
+                      "/stall-headers": 2, "/stall-body": 1}
 finally:
     server.shutdown()
     server.server_close()

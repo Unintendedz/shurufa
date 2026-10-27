@@ -55,6 +55,18 @@ int main(int argc, char **argv) {
             const NSTimeInterval elapsed = NSProcessInfo.processInfo.systemUptime - started;
             assert(elapsed >= 5.5);
         }
+        // 超时：服务答得比预算慢，就原样上屏识别文字，不报错也不丢字。
+        options[@"polish_endpoint"] = [base stringByAppendingString:@"/stall-headers"];
+        options[@"polish_timeout_ms"] = @1000;
+        request = [[MSIMEHTTPVoiceRequest alloc] initWithPolishOptions:options error:nil];
+        done = NO;
+        const NSTimeInterval timeoutStarted = NSProcessInfo.processInfo.systemUptime;
+        assert([request polishText:@"synthetic transcript" completion:^(NSString *text, NSError *error) {
+            assert(!error && [text isEqual:@"synthetic transcript"]); done = YES;
+        } error:nil]);
+        Wait(^BOOL { return done; });
+        assert(NSProcessInfo.processInfo.systemUptime - timeoutStarted < 4.0);
+        [options removeObjectForKey:@"polish_timeout_ms"];
         options[@"polish_enabled"] = @NO;
         request = [[MSIMEHTTPVoiceRequest alloc] initWithPolishOptions:options error:nil];
         assert([request polishText:@"cancelled" completion:^(NSString *, NSError *) { assert(false); } error:nil]);

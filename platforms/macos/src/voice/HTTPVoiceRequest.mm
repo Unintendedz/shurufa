@@ -53,8 +53,12 @@ std::string Polish(std::string text, NSDictionary *options, const std::shared_pt
             // below keeps the ASR text without telling anyone - so the transcript reached the provider and
             // the cleaned answer was discarded every time. Waiting is the lesser cost; sending the text and
             // binning the reply is the one nobody asked for.
+            // 整理预算默认 30 秒；`polish_timeout_ms` 只能把它调小（测试用），不会放宽。
+            long budget = 30000;
+            id requested = options[@"polish_timeout_ms"];
+            if ([requested isKindOfClass:NSNumber.class] && [requested longValue] >= 200) budget = std::min(budget, [requested longValue]);
             auto polished = msime::voice::polish_cloud_text(text, provider, endpoint, model,
-                String(options, @"polish_token"), prompt, String(options, @"polish_thinking"), cancelled, 30000);
+                String(options, @"polish_token"), prompt, String(options, @"polish_thinking"), cancelled, budget);
             if (!polished.empty() && polished.size() <= 65536) text = std::move(polished);
         }
     } catch (const std::exception &) { /* Optional polish failure preserves ASR. */ }
@@ -90,6 +94,8 @@ std::string Polish(std::string text, NSDictionary *options, const std::shared_pt
         }
         if (value) snapshot[key] = [value copy];
     }
+    id timeout = options[@"polish_timeout_ms"];
+    if ([timeout isKindOfClass:NSNumber.class] && CFGetTypeID((__bridge CFTypeRef)timeout) != CFBooleanGetTypeID()) snapshot[@"polish_timeout_ms"] = timeout;
     for (NSString *key in @[@"polish_enabled", @"polish_text"]) {
         id value = options[key];
         if ([value isKindOfClass:NSNumber.class] && CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID())
