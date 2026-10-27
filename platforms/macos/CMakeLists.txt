@@ -401,6 +401,13 @@ add_custom_target(macos-voice-runtime DEPENDS "${MSIME_VOICE_RUNTIME_STAMP}")
 # 发布包在 resources/voice-runtime-macos.lock.json 固定了重签的运行库、并且用同一个 Team ID 签名时关掉它（package-release.sh）：运行库不进 bundle，由设置应用作为 voice-runtime-macos 资源包下载，输入法以 --runtime 交给辅助进程（src/voice/LocalVoiceRequest.h）。开发构建照旧内置，签名身份不同的开发者也能直接用本地识别。
 option(MSIME_BUNDLE_VOICE_RUNTIME "Stage the sherpa-onnx runtime into Contents/Frameworks; off leaves it to the voice-runtime-macos resource pack" ON)
 add_dependencies(MSIMEClientInputMethod msime-voice-local)
+# 本地流式识别（TextStream）：输入法 spawn Contents/Resources/textstream/shurufa-textstream，它在自身目录里找 worker；install-runtime.sh 随包，由设置窗口调用，把 Python 运行环境和模型装进用户的 Application Support。
+set(MSIME_TEXTSTREAM_FILES shurufa-textstream textstream_worker.py install-runtime.sh requirements.lock LICENSE-TextStream)
+foreach(MSIME_TEXTSTREAM_FILE IN LISTS MSIME_TEXTSTREAM_FILES)
+  add_custom_command(TARGET MSIMEClientInputMethod POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/textstream/${MSIME_TEXTSTREAM_FILE}" "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>/Contents/Resources/textstream/${MSIME_TEXTSTREAM_FILE}")
+  set_property(TARGET MSIMEClientInputMethod APPEND PROPERTY LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/textstream/${MSIME_TEXTSTREAM_FILE}")
+endforeach()
 add_custom_command(TARGET MSIMEClientInputMethod POST_BUILD
   COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>/Contents/Frameworks"
   COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${MSIME_SWIFT_BACKEND_OUTPUT}" "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>/Contents/Frameworks/MSIMEBackend.dylib"
