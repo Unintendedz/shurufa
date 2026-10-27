@@ -702,6 +702,9 @@ impl HostSession {
 
     /// 统计开关；读不到统计目录或文件时当作关闭。
     fn statistics_enabled(&mut self) -> Option<bool> {
+        if self.edition.id == "shurufa" {
+            return Some(false);
+        }
         if let Some(enabled) = self.statistics_enabled {
             return Some(enabled);
         }
@@ -3679,3 +3682,6 @@ fn layout_key_grid_for(
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod shurufa_tests;

@@ -4231,6 +4231,32 @@ impl Preferences {
             preferences.wubi_mixed_pinyin = mixed;
         }
         preferences.touch_keyboard_schemes = TouchKeyboardSchemePreferences::for_edition(edition);
+        if edition.id == "shurufa" {
+            // Shurufa 新装只提供本地输入；AI 候选和语音整理须单独开启。
+            preferences.usage_reporting = false;
+            preferences.cloud_candidates = false;
+            preferences.candidate_translations = false;
+            preferences.candidate_english_gloss = false;
+            preferences.translation_account = false;
+            preferences.translation_ai = false;
+            preferences.clipboard_history = false;
+            preferences.floating_toolbar.enabled = false;
+            preferences.ai_assistant.enabled = false;
+            preferences.english_online_candidates = false;
+            preferences.sentence_association.neural_keyboard = true;
+            preferences.sentence_association.neural_desktop = false;
+            preferences.mixed_input.emoji = false;
+            preferences.mixed_input.kaomoji = false;
+            preferences.mixed_input.japanese = false;
+            preferences.local_modes.emoji = false;
+            preferences.local_modes.kaomoji = false;
+            preferences.local_modes.temporary_japanese = false;
+            preferences.plugins = PluginPreferences::default();
+            preferences.voice_input.enabled = true;
+            preferences.voice_input.asr_provider = "local".into();
+            preferences.voice_input.polish_enabled = false;
+            preferences.voice_input.polish_text = false;
+        }
         preferences
     }
 
