@@ -1,6 +1,11 @@
 #import "UpdateController.h"
 
+#ifndef MSIME_ENABLE_SPARKLE
+#define MSIME_ENABLE_SPARKLE 1
+#endif
+#if MSIME_ENABLE_SPARKLE
 #import <Sparkle/Sparkle.h>
+#endif
 
 // 官网下载页的 macOS 一栏读的就是本仓库的 macos-v 发布，GitHub 按钮旁边有国内镜像（dl.msime.app），国内打开 GitHub 发布页下载常常只有几十 KB/s。
 static NSString *const MetasequoiaReleasePageURL = @"https://msime.app/download/?platform=macos";
@@ -70,6 +75,7 @@ static NSString *const MetasequoiaReleasePageURL = @"https://msime.app/download/
 @end
 
 // 输入法是 LSBackgroundOnly，进程与登录会话同寿，Sparkle 的默认做法不适合它：它的重启会把 bundle 当成独立启动拉起，打开的是设置窗口（input_method_main.mm）；退出时安装很少等得到；委托若把后台下好的更新交还给 Sparkle，过了 SUScheduledImpatientCheckInterval 它会弹窗，抢走用户正在打字的应用的焦点。所以驱动留着安装闭包，在用户切到别的输入源或离开电脑时运行（installDownloadedUpdate，见控制器的 installDownloadedUpdateWhenAwayWithWorkspaceCenter:idleClock:）；退出先来的话 Sparkle 照常在退出时装。
+#if MSIME_ENABLE_SPARKLE
 @interface MetasequoiaSparkleUpdateDriver : NSObject <MetasequoiaUpdateDriver, SPUUpdaterDelegate>
 @property(nonatomic, readonly) SPUStandardUpdaterController *updaterController;
 @property(nonatomic, copy, nullable) void (^pendingInstall)(void);
@@ -160,6 +166,8 @@ static NSString *const MetasequoiaReleasePageURL = @"https://msime.app/download/
 
 @end
 
+#endif
+
 @interface MetasequoiaUpdateController ()
 @property(nonatomic) id<MetasequoiaUpdateDriver> driver;
 @property(nonatomic, copy) MetasequoiaUpdateActivationHandler activationHandler;
@@ -195,7 +203,11 @@ static NSString *MetasequoiaLaunchUpdateChannel = nil;
       NSString *launchChannel = MetasequoiaLaunchUpdateChannel;
       if (route == MetasequoiaUpdateRouteSparkle)
       {
+#if MSIME_ENABLE_SPARKLE
           driver = [[MetasequoiaSparkleUpdateDriver alloc] initWithUpdateChannel:launchChannel ?: @"stable"];
+#else
+          driver = [[MetasequoiaUnavailableUpdateDriver alloc] init];
+#endif
       }
       else if (route == MetasequoiaUpdateRouteReleasePage)
       {
