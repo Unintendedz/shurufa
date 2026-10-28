@@ -919,6 +919,7 @@ static void TestSmartPunctuationWritesBothHalves() {
 // 原生窗口各节「恢复默认值」的入口：删掉本机值，也清掉共享值。
 @interface MSIMEAppearancePreferences (SectionRestore)
 - (void)removeStoredKeys:(NSArray<NSString *> *)keys;
+- (NSArray<NSString *> *)restorableKeys;
 @end
 
 // `show_candidate_page_number` 在 macOS 上的读写：缺省显示；共享文档里的值优先于本机值；「恢复默认值」清掉两者后写回文档的是默认的显示（#7316）。
@@ -13313,6 +13314,30 @@ int main(int argc, char **argv) {
                 assert([[image representationUsingType:NSBitmapImageFileTypePNG properties:@{}]
                     writeToFile:[NSString stringWithUTF8String:argv[3]] atomically:YES]);
             }
+            // 恢复后的值必须真正回到共享快照，不能在下次加载时被旧文档覆盖。
+            [standard setVolatileDomain:@{@"MSIMEClientVoiceASRProvider":@"system",
+                @"MSIMEClientVoiceASRToken":@"synthetic-preserved"} forName:NSArgumentDomain];
+            NSDictionary *beforeRestore = @{@"keybindings":@{@"switch_language_caps_lock":@NO,@"switch_language_shift":@NO},
+                @"voice_input":@{@"enabled":@NO,@"macos_hotkey":@{@"key_code":@123,@"modifiers":@2},@"hotkey_mode":@"toggle",
+                    @"asr_provider":@"system",@"asr_token":@"synthetic-preserved"}};
+            [prefs applySharedInputPreferences:beforeRestore];
+            MSIMEApplySharedVoicePreferences(beforeRestore[@"voice_input"], defaults);
+            NSArray *resetKeys = @[@"MSIMEClientCapsLockTapShortcut",@"MSIMEClientShiftTapShortcut",
+                @"MSIMEClientVoiceEnabled",@"MSIMEClientVoiceMacOSHotkey",@"MSIMEClientVoiceHotkeyMode"];
+            [prefs removeStoredKeys:resetKeys];
+            NSDictionary *restored = [prefs sharedPreferencesByMerging:beforeRestore];
+            const BOOL capsRestored = [restored[@"keybindings"][@"switch_language_caps_lock"] boolValue];
+            const BOOL voiceRestored = [restored[@"voice_input"][@"macos_hotkey"][@"key_code"] isEqual:@61] &&
+                [restored[@"voice_input"][@"hotkey_mode"] isEqual:@"hold"] && [restored[@"voice_input"][@"enabled"] boolValue];
+            printf("restore defaults: caps=%d voice=%d\n",capsRestored,voiceRestored); fflush(stdout);
+            assert(capsRestored && voiceRestored);
+            assert([[prefs restorableKeys] containsObject:@"MSIMEClientVoiceMacOSHotkey"]);
+            assert([[prefs restorableKeys] containsObject:@"MSIMEClientVoiceHotkeyMode"]);
+            assert([restored[@"voice_input"][@"asr_provider"] isEqual:@"system"]);
+            assert([restored[@"voice_input"][@"asr_token"] isEqual:@"synthetic-preserved"]);
+            [prefs applySharedInputPreferences:restored];
+            MSIMEApplySharedVoicePreferences(restored[@"voice_input"], defaults);
+            assert(prefs.capsLockTapShortcut && [MSIMEVoiceHotkeyMode(defaults) isEqual:@"hold"]);
             MSIMERemoveTestPreferenceSuite(defaults, suite);
             [standard setVolatileDomain:oldArguments forName:NSArgumentDomain];
             method_setImplementation(mainBundle, original);

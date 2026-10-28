@@ -411,6 +411,8 @@ static NSString *const VoiceLanguageKey = @"MSIMEClientVoiceLanguage";
 static NSString *const VoiceSoundKey = @"MSIMEClientVoiceSoundEnabled";
 static NSString *const VoiceMuteSystemAudioKey = @"MSIMEClientVoiceMuteSystemAudio";
 static NSString *const VoiceStreamInlinePreeditKey = @"MSIMEClientVoiceStreamInlinePreedit";
+static NSString *const VoiceMacOSHotkeyKey = @"MSIMEClientVoiceMacOSHotkey";
+static NSString *const VoiceHotkeyModeKey = @"MSIMEClientVoiceHotkeyMode";
 static NSString *const VoiceHotkeyCtrlF9Key = @"MSIMEClientVoiceHotkeyCtrlF9";
 static NSString *const VoiceHotkeyRightAltKey = @"MSIMEClientVoiceHotkeyRightAlt";
 static NSString *const VoiceHotkeyCtrlCommandKey = @"MSIMEClientVoiceHotkeyCtrlCommand";
@@ -535,6 +537,8 @@ static NSDictionary<NSString *, NSString *> *SharedOverrideProperties() {
 - (NSDictionary<NSString *, NSString *> *)applicationInputModeRules;
 - (NSArray<NSString *> *)vimModeApps;
 - (instancetype)initSilentlyWithDefaults:(NSUserDefaults *)defaults;
+- (id)voiceShortcutBinding;
+- (NSString *)voiceShortcutMode;
 @property(nonatomic) BOOL wubiZWildcard;
 @property(nonatomic) BOOL wubiFifthCodeTopCommit;
 @property(nonatomic) BOOL sentenceAssociationNeuralDesktop;
@@ -642,6 +646,8 @@ static NSDictionary<NSString *, MSIMESettingProbe> *SettingProbes() {
             ControlOptionSpaceShortcutKey : ^id(MSIMEAppearancePreferences *p) { return @(p.controlOptionSpaceShortcut); },
             CharacterSetShortcutKey : ^id(MSIMEAppearancePreferences *p) { return @(p.characterSetShortcut); },
             FullWidthShortcutKey : ^id(MSIMEAppearancePreferences *p) { return @(p.fullWidthShortcut); },
+            VoiceMacOSHotkeyKey : ^id(MSIMEAppearancePreferences *p) { return [p voiceShortcutBinding]; },
+            VoiceHotkeyModeKey : ^id(MSIMEAppearancePreferences *p) { return [p voiceShortcutMode]; },
             VoiceEnabledKey : ^id(MSIMEAppearancePreferences *p) { return @(p.voiceInputEnabled); },
             VoiceLanguageKey : ^id(MSIMEAppearancePreferences *p) { return p.voiceLanguage ?: NSNull.null; },
             VoiceSoundKey : ^id(MSIMEAppearancePreferences *p) { return @(p.voiceSoundEnabled); },
@@ -1609,7 +1615,7 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     id existingVoice = merged[@"voice_input"];
     NSMutableDictionary *voice = [existingVoice isKindOfClass:NSDictionary.class]
         ? [existingVoice mutableCopy] : [NSMutableDictionary dictionary];
-    [voice addEntriesFromDictionary:MSIMEVoicePreferencesFromDefaults(NSUserDefaults.standardUserDefaults)];
+    [voice addEntriesFromDictionary:MSIMEVoicePreferencesFromDefaults(_defaults)];
     merged[@"voice_input"] = voice;
     NSMutableDictionary *toolbar = [merged[@"floating_toolbar"] mutableCopy];
     if (!toolbar) toolbar = [NSMutableDictionary dictionary];
@@ -2749,7 +2755,6 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
 - (BOOL)controlTapShortcut {
     return _sharedControlTapShortcut ? _sharedControlTapShortcut.boolValue : [_defaults boolForKey:ControlTapShortcutKey];
 }
-// 缺省为关，和共享偏好 `keybindings.switch_language_caps_lock` 一致。
 // 中日英循环切换（共享偏好 `keybindings.trilingual_cycle`，默认关）：打开后「切换中英文」那一组
 // 快捷键按 中 → 日 → 英 → 中 转圈，顺序和「有组字时先上屏」在共享层（`msime_client_language_cycle`）。
 - (BOOL)trilingualCycle {
@@ -2762,7 +2767,10 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     [self preferencesChanged];
 }
 - (BOOL)capsLockTapShortcut {
-    return _sharedCapsLockTapShortcut ? _sharedCapsLockTapShortcut.boolValue : [_defaults boolForKey:CapsLockTapShortcutKey];
+    // Shurufa 的既定出厂值为开；显式保存的关闭值仍然保留。
+    if (_sharedCapsLockTapShortcut) return _sharedCapsLockTapShortcut.boolValue;
+    if ([_defaults objectForKey:CapsLockTapShortcutKey] == nil) return MSIMEEditionIsShurufa();
+    return [_defaults boolForKey:CapsLockTapShortcutKey];
 }
 - (void)setCapsLockTapShortcut:(BOOL)value {
     _sharedCapsLockTapShortcut = nil;
@@ -2838,6 +2846,8 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     [_defaults setBool:value forKey:VoiceStreamInlinePreeditKey];
     [self preferencesChanged];
 }
+- (id)voiceShortcutBinding { return MSIMEVoiceCustomShortcut(_defaults) ?: (id)NSNull.null; }
+- (NSString *)voiceShortcutMode { return MSIMEVoiceHotkeyMode(_defaults); }
 - (BOOL)voiceHotkeyCtrlF9 {
     return [_defaults objectForKey:VoiceHotkeyCtrlF9Key] == nil || [_defaults boolForKey:VoiceHotkeyCtrlF9Key];
 }
@@ -4863,7 +4873,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
                                  content:@[
         [self sectionHeader:@"语音"
                        keys:@[VoiceEnabledKey, VoiceLanguageKey, VoiceSoundKey, VoiceMuteSystemAudioKey,
-                              VoiceStreamInlinePreeditKey]],
+                              VoiceStreamInlinePreeditKey, VoiceMacOSHotkeyKey, VoiceHotkeyModeKey]],
         voiceCard,
         voiceContent,
     ]];
@@ -5899,6 +5909,12 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
 - (void)removeStoredKeys:(NSArray<NSString *> *)keys
                   fields:(NSDictionary<NSString *, NSArray<NSString *> *> *)fields {
     NSDictionary<NSString *, NSString *> *overrides = SharedOverrideProperties();
+    // 这些字段的共享合并把缺键视为“沿用文档”，恢复时须显式写入已定义的默认值。
+    NSArray *publishReset = @[InputModeShortcutKey, ShiftTapShortcutKey, ControlTapShortcutKey,
+        CapsLockTapShortcutKey, ControlOptionSpaceShortcutKey, VoiceEnabledKey, VoiceLanguageKey,
+        VoiceSoundKey, VoiceMuteSystemAudioKey, VoiceStreamInlinePreeditKey,
+        VoiceMacOSHotkeyKey, VoiceHotkeyModeKey, VoiceHotkeyCtrlF9Key, VoiceHotkeyRightAltKey,
+        VoiceHotkeyCtrlCommandKey, VoiceHotkeyCtrlOptionKey];
     for (NSString *key in keys) {
         NSArray<NSString *> *owned = fields[key];
         // And the account's pushed value, which the accessors read first; see
@@ -5907,6 +5923,13 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
         if (owned == nil) {
             [_defaults removeObjectForKey:key];
             if (override != nil) [self setValue:nil forKey:override];
+            if ([publishReset containsObject:key]) {
+                id value = DefaultSettingValues()[key];
+                if ([key isEqual:VoiceMacOSHotkeyKey] && value == NSNull.null) value = @{};
+                if (MSIMEEditionIsShurufa() && [@[VoiceHotkeyCtrlF9Key, VoiceHotkeyRightAltKey,
+                    VoiceHotkeyCtrlCommandKey, VoiceHotkeyCtrlOptionKey] containsObject:key]) value = @NO;
+                if (value && value != NSNull.null) [_defaults setObject:value forKey:key];
+            }
             continue;
         }
         NSMutableDictionary *stored = [[_defaults dictionaryForKey:key] mutableCopy];
@@ -5917,6 +5940,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
         if ([pushed isKindOfClass:NSMutableDictionary.class]) [pushed removeObjectsForKeys:owned];
     }
     [self refreshControls];
+    [_voiceSettingsView reloadSettings];
     [NSNotificationCenter.defaultCenter postNotificationName:MSIMEAppearanceDidChangeNotification object:self];
 }
 #pragma mark - Settings document
