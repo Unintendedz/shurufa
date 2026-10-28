@@ -4912,7 +4912,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     // groups by, so each run gets the heading AppKit puts above a source-list section. No heading is
     // the name of a page under it any more: 输入 used to be both the first group and its first
     // member, which reads as a page nested inside itself.
-    NSArray<NSString *> *groupTitles = @[@"打字", @"显示", @"数据与账号", @"支持"];
+    NSArray<NSString *> *groupTitles = @[@"打字", @"显示", MSIMEEditionIsShurufa() ? @"数据" : @"数据与账号", @"支持"];
     NSArray<NSArray<NSNumber *> *> *navigationGroups = @[
         @[@(MSIMESettingsPageInputScheme), @(MSIMESettingsPageInputHabits), @(MSIMESettingsPageKeys),
           @(MSIMESettingsPageVoice)],
@@ -6035,7 +6035,9 @@ static const NSUInteger MSIMESettingsDocumentLimit = 1 << 20;
     NSAlert *alert = [NSAlert new];
     alert.alertStyle = NSAlertStyleWarning;
     alert.messageText = @"恢复全部设置？";
-    alert.informativeText = @"所有页的设置都会恢复为默认值。词库、学习记录、账号与语音密钥不受影响。";
+    alert.informativeText = MSIMEEditionIsShurufa()
+        ? @"常规设置会恢复为默认值。词库、学习记录、语音服务与密钥不受影响。"
+        : @"所有页的设置都会恢复为默认值。词库、学习记录、账号与语音密钥不受影响。";
     // Cancel is added first so it is the default button: the other one throws settings away, and a
     // destructive action should not be what Return picks.
     [alert addButtonWithTitle:@"取消"];
