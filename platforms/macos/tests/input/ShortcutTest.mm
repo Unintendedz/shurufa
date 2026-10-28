@@ -2752,10 +2752,11 @@ static void TestKeypadDecimal(MSIMEAppearancePreferences *appearance) {
 @interface RestoredInputModeController : ModeController
 @property(nonatomic, copy) NSString *selectedSource;
 @property(nonatomic) NSUInteger synchronizationCalls;
+@property(nonatomic) NSUInteger sourceReads;
 @end
 @implementation RestoredInputModeController
 - (NSDictionary *)runtimeOptions { return @{}; }
-- (NSString *)selectedSystemInputModeID { return self.selectedSource; }
+- (NSString *)selectedSystemInputModeID { ++self.sourceReads; return self.selectedSource; }
 - (void)syncSystemInputModeForClient:(id)client {
     ++self.synchronizationCalls;
     // 可用性由合成源决定，CI 不需要安装或启用真实输入源。
@@ -2844,6 +2845,11 @@ static void TestRestoredInputModeActivation() {
     DrainMainQueue();
     assert(controller.synchronizationCalls == 0 && client.selectedModes.count == 0);
     assert([MSIMESharedSystemInputModeState().current isEqual:MSIMEEnglishInputModeID]);
+    RestoredInputModeController *inactive = makeController(client);
+    RestoredInputModeController *owner = makeController([ModeSelectingClient new]);
+    MSIMEFocusedController = owner;
+    synchronize(inactive, selector, client);
+    assert(inactive.sourceReads == 0 && client.selectedModes.count == 0);
     MSIMEFocusedController = nil;
     MSIMEResetSystemInputModeState(MSIMESharedSystemInputModeState());
     MSIMERemoveTestPreferenceSuite(defaults, suite);

@@ -293,11 +293,21 @@ static inline NSString *MSIMESchemeForReportedInputMode(MSIMEInputMode mode, NSS
 
 // Asks the client to show `mode`, unless it already does or the system does not offer it. Returns whether a switch was requested. A scheme whose own mode is not offered falls back to 中: the controller is still composing through the Engine, and 中 is closer to that than an 英 left over from before. A mode the system has just reported as shown is offered by definition, so it is kept rather than second-guessed.
 static inline BOOL MSIMESelectSystemInputMode(MSIMESystemInputModeState &state, NSString *mode, id client,
-                                              MSIMEInputModeAvailability available) {
+                                              MSIMEInputModeAvailability available, NSString *observedSource = nil) {
     if (!available) return NO;
     if (![mode isEqualToString:MSIMEChineseInputModeID] && ![mode isEqualToString:MSIMEEnglishInputModeID] &&
         ![mode isEqualToString:state.current] && !available(mode))
         mode = MSIMEChineseInputModeID;
+    if (state.selecting) return NO;
+    // 缓存会在离开输入法时清空；偏好刷新和通知也必须以实际输入源去重，不能只依赖激活校准。
+    // 空串表示查询未知；nil 仅供没有系统边界的旧合成测试使用。
+    if (observedSource) {
+        if (!MSIMEIsInputModeID(observedSource)) return NO;
+        if ([mode isEqualToString:observedSource]) {
+            state.current = mode;
+            return NO;
+        }
+    }
     if (state.selecting || [mode isEqualToString:state.current] || ![client respondsToSelector:@selector(selectInputMode:)] ||
         !available(mode))
         return NO;

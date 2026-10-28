@@ -90,6 +90,7 @@ int main(int argc, const char *argv[]) {
             std::fprintf(stderr, "Shurufa: install the bundle before starting the input method\n");
             return 78;
         }
+        if (MSIMEEditionIsShurufa()) NSLog(@"Shurufa installed-host accepted: %@", NSBundle.mainBundle.bundlePath);
         if (MSIMEShouldRegisterInputSource(argc, argv)) {
             NSURL *bundleURL = NSBundle.mainBundle.bundleURL;
             NSString *identifier = NSBundle.mainBundle.bundleIdentifier;

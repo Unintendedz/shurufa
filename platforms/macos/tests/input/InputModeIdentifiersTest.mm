@@ -47,6 +47,21 @@ void require(bool condition, const char *message) {
 
 int main() {
     @autoreleasepool {
+        // 激活记录还没校准时，偏好刷新也不能重复选择系统已经选中的模式。
+        MSIMESystemInputModeState activation;
+        InputModeRecordingClient *activationClient = [InputModeRecordingClient new];
+        require(!MSIMESelectSystemInputMode(activation, MSIMEChineseInputModeID, activationClient, Available, MSIMEChineseInputModeID)
+            && activationClient.selected.count == 0, "已选中的模式被再次选择，会打断系统输入源交接。");
+        gShuangpinModeEnabled = NO;
+        MSIMEResetSystemInputModeState(activation);
+        require(!MSIMESelectSystemInputMode(activation, MSIMEShuangpinInputModeID, activationClient, Available, MSIMEChineseInputModeID)
+            && activationClient.selected.count == 0, "未启用双拼回退到已选中的中文时不应再次选择。");
+        gShuangpinModeEnabled = YES;
+        MSIMEResetSystemInputModeState(activation);
+        require(!MSIMESelectSystemInputMode(activation, MSIMEChineseInputModeID, activationClient, Available, @"com.apple.inputmethod.SCIM.ITABC"),
+            "系统还在其他输入法时不能抢回输入源。");
+        require(MSIMESelectSystemInputMode(activation, MSIMEEnglishInputModeID, activationClient, Available, MSIMEChineseInputModeID),
+            "本输入法内部的显式中英文切换应继续工作。");
         // 版本身份：没有 MSIMEEdition 的 Info.plist（full 的，以及不是 bundle 的测试进程）每个值都是 full 今天的那个；声明了版本的取 plist 里的值。
         NSDictionary *wubi = @{@"MSIMEEdition": @"wubi", @"CFBundleIdentifier": @"app.msime.inputmethod.wubi",
                                @"MSIMEInputSchemes": @[@"wubi"], @"MSIMEDefaultScheme": @"wubi",
