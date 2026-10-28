@@ -45,6 +45,11 @@ RUST_ONLY: dict[str, set[str]] = {
 
     },
     "KeybindingPreferences": set(),
+    "VoiceInputPreferences": {
+        # Shurufa 不承载 React 设置页；这两项由 macOS 原生语音表单录制、保存和读取。
+        "hotkey_mode",
+        "macos_hotkey",
+    },
     "TouchToolbarPreferences": {
         # 撤销与重做仅在 Android 原生工具栏设置页提供入口，其他宿主保留共享字段，React 设置页不显示。
         "undo",
