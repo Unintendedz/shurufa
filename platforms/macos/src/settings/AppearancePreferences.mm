@@ -1302,6 +1302,7 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     NSSwitch *_voiceHotkeyRightAltToggle;
     NSSwitch *_voiceHotkeyCtrlCommandToggle;
     NSSwitch *_voiceHotkeyCtrlOptionToggle;
+    NSTextField *_voiceHotkeyModeDescription;
     NSSwitch *_wubiMixedPinyinToggle;
     NSSwitch *_toolbarToggle;
     NSSwitch *_transpositionToggle;
@@ -2739,6 +2740,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
 }
 - (BOOL)shiftTapRequiresEditable { return _sharedShiftTapRequiresEditable; }
 - (void)setShiftTapShortcut:(BOOL)value {
+    if (value && MSIMEVoiceShortcutOccupies(_defaults, @[@56, @60], 0)) { [self refreshControls]; return; }
     _sharedInputModeShortcut = nil;
     _sharedShiftTapShortcut = nil;
     [_defaults setBool:value forKey:ShiftTapShortcutKey];
@@ -2768,6 +2770,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     [self preferencesChanged];
 }
 - (void)setControlTapShortcut:(BOOL)value {
+    if (value && MSIMEVoiceShortcutOccupies(_defaults, @[@59, @62], 0)) { [self refreshControls]; return; }
     _sharedControlTapShortcut = nil;
     [_defaults setBool:value forKey:ControlTapShortcutKey];
     [self preferencesChanged];
@@ -2777,6 +2780,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     return [_defaults objectForKey:ControlOptionSpaceShortcutKey] == nil || [_defaults boolForKey:ControlOptionSpaceShortcutKey];
 }
 - (void)setControlOptionSpaceShortcut:(BOOL)value {
+    if (value && MSIMEVoiceShortcutOccupies(_defaults, @[@49], 3)) { [self refreshControls]; return; }
     _sharedControlOptionSpaceShortcut = nil;
     [_defaults setBool:value forKey:ControlOptionSpaceShortcutKey];
     [self preferencesChanged];
@@ -2786,6 +2790,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     return [_defaults objectForKey:CharacterSetShortcutKey] == nil || [_defaults boolForKey:CharacterSetShortcutKey];
 }
 - (void)setCharacterSetShortcut:(BOOL)value {
+    if (value && MSIMEVoiceShortcutOccupies(_defaults, @[@3], 5)) { [self refreshControls]; return; }
     _sharedCharacterSetShortcut = nil;
     [_defaults setBool:value forKey:CharacterSetShortcutKey];
     [self preferencesChanged];
@@ -2795,6 +2800,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     return [_defaults objectForKey:FullWidthShortcutKey] == nil || [_defaults boolForKey:FullWidthShortcutKey];
 }
 - (void)setFullWidthShortcut:(BOOL)value {
+    if (value && MSIMEVoiceShortcutOccupies(_defaults, @[@4], 6)) { [self refreshControls]; return; }
     _sharedFullWidthShortcut = nil;
     [_defaults setBool:value forKey:FullWidthShortcutKey];
     [self preferencesChanged];
@@ -2859,6 +2865,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     [self preferencesChanged];
 }
 - (void)setInputModeShortcut:(BOOL)value {
+    if (value && MSIMEVoiceShortcutOccupies(_defaults, @[@49], 4)) { [self refreshControls]; return; }
     _sharedInputModeShortcut = nil;
     _sharedShiftTapShortcut = nil;
     [_defaults setBool:value forKey:InputModeShortcutKey];
@@ -3490,6 +3497,19 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     _voiceHotkeyRightAltToggle.state = self.voiceHotkeyRightAlt ? NSControlStateValueOn : NSControlStateValueOff;
     _voiceHotkeyCtrlCommandToggle.state = self.voiceHotkeyCtrlCommand ? NSControlStateValueOn : NSControlStateValueOff;
     _voiceHotkeyCtrlOptionToggle.state = self.voiceHotkeyCtrlOption ? NSControlStateValueOn : NSControlStateValueOff;
+    NSDictionary *voiceBinding = MSIMEVoiceCustomShortcut(_defaults);
+    NSString *voiceMode = MSIMEVoiceHotkeyMode(_defaults);
+    _voiceHotkeyModeDescription.stringValue = voiceBinding ? @"已由自定义快捷键替代。请在「语音输入」页查看或清除自定义快捷键。" :
+        [voiceMode isEqual:@"hold"] ? @"按住说话：所有语音快捷键按住开始、松开结束。在「语音输入」页更改模式。" :
+        [voiceMode isEqual:@"toggle"] ? @"切换：按一下开始、再按一下结束；单个修饰键在松开时触发。在「语音输入」页更改模式。" :
+        @"原有行为：右 Option 和修饰键组合按住说话，Control+F9 按一下开始、再按一下结束。";
+    if (_shiftTapShortcutToggle) for (NSArray *entry in @[@[_shiftTapShortcutToggle, @[@56, @60], @0], @[_controlTapShortcutToggle, @[@59, @62], @0],
+        @[_inputModeShortcutToggle, @[@49], @4], @[_controlOptionSpaceShortcutToggle, @[@49], @3],
+        @[_characterSetShortcutToggle, @[@3], @5], @[_fullWidthShortcutToggle, @[@4], @6]]) {
+        NSControl *control = entry[0];
+        control.toolTip = MSIMEVoiceShortcutOccupies(_defaults, entry[1], [entry[2] unsignedIntValue])
+            ? @"该按键已被自定义语音快捷键占用，请先在「语音输入」页清除或更改绑定。" : nil;
+    }
     _traditionalOutputToggle.state = self.traditionalOutput ? NSControlStateValueOn : NSControlStateValueOff;
     _keymapToggle.state = self.shuangpinKeymap ? NSControlStateValueOn : NSControlStateValueOff;
     _wubiToggle.state = self.wubiAutoCommitUnique ? NSControlStateValueOn : NSControlStateValueOff;
@@ -3671,8 +3691,15 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
         @[ @(self.showsCandidatePreedit), @[_preeditFontButton] ],
         // Everything about dictation follows the master switch: InputController returns from -toggleVoiceInput: before it opens a microphone when it is off, and resets the hold shortcut on every event, so none of the rows under it reaches a recording.
         @[ @(voice), @[_voiceLanguageButton, _voiceSoundToggle, _voiceMuteSystemAudioToggle,
-                       _voiceStreamInlinePreeditToggle, _voiceHotkeyCtrlF9Toggle, _voiceHotkeyRightAltToggle,
+                       _voiceStreamInlinePreeditToggle] ],
+        @[ @(voice && !MSIMEVoiceCustomShortcut(_defaults)), @[_voiceHotkeyCtrlF9Toggle, _voiceHotkeyRightAltToggle,
                        _voiceHotkeyCtrlCommandToggle, _voiceHotkeyCtrlOptionToggle] ],
+        @[ @(!MSIMEVoiceShortcutOccupies(_defaults, @[@56, @60], 0)), @[_shiftTapShortcutToggle] ],
+        @[ @(!MSIMEVoiceShortcutOccupies(_defaults, @[@59, @62], 0)), @[_controlTapShortcutToggle] ],
+        @[ @(!MSIMEVoiceShortcutOccupies(_defaults, @[@49], 4)), @[_inputModeShortcutToggle] ],
+        @[ @(!MSIMEVoiceShortcutOccupies(_defaults, @[@49], 3)), @[_controlOptionSpaceShortcutToggle] ],
+        @[ @(!MSIMEVoiceShortcutOccupies(_defaults, @[@3], 5)), @[_characterSetShortcutToggle] ],
+        @[ @(!MSIMEVoiceShortcutOccupies(_defaults, @[@4], 6)), @[_fullWidthShortcutToggle] ],
         // 以词定字 cannot be turned on for a key group that paging holds. The popup beneath it stays
         // live even so — it is the way off the contested group, and greying it out would leave the
         // pair with no way out at all.
@@ -4017,12 +4044,12 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     _voiceMuteSystemAudioToggle = MSIMESettingSwitch(self, @selector(voiceMuteSystemAudioChanged:), @"录音时静音系统音频");
     _voiceStreamInlinePreeditToggle =
         MSIMESettingSwitch(self, @selector(voiceStreamInlinePreeditChanged:), @"实时显示识别结果");
-    _voiceHotkeyCtrlF9Toggle = MSIMESettingSwitch(self, @selector(voiceHotkeyCtrlF9Changed:), @"Control + F9 开始语音输入");
-    _voiceHotkeyRightAltToggle = MSIMESettingSwitch(self, @selector(voiceHotkeyRightAltChanged:), @"按住右 Option 说话");
+    _voiceHotkeyCtrlF9Toggle = MSIMESettingSwitch(self, @selector(voiceHotkeyCtrlF9Changed:), @"Control + F9 语音输入");
+    _voiceHotkeyRightAltToggle = MSIMESettingSwitch(self, @selector(voiceHotkeyRightAltChanged:), @"右 Option 语音输入");
     _voiceHotkeyCtrlCommandToggle =
-        MSIMESettingSwitch(self, @selector(voiceHotkeyCtrlCommandChanged:), @"按住 Control + Command 说话");
+        MSIMESettingSwitch(self, @selector(voiceHotkeyCtrlCommandChanged:), @"Control + Command 语音输入");
     _voiceHotkeyCtrlOptionToggle =
-        MSIMESettingSwitch(self, @selector(voiceHotkeyCtrlOptionChanged:), @"按住右 Control + Option 说话");
+        MSIMESettingSwitch(self, @selector(voiceHotkeyCtrlOptionChanged:), @"右 Control + 右 Option 语音输入");
     _traditionalOutputToggle = MSIMESettingSwitch(self, @selector(traditionalOutputChanged:), @"简繁输入");
     _keymapToggle = MSIMESettingSwitch(self, @selector(keymapChanged:), @"输入时显示双拼键位提示");
     _wubiToggle = MSIMESettingSwitch(self, @selector(wubiChanged:), @"五笔四码唯一候选自动上屏");
@@ -4659,6 +4686,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
         [self settingRow:@"首字／尾字键组" detailLabel:_wordCharacterConflictLabel control:_wordCharacterKeys],
     ], 6.0);
     pagingCard.accessibilityLabel = @"候选翻页卡片";
+    _voiceHotkeyModeDescription = MSIMEDetailLabel(@"");
     NSBox *switchingCard = MSIMECardWithViews(@[
         [self settingRow:@"Shift + 空格切换中英文" control:_inputModeShortcutToggle aka:@[@"中英文切换"]],
         [self settingRow:@"单按 Shift 切换中英文" control:_shiftTapShortcutToggle aka:@[@"中英文切换"]],
@@ -4675,14 +4703,14 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
                      aka:@[@"全角", @"半角"]],
         MSIMECardSeparator(),
         MSIMECardHeader(@"语音听写"),
-        [self settingRow:@"Control + F9 开始语音输入"
-                  detail:@"按一次开始，再按一次结束。"
+        _voiceHotkeyModeDescription,
+        [self settingRow:@"Control + F9 语音输入"
                  control:_voiceHotkeyCtrlF9Toggle
                      aka:@[@"听写"]],
-        [self settingRow:@"按住右 Option 说话" control:_voiceHotkeyRightAltToggle aka:@[@"听写"]],
-        [self settingRow:@"按住 Control + Command 说话" control:_voiceHotkeyCtrlCommandToggle aka:@[@"听写"]],
+        [self settingRow:@"右 Option 语音输入" control:_voiceHotkeyRightAltToggle aka:@[@"听写"]],
+        [self settingRow:@"Control + Command 语音输入" control:_voiceHotkeyCtrlCommandToggle aka:@[@"听写"]],
         // 按住说话时按空格锁定录音在 macOS 上固定为开（InputController 不再读存下的值），这里不再给开关。
-        [self settingRow:@"按住右 Control + Option 说话" control:_voiceHotkeyCtrlOptionToggle aka:@[@"听写"]],
+        [self settingRow:@"右 Control + 右 Option 语音输入" control:_voiceHotkeyCtrlOptionToggle aka:@[@"听写"]],
     ], 0.0);
     switchingCard.accessibilityLabel = @"输入状态切换卡片";
     // Switching between Chinese and English is what this page is opened for; the paging matrix is
@@ -4814,7 +4842,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
                                                   control:[NSTextField labelWithString:@"此构建不包含语音模块。"]]], 0.0);
     NSScrollView *voicePage = [self page:MSIMESettingsPageVoice
                                    title:@"语音输入"
-                                 summary:@"开始录音的方式在「按键」页；这里是识别服务、识别语言，以及识别后的文本整理。"
+                                 summary:@"设置语音快捷键、触发模式、识别服务，以及识别后的文本整理。"
                                  content:@[
         [self sectionHeader:@"语音"
                        keys:@[VoiceEnabledKey, VoiceLanguageKey, VoiceSoundKey, VoiceMuteSystemAudioKey,
@@ -5021,6 +5049,8 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     window.toolbar = toolbar;
     window.toolbarStyle = NSWindowToolbarStyleUnified;
     self.window = window;
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(voiceShortcutConfigurationChanged:)
+        name:@"MSIMEClientVoiceProviderSettingsDidChange" object:nil];
     // The account pane is a foreign view attached to this window; closing the window from its own
     // close button has to detach it the way the removed Close button used to.
     [NSNotificationCenter.defaultCenter addObserver:self
@@ -5734,6 +5764,10 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
 - (void)openProductWebsite:(id)sender {
     (void)sender;
     [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:@"https://msime.app"]];
+}
+- (void)voiceShortcutConfigurationChanged:(NSNotification *)notification {
+    (void)notification;
+    [self refreshControls];
 }
 - (void)uninstallInputSource:(id)sender {
     (void)sender;

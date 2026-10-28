@@ -4292,6 +4292,7 @@ static const NSTimeInterval kSettledRerankPoll = 1.0 / 60.0;
         [defaults boolForKey:@"MSIMEClientVoiceHotkeyCtrlOption"] != NO,
         event.type == NSEventTypeKeyDown && [self matchesVoiceToggleHotkey:event] != NO
     }, _voiceService.active, event.type == NSEventTypeFlagsChanged ? MSIMEPhysicalModifierFlagsState(kCGEventSourceStateHIDSystemState) : 0);
+    if (_configuredVoiceShortcut.began()) _voiceHoldGeneration = _voiceGeneration;
     if (result.consumed || result.action != MSIMEVoiceHoldShortcut::Action::None) [self resetModifierTap];
     if (_configuredVoiceShortcut.locked() && _voiceService.active) [_voiceOverlay setRecordingLocked:YES];
     if (result.action == MSIMEVoiceHoldShortcut::Action::Toggle) {

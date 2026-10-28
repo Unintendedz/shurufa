@@ -13269,6 +13269,16 @@ int main(int argc, char **argv) {
             assert(MSIMEVoiceShortcutConflict(@{@"key_code":@59, @"modifiers":@0}, prefs));
             prefs.shiftTapShortcut = NO;
             assert(!MSIMEVoiceShortcutConflict(@{@"key_code":@56, @"modifiers":@0}, prefs));
+            [defaults setObject:@{@"key_code":@56, @"modifiers":@0} forKey:@"MSIMEClientVoiceMacOSHotkey"];
+            prefs.shiftTapShortcut = YES;
+            assert(!prefs.shiftTapShortcut);
+            NSSwitch *shift = (id)PreferenceControl(prefs, @selector(shiftTapShortcutChanged:));
+            assert(!shift.enabled && shift.toolTip.length);
+            NSSwitch *builtin = (id)PreferenceControl(prefs, @selector(voiceHotkeyCtrlF9Changed:));
+            assert(!builtin.enabled);
+            [defaults setObject:@{} forKey:@"MSIMEClientVoiceMacOSHotkey"];
+            prefs.shiftTapShortcut = YES;
+            assert(prefs.shiftTapShortcut && shift.enabled);
             MSIMERemoveTestPreferenceSuite(defaults, suite);
             return 0;
         }
