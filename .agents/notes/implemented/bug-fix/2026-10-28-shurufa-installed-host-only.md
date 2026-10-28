@@ -10,6 +10,10 @@ Status: implemented
 
 Shurufa 常驻服务只接受 `~/Library/Input Methods/Shurufa.app` 和 `/Library/Input Methods/Shurufa.app`（解析符号链接后精确比较）。构建完成后注销产物；误启动产物时再次注销并退出，不创建 IMKServer。只读身份与注册查询不启动服务。安装前枚举同 bundle id 的登记、精确核对进程可执行路径，注销全部副本并结束全部 Shurufa 主进程。备份可逆地改为非应用目录，并把 `Contents` 改为 `SavedContents`，保留全部旧文件。安装保留构建产物原签名，避免无意义重签造成身份漂移。
 
+### 备份与卸载数据分开
+
+安装备份保存在 `~/Library/Application Support/Shurufa Installation Backups`，不放入卸载器会整体移入废纸篓的 Shurufa 状态目录。下一次安装准备阶段先封存旧 `.app`，再把旧 `Shurufa/installation-backups` 下的备份目录整体移到新位置；不删文件、不覆盖同名目标。目标冲突时在迁移任何目录前停止，保留两份。合成目录测试核对字节、重复运行和目标冲突；本轮只提交，实际旧备份随下一次获准的安装迁移。
+
 ## Alternatives considered
 
 - 只杀构建目录的进程：即时有效，但下一次系统仍会按登记拉起它。

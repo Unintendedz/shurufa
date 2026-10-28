@@ -20,6 +20,26 @@ class InstallationTests(unittest.TestCase):
         self.assertFalse(installation.installation_matches([destination], [process, process], destination))
         self.assertFalse(installation.installation_matches([destination], [], destination))
 
+    def test_old_backups_move_outside_the_removable_state_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            support = Path(directory)
+            legacy = support / "Shurufa/installation-backups"
+            backup = support / "Shurufa Installation Backups"
+            source = legacy / "synthetic-date/Shurufa.bundle-backup/SavedContents"
+            source.mkdir(parents=True)
+            (source / "Info.plist").write_bytes(b"synthetic preserved bytes")
+            installation.migrate_backups(legacy, backup)
+            saved = backup / "synthetic-date/Shurufa.bundle-backup/SavedContents/Info.plist"
+            self.assertEqual(saved.read_bytes(), b"synthetic preserved bytes")
+            self.assertFalse((legacy / "synthetic-date").exists())
+            installation.migrate_backups(legacy, backup)
+            source.mkdir(parents=True)
+            (source / "Info.plist").write_bytes(b"synthetic second backup")
+            with self.assertRaises(RuntimeError):
+                installation.migrate_backups(legacy, backup)
+            self.assertEqual(saved.read_bytes(), b"synthetic preserved bytes")
+            self.assertEqual((source / "Info.plist").read_bytes(), b"synthetic second backup")
+
     def test_registered_paths_only_match_exact_identifier(self):
         separator = "\n" + "-" * 80 + "\n"
         dump = separator.join([

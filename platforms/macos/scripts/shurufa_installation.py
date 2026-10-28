@@ -65,6 +65,20 @@ def host_processes():
     return found
 
 
+def migrate_backups(legacy_root, backup_root):
+    """把旧备份移出可卸载的数据目录，保留每个目录和字节，不覆盖同名目标。"""
+    if not legacy_root.exists():
+        return
+    directories = sorted(path for path in legacy_root.iterdir() if path.is_dir())
+    for path in directories:
+        if (backup_root / path.name).exists():
+            raise RuntimeError(f"备份目标已存在，保留两份并停止：{backup_root / path.name}")
+    if directories:
+        backup_root.mkdir(parents=True, exist_ok=True)
+    for path in directories:
+        path.rename(backup_root / path.name)
+
+
 def prepare():
     dump = subprocess.check_output([LSREGISTER, "-dump"], text=True)
     for path in registered_paths(dump):
@@ -79,12 +93,14 @@ def prepare():
         time.sleep(0.1)
     else:
         raise RuntimeError("Shurufa 进程未退出，停止安装；保留现有安装和备份")
-    backup_root = Path.home() / "Library/Application Support/Shurufa/installation-backups"
-    for bundle in sorted(backup_root.glob("*/Shurufa.app")):
+    legacy_root = Path.home() / "Library/Application Support/Shurufa/installation-backups"
+    backup_root = Path.home() / "Library/Application Support/Shurufa Installation Backups"
+    for bundle in sorted([*legacy_root.glob("*/Shurufa.app"), *backup_root.glob("*/Shurufa.app")]):
         info = plistlib.loads((bundle / "Contents/Info.plist").read_bytes())
         if info.get("CFBundleIdentifier") == IDENTIFIER:
             unregister(bundle)
             print(f"Preserved: {preserve_bundle(bundle)}")
+    migrate_backups(legacy_root, backup_root)
 
 
 def installation_matches(paths, processes, destination):

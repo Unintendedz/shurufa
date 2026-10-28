@@ -15,7 +15,7 @@ ditto "$source_bundle" "$staging/Shurufa.app"
 codesign --verify --deep --strict "$staging/Shurufa.app"
 python3 "$root/platforms/macos/scripts/shurufa_installation.py" prepare
 if [[ -e "$destination" ]]; then
-  backup="$HOME/Library/Application Support/Shurufa/installation-backups/$(date +%Y%m%d-%H%M%S)"
+  backup="$HOME/Library/Application Support/Shurufa Installation Backups/$(date +%Y%m%d-%H%M%S)"
   mkdir -p "$backup"
   mv "$destination" "$backup/Shurufa.app"
   python3 "$root/platforms/macos/scripts/shurufa_installation.py" preserve "$backup/Shurufa.app"
