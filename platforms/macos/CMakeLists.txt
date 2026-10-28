@@ -1353,6 +1353,10 @@ add_executable(window-presentation-test tests/core/WindowPresentationTest.mm)
 target_compile_options(window-presentation-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(window-presentation-test PRIVATE "-framework AppKit")
 add_test(NAME window-presentation COMMAND window-presentation-test)
+add_executable(settings-edit-menu-test tests/core/SettingsEditMenuTest.mm)
+target_compile_options(settings-edit-menu-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(settings-edit-menu-test PRIVATE "-framework AppKit")
+add_test(NAME settings-edit-menu COMMAND settings-edit-menu-test)
 # The Sparkle driver is compiled in, but the test binary is not an application bundle, so the shared
 # controller must decline to start it - which is the thing worth testing.
 add_executable(update-controller-test tests/core/UpdateControllerTest.mm src/core/UpdateController.mm)

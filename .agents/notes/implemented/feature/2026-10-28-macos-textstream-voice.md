@@ -14,6 +14,10 @@ macOS 宿主的本地识别只有 `msime-voice-local`（sherpa-onnx）一条路�
 - 整理沿用现有 `polish_*` 链路，`textstream` 下默认开启（用户没存过开关时按开，仍要求有凭据才发请求）；整理失败或超时原样上屏识别文字。新增只能调小的 `polish_timeout_ms` 选项，仅为测试超时路径。
 - 从 OpenLess 导入是输入法设置窗口里由用户触发的动作：读登录钥匙串里 `com.openless.app`/`credentials.v2` 的凭据（系统会弹授权框），读 `preferences.json`、`style-packs.json`，把当前整理风格的提示词写进自定义方案 1 并选中。不读历史、录音、速记。提示词取值顺序固定：内置风格的用户覆盖值，其次 style-packs.json 里同 id 的包，最后 `styleSystemPrompts`。
 
+### 设置编辑
+
+所有通过 `MSIMEPresentWindow` 展示的原生设置窗口安装标准编辑菜单，Command+V/C/X/A/Z 经 AppKit 响应链到当前文本框。保留系统文本框的右键菜单和安全文本框对复制密钥的保护。测试进程使用独立剪贴板，不读写用户剪贴板。
+
 ## Alternatives considered
 
 - 把 MLX 识别直接放进输入法进程：最强的理由是省一个进程和一层协议。但输入法被加载进每个接受文字的应用，模型和 Metal 内存会拖慢前台应用，崩溃会带走打字；AGENTS 和 `msime-voice-local` 的设计都是为了避免这一点。

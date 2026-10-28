@@ -21,6 +21,7 @@ int main() {
         assert(window.keyOrders == 1 && window.regardlessOrders == 1);
         // A background-only process cannot become active at all; presenting a window lifts it to Accessory, never to Regular.
         assert(NSApp.activationPolicy == NSApplicationActivationPolicyAccessory);
+        assert([[NSApp.mainMenu.itemArray valueForKey:@"identifier"] containsObject:@"ShurufaStandardEditMenu"]);
         MSIMEPresentWindow(nil);
     }
     return 0;
