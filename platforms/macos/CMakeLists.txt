@@ -1153,6 +1153,9 @@ add_executable(live-voice-controller-test tests/voice/LiveVoiceControllerTest.mm
 target_link_libraries(live-voice-controller-test PRIVATE ${MSIME_CONTROLLER_TEST_LIBS})
 target_compile_options(live-voice-controller-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG ${MSIME_SPARKLE_COMPILE_OPTIONS})
 add_test(NAME live-voice-controller COMMAND live-voice-controller-test)
+if(MSIME_EDITION STREQUAL "shurufa")
+    add_test(NAME persistent-voice-controller COMMAND live-voice-controller-test --persistent $<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>)
+endif()
 add_test(NAME live-voice-socket-route COMMAND live-voice-controller-test --socket)
 set_tests_properties(live-voice-socket-route PROPERTIES ENVIRONMENT "MSIME_VOICE_PROVIDER_SOCKET=/tmp/synthetic-live.sock")
 # The window's implementation is linked in so the test can ask the runtime what properties the class

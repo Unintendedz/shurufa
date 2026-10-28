@@ -14,7 +14,7 @@ Status: implemented
 
 键帽用固有文本宽度和左右 8 点内边距排版，左右侧别用 9 点文字、符号用 14 点。按键页固定切换开关的显示与原有绑定一致，原控制器和真实偏好仍决定是否生效；不把单按 Shift 与 Shift+空格合成一个控件。
 
-跨窗口录音另见[持续录音提案](../../proposed/feature/2026-10-28-shurufa-single-voice-session.md)，不作为本提交完成的能力。
+跨窗口录音由后续[持续录音决定](2026-10-28-shurufa-single-voice-session.md)实现，本篇只记录快捷键与设置入口。
 
 ## Alternatives considered
 

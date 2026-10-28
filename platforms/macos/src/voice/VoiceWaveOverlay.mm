@@ -137,6 +137,7 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
 @property(nonatomic, copy) NSString *status;
 @property(nonatomic) BOOL showsLabel;
 @property(nonatomic) BOOL showsActions;
+@property(nonatomic) CGFloat footerHeight;
 /// Already cut to the newest three lines; nil when the layout has no transcript area.
 @property(nonatomic, copy) NSString *visibleTranscript;
 - (void)advanceWave;
@@ -169,7 +170,7 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
     const BOOL label = self.showsLabel;
     const BOOL transcript = self.visibleTranscript.length > 0;
 
-    const CGFloat corner = actions || (label && !transcript) ? h * 0.5 : (transcript ? 16.0 : 10.0);
+    const CGFloat corner = self.footerHeight > 0 ? 16.0 : actions || (label && !transcript) ? h * 0.5 : (transcript ? 16.0 : 10.0);
     NSBezierPath *panel = [NSBezierPath bezierPathWithRoundedRect:NSMakeRect(0.5, 0.5, w - 1.0, h - 1.0) xRadius:corner yRadius:corner];
     [background setFill]; [panel fill];
     [border setStroke]; panel.lineWidth = 1.0; [panel stroke];
@@ -177,7 +178,7 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
     const CGFloat contentLeft = actions ? kActionContentInset : 0.0;
     const CGFloat contentRight = actions ? w - kActionContentInset : w;
     const CGFloat contentWidth = contentRight - contentLeft;
-    const CGFloat centerY = transcript ? 18.0 : h * 0.5;
+    const CGFloat centerY = transcript || self.footerHeight > 0 ? 18.0 : h * 0.5;
     if (label) {
         NSMutableParagraphStyle *style = [NSMutableParagraphStyle new];
         style.alignment = NSTextAlignmentCenter;
@@ -214,7 +215,7 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
         style.minimumLineHeight = kTranscriptLineHeight;
         style.maximumLineHeight = kTranscriptLineHeight;
         const NSRect textRect = NSMakeRect(kTranscriptHorizontalPadding, kTranscriptTextTop, w - 2.0 * kTranscriptHorizontalPadding,
-                                           h - kTranscriptTextTop - kTranscriptTextBottom);
+                                           h - kTranscriptTextTop - kTranscriptTextBottom - self.footerHeight);
         [NSGraphicsContext saveGraphicsState];
         NSRectClip(textRect);
         [self.visibleTranscript drawWithRect:textRect options:NSStringDrawingUsesLineFragmentOrigin
@@ -261,6 +262,10 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
     NSTimer *_waveTimer;
     BOOL _followsSystemAppearance;
     id _screenObserver;
+    BOOL _persistentRecording;
+    BOOL _shortcutMonitoringAvailable;
+    NSTextField *_monitorNotice;
+    NSButton *_monitorPermission;
 }
 - (instancetype)init {
     self = [super initWithContentRect:NSMakeRect(0, 0, kCompactWidth, kCompactHeight)
@@ -280,6 +285,14 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
             button.accessibilityLabel = button.title;
             [_view addSubview:button];
         }
+        _monitorNotice = [NSTextField labelWithString:@"允许输入监控后，可跨应用使用快捷键。"];
+        _monitorNotice.font = [NSFont systemFontOfSize:11];
+        _monitorNotice.textColor = NSColor.secondaryLabelColor;
+        _monitorNotice.hidden = YES; [_view addSubview:_monitorNotice];
+        _monitorPermission = [NSButton buttonWithTitle:@"允许输入监控…" target:self action:@selector(openInputMonitoring:)];
+        _monitorPermission.refusesFirstResponder = YES;
+        _monitorPermission.bezelStyle = NSBezelStyleRounded;
+        _monitorPermission.hidden = YES; [_view addSubview:_monitorPermission];
         __weak MSIMEVoiceWaveOverlay *weakSelf = self;
         _screenObserver = [NSNotificationCenter.defaultCenter
             addObserverForName:NSApplicationDidChangeScreenParametersNotification
@@ -354,7 +367,7 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
 // The source shows the round actions in lock mode or while recognition or polishing is pending (`set_actions_visible`), never during a plain hold.
 - (BOOL)actionsVisible {
     return self.actionHandler && _view.status.length && !_showingFailure && !_dismissed &&
-           (_processing || (_recordingLocked && _view.listening));
+           (_processing || ((_recordingLocked || _persistentRecording) && _view.listening));
 }
 - (NSString *)visibleTranscriptForWidth:(CGFloat)width {
     if (!_transcript.length) return nil;
@@ -382,8 +395,14 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
         size = MSIMEVoiceWaveOverlaySizeForLayout(layout);
         if (layout == MSIMEVoiceWaveOverlayLayoutTranscript) visible = [self visibleTranscriptForWidth:size.width - 2.0 * kTranscriptHorizontalPadding];
     }
-    _view.showsLabel = _showingFailure || _processing;
-    _view.showsActions = actions;
+    const BOOL persistentActions = actions && _persistentRecording;
+    if (persistentActions) {
+        size = NSMakeSize(460, _shortcutMonitoringAvailable ? 152 : 186);
+        visible = [self visibleTranscriptForWidth:size.width - 2.0 * kTranscriptHorizontalPadding];
+    }
+    _view.footerHeight = persistentActions ? (_shortcutMonitoringAvailable ? 40 : 74) : 0;
+    _view.showsLabel = _showingFailure || _processing || persistentActions;
+    _view.showsActions = actions && !persistentActions;
     _view.visibleTranscript = visible;
     NSScreen *screen = [self resolvedPreferredScreen];
     const NSPoint origin = screen ? MSIMEVoiceWaveOverlayOriginForFrames(screen.frame, screen.visibleFrame, size) : self.frame.origin;
@@ -392,6 +411,19 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
     // The view is flipped, so these centers match the source's top-left coordinates.
     _cancelButton.frame = NSMakeRect(kActionCenterInset - kActionRadius, size.height * 0.5 - kActionRadius, kActionRadius * 2.0, kActionRadius * 2.0);
     _confirmButton.frame = NSMakeRect(size.width - kActionCenterInset - kActionRadius, size.height * 0.5 - kActionRadius, kActionRadius * 2.0, kActionRadius * 2.0);
+    for (NSButton *button in @[_cancelButton, _confirmButton]) {
+        button.transparent = !persistentActions; button.bordered = persistentActions;
+        button.bezelStyle = NSBezelStyleRounded;
+    }
+    _confirmButton.title = persistentActions ? @"完成" : @"确认";
+    _confirmButton.accessibilityLabel = _confirmButton.title;
+    if (persistentActions) {
+        _cancelButton.frame = NSMakeRect(size.width-178,size.height-36,76,28);
+        _confirmButton.frame = NSMakeRect(size.width-92,size.height-36,76,28);
+    }
+    _monitorNotice.hidden = _monitorPermission.hidden = !persistentActions || _shortcutMonitoringAvailable;
+    _monitorNotice.frame = NSMakeRect(14,size.height-64,size.width-28,20);
+    _monitorPermission.frame = NSMakeRect(14,size.height-36,142,28);
     // Only the round actions take the pointer; this panel still cannot become key/main or redirect typing away from the IMK client.
     self.ignoresMouseEvents = !actions;
     [self updateWaveAnimation];
@@ -435,6 +467,28 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
     _processing = NO; _recordingLocked = NO;
     _transcript = @"";
     [self showStatus:listening ? @"正在录音…" : @"" listening:listening failure:NO];
+}
+- (void)setPersistentRecording:(BOOL)persistent {
+    _persistentRecording = persistent;
+    [self layoutPresentation];
+}
+- (void)setShortcutMonitoringAvailable:(BOOL)available {
+    _shortcutMonitoringAvailable = available;
+    [self layoutPresentation];
+}
+- (void)openInputMonitoring:(id)sender {
+    (void)sender;
+    [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:@"x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"]];
+}
+- (void)showCopied {
+    _transcript = @"";
+    [self showStatus:@"已复制" listening:NO failure:YES];
+    const NSUInteger generation = _presentationGeneration;
+    __weak MSIMEVoiceWaveOverlay *weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3*NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        MSIMEVoiceWaveOverlay *panel = weakSelf;
+        if (panel && panel->_presentationGeneration == generation) [panel dismissFailure];
+    });
 }
 - (void)setRecordingLocked:(BOOL)locked {
     if (locked && (!_view.listening || _showingFailure)) return;

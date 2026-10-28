@@ -33,7 +33,7 @@ legacy 保留所有内置行为。legacy 配自定义单个修饰键时按住说
 
 组合键在 toggle 模式下不再必须等上一轮 KeyUp 才能再次触发。新的非重复 KeyDown 且事件时间戳变化，表示新一轮按下；同一时间戳从全局与 IMK 双入口到达时只处理一次。完整控制器夹具证明 Option+左方向键在 marked text 存在、KeyUp 缺失时旧实现卡住，新实现能进入结束处理。现场是否确实丢失 KeyUp 尚未观测；这是已复现的失效路径，不等同于全部现场根因。
 
-Shurufa 的多入口和 legacy 规则由[单一语音快捷键](2026-10-28-shurufa-single-voice-shortcut.md)取代，本篇保留旧决定与其他 edition 的兼容语义。
+Shurufa 的多入口和 legacy 规则由[单一语音快捷键](2026-10-28-shurufa-single-voice-shortcut.md)取代，失焦取消规则由[跨窗口录音](2026-10-28-shurufa-single-voice-session.md)取代。本篇保留旧决定与其他 edition 的兼容语义。
 
 ## Consequences
 

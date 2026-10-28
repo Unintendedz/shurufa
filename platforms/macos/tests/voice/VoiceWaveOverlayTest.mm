@@ -228,6 +228,43 @@ int main(int argc, char **argv) {
         [panel setListening:YES];
         assert([panel.statusText isEqual:@"正在录音…"]);
         [panel setListening:NO];
+        // 跨窗口录音始终保留真实 AppKit 按钮，不取得键盘焦点。
+        [panel setPersistentRecording:YES];
+        panel.actionHandler = ^(BOOL cancel) { if (cancel) ++cancels; else ++confirms; };
+        for (NSString *theme in @[@"light", @"dark"]) {
+            [panel applyThemePreferences:@{@"theme":theme}];
+            for (NSString *state in @[@"recording", @"permission", @"copied"]) {
+                panel.actionHandler = ^(BOOL cancel) { if (cancel) ++cancels; else ++confirms; };
+                [panel setShortcutMonitoringAvailable:![state isEqual:@"permission"]];
+                [panel setListening:YES];
+                [panel setTranscript:@"这是一段合成转写，用于验证跨窗口录音。\n切换页面后，文字仍在这里继续显示。"];
+                if ([state isEqual:@"copied"]) {
+                    [panel showCopied];
+                    assert([panel.statusText isEqual:@"已复制"] && panel.visible && cancelButton.hidden && confirmButton.hidden);
+                } else {
+                    assert(!panel.ignoresMouseEvents && !cancelButton.hidden && !confirmButton.hidden);
+                    assert([confirmButton.title isEqual:@"完成"]);
+                    assert(NSContainsRect(panel.contentView.bounds, confirmButton.frame));
+                    assert(NSContainsRect(panel.contentView.bounds, cancelButton.frame));
+                    const NSUInteger beforeConfirm = confirms, beforeCancel = cancels;
+                    [confirmButton performClick:nil]; [cancelButton performClick:nil];
+                    assert(confirms == beforeConfirm+1 && cancels == beforeCancel+1);
+                    NSTextField *notice = [panel valueForKey:@"monitorNotice"];
+                    assert(notice.hidden == ![state isEqual:@"permission"]);
+                }
+                assert(!panel.canBecomeKeyWindow && !panel.canBecomeMainWindow && !panel.hidesOnDeactivate);
+                [panel.contentView display];
+                if (argc == 3 && [@(argv[1]) isEqual:@"--persistent-screenshots"]) {
+                    NSString *name = [NSString stringWithFormat:@"voice-%@-%@.png", state, theme];
+                    NSString *path = [@(argv[2]) stringByAppendingPathComponent:name];
+                    NSBitmapImageRep *bitmap = [panel.contentView bitmapImageRepForCachingDisplayInRect:panel.contentView.bounds];
+                    [panel.contentView cacheDisplayInRect:panel.contentView.bounds toBitmapImageRep:bitmap];
+                    assert([[bitmap representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:path atomically:YES]);
+                }
+                [panel setListening:NO];
+            }
+        }
+        puts("PASS persistent overlay: real buttons, focus, permission hint, copied state");
     }
     return 0;
 }

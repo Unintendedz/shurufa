@@ -7,9 +7,11 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
+#import <objc/runtime.h>
 
 @interface LiveCaptureFixture : MSIMEVoiceInputService
 @property(copy) MSIMEVoiceAudioBuffer bufferHandler;
+@property(copy) MSIMEVoicePCMChunk chunk;
 @property NSTimeInterval capturedSeconds;
 @property(copy) void (^transcript)(NSString *, BOOL);
 @property NSUInteger captureStops;
@@ -36,14 +38,22 @@
 - (BOOL)startMicrophoneCapture:(MSIMEVoiceAudioBuffer)handler deviceUID:(NSString *)device error:(NSError **)error {
     (void)error; self.captureDevice = device; self.bufferHandler = handler; return !self.failCapture;
 }
+- (BOOL)startPCMStreaming:(MSIMEVoicePCMChunk)handler deviceUID:(NSString *)device error:(NSError **)error {
+    (void)device; (void)error; self.chunk = handler; return YES;
+}
+- (NSData *)finishPCMStreamingWithError:(NSError **)error {
+    (void)error; ++self.captureStops; return [NSData data];
+}
 - (void)stopMicrophoneCapture { ++self.captureStops; }
 - (void)stopTranscription { ++self.transcriptionStops; }
 @end
 @interface LiveTextFixture : NSObject <MSIMETextClient>
 @property(copy) NSString *marked;
 @property NSMutableArray *commits;
+@property NSUInteger unmarks;
 @end
 @implementation LiveTextFixture
+- (void)unmarkText { ++self.unmarks; self.marked = @""; }
 // The controller asks the client for the caret whenever it repositions the overlay; an empty rectangle reads as "no usable position".
 - (NSDictionary *)attributesForCharacterIndex:(NSUInteger)index lineHeightRectangle:(NSRect *)rectangle {
     (void)index; if (rectangle) *rectangle = NSZeroRect; return @{};
@@ -73,6 +83,9 @@
 - (void)restore;
 @end
 @implementation LivePresentationFixture
+- (void)setPersistentRecording:(BOOL)value { (void)value; }
+- (void)setShortcutMonitoringAvailable:(BOOL)value { (void)value; }
+- (void)showCopied { self.preview = @"已复制"; }
 - (void)setInputLevel:(float)level { self.lastLevel = level; ++self.levelUpdates; }
 - (void)dismissProcessing { self.dismissed = YES; }
 - (void)setListening:(BOOL)listening { self.phase = listening ? 1 : 0; self.failure = 0; self.preview = @""; self.locked = NO; }
@@ -115,6 +128,38 @@
     self.polishOptions = options; self.polishFixture = [LivePolishFixture new]; return (id)self.polishFixture;
 }
 @end
+// TextStream 工厂后的流协议替身；控制器继续走实际的采集、失焦和最终投递路径。
+@interface PersistentStreamFixture : NSObject <MSIMEStreamingVoiceRequest>
+@property(copy) MSIMEDoubaoResult result;
+@property NSUInteger finishes;
+@property NSUInteger cancellations;
+@end
+@implementation PersistentStreamFixture
+- (BOOL)startWithResult:(MSIMEDoubaoResult)result error:(NSError **)error { (void)error; self.result = result; return YES; }
+- (BOOL)appendPCM:(NSData *)pcm error:(NSError **)error { (void)pcm; (void)error; return YES; }
+- (BOOL)finishWithError:(NSError **)error { (void)error; ++self.finishes; return YES; }
+- (void)cancel { ++self.cancellations; }
+@end
+@interface PersistentControllerFixture : LiveControllerFixture
+@property(copy) void (^recordingMonitor)(NSEvent *);
+@property BOOL monitorDenied;
+@property PersistentStreamFixture *streamFixture;
+@property(copy) NSString *copiedText;
+@end
+@implementation PersistentControllerFixture
+- (BOOL)startVoiceRecordingMonitor:(void (^)(NSEvent *))handler { self.recordingMonitor = handler; return !self.monitorDenied; }
+- (NSString *)selectedSystemInputModeID { return MSIMEChineseInputModeID; }
+- (id<MSIMEStreamingVoiceRequest>)makeTextStreamVoiceRequest:(NSDictionary *)options error:(NSError **)error {
+    (void)options; (void)error; self.streamFixture = [PersistentStreamFixture new]; return self.streamFixture;
+}
+- (MSIMEHTTPVoiceRequest *)makeDoubaoPolishRequest:(NSDictionary *)options { return [self makeLiveVoicePolishRequest:options]; }
+- (void)copyVoiceText:(NSString *)text { self.copiedText = text; }
+@end
+static NSBundle *PersistentTestBundle;
+static id PersistentMainBundle(id, SEL) { return PersistentTestBundle; }
+static NSUInteger PersistentBaseDeactivations;
+// 夹具没有 IMKServer，只替换系统基类；仍执行产品完整的失焦处理。
+static void PersistentBaseDeactivate(id, SEL, id) { ++PersistentBaseDeactivations; }
 // The socket route only engages when the configured path is a real Unix socket (MSIMEVoiceProviderSocketFromConfiguration rejects regular and stale files), so the test has to bind one rather than hope one is lying around - without it the controller quietly falls back to native Speech and every provider assertion below fails for a reason that has nothing to do with the code.
 static NSString *MSIMESyntheticVoiceSocket(void)
 {
@@ -165,7 +210,7 @@ static int MSIMEBindSyntheticVoiceSocket(NSString *path)
     return YES;
 }
 @end
-int main(int argc, char **) {
+int main(int argc, char **argv) {
     @autoreleasepool {
         NSString *root = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
         NSMutableDictionary *options = [@{@"api_version": @1, @"preferences": @{@"scheme": @"quanpin", @"learning": @NO, @"candidate_page_size": @5, @"chinese_punctuation": @YES}} mutableCopy];
@@ -193,6 +238,138 @@ int main(int argc, char **) {
         voiceArguments[@"MSIMEClientVoicePolishText"] = @NO;
         voiceArguments[@"MSIMEClientVoicePolishToken"] = @"";
         [defaults setVolatileDomain:voiceArguments forName:NSArgumentDomain];
+        if (argc == 3 && std::strcmp(argv[1], "--persistent") == 0) {
+            PersistentTestBundle = [NSBundle bundleWithPath:[NSString stringWithUTF8String:argv[2]]];
+            assert(PersistentTestBundle);
+            Method method = class_getClassMethod(NSBundle.class, @selector(mainBundle));
+            IMP original = method_setImplementation(method, (IMP)PersistentMainBundle);
+            Method deactivate = class_getInstanceMethod(IMKInputController.class, @selector(deactivateServer:));
+            IMP originalDeactivate = method_setImplementation(deactivate, (IMP)PersistentBaseDeactivate);
+            assert(MSIMEEditionIsShurufa());
+            PersistentControllerFixture *owner = [PersistentControllerFixture alloc];
+            LiveCaptureFixture *source = [LiveCaptureFixture new]; source.capturedSeconds = 0.5;
+            LiveTextFixture *origin = [LiveTextFixture new];
+            LivePresentationFixture *overlay = [LivePresentationFixture new];
+            [owner setValue:session forKey:@"session"]; [owner setValue:origin forKey:@"activeClient"];
+            [owner setValue:source forKey:@"voiceService"];
+            [owner setValue:overlay forKey:@"voiceOverlay"]; [owner setValue:overlay forKey:@"voiceAudioMuter"];
+            [owner setValue:[MSIMEVoiceCueFixture new] forKey:@"voiceCuePlayer"];
+            [owner toggleVoiceInput:nil];
+            assert(source.active);
+            source.transcript(@"synthetic partial before blur", NO);
+            assert(origin.marked.length && !origin.commits.count);
+            [owner deactivateServer:origin];
+            assert(source.active && !origin.marked.length && !origin.commits.count && origin.unmarks == 1);
+            source.transcript(@"synthetic partial after blur", NO);
+            assert(source.active && [overlay.preview isEqual:@"synthetic partial after blur"] && !origin.marked.length);
+            [owner cancelLiveVoiceInput];
+            assert(!source.active && !origin.commits.count && !MSIMEVoiceRecordingOwner);
+            for (NSUInteger route=0; route<3; ++route) {
+                LiveTextFixture *next = [LiveTextFixture new];
+                PersistentControllerFixture *destination = [PersistentControllerFixture alloc];
+                [destination setValue:next forKey:@"activeClient"];
+                [owner setValue:origin forKey:@"activeClient"];
+                origin.commits = [NSMutableArray array]; owner.copiedText = nil;
+                owner.usePolishFixture = YES;
+                [owner toggleVoiceInput:nil];
+                auto finalReply = source.transcript;
+                finalReply(@"synthetic draft", NO);
+                [owner deactivateServer:origin];
+                assert(source.active && !origin.marked.length && !origin.commits.count);
+                finalReply(@"synthetic continued", NO);
+                if (route == 0) { [owner setValue:origin forKey:@"activeClient"]; MSIMEFocusedController = owner; }
+                else MSIMEFocusedController = route == 1 ? destination : nil;
+                overlay.actionHandler(NO);
+                assert([[owner valueForKey:@"liveVoiceProcessing"] boolValue]);
+                finalReply(@"synthetic final", YES);
+                assert(owner.polishFixture.submissions == 1);
+                owner.polishFixture.completion(@"synthetic polished", nil);
+                finalReply(@"synthetic late duplicate", YES);
+                assert(!source.active && !MSIMEVoiceRecordingOwner && !origin.marked.length);
+                assert(origin.commits.count == (route == 0 ? 1 : 0));
+                assert(next.commits.count == (route == 1 ? 1 : 0));
+                if (route == 2) assert([owner.copiedText isEqual:@"synthetic polished"] && [overlay.preview isEqual:@"已复制"]);
+                else assert(owner.copiedText == nil);
+            }
+            puts("PASS persistent: blur, return/new client/clipboard, polish, duplicate final");
+            // 事件仅作为状态机参数，不向系统注入按键。
+            auto event = [](NSEventType type, unsigned short code, NSEventModifierFlags flags, NSTimeInterval time) {
+                return [NSEvent keyEventWithType:type location:NSZeroPoint modifierFlags:flags timestamp:time windowNumber:0
+                    context:nil characters:@"" charactersIgnoringModifiers:@"" isARepeat:NO keyCode:code];
+            };
+            voiceArguments[@"MSIMEClientVoiceHotkeyMode"] = @"toggle";
+            voiceArguments[@"MSIMEClientVoiceMacOSHotkey"] = @{@"key_code":@123,@"modifiers":@2};
+            [defaults setVolatileDomain:voiceArguments forName:NSArgumentDomain];
+            for (NSUInteger action = 0; action < 3; ++action) {
+                [owner setValue:origin forKey:@"activeClient"];
+                origin.commits = [NSMutableArray array]; owner.copiedText = nil;
+                owner.monitorDenied = action == 2;
+                [owner handleConfiguredVoiceShortcut:event(NSEventTypeKeyDown,123,NSEventModifierFlagOption,10+action*10)];
+                assert(source.active);
+                auto finalReply = source.transcript;
+                finalReply(@"synthetic before shortcut", NO);
+                [owner deactivateServer:origin];
+                MSIMEFocusedController = nil;
+                if (action == 0) {
+                    // 缺 KeyUp，结束键从录音全局监听到达；同一事件重复到达只结束一次。
+                    NSEvent *finish = event(NSEventTypeKeyDown,123,NSEventModifierFlagOption,11);
+                    owner.recordingMonitor(finish); owner.recordingMonitor(finish);
+                    assert([[owner valueForKey:@"liveVoiceProcessing"] boolValue]);
+                    finalReply(@"synthetic shortcut final", YES);
+                    assert(owner.polishFixture.submissions == 1);
+                    owner.polishFixture.completion(@"synthetic shortcut polished", nil);
+                    assert([owner.copiedText isEqual:@"synthetic shortcut polished"]);
+                } else {
+                    if (action == 1) owner.recordingMonitor(event(NSEventTypeKeyDown,53,0,22));
+                    else overlay.actionHandler(YES);
+                    finalReply(@"synthetic cancelled late final", YES);
+                    assert(!owner.polishFixture.submissions && !owner.copiedText && !origin.commits.count);
+                }
+                assert(!source.active && !MSIMEVoiceRecordingOwner);
+            }
+            puts("PASS persistent: global finish/Esc, missing KeyUp, denied-monitor cancel button");
+            // TextStream 使用实际工厂分支，替身只替换模型与麦克风。
+            for (NSUInteger action = 0; action < 3; ++action) {
+                [owner setValue:origin forKey:@"activeClient"];
+                origin.commits = [NSMutableArray array]; owner.copiedText = nil;
+                owner.monitorDenied = YES;
+                uint64_t generation = 0;
+                assert([source startWithSession:session generation:&generation error:nil]);
+                [owner setValue:@(generation) forKey:@"voiceGeneration"];
+                assert(([owner startDoubaoVoiceInputWithOptions:@{@"asr_provider":@"textstream",@"stream":@YES}]));
+                PersistentStreamFixture *request = owner.streamFixture;
+                request.result(@"synthetic textstream partial", NO, nil);
+                [owner deactivateServer:origin];
+                assert(source.active && !origin.marked.length && !origin.commits.count);
+                request.result(@"synthetic textstream continued", NO, nil);
+                assert([overlay.preview isEqual:@"synthetic textstream continued"]);
+                MSIMEFocusedController = nil;
+                if (action == 0) { [owner setValue:origin forKey:@"activeClient"]; MSIMEFocusedController = owner; }
+                overlay.actionHandler(action == 2);
+                if (action != 2) {
+                    assert(request.finishes == 1);
+                    request.result(@"synthetic textstream final", YES, nil);
+                    assert(owner.polishFixture.submissions == 1);
+                    owner.polishFixture.completion(@"synthetic textstream polished", nil);
+                    request.result(@"synthetic duplicate", YES, nil);
+                    assert(origin.commits.count == (action == 0 ? 1 : 0));
+                    assert(action == 0 || [owner.copiedText isEqual:@"synthetic textstream polished"]);
+                } else {
+                    request.result(@"synthetic cancelled final", YES, nil);
+                    assert(!owner.polishFixture.submissions && !origin.commits.count && !owner.copiedText);
+                }
+                assert(!source.active && !MSIMEVoiceRecordingOwner);
+            }
+            puts("PASS persistent: TextStream blur, return/clipboard, denied-monitor finish button, cancel");
+            MSIMEFocusedController = nil;
+            method_setImplementation(method, original);
+            method_setImplementation(deactivate, originalDeactivate);
+            assert(PersistentBaseDeactivations == 10);
+            [defaults setVolatileDomain:old forName:NSArgumentDomain];
+            assert([session closeWithError:nil]);
+            assert([NSFileManager.defaultManager removeItemAtPath:root error:nil]);
+            return 0;
+        }
         if (argc == 2) {
             NSString *socketPath = MSIMESyntheticVoiceSocket();
             int socketDescriptor = MSIMEBindSyntheticVoiceSocket(socketPath);
