@@ -918,7 +918,7 @@ static void TestSmartPunctuationWritesBothHalves() {
 
 // 原生窗口各节「恢复默认值」的入口：删掉本机值，也清掉共享值。
 @interface MSIMEAppearancePreferences (SectionRestore)
-- (void)removeStoredKeys:(NSArray<NSString *> *)keys;
+- (BOOL)removeStoredKeys:(NSArray<NSString *> *)keys;
 - (NSArray<NSString *> *)restorableKeys;
 @end
 
@@ -13338,6 +13338,14 @@ int main(int argc, char **argv) {
             [prefs applySharedInputPreferences:restored];
             MSIMEApplySharedVoicePreferences(restored[@"voice_input"], defaults);
             assert(prefs.capsLockTapShortcut && [MSIMEVoiceHotkeyMode(defaults) isEqual:@"hold"]);
+            [defaults setObject:@{@"key_code":@60,@"modifiers":@0} forKey:@"MSIMEClientVoiceMacOSHotkey"];
+            prefs.shiftTapShortcut = NO;
+            NSDictionary *beforeConflict = [defaults persistentDomainForName:suite];
+            assert((![prefs removeStoredKeys:@[@"MSIMEClientShiftTapShortcut",@"MSIMEClientCapsLockTapShortcut"]]));
+            assert([[defaults persistentDomainForName:suite] isEqual:beforeConflict]);
+            assert(!prefs.shiftTapShortcut);
+            assert(([prefs removeStoredKeys:@[@"MSIMEClientShiftTapShortcut",@"MSIMEClientVoiceMacOSHotkey",@"MSIMEClientVoiceHotkeyMode"]]));
+            assert(prefs.shiftTapShortcut && [MSIMEVoiceCustomShortcut(defaults)[@"key_code"] isEqual:@61]);
             MSIMERemoveTestPreferenceSuite(defaults, suite);
             [standard setVolatileDomain:oldArguments forName:NSArgumentDomain];
             method_setImplementation(mainBundle, original);

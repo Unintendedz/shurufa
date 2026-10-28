@@ -539,6 +539,8 @@ static NSDictionary<NSString *, NSString *> *SharedOverrideProperties() {
 - (instancetype)initSilentlyWithDefaults:(NSUserDefaults *)defaults;
 - (id)voiceShortcutBinding;
 - (NSString *)voiceShortcutMode;
+- (BOOL)removeStoredKeys:(NSArray<NSString *> *)keys;
+- (BOOL)removeStoredKeys:(NSArray<NSString *> *)keys fields:(NSDictionary<NSString *, NSArray<NSString *> *> *)fields;
 @property(nonatomic) BOOL wubiZWildcard;
 @property(nonatomic) BOOL wubiFifthCodeTopCommit;
 @property(nonatomic) BOOL sentenceAssociationNeuralDesktop;
@@ -5902,12 +5904,22 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
             if (![keys containsObject:key]) [keys addObject:key];
     return keys;
 }
-- (void)removeStoredKeys:(NSArray<NSString *> *)keys {
-    [self removeStoredKeys:keys fields:nil];
+- (BOOL)removeStoredKeys:(NSArray<NSString *> *)keys {
+    return [self removeStoredKeys:keys fields:nil];
 }
 /// The same removal, restricted for a key named in `fields` to the entries of its stored dictionary that the section owns; everything else in that dictionary, and the account's pushed value for it, is left exactly as it was.
-- (void)removeStoredKeys:(NSArray<NSString *> *)keys
+- (BOOL)removeStoredKeys:(NSArray<NSString *> *)keys
                   fields:(NSDictionary<NSString *, NSArray<NSString *> *> *)fields {
+    // 只恢复一个按键分组时不能改变另一个分组的语音绑定，也不能先写出无效组合。
+    if (![keys containsObject:VoiceMacOSHotkeyKey]) {
+        for (NSArray *entry in @[@[ShiftTapShortcutKey,@[@56,@60],@0],
+            @[ControlTapShortcutKey,@[@59,@62],@0], @[InputModeShortcutKey,@[@49],@4],
+            @[ControlOptionSpaceShortcutKey,@[@49],@3], @[CharacterSetShortcutKey,@[@3],@5],
+            @[FullWidthShortcutKey,@[@4],@6]]) {
+            if ([keys containsObject:entry[0]] && [DefaultSettingValues()[entry[0]] boolValue] &&
+                MSIMEVoiceShortcutOccupies(_defaults, entry[1], [entry[2] unsignedIntValue])) return NO;
+        }
+    }
     NSDictionary<NSString *, NSString *> *overrides = SharedOverrideProperties();
     // 这些字段的共享合并把缺键视为“沿用文档”，恢复时须显式写入已定义的默认值。
     NSArray *publishReset = @[InputModeShortcutKey, ShiftTapShortcutKey, ControlTapShortcutKey,
@@ -5942,6 +5954,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     [self refreshControls];
     [_voiceSettingsView reloadSettings];
     [NSNotificationCenter.defaultCenter postNotificationName:MSIMEAppearanceDidChangeNotification object:self];
+    return YES;
 }
 #pragma mark - Settings document
 
@@ -6043,7 +6056,8 @@ static const NSUInteger MSIMESettingsDocumentLimit = 1 << 20;
     [alert addButtonWithTitle:@"取消"];
     [alert addButtonWithTitle:@"恢复全部设置"];
     if ([alert runModal] == NSAlertFirstButtonReturn) return;
-    [self removeStoredKeys:[self restorableKeys]];
+    if (![self removeStoredKeys:[self restorableKeys]])
+        [self reportSettingsDocumentFailure:@"未能恢复默认设置" reason:@"默认按键已被语音快捷键占用，请先更改语音绑定。"];
 }
 /// One section, from the link on its heading. The link is only there when that section has
 /// something to restore, so this no longer has to offer the whole window as a consolation for a page
@@ -6061,7 +6075,8 @@ static const NSUInteger MSIMESettingsDocumentLimit = 1 << 20;
     [alert addButtonWithTitle:@"取消"];
     [alert addButtonWithTitle:@"恢复默认值"];
     if ([alert runModal] == NSAlertFirstButtonReturn) return;
-    [self removeStoredKeys:section.keys fields:section.fields];
+    if (![self removeStoredKeys:section.keys fields:section.fields])
+        [self reportSettingsDocumentFailure:@"未能恢复默认设置" reason:@"默认按键已被语音快捷键占用，请先更改语音绑定。"];
 }
 - (void)showWindow:(id)sender { [self reloadSkins]; [super showWindow:sender]; }
 - (void)pageShortcutChanged:(NSPopUpButton *)sender { self.pageShortcut = sender.indexOfSelectedItem; }
