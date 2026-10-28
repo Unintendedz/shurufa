@@ -1057,6 +1057,7 @@ target_link_libraries(MSIMEClientInputMethod PRIVATE "-framework AudioToolbox")
 target_link_libraries(shortcut-test PRIVATE "-framework AVFoundation" "-framework Speech" "-framework CoreGraphics" "-framework CoreText" "-framework CoreAudio" "-framework UniformTypeIdentifiers")
 add_test(NAME shortcut COMMAND shortcut-test)
 add_test(NAME caps-lock COMMAND shortcut-test --caps-lock)
+add_test(NAME voice-shortcut-conflicts COMMAND shortcut-test --voice-shortcut-conflicts)
 add_test(NAME shortcut-expanded-scroll COMMAND shortcut-test --expanded-scroll)
 add_test(NAME shortcut-vim-mode COMMAND shortcut-test --vim-mode)
 add_test(NAME shortcut-nested-commit COMMAND shortcut-test --nested-commit)
@@ -1085,6 +1086,10 @@ add_executable(voice-hold-shortcut-test tests/voice/VoiceHoldShortcutTest.mm)
 target_compile_options(voice-hold-shortcut-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(voice-hold-shortcut-test PRIVATE "-framework AppKit")
 add_test(NAME voice-hold-shortcut COMMAND voice-hold-shortcut-test)
+add_executable(configured-voice-shortcut-test tests/voice/ConfiguredVoiceShortcutTest.mm)
+target_compile_options(configured-voice-shortcut-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(configured-voice-shortcut-test PRIVATE "-framework AppKit")
+add_test(NAME configured-voice-shortcut COMMAND configured-voice-shortcut-test)
 add_executable(toggle-hotkeys-test tests/input/ToggleHotkeysTest.cpp)
 target_compile_options(toggle-hotkeys-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(toggle-hotkeys-test PRIVATE apple-client)
@@ -1181,19 +1186,19 @@ add_test(NAME common-dictionary-quiesce-lease COMMAND common-dictionary-quiesce-
 add_executable(voice-provider-settings-keys-test tests/voice/VoiceProviderSettingsKeysTest.mm
   src/voice/VoiceProviderSettings.mm src/voice/TextStreamSupport.mm src/voice/OpenLessImport.mm)
 target_compile_options(voice-provider-settings-keys-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
-target_link_libraries(voice-provider-settings-keys-test PRIVATE "-framework AppKit" "-framework Security"
+target_link_libraries(voice-provider-settings-keys-test PRIVATE apple-client "-framework AppKit" "-framework Security"
   "-framework CoreAudio" "-framework AudioToolbox")
 add_test(NAME voice-provider-settings-keys COMMAND voice-provider-settings-keys-test)
 add_executable(voice-provider-catalog-test tests/voice/VoiceProviderCatalogTest.mm
   src/voice/VoiceProviderSettings.mm src/voice/TextStreamSupport.mm src/voice/OpenLessImport.mm)
 target_compile_options(voice-provider-catalog-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
-target_link_libraries(voice-provider-catalog-test PRIVATE "-framework AppKit" "-framework Security"
+target_link_libraries(voice-provider-catalog-test PRIVATE apple-client "-framework AppKit" "-framework Security"
   "-framework CoreAudio" "-framework AudioToolbox")
 add_test(NAME voice-provider-catalog COMMAND voice-provider-catalog-test)
 add_executable(voice-provider-settings-validation-test tests/voice/VoiceSettingsTests.mm
   src/voice/VoiceProviderSettings.mm src/voice/TextStreamSupport.mm src/voice/OpenLessImport.mm)
 target_compile_options(voice-provider-settings-validation-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
-target_link_libraries(voice-provider-settings-validation-test PRIVATE "-framework AppKit" "-framework Security"
+target_link_libraries(voice-provider-settings-validation-test PRIVATE apple-client "-framework AppKit" "-framework Security"
   "-framework CoreAudio" "-framework AudioToolbox")
 add_test(NAME voice-provider-settings-validation COMMAND voice-provider-settings-validation-test)
 add_executable(voice-polish-presets-test tests/voice/VoicePolishPresetsTest.mm)

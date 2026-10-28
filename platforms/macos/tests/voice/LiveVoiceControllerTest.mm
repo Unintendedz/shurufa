@@ -720,6 +720,57 @@ int main(int argc, char **) {
             MSIMEPhysicalModifierFlagsState = systemFlags;
             [defaults setVolatileDomain:old forName:NSArgumentDomain];
         }
+        {
+            // 自定义快捷键走真实控制器，采集、转写、整理均为合成替身。
+            NSMutableDictionary *configured = [@{
+                @"MSIMEClientVoiceEnabled":@YES, @"MSIMEClientVoiceASRProvider":@"system",
+                @"MSIMEClientVoiceHotkeyMode":@"hold", @"MSIMEClientVoiceMacOSHotkey":@{@"key_code":@54, @"modifiers":@0},
+                @"MSIMEClientVoicePolish":@YES, @"MSIMEClientVoicePolishText":@YES, @"MSIMEClientVoicePolishToken":@"synthetic-only",
+                @"MSIMEClientVoiceSoundEnabled":@NO, @"MSIMEClientVoiceMuteSystemAudio":@NO,
+                @"MSIMEClientVoiceStreamInlinePreedit":@YES
+            } mutableCopy];
+            [defaults setVolatileDomain:configured forName:NSArgumentDomain];
+            LiveControllerFixture *customController = [LiveControllerFixture alloc];
+            customController.usePolishFixture = YES;
+            LiveCaptureFixture *customCapture = [LiveCaptureFixture new]; customCapture.capturedSeconds = 0.5;
+            LiveTextFixture *customClient = [LiveTextFixture new];
+            [customController setValue:session forKey:@"session"];
+            [customController setValue:customClient forKey:@"activeClient"];
+            [customController setValue:customCapture forKey:@"voiceService"];
+            [customController setValue:[LivePresentationFixture new] forKey:@"voiceOverlay"];
+            [customController setValue:[LivePresentationFixture new] forKey:@"voiceAudioMuter"];
+            [customController setValue:[MSIMEVoiceCueFixture new] forKey:@"voiceCuePlayer"];
+            const auto command = NSEventModifierFlagCommand | NX_DEVICERCMDKEYMASK;
+            auto down = key(54, command, NSEventTypeFlagsChanged), up = key(54, 0, NSEventTypeFlagsChanged);
+            assert([customController handleConfiguredVoiceShortcut:down] && customCapture.active);
+            auto late = customCapture.transcript;
+            late(@"synthetic cancelled partial", NO);
+            assert(customClient.marked.length);
+            assert(![customController handleConfiguredVoiceShortcut:key(8, command, NSEventTypeKeyDown)]);
+            assert(!customCapture.active && !customClient.marked.length && !customClient.commits.count);
+            assert(customController.polishFixture.submissions == 0);
+            late(@"synthetic late final", YES);
+            assert(!customClient.commits.count && customController.polishFixture.submissions == 0);
+            [customController handleConfiguredVoiceShortcut:up];
+            configured[@"MSIMEClientVoiceHotkeyMode"] = @"toggle";
+            [defaults setVolatileDomain:configured forName:NSArgumentDomain];
+            assert([customController handleConfiguredVoiceShortcut:down] && !customCapture.active);
+            assert([customController handleConfiguredVoiceShortcut:up] && customCapture.active);
+            assert([customController handleConfiguredVoiceShortcut:key(53, 0, NSEventTypeKeyDown)]);
+            assert(!customCapture.active && !customClient.commits.count && customController.polishFixture.submissions == 0);
+            [customController handleConfiguredVoiceShortcut:key(53, 0, NSEventTypeKeyUp)];
+            [customController handleConfiguredVoiceShortcut:down];
+            [customController handleConfiguredVoiceShortcut:up];
+            assert(customCapture.active);
+            [customController handleConfiguredVoiceShortcut:down];
+            [customController handleConfiguredVoiceShortcut:up];
+            assert([[customController valueForKey:@"liveVoiceProcessing"] boolValue]);
+            customCapture.transcript(@"synthetic toggle final", YES);
+            assert(customController.polishFixture.submissions == 1);
+            customController.polishFixture.completion(@"synthetic toggle polished", nil);
+            assert(customClient.commits.count == 1 && !customCapture.active);
+            [defaults setVolatileDomain:old forName:NSArgumentDomain];
+        }
         CGEventRef injected = CGEventCreateKeyboardEvent(nullptr, 0, true);
         CGEventSetIntegerValueField(injected, kCGEventSourceUserData, MSIMEVoiceCommitEventTag);
         assert(![controller handleEvent:[NSEvent eventWithCGEvent:injected] client:client]);

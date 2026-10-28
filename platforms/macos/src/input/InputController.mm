@@ -30,6 +30,7 @@
 #import "../voice/VoiceDeactivation.h"
 #import "../voice/HTTPVoiceRequest.h"
 #import "../voice/VoiceHoldShortcut.h"
+#import "../voice/ConfiguredVoiceShortcut.h"
 #import "../voice/DoubaoVoiceRequest.h"
 #import "../voice/LocalVoiceRequest.h"
 #import "../voice/VoiceFailureMessages.h"
@@ -1889,6 +1890,7 @@ static NSImage *MSIMECandidateLogoImage() {
     // 在看到下一次真实按下前，不要让这份旧状态把工具栏和英文输入重新变成大写。
     BOOL _capsLockTapReleased;
     MSIMEVoiceHoldShortcut _voiceHoldShortcut;
+    MSIMEConfiguredVoiceShortcut _configuredVoiceShortcut;
     uint64_t _voiceHoldGeneration;
     BOOL _voiceHoldStarting;
     NSDictionary *_voiceThemePreferences;
@@ -4235,7 +4237,7 @@ static const NSTimeInterval kSettledRerankPoll = 1.0 / 60.0;
         selector:@selector(typingStatisticsEnabledChanged:)
         name:MSIMETypingStatisticsEnabledChangedNotification object:nil
         suspensionBehavior:NSNotificationSuspensionBehaviorDeliverImmediately];
-    _globalVoiceHotkeyMonitor = [NSEvent addGlobalMonitorForEventsMatchingMask:NSEventMaskKeyDown handler:[self globalVoiceHotkeyHandler]];
+    _globalVoiceHotkeyMonitor = [NSEvent addGlobalMonitorForEventsMatchingMask:(NSEventMaskKeyDown | NSEventMaskKeyUp) handler:[self globalVoiceHotkeyHandler]];
 }
 - (void)typingStatisticsEnabledChanged:(NSNotification *)notification {
     NSNumber *enabled = [notification.userInfo[@"enabled"] isKindOfClass:NSNumber.class]
@@ -4253,9 +4255,13 @@ static const NSTimeInterval kSettledRerankPoll = 1.0 / 60.0;
     __weak MSIMEInputController *weakSelf = self;
     return ^(NSEvent *event) {
         MSIMEInputController *controller = weakSelf;
-        if (!controller || !controller->_activeClient || event.isARepeat ||
-            !MSIMEVoiceInputEnabled(NSUserDefaults.standardUserDefaults) ||
-            ![controller matchesVoiceToggleHotkey:event]) return;
+        if (!controller || !controller->_activeClient || (event.type == NSEventTypeKeyDown && event.isARepeat) ||
+            !MSIMEVoiceInputEnabled(NSUserDefaults.standardUserDefaults)) return;
+        if ([controller usesConfiguredVoiceShortcut]) {
+            [controller handleConfiguredVoiceShortcut:event];
+            return;
+        }
+        if (event.type != NSEventTypeKeyDown || ![controller matchesVoiceToggleHotkey:event]) return;
         // AppKit delivers event-monitor handlers on the main thread. Handle
         // this gesture now: another main-queue hop could toggle a new client
         // or recording after focus or voice state has changed.
@@ -4270,6 +4276,37 @@ static const NSTimeInterval kSettledRerankPoll = 1.0 / 60.0;
     return fixedEnabled && event.keyCode == 101 &&
         (event.modifierFlags & (NSEventModifierFlagControl | NSEventModifierFlagShift |
             NSEventModifierFlagOption | NSEventModifierFlagCommand)) == NSEventModifierFlagControl;
+}
+- (BOOL)usesConfiguredVoiceShortcut {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    return MSIMEVoiceCustomShortcut(defaults) != nil || ![MSIMEVoiceHotkeyMode(defaults) isEqual:@"legacy"];
+}
+- (BOOL)handleConfiguredVoiceShortcut:(NSEvent *)event {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSDictionary *custom = MSIMEVoiceCustomShortcut(defaults);
+    NSString *mode = MSIMEVoiceHotkeyMode(defaults);
+    const auto result = _configuredVoiceShortcut.observe(event, {
+        custom, mode,
+        [defaults objectForKey:@"MSIMEClientVoiceHotkeyRightAlt"] == nil || [defaults boolForKey:@"MSIMEClientVoiceHotkeyRightAlt"],
+        [defaults boolForKey:@"MSIMEClientVoiceHotkeyCtrlCommand"] != NO,
+        [defaults boolForKey:@"MSIMEClientVoiceHotkeyCtrlOption"] != NO,
+        event.type == NSEventTypeKeyDown && [self matchesVoiceToggleHotkey:event] != NO
+    }, _voiceService.active, event.type == NSEventTypeFlagsChanged ? MSIMEPhysicalModifierFlagsState(kCGEventSourceStateHIDSystemState) : 0);
+    if (result.consumed || result.action != MSIMEVoiceHoldShortcut::Action::None) [self resetModifierTap];
+    if (_configuredVoiceShortcut.locked() && _voiceService.active) [_voiceOverlay setRecordingLocked:YES];
+    if (result.action == MSIMEVoiceHoldShortcut::Action::Toggle) {
+        const BOOL hold = [mode isEqual:@"hold"] || ([mode isEqual:@"legacy"] && custom &&
+            MSIMEVoiceModifierKey([custom[@"key_code"] unsignedShortValue]) && [custom[@"modifiers"] unsignedIntValue] == 0);
+        _voiceHoldStarting = hold && !result.onRelease && !_voiceService.active;
+        if (!result.onRelease || _voiceHoldGeneration == _voiceGeneration) [self toggleVoiceInput:nil];
+        _voiceHoldStarting = NO;
+        if (!result.onRelease) _voiceHoldGeneration = _voiceGeneration;
+    } else if (result.action == MSIMEVoiceHoldShortcut::Action::Cancel) {
+        _voicePermissionToken = nil;
+        [self cancelHTTPVoiceInput]; [self cancelDoubaoVoiceInput]; [self cancelLiveVoiceInput];
+        if (_voiceService.active) [_voiceService cancelWithError:nil];
+    }
+    return result.consumed;
 }
 - (void)resetCandidateAnchor {
     _candidateAnchorCaret = NSZeroRect;
@@ -4289,7 +4326,7 @@ static const NSTimeInterval kSettledRerankPoll = 1.0 / 60.0;
     }
     return _candidateAnchorValid ? _candidateAnchorCaret : reported;
 }
-- (void)voiceProviderSettingsChanged:(NSNotification *)notification { (void)notification; _preferenceLoadState.reset(); _voicePermissionToken = nil; _voiceHoldShortcut.reset(); [self cancelLiveVoiceInput]; [self cancelDoubaoVoiceInput]; [self cancelHTTPVoiceInput]; if (_voiceService.active) [_voiceService cancelWithError:nil]; [_voiceOverlay dismissFailure]; [self persistAppearancePreferences]; }
+- (void)voiceProviderSettingsChanged:(NSNotification *)notification { (void)notification; _preferenceLoadState.reset(); _voicePermissionToken = nil; _voiceHoldShortcut.reset(); _configuredVoiceShortcut.reset(); [self cancelLiveVoiceInput]; [self cancelDoubaoVoiceInput]; [self cancelHTTPVoiceInput]; if (_voiceService.active) [_voiceService cancelWithError:nil]; [_voiceOverlay dismissFailure]; [self persistAppearancePreferences]; }
 - (void)translationPreferencesSaved:(NSNotification *)notification {
     _preferenceLoadState.reset();
     [self applySharedToolbarPreferences:notification.userInfo];
@@ -5544,7 +5581,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
 }
 - (void)reportVoiceFailure:(MSIMEVoiceFailure)failure { [self reportVoiceFailure:failure detail:nil]; }
 - (void)reportVoiceFailure:(MSIMEVoiceFailure)failure detail:(NSString *)detail {
-    _voicePermissionToken = nil; _voiceHoldShortcut.reset();
+    _voicePermissionToken = nil; _voiceHoldShortcut.reset(); _configuredVoiceShortcut.reset();
     [self cancelHTTPVoiceInput]; [self cancelDoubaoVoiceInput]; [self cancelLiveVoiceInput];
     if (_voiceService.active) [_voiceService cancelWithError:nil];
     [_voiceAudioMuter restore]; [self voiceCaptureDidEnd];
@@ -5719,7 +5756,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
             [controller->_voiceOverlay setInputLevel:level];
             // MSIME-Windows keeps every sample and tells the user when the upload is too large; this host keeps only what the provider takes. Once it has that much, end the recording the way a release does, so the overlay turns to 识别中... and the end cue plays instead of the wave animating over audio that is no longer kept. The physical release that follows must not cancel the recognition.
             if (controller->_voiceService.recordedDuration * 16000.0 >= sampleLimit) {
-                controller->_voiceHoldShortcut.reset();
+                controller->_voiceHoldShortcut.reset(); controller->_configuredVoiceShortcut.reset();
                 [controller finishHTTPVoiceInput];
             }
         });
@@ -5826,7 +5863,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
             controller->_httpVoiceRequest != http || controller->_doubaoVoiceRequest != doubao ||
             controller->_liveVoiceToken != live || !(http || doubao || live)) return;
         // A subsequent physical hold release must not toggle pending recognition.
-        controller->_voiceHoldShortcut.reset();
+        controller->_voiceHoldShortcut.reset(); controller->_configuredVoiceShortcut.reset();
         if (cancel) {
             [controller cancelHTTPVoiceInput]; [controller cancelDoubaoVoiceInput]; [controller cancelLiveVoiceInput];
         } else if (controller->_httpVoiceProcessing || controller->_doubaoVoiceProcessing || controller->_liveVoiceProcessing) {
@@ -5911,7 +5948,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     _voicePermissionToken = nil;
     // Windows RefreshKeyboardHook stops capture on disable without discarding
     // its final result. Repeated preference loads must not act as a second stop.
-    _voiceHoldShortcut.reset();
+    _voiceHoldShortcut.reset(); _configuredVoiceShortcut.reset();
     if (_httpVoiceRequest && !_httpVoiceProcessing) [self finishHTTPVoiceInput];
     if (_doubaoVoiceRequest && !_doubaoVoiceProcessing) [self finishDoubaoVoiceInput];
     if (_liveVoiceToken && !_liveVoiceProcessing) [self finishLiveVoiceInput];
@@ -6220,7 +6257,7 @@ static constexpr NSUInteger MSIMEIdleDictionarySessionLimit = 4;
     [self clearSmartPunctuationSpaceRevert];
     [_voiceOverlay dismissFailure];
     _voicePermissionToken = nil;
-    _voiceHoldShortcut.reset();
+    _voiceHoldShortcut.reset(); _configuredVoiceShortcut.reset();
     if (_activeClient && _activeClient != sender) [self cancelLiveVoiceInput];
     if (_activeClient && _activeClient != sender) [self cancelDoubaoVoiceInput];
     if (_activeClient && _activeClient != sender) [self cancelHTTPVoiceInput];
@@ -6987,7 +7024,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     [self invalidateSmartPunctuationShadow];
     msime_macos_diagnostic_write("focus_out");
     _voicePermissionToken = nil;
-    _voiceHoldShortcut.reset();
+    _voiceHoldShortcut.reset(); _configuredVoiceShortcut.reset();
     [self cancelLiveVoiceInput];
     [self cancelDoubaoVoiceInput];
     [self cancelHTTPVoiceInput];
@@ -7557,7 +7594,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         [_voiceOverlay dismissFailure];
         [self resetModifierTap];
         [self abandonCapsLockTap];
-        _voiceHoldShortcut.reset();
+        _voiceHoldShortcut.reset(); _configuredVoiceShortcut.reset();
         _backspaceHoldArmed = NO;
         [self clearSmartPunctuationSpaceConversion];
         [self clearSmartPunctuationSpaceRevert];
@@ -7569,7 +7606,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         if (![self commitManagedEnglishRaw]) return YES;
         [_voiceOverlay dismissFailure];
         _voicePermissionToken = nil;
-        _voiceHoldShortcut.reset();
+        _voiceHoldShortcut.reset(); _configuredVoiceShortcut.reset();
         [self cancelLiveVoiceInput];
         [self cancelDoubaoVoiceInput];
         [self cancelHTTPVoiceInput];
@@ -7611,13 +7648,15 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     NSUserDefaults *voiceDefaults = NSUserDefaults.standardUserDefaults;
     if (event.type == NSEventTypeKeyDown && event.keyCode == 53) [_voiceOverlay dismissFailure];
     if (_voicePermissionToken && event.type == NSEventTypeKeyDown && event.keyCode == 53) {
-        _voicePermissionToken = nil; _voiceHoldShortcut.reset(); [self resetModifierTap]; return YES;
+        _voicePermissionToken = nil; _voiceHoldShortcut.reset(); _configuredVoiceShortcut.reset(); [self resetModifierTap]; return YES;
     }
     const BOOL voiceEnabled = MSIMEVoiceInputEnabled(voiceDefaults);
-    if (!voiceEnabled) _voiceHoldShortcut.reset();
+    if (!voiceEnabled) { _voiceHoldShortcut.reset(); _configuredVoiceShortcut.reset(); }
     const NSEventModifierFlags physicalModifierFlags = voiceEnabled && event.type == NSEventTypeFlagsChanged
         ? MSIMEPhysicalModifierFlagsState(kCGEventSourceStateHIDSystemState) : 0;
-    const auto voiceShortcut = voiceEnabled ? _voiceHoldShortcut.observe(event, {
+    const BOOL configuredVoice = voiceEnabled && [self usesConfiguredVoiceShortcut];
+    if (configuredVoice && [self handleConfiguredVoiceShortcut:event]) return YES;
+    const auto voiceShortcut = voiceEnabled && !configuredVoice ? _voiceHoldShortcut.observe(event, {
         [voiceDefaults boolForKey:@"MSIMEClientVoiceHotkeyRightAlt"] != NO,
         [voiceDefaults boolForKey:@"MSIMEClientVoiceHotkeyCtrlCommand"] != NO,
         [voiceDefaults boolForKey:@"MSIMEClientVoiceHotkeyCtrlOption"] != NO,
@@ -7670,7 +7709,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
                [event.characters characterAtIndex:0] != _lastSmartPunctuation) {
         [self resetSmartPunctuationState];
     }
-    if (voiceEnabled && !event.isARepeat && [self matchesVoiceToggleHotkey:event]) {
+    if (voiceEnabled && !configuredVoice && !event.isARepeat && [self matchesVoiceToggleHotkey:event]) {
         [self toggleVoiceInput:nil];
         return YES;
     }

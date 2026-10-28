@@ -1,4 +1,5 @@
 #import "../../src/input/InputController.mm"
+#import "../../src/voice/VoiceShortcutPresentation.h"
 #include "../../src/candidate/CandidatePageSize.h"
 #import "../../src/input/InputSourceRegistration.h"
 #import "../../src/candidate/SkinSettingsView.h"
@@ -13252,6 +13253,23 @@ int main(int argc, char **argv) {
         if (argc == 2 && std::string(argv[1]) == "--caps-lock") {
             [NSApp finishLaunching];
             TestCapsLockTap();
+            return 0;
+        }
+        if (argc == 2 && std::string(argv[1]) == "--voice-shortcut-conflicts") {
+            NSString *suite = [@"shurufa.synthetic.voice-conflicts." stringByAppendingString:NSUUID.UUID.UUIDString];
+            NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+            MSIMEAppearancePreferences *prefs = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults];
+            assert(MSIMEVoiceShortcutConflict(@{@"key_code":@56, @"modifiers":@0}, prefs));
+            assert(MSIMEVoiceShortcutConflict(@{@"key_code":@57, @"modifiers":@0}, prefs));
+            assert(MSIMEVoiceShortcutConflict(@{@"key_code":@53, @"modifiers":@0}, prefs));
+            assert(MSIMEVoiceShortcutConflict(@{@"key_code":@0, @"modifiers":@0}, prefs));
+            assert(!MSIMEVoiceShortcutConflict(@{@"key_code":@54, @"modifiers":@0}, prefs));
+            assert(!MSIMEVoiceShortcutConflict(@{@"key_code":@9, @"modifiers":@3}, prefs));
+            prefs.controlTapShortcut = YES;
+            assert(MSIMEVoiceShortcutConflict(@{@"key_code":@59, @"modifiers":@0}, prefs));
+            prefs.shiftTapShortcut = NO;
+            assert(!MSIMEVoiceShortcutConflict(@{@"key_code":@56, @"modifiers":@0}, prefs));
+            MSIMERemoveTestPreferenceSuite(defaults, suite);
             return 0;
         }
         // Each case drains its own pool. No run loop turns between cases, so under one outer pool every autoreleased preferences window lived to the end of main: about a hundred piled up, every later window paid for all of their notification observers and weak references, and the run grew quadratically until the sanitizer leg crossed its 240 s ceiling.

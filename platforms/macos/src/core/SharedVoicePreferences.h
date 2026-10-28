@@ -1,5 +1,6 @@
 #pragma once
 #import <Foundation/Foundation.h>
+#import "VoiceShortcutConfig.h"
 
 // Match the shared default while preserving explicit disablement.
 static inline BOOL MSIMEVoiceInputEnabled(NSUserDefaults *defaults) {
@@ -17,6 +18,15 @@ static inline BOOL MSIMEVoiceMuteSystemAudioEnabled(NSUserDefaults *defaults) {
 static NSString *const MSIMEVoicePolishDefaultProvider = @"deepseek";
 static NSString *const MSIMEVoicePolishDefaultEndpoint = @"https://api.deepseek.com/chat/completions";
 static NSString *const MSIMEVoicePolishDefaultModel = @"deepseek-v4-flash";
+
+// 设置窗口和实际识别读取同一个开关；缺键时 TextStream 整理默认开，不由是否填密钥改变选择。
+static inline BOOL MSIMEVoicePolishEnabledForProvider(NSUserDefaults *defaults, NSDictionary *legacy, NSString *provider) {
+    id value = [defaults objectForKey:@"MSIMEClientVoicePolish"];
+    if ([value isKindOfClass:NSNumber.class]) return [value boolValue];
+    value = legacy[@"polishEnabled"];
+    if ([value isKindOfClass:NSNumber.class] || [value isKindOfClass:NSString.class]) return [value boolValue];
+    return [provider isEqual:@"textstream"];
+}
 
 // 开始和结束提示音只看总开关 `sound_enabled`。设置页在 macOS 上只给这一个开关（`voice_cue_switches` 为 false），所以不再读存下的 `start_sound`、`end_sound`：以前单独关掉其中一个的人会重新听到它，这是有意的，不留一个看不见却仍然生效的值。
 static inline BOOL MSIMEVoiceCuesEnabled(NSUserDefaults *defaults) {
@@ -96,6 +106,10 @@ static inline BOOL MSIMESaveVoiceTokenSlot(NSUserDefaults *defaults, NSString *k
 static inline NSDictionary *MSIMEVoicePreferencesFromDefaults(NSUserDefaults *defaults) {
     if (!defaults) return @{};
     NSMutableDictionary *voice = [NSMutableDictionary dictionary];
+    if ([defaults objectForKey:@"MSIMEClientVoiceHotkeyMode"])
+        voice[@"hotkey_mode"] = MSIMEVoiceHotkeyMode(defaults);
+    if ([defaults objectForKey:@"MSIMEClientVoiceMacOSHotkey"])
+        voice[@"macos_hotkey"] = MSIMEVoiceCustomShortcut(defaults) ?: (id)NSNull.null;
     NSDictionary *strings = @{
         @"language": @"MSIMEClientVoiceLanguage",
         @"asr_provider": @"MSIMEClientVoiceASRProvider",
@@ -162,6 +176,19 @@ static inline NSDictionary *MSIMEVoicePreferencesFromDefaults(NSUserDefaults *de
 static inline BOOL MSIMEApplySharedVoicePreferences(id voice, NSUserDefaults *defaults) {
     if (![voice isKindOfClass:NSDictionary.class]) return NO;
     BOOL changed = NO;
+    id mode = voice[@"hotkey_mode"];
+    if ([@[@"legacy", @"hold", @"toggle"] containsObject:mode ?: @""] &&
+        ![[defaults objectForKey:@"MSIMEClientVoiceHotkeyMode"] isEqual:mode]) {
+        [defaults setObject:mode forKey:@"MSIMEClientVoiceHotkeyMode"]; changed = YES;
+    }
+    id shortcut = voice[@"macos_hotkey"];
+    id storedShortcut = shortcut == NSNull.null ? @{} : shortcut;
+    if ((shortcut == NSNull.null || MSIMEVoiceShortcutValid(shortcut)) &&
+        ![[defaults objectForKey:@"MSIMEClientVoiceMacOSHotkey"] isEqual:storedShortcut]) {
+        // 空字典是本地的显式清除值，写回文档时变成 null。
+        [defaults setObject:storedShortcut forKey:@"MSIMEClientVoiceMacOSHotkey"];
+        changed = YES;
+    }
     NSDictionary *strings = @{
         @"language": @"Language",
         @"asr_provider": @"ASRProvider", @"asr_endpoint": @"ASREndpoint",

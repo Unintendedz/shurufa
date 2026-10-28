@@ -120,6 +120,25 @@ int main() {
         assert([MSIMEVoiceCaptureDeviceUID(defaults) isEqual:@"fixture-uid"]);
         MSIMEApplySharedVoicePreferences(@{@"capture_backend": @"", @"capture_device": @""}, defaults);
         assert([MSIMEVoiceCaptureDeviceUID(defaults) isEqual:@""]);
+        NSDictionary *hotkey = @{@"key_code":@54, @"modifiers":@0};
+        [defaults removeObjectForKey:@"MSIMEClientVoicePolish"];
+        assert(MSIMEVoicePolishEnabledForProvider(defaults, @{}, @"textstream"));
+        assert(!MSIMEVoicePolishEnabledForProvider(defaults, @{}, @"system"));
+        assert(!MSIMEVoicePolishEnabledForProvider(defaults, @{@"polishEnabled":@NO}, @"textstream"));
+        [defaults setBool:NO forKey:@"MSIMEClientVoicePolish"];
+        assert(!MSIMEVoicePolishEnabledForProvider(defaults, @{@"polishEnabled":@YES}, @"textstream"));
+        [defaults setBool:YES forKey:@"MSIMEClientVoicePolish"];
+        assert(MSIMEVoicePolishEnabledForProvider(defaults, @{@"polishEnabled":@NO}, @"textstream"));
+        assert(MSIMEApplySharedVoicePreferences(@{@"hotkey_mode":@"toggle", @"macos_hotkey":hotkey}, defaults));
+        assert([MSIMEVoiceHotkeyMode(defaults) isEqual:@"toggle"]);
+        assert([MSIMEVoiceCustomShortcut(defaults) isEqual:hotkey]);
+        assert([MSIMEVoicePreferencesFromDefaults(defaults)[@"macos_hotkey"] isEqual:hotkey]);
+        assert(!MSIMEApplySharedVoicePreferences(@{@"hotkey_mode":@"toggle", @"macos_hotkey":hotkey}, defaults));
+        assert(!MSIMEApplySharedVoicePreferences(@{}, defaults));
+        assert(MSIMEApplySharedVoicePreferences(@{@"macos_hotkey":NSNull.null}, defaults));
+        assert(!MSIMEVoiceCustomShortcut(defaults));
+        assert(MSIMEVoicePreferencesFromDefaults(defaults)[@"macos_hotkey"] == NSNull.null);
+        assert(!MSIMEApplySharedVoicePreferences(@{@"macos_hotkey":NSNull.null}, defaults));
         MSIMERemoveTestPreferenceSuite(defaults, suite);
     }
 }

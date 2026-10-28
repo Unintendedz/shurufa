@@ -1802,8 +1802,52 @@ pub struct Preferences {
     pub update_channel: UpdateChannel,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceHotkeyMode {
+    #[default]
+    Legacy,
+    Hold,
+    Toggle,
+}
+
+/// macOS 的物理主键和四种修饰键；单个左右修饰键用主键表示。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MacosVoiceHotkey {
+    pub key_code: u16,
+    pub modifiers: u8,
+}
+
+impl MacosVoiceHotkey {
+    fn valid(&self) -> bool {
+        if self.key_code > 126 || self.modifiers > 15 || matches!(self.key_code, 53 | 57 | 63) {
+            return false;
+        }
+        if matches!(self.key_code, 54 | 55 | 56 | 58 | 59 | 60 | 61 | 62) {
+            let own = match self.key_code {
+                54 | 55 => 8,
+                56 | 60 => 4,
+                58 | 61 => 2,
+                _ => 1,
+            };
+            return self.modifiers & own == 0;
+        }
+        self.modifiers & 11 != 0
+            || matches!(
+                self.key_code,
+                122 | 120 | 99 | 118 | 96 | 97 | 98 | 100 | 101 | 109 | 103 | 111
+            )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VoiceInputPreferences {
+    /// 缺字段时保留旧版“右 Option 按住、普通组合键切换”的默认行为。
+    #[serde(default)]
+    pub hotkey_mode: VoiceHotkeyMode,
+    #[serde(default)]
+    pub macos_hotkey: Option<MacosVoiceHotkey>,
     #[serde(default = "enabled_by_default")]
     pub enabled: bool,
     #[serde(default = "enabled_by_default")]
@@ -1921,6 +1965,8 @@ impl Default for VoiceInputPreferences {
     fn default() -> Self {
         let polish = default_polish_service();
         Self {
+            hotkey_mode: VoiceHotkeyMode::Legacy,
+            macos_hotkey: None,
             enabled: true,
             sound_enabled: true,
             start_sound: true,
@@ -4523,6 +4569,11 @@ impl Preferences {
             return Err(PreferencesError::InvalidNetwork);
         }
         if !ASR_PROVIDERS.contains(&self.voice_input.asr_provider.as_str())
+            || self
+                .voice_input
+                .macos_hotkey
+                .as_ref()
+                .is_some_and(|key| !key.valid())
             || !POLISH_PROVIDERS.contains(&self.voice_input.polish_provider.as_str())
             || !valid_model_path(&self.voice_input.asr_model_path)
             || !valid_model_mirror(&self.voice_input.asr_model_mirror)

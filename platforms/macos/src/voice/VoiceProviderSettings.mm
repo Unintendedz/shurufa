@@ -5,6 +5,10 @@
 #import "TextStreamSupport.h"
 #import "OpenLessImport.h"
 #import "../settings/SettingsLayout.h"
+#import "../settings/RuntimeOptions.h"
+#import "MSIMEClientSession.h"
+#import "../core/SharedVoicePreferences.h"
+#import "VoiceShortcutPresentation.h"
 NSNotificationName const MSIMEVoiceProviderSettingsDidChangeNotification = @"MSIMEClientVoiceProviderSettingsDidChange";
 #import <Security/Security.h>
 #import "../core/WindowPresentation.h"
@@ -231,11 +235,7 @@ static NSString *SharedSetting(NSString *key, NSString *fallback)
     if (value.model.length == 0)
         value.model = MSIMEVoiceASRProviderDefaultModel(rawProvider);
     value.modelPath = SharedSetting(@"modelPath", @"");
-    id polishEnabled = saved[@"polishEnabled"];
-    value.polishEnabled =
-        [polishEnabled isKindOfClass:[NSNumber class]] || [polishEnabled isKindOfClass:[NSString class]]
-            ? [polishEnabled boolValue]
-            : NO;
+    value.polishEnabled = MSIMEVoicePolishEnabledForProvider(defaults, saved, rawProvider);
     value.polishEndpoint = SharedSetting(@"polishEndpoint", MSIMEVoicePolishDefaultEndpoint);
     value.polishModel = SharedSetting(@"polishModel", MSIMEVoicePolishDefaultModel);
     value.polishPromptID = MSIMEPolishPromptIdentifierOrDefault(SharedSetting(@"polishPromptID", @""));
@@ -268,9 +268,6 @@ static NSString *SharedSetting(NSString *key, NSString *fallback)
         [defaults stringForKey:@"MSIMEClientVoicePolishToken"]);
     value.polishToken = sharedPolishToken.length
         ? sharedPolishToken : ReadToken(@"polish", polishProvider, value.polishEndpoint);
-    // 本地流式识别默认开着整理，前提是整理服务的密钥已经填好；没填时开着只会让保存被校验拦下。
-    if (!saved[@"polishEnabled"] && [rawProvider isEqualToString:@"textstream"] && value.polishToken.length)
-        value.polishEnabled = YES;
     return value;
 }
 - (BOOL)validate:(NSError **)error
@@ -416,6 +413,12 @@ static NSString *SharedSetting(NSString *key, NSString *fallback)
     NSString *_polishPromptSelection;
     /// Set while the controls are being filled from storage, so populating them saves nothing.
     BOOL _loading;
+    NSPopUpButton *_hotkeyMode;
+    NSTextField *_hotkeyLabel, *_hotkeyNotice, *_builtinHotkeyStatus;
+    NSButton *_recordHotkey, *_clearHotkey;
+    NSArray<NSSwitch *> *_builtinHotkeySwitches;
+    id _hotkeyMonitor, _hotkeyResignObserver;
+    NSDictionary *_pendingModifier;
 }
 
 /// A message on the card it belongs to, or nothing at all. The window has no separate error style — MSIMEDetailLabel is the one quieter line under a row, and what distinguishes a failure from an aside is its colour.
@@ -444,6 +447,39 @@ static void ShowNotice(NSTextField *label, NSString *message, NSColor *color)
     }
     self.translatesAutoresizingMaskIntoConstraints = NO;
     _tokenDrafts = [NSMutableDictionary dictionary];
+
+    _hotkeyLabel = [NSTextField labelWithString:@"未设置"];
+    _hotkeyLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    [_hotkeyLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultHigh forOrientation:NSLayoutConstraintOrientationHorizontal];
+    _hotkeyLabel.accessibilityLabel = @"当前自定义语音快捷键";
+    _recordHotkey = [NSButton buttonWithTitle:@"录制快捷键…" target:self action:@selector(recordHotkey:)];
+    _clearHotkey = [NSButton buttonWithTitle:@"清除" target:self action:@selector(clearHotkey:)];
+    NSStackView *hotkeyRow = [NSStackView stackViewWithViews:@[_hotkeyLabel, _recordHotkey, _clearHotkey]];
+    hotkeyRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    hotkeyRow.spacing = 8;
+    _hotkeyMode = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    [_hotkeyMode addItemsWithTitles:@[@"原有行为（默认）", @"按住说话", @"切换"]];
+    _hotkeyMode.accessibilityLabel = @"语音快捷键触发模式";
+    _hotkeyMode.target = self; _hotkeyMode.action = @selector(hotkeyModeChanged:);
+    _hotkeyNotice = MSIMEDetailLabel(@"");
+    _hotkeyNotice.hidden = YES;
+    NSMutableArray *switches = [NSMutableArray array];
+    NSMutableArray *shortcutRows = [NSMutableArray arrayWithArray:@[
+        MSIMEPreferenceRow(@"自定义快捷键", hotkeyRow), MSIMEPreferenceRow(@"触发模式", _hotkeyMode)]];
+    for (NSString *title in @[@"Control+F9", @"右 Option", @"Control+Command", @"右 Control+右 Option"]) {
+        NSSwitch *control = MSIMESettingSwitch(self, @selector(builtinHotkeyChanged:), title);
+        control.tag = switches.count;
+        [switches addObject:control];
+        [shortcutRows addObject:MSIMESwitchRow(title, control, @"")];
+    }
+    _builtinHotkeySwitches = switches;
+    _builtinHotkeyStatus = MSIMEDetailLabel(@"已由自定义快捷键替代；清除自定义后恢复内置选择。");
+    [shortcutRows addObject:_builtinHotkeyStatus];
+    [shortcutRows addObject:MSIMEDetailLabel(@"自定义快捷键会替代内置快捷键，清除后恢复内置选择。快捷键在 Shurufa 是当前输入法、光标在文本框里时生效。")];
+    [shortcutRows addObject:MSIMEDetailLabel(@"原有行为（默认）：右 Option 和修饰键组合按住说话；Control+F9、Control+Option+V 按一下开始、再按一下结束。自定义单个修饰键按住说话，自定义组合键切换。")];
+    [shortcutRows addObject:MSIMEDetailLabel(@"按住说话：所有快捷键按住开始、松开结束。切换：按一下开始、再按一下结束；单个修饰键在松开时触发。录音中按 Esc 取消，切换应用会取消录音。")];
+    [shortcutRows addObject:_hotkeyNotice];
+    NSBox *shortcutCard = MSIMECardWithViews(shortcutRows, 0);
 
     _provider = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     _provider.accessibilityLabel = @"识别方式";
@@ -524,13 +560,13 @@ static void ShowNotice(NSTextField *label, NSString *message, NSColor *color)
     polishCard.accessibilityLabel = @"文本整理卡片";
 
     NSTextField *hint = [NSTextField
-        wrappingLabelWithString:@"Control+Option+V 开始/结束，Esc "
-                                @"取消。云端识别会发送本次录音；本地识别使用所选模型。密钥保存在系统钥匙串中。"
+        wrappingLabelWithString:@"云端识别会发送本次录音；本地识别使用所选模型。密钥保存在系统钥匙串中。"
                                 @"本地流式识别在本机运行，不上传录音；整理会把识别出的文字发给上面的整理服务，失败或超时时直接输入原文。"];
     hint.font = [NSFont systemFontOfSize:11.0];
     hint.textColor = NSColor.secondaryLabelColor;
 
     NSStackView *stack = [NSStackView stackViewWithViews:@[
+        MSIMESectionLabel(@"语音快捷键"), shortcutCard,
         MSIMESectionLabel(@"语音识别"), recognitionCard,
         MSIMESectionLabel(@"文本整理"), polishCard,
         hint,
@@ -558,6 +594,7 @@ static void ShowNotice(NSTextField *label, NSString *message, NSColor *color)
 - (void)reloadSettings
 {
     _loading = YES;
+    [self reloadHotkeyControls];
     MetasequoiaVoiceProviderSettings *value = [MetasequoiaVoiceProviderSettings loadSettings];
     NSArray *providerIDs = MSIMEVoiceASRProviderIDs();
     NSUInteger providerIndex = [providerIDs indexOfObject:value.provider];
@@ -622,6 +659,119 @@ static void ShowNotice(NSTextField *label, NSString *message, NSColor *color)
     ShowNotice(_polishNotice, nil, NSColor.systemRedColor);
     _loading = NO;
 }
+
+- (NSArray<NSString *> *)builtinHotkeyKeys {
+    return @[@"hotkey_ctrl_f9", @"hotkey_ralt", @"hotkey_ctrl_win", @"hotkey_rctrl_ralt"];
+}
+- (void)reloadHotkeyControls {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSDictionary *custom = MSIMEVoiceCustomShortcut(defaults);
+    _hotkeyLabel.stringValue = MSIMEVoiceShortcutTitle(custom);
+    _hotkeyLabel.toolTip = _hotkeyLabel.stringValue;
+    _clearHotkey.enabled = custom != nil;
+    _builtinHotkeyStatus.hidden = custom == nil;
+    [_hotkeyMode selectItemAtIndex:[@[@"legacy", @"hold", @"toggle"] indexOfObject:MSIMEVoiceHotkeyMode(defaults)]];
+    NSArray *keys = @[@"MSIMEClientVoiceHotkeyCtrlF9", @"MSIMEClientVoiceHotkeyRightAlt",
+        @"MSIMEClientVoiceHotkeyCtrlCommand", @"MSIMEClientVoiceHotkeyCtrlOption"];
+    for (NSUInteger index = 0; index < keys.count; ++index) {
+        id value = [defaults objectForKey:keys[index]];
+        _builtinHotkeySwitches[index].state = value ? [value boolValue] : index < 2;
+        _builtinHotkeySwitches[index].enabled = custom == nil;
+    }
+}
+- (BOOL)saveHotkeyPatch:(NSDictionary *)patch {
+    NSString *directory = MSIMELoadRuntimeOptions()[@"preferences_directory"];
+    if (![directory isKindOfClass:NSString.class] || !directory.isAbsolutePath) {
+        ShowNotice(_hotkeyNotice, @"无法找到输入法偏好目录，请重新打开已安装的 Shurufa。", NSColor.systemRedColor);
+        return NO;
+    }
+    NSDictionary *snapshot = [MSIMEClientSession loadPreferencesInDirectory:directory error:nil];
+    NSMutableDictionary *preferences = [snapshot[@"preferences"] mutableCopy];
+    NSMutableDictionary *voice = [preferences[@"voice_input"] mutableCopy];
+    if (!snapshot || !preferences || !voice) {
+        ShowNotice(_hotkeyNotice, @"无法读取偏好，快捷键未更改，请稍后重试。", NSColor.systemRedColor);
+        return NO;
+    }
+    [voice addEntriesFromDictionary:patch];
+    preferences[@"voice_input"] = voice;
+    NSMutableDictionary *updated = [snapshot mutableCopy];
+    updated[@"preferences"] = preferences;
+    if (![MSIMEClientSession savePreferencesInDirectory:directory expectedRevision:[snapshot[@"revision"] unsignedLongLongValue]
+        snapshot:updated error:nil]) {
+        ShowNotice(_hotkeyNotice, @"快捷键未保存，偏好可能已变化，请重新打开设置后重试。", NSColor.systemRedColor);
+        [self reloadHotkeyControls];
+        return NO;
+    }
+    MSIMEApplySharedVoicePreferences(voice, NSUserDefaults.standardUserDefaults);
+    [NSUserDefaults.standardUserDefaults synchronize];
+    [[NSNotificationCenter defaultCenter] postNotificationName:MSIMEVoiceProviderSettingsDidChangeNotification object:self];
+    [self reloadHotkeyControls];
+    ShowNotice(_hotkeyNotice, @"已保存", NSColor.secondaryLabelColor);
+    return YES;
+}
+- (void)hotkeyModeChanged:(id)sender {
+    (void)sender;
+    if (!_loading) [self saveHotkeyPatch:@{@"hotkey_mode":@[@"legacy", @"hold", @"toggle"][_hotkeyMode.indexOfSelectedItem]}];
+}
+- (void)builtinHotkeyChanged:(NSSwitch *)sender {
+    if (!_loading) [self saveHotkeyPatch:@{[self builtinHotkeyKeys][sender.tag]:@(sender.state == NSControlStateValueOn)}];
+}
+- (void)clearHotkey:(id)sender {
+    (void)sender;
+    [self stopRecordingHotkey];
+    [self saveHotkeyPatch:@{@"macos_hotkey":NSNull.null}];
+}
+- (void)stopRecordingHotkey {
+    if (_hotkeyMonitor) [NSEvent removeMonitor:_hotkeyMonitor];
+    if (_hotkeyResignObserver) [NSNotificationCenter.defaultCenter removeObserver:_hotkeyResignObserver];
+    _hotkeyMonitor = nil; _hotkeyResignObserver = nil; _pendingModifier = nil;
+    _recordHotkey.title = @"录制快捷键…";
+}
+- (void)acceptRecordedHotkey:(NSDictionary *)binding {
+    Class preferencesClass = NSClassFromString(@"MSIMEAppearancePreferences");
+    NSString *conflict = MSIMEVoiceShortcutConflict(binding, [preferencesClass sharedPreferences]);
+    if (conflict) { ShowNotice(_hotkeyNotice, conflict, NSColor.systemRedColor); _pendingModifier = nil; return; }
+    [self stopRecordingHotkey];
+    [self saveHotkeyPatch:@{@"macos_hotkey":binding}];
+}
+- (void)recordHotkey:(id)sender {
+    (void)sender;
+    if (_hotkeyMonitor) { [self stopRecordingHotkey]; return; }
+    _recordHotkey.title = @"请按快捷键…";
+    ShowNotice(_hotkeyNotice, @"按 Esc 取消录制。单个修饰键请按下后松开。", NSColor.secondaryLabelColor);
+    __weak MetasequoiaVoiceProviderSettingsView *weakSelf = self;
+    _hotkeyResignObserver = [NSNotificationCenter.defaultCenter addObserverForName:NSWindowDidResignKeyNotification
+        object:self.window queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *) { [weakSelf stopRecordingHotkey]; }];
+    _hotkeyMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:(NSEventMaskKeyDown | NSEventMaskKeyUp | NSEventMaskFlagsChanged | NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown)
+        handler:^NSEvent *(NSEvent *event) {
+            MetasequoiaVoiceProviderSettingsView *view = weakSelf;
+            if (!view || NSApp.keyWindow != view.window) return event;
+            if (event.type == NSEventTypeLeftMouseDown || event.type == NSEventTypeRightMouseDown) {
+                [view stopRecordingHotkey];
+                return event;
+            }
+            if (event.keyCode == 53 && event.type == NSEventTypeKeyDown) {
+                [view stopRecordingHotkey];
+                ShowNotice(view->_hotkeyNotice, @"已取消录制；Esc 留作取消录音。", NSColor.secondaryLabelColor);
+            } else if (event.keyCode == 57) {
+                ShowNotice(view->_hotkeyNotice, @"Caps Lock 留作中英文切换，不能设为语音快捷键。", NSColor.systemRedColor);
+                view->_pendingModifier = nil;
+            } else if (event.type == NSEventTypeKeyDown && !event.isARepeat) {
+                [view acceptRecordedHotkey:@{@"key_code":@(event.keyCode), @"modifiers":@(MSIMEVoiceModifierBits(event.modifierFlags))}];
+            } else if (event.type == NSEventTypeFlagsChanged) {
+                unsigned flags = MSIMEVoiceModifierBits(event.modifierFlags);
+                unsigned own = MSIMEVoiceModifierBitForKey(event.keyCode);
+                if (own && (flags & own)) view->_pendingModifier = @{@"key_code":@(event.keyCode), @"modifiers":@(flags & ~own)};
+                else if (flags == 0 && view->_pendingModifier) [view acceptRecordedHotkey:view->_pendingModifier];
+            }
+            return nil;
+        }];
+}
+- (void)viewWillMoveToWindow:(NSWindow *)newWindow {
+    if (!newWindow) [self stopRecordingHotkey];
+    [super viewWillMoveToWindow:newWindow];
+}
+- (void)dealloc { [self stopRecordingHotkey]; }
 
 /// What the prompt field shows for a preset: a custom preset's own slot, and nothing for a built-in one, whose wording is not editable. An empty slot tells the recogniser to use the built-in default.
 - (NSString *)polishPromptForPreset:(NSString *)identifier

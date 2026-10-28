@@ -1,5 +1,6 @@
 // Validation of the voice form's stored configuration. validate: reads only the properties, so this never touches the Keychain or the defaults the form saves to.
 #import "../../src/voice/VoiceProviderSettings.h"
+#import "../../src/settings/SettingsLayout.h"
 #include <cstdio>
 #include <cstdlib>
 
@@ -14,7 +15,7 @@ void Require(bool value, const char *message)
     }
 }
 } // namespace
-int main()
+int main(int argc, const char **argv)
 {
     @autoreleasepool
     {
@@ -100,6 +101,37 @@ int main()
         [[NSFileManager defaultManager] removeItemAtPath:external error:nil];
         settings.provider = @"unknown";
         Require(![settings validate:nil], "unknown provider accepted");
+        if (argc >= 2) {
+            // 真实 AppKit 表单的离屏截图；使用合成偏好，不访问用户密钥或发送按键。
+            [NSApplication sharedApplication];
+            NSApp.appearance = [NSAppearance appearanceNamed:argc == 3 ? NSAppearanceNameAqua : NSAppearanceNameDarkAqua];
+            NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+            [defaults setVolatileDomain:@{
+                @"MSIMEClientVoiceASRProvider":@"textstream", @"MSIMEClientVoicePolishToken":@"synthetic-only", @"MSIMEClientVoicePolish":@YES,
+                @"MSIMEClientVoicePolishTokens":@{@"deepseek":@"synthetic-only"},
+                @"MSIMEClientVoiceHotkeyMode":@"toggle", @"MSIMEClientVoiceMacOSHotkey":@{@"key_code":@54, @"modifiers":@0}
+            } forName:NSArgumentDomain];
+            MetasequoiaVoiceProviderSettingsView *form = [[MetasequoiaVoiceProviderSettingsView alloc] initWithFrame:NSMakeRect(0, 0, 640, 1200)];
+            NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 680, 1400)
+                styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];
+            NSView *content = window.contentView;
+            content.wantsLayer = YES;
+            [NSApp.appearance performAsCurrentDrawingAppearance:^{ content.layer.backgroundColor = MSIMESettingsSurfaceColor().CGColor; }];
+            [content addSubview:form];
+            [NSLayoutConstraint activateConstraints:@[
+                [form.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:20],
+                [form.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-20],
+                [form.topAnchor constraintEqualToAnchor:content.topAnchor constant:20]
+            ]];
+            [content layoutSubtreeIfNeeded];
+            [window setContentSize:NSMakeSize(680, form.fittingSize.height + 40)];
+            [content layoutSubtreeIfNeeded];
+            [content display];
+            NSBitmapImageRep *image = [content bitmapImageRepForCachingDisplayInRect:content.bounds];
+            [content cacheDisplayInRect:content.bounds toBitmapImageRep:image];
+            Require([[image representationUsingType:NSBitmapImageFileTypePNG properties:@{}]
+                writeToFile:[NSString stringWithUTF8String:argv[1]] atomically:YES], "snapshot export failed");
+        }
     }
     return 0;
 }

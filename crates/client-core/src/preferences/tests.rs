@@ -7178,6 +7178,8 @@ const NOT_CREDENTIALS: &[&str] = &[
     "voice_input.hotkey_ctrl_f9",
     "voice_input.hotkey_ctrl_win",
     "voice_input.hotkey_hold_space_lock",
+    "voice_input.hotkey_mode",
+    "voice_input.macos_hotkey",
     "voice_input.hotkey_ralt",
     "voice_input.hotkey_rctrl_ralt",
     "word_character.keys",
@@ -8218,4 +8220,35 @@ fn shurufa_defaults_use_textstream_with_polish_and_validate() {
         .restored_to_defaults_for(edition)
         .validate()
         .is_ok());
+}
+
+#[test]
+fn macos_voice_hotkeys_migrate_validate_and_round_trip() {
+    let legacy: VoiceInputPreferences = serde_json::from_value(serde_json::json!({})).unwrap();
+    assert_eq!(legacy.hotkey_mode, VoiceHotkeyMode::Legacy);
+    assert!(legacy.macos_hotkey.is_none());
+    for (key_code, modifiers) in [(54, 0), (61, 0), (9, 3), (54, 1), (101, 0)] {
+        let mut preferences = Preferences::default();
+        preferences.voice_input.hotkey_mode = VoiceHotkeyMode::Toggle;
+        preferences.voice_input.macos_hotkey = Some(MacosVoiceHotkey {
+            key_code,
+            modifiers,
+        });
+        preferences.validate().unwrap();
+        let restored: Preferences =
+            serde_json::from_value(serde_json::to_value(&preferences).unwrap()).unwrap();
+        assert_eq!(restored.voice_input, preferences.voice_input);
+    }
+    for (key_code, modifiers) in [(0, 0), (0, 4), (53, 8), (57, 0), (54, 8), (127, 1), (9, 16)] {
+        let mut preferences = Preferences::default();
+        preferences.voice_input.macos_hotkey = Some(MacosVoiceHotkey {
+            key_code,
+            modifiers,
+        });
+        assert!(preferences.validate().is_err());
+    }
+    assert!(serde_json::from_value::<VoiceInputPreferences>(
+        serde_json::json!({"hotkey_mode":"unknown"})
+    )
+    .is_err());
 }
