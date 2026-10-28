@@ -8252,3 +8252,37 @@ fn macos_voice_hotkeys_migrate_validate_and_round_trip() {
     )
     .is_err());
 }
+
+#[test]
+fn macos_voice_hotkeys_reject_conflicts_in_both_edit_directions() {
+    let mut preferences = Preferences::default();
+    preferences.keybindings.switch_language_shift = false;
+    preferences.voice_input.macos_hotkey = Some(MacosVoiceHotkey {
+        key_code: 60,
+        modifiers: 0,
+    });
+    assert!(preferences.validate().is_ok());
+    preferences.keybindings.switch_language_shift = true;
+    assert!(preferences.validate().is_err());
+    preferences.voice_input.macos_hotkey = Some(MacosVoiceHotkey {
+        key_code: 62,
+        modifiers: 0,
+    });
+    assert!(preferences.validate().is_ok());
+    preferences.keybindings.switch_language_ctrl = true;
+    assert!(preferences.validate().is_err());
+    preferences.voice_input.macos_hotkey = Some(MacosVoiceHotkey {
+        key_code: 49,
+        modifiers: 3,
+    });
+    assert!(preferences.validate().is_err());
+    preferences.keybindings.switch_language_ctrl_alt_space = false;
+    assert!(preferences.validate().is_ok());
+    preferences.voice_input.macos_hotkey = Some(MacosVoiceHotkey {
+        key_code: 100,
+        modifiers: 3,
+    });
+    assert!(preferences.validate().is_ok());
+    preferences.keybindings.toggle_punctuation = "Ctrl+Alt+F8".into();
+    assert!(preferences.validate().is_err());
+}

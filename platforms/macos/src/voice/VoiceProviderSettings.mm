@@ -290,6 +290,7 @@ static NSString *SharedSetting(NSString *key, NSString *fallback)
         message = @"请填写 HTTPS 识别地址、模型名称和 API 密钥。";
     // The polish check comes last and wins, as it always has; what is new is that the message carries the card it belongs on, so a polish failure no longer prints under the recognition fields as well.
     if (self.polishEnabled &&
+        !([self.provider isEqual:@"textstream"] && self.polishToken.length == 0) &&
         (!IsEndpoint(self.polishEndpoint) || self.polishModel.length == 0 || self.polishToken.length == 0))
     {
         message = @"启用文本整理需要 HTTPS 服务地址、模型名称和 API 密钥。";
@@ -414,7 +415,7 @@ static NSString *SharedSetting(NSString *key, NSString *fallback)
     /// Set while the controls are being filled from storage, so populating them saves nothing.
     BOOL _loading;
     NSPopUpButton *_hotkeyMode;
-    NSTextField *_hotkeyLabel, *_hotkeyNotice, *_builtinHotkeyStatus;
+    NSTextField *_hotkeyLabel, *_hotkeyNotice, *_builtinHotkeyStatus, *_builtinHotkeyHelp;
     NSButton *_recordHotkey, *_clearHotkey;
     NSArray<NSSwitch *> *_builtinHotkeySwitches;
     id _hotkeyMonitor, _hotkeyResignObserver;
@@ -475,8 +476,10 @@ static void ShowNotice(NSTextField *label, NSString *message, NSColor *color)
     _builtinHotkeySwitches = switches;
     _builtinHotkeyStatus = MSIMEDetailLabel(@"已由自定义快捷键替代；清除自定义后恢复内置选择。");
     [shortcutRows addObject:_builtinHotkeyStatus];
-    [shortcutRows addObject:MSIMEDetailLabel(@"自定义快捷键会替代内置快捷键，清除后恢复内置选择。快捷键在 Shurufa 是当前输入法、光标在文本框里时生效。")];
-    [shortcutRows addObject:MSIMEDetailLabel(@"原有行为（默认）：右 Option 和修饰键组合按住说话；Control+F9、Control+Option+V 按一下开始、再按一下结束。自定义单个修饰键按住说话，自定义组合键切换。")];
+    _builtinHotkeyHelp = MSIMEDetailLabel(@"自定义快捷键会替代内置快捷键，清除后恢复内置选择。");
+    [shortcutRows addObject:_builtinHotkeyHelp];
+    [shortcutRows addObject:MSIMEDetailLabel([NSString stringWithFormat:@"快捷键在 %@ 是当前输入法、光标在文本框里时生效。", MSIMEEditionDisplayName()])];
+    [shortcutRows addObject:MSIMEDetailLabel(@"原有行为（默认）：右 Option 和修饰键组合按住说话；Control+F9 按一下开始、再按一下结束。自定义单个修饰键按住说话，自定义组合键切换。")];
     [shortcutRows addObject:MSIMEDetailLabel(@"按住说话：所有快捷键按住开始、松开结束。切换：按一下开始、再按一下结束；单个修饰键在松开时触发。录音中按 Esc 取消，切换应用会取消录音。")];
     [shortcutRows addObject:_hotkeyNotice];
     NSBox *shortcutCard = MSIMECardWithViews(shortcutRows, 0);
@@ -670,6 +673,7 @@ static void ShowNotice(NSTextField *label, NSString *message, NSColor *color)
     _hotkeyLabel.toolTip = _hotkeyLabel.stringValue;
     _clearHotkey.enabled = custom != nil;
     _builtinHotkeyStatus.hidden = custom == nil;
+    _builtinHotkeyHelp.hidden = custom != nil;
     [_hotkeyMode selectItemAtIndex:[@[@"legacy", @"hold", @"toggle"] indexOfObject:MSIMEVoiceHotkeyMode(defaults)]];
     NSArray *keys = @[@"MSIMEClientVoiceHotkeyCtrlF9", @"MSIMEClientVoiceHotkeyRightAlt",
         @"MSIMEClientVoiceHotkeyCtrlCommand", @"MSIMEClientVoiceHotkeyCtrlOption"];
@@ -1039,7 +1043,7 @@ static void ShowNotice(NSTextField *label, NSString *message, NSColor *color)
     self = [super initWithWindow:window];
     if (self)
     {
-        window.title = @"语音输入设置";
+        window.title = [MSIMEEditionDisplayName() stringByAppendingString:@" · 语音输入设置"];
         window.releasedWhenClosed = NO;
         _form = [[MetasequoiaVoiceProviderSettingsView alloc] initWithFrame:NSZeroRect];
         [window.contentView addSubview:_form];

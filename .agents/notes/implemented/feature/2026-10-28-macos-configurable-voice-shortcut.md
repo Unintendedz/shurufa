@@ -4,7 +4,7 @@ Status: implemented
 
 ## Problem
 
-Shurufa 继承的语音键有两种行为：默认开启的右 Option 按住说话，默认开启的 Control+F9 和额外的 Control+Option+V 切换录音；Control+Command、右 Control+右 Option 默认关闭。用户需要录制右 Command 等单侧修饰键或组合键，并自行选择按住或切换。
+Shurufa 继承的语音键有两种行为：默认开启的右 Option 按住说话，默认开启的 Control+F9 切换录音；Control+Command、右 Control+右 Option 默认关闭。旧界面虽写 Control+Option+V，实际额外绑定默认空，故本次移除错误说明，不新增默认键。用户需要录制右 Command 等单侧修饰键或组合键，并自行选择按住或切换。
 
 ## Decision
 
@@ -14,7 +14,9 @@ Shurufa 继承的语音键有两种行为：默认开启的右 Option 按住说�
 
 设置表单的整理开关优先读取 `MSIMEClientVoicePolish`，再兼容旧 `voiceInput.polishEnabled`，两者缺失时 TextStream 默认开。旧窗口只读私有字典，还用是否有密钥决定默认开关，可能把实际开启的整理显示为关闭。现场白名单查询确认共享文档和 NSUserDefaults 都是 textstream、整理 true，旧字典没有 polishEnabled。原生浅/深截图使用合成值并画完整窗口底色，未展示本机凭据。
 
-legacy 保留所有内置行为。legacy 配自定义单个修饰键时按住说话，配组合键时切换；录制本身不更改模式。hold 和 toggle 对所有入口统一生效，包括全局事件监视器接住的 Control+F9 与额外组合键。裸修饰键的 toggle 等松开才触发，期间有其他键就取消判定。hold 按下立即启动，期间普通组合键取消录音并原样交回应用，不提交文字，不请求整理；空格仍可锁定按住录音。
+legacy 保留所有内置行为。legacy 配自定义单个修饰键时按住说话，配组合键时切换；录制本身不更改模式。hold 和 toggle 对所有入口统一生效，包括全局事件监视器接住的 Control+F9 与额外组合键。裸修饰键的 toggle 等松开才触发，期间有其他键（包括同组另一侧）就取消判定。hold 按下立即启动，期间普通组合键取消录音并原样交回应用，不提交文字，不请求整理；空格仍可锁定按住录音。
+
+完整共享偏好验证检查自定义语音键与模式切换的冲突；原生反向开启 Shift/Control 等开关也受占用限制，并显示中文提示。原有按键页使用中性键名、当前模式说明和与语音页一致的禁用状态。TextStream 整理开启但密钥尚未填写时可以保存识别设置，运行时仍直接上屏原文；填写了密钥后的无效整理地址仍拒绝保存。
 
 录音中 Esc 取消；失焦、换应用、改语音设置沿用原有取消流程。首次权限询问期间松开的按住键不会在授权后突然开始录音。输入法不是当前输入源或没有文本客户端时不启动。
 

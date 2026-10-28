@@ -101,6 +101,10 @@ int main(int argc, const char **argv)
         [[NSFileManager defaultManager] removeItemAtPath:external error:nil];
         settings.provider = @"unknown";
         Require(![settings validate:nil], "unknown provider accepted");
+        settings.provider = @"textstream";
+        settings.polishEnabled = YES;
+        settings.polishToken = @"";
+        Require([settings validate:nil], "pending TextStream polish blocks recognition settings");
         if (argc >= 2) {
             // 真实 AppKit 表单的离屏截图；使用合成偏好，不访问用户密钥或发送按键。
             [NSApplication sharedApplication];

@@ -36,3 +36,7 @@ static inline NSDictionary *MSIMEVoiceCustomShortcut(NSUserDefaults *defaults) {
     id value = [defaults objectForKey:@"MSIMEClientVoiceMacOSHotkey"];
     return MSIMEVoiceShortcutValid(value) ? value : nil;
 }
+static inline BOOL MSIMEVoiceShortcutOccupies(NSUserDefaults *defaults, NSArray<NSNumber *> *keys, unsigned modifiers) {
+    NSDictionary *binding = MSIMEVoiceCustomShortcut(defaults);
+    return binding && [keys containsObject:binding[@"key_code"]] && [binding[@"modifiers"] unsignedIntValue] == modifiers;
+}

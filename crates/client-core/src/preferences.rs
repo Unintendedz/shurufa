@@ -1820,6 +1820,98 @@ pub struct MacosVoiceHotkey {
 }
 
 impl MacosVoiceHotkey {
+    fn conflicts_with(&self, keys: &KeybindingPreferences) -> bool {
+        use crate::key_chord::{ChordKey, ChordModifiers, KeyChord};
+        if self.modifiers == 0 {
+            if matches!(self.key_code, 56 | 60) && keys.switch_language_shift {
+                return true;
+            }
+            if matches!(self.key_code, 59 | 62) && keys.switch_language_ctrl {
+                return true;
+            }
+        }
+        // 物理键码沿用 macOS 主键表；两份配置的按键集合必须能共同保存。
+        let key = match self.key_code {
+            0 => ChordKey::Letter('A'),
+            11 => ChordKey::Letter('B'),
+            8 => ChordKey::Letter('C'),
+            2 => ChordKey::Letter('D'),
+            14 => ChordKey::Letter('E'),
+            3 => ChordKey::Letter('F'),
+            5 => ChordKey::Letter('G'),
+            4 => ChordKey::Letter('H'),
+            34 => ChordKey::Letter('I'),
+            38 => ChordKey::Letter('J'),
+            40 => ChordKey::Letter('K'),
+            37 => ChordKey::Letter('L'),
+            46 => ChordKey::Letter('M'),
+            45 => ChordKey::Letter('N'),
+            31 => ChordKey::Letter('O'),
+            35 => ChordKey::Letter('P'),
+            12 => ChordKey::Letter('Q'),
+            15 => ChordKey::Letter('R'),
+            1 => ChordKey::Letter('S'),
+            17 => ChordKey::Letter('T'),
+            32 => ChordKey::Letter('U'),
+            9 => ChordKey::Letter('V'),
+            13 => ChordKey::Letter('W'),
+            7 => ChordKey::Letter('X'),
+            16 => ChordKey::Letter('Y'),
+            6 => ChordKey::Letter('Z'),
+            18 => ChordKey::Digit('1'),
+            19 => ChordKey::Digit('2'),
+            20 => ChordKey::Digit('3'),
+            21 => ChordKey::Digit('4'),
+            23 => ChordKey::Digit('5'),
+            22 => ChordKey::Digit('6'),
+            26 => ChordKey::Digit('7'),
+            28 => ChordKey::Digit('8'),
+            25 => ChordKey::Digit('9'),
+            29 => ChordKey::Digit('0'),
+            122 => ChordKey::Function(1),
+            120 => ChordKey::Function(2),
+            99 => ChordKey::Function(3),
+            118 => ChordKey::Function(4),
+            96 => ChordKey::Function(5),
+            97 => ChordKey::Function(6),
+            98 => ChordKey::Function(7),
+            100 => ChordKey::Function(8),
+            101 => ChordKey::Function(9),
+            109 => ChordKey::Function(10),
+            103 => ChordKey::Function(11),
+            111 => ChordKey::Function(12),
+            49 => ChordKey::Space,
+            41 => ChordKey::Semicolon,
+            24 => ChordKey::Equal,
+            43 => ChordKey::Comma,
+            27 => ChordKey::Minus,
+            47 => ChordKey::Period,
+            44 => ChordKey::Slash,
+            50 => ChordKey::Backquote,
+            33 => ChordKey::BracketLeft,
+            42 => ChordKey::Backslash,
+            30 => ChordKey::BracketRight,
+            39 => ChordKey::Quote,
+            _ => return false,
+        };
+        let chord = KeyChord {
+            key,
+            modifiers: ChordModifiers {
+                ctrl: self.modifiers & 1 != 0,
+                alt: self.modifiers & 2 != 0,
+                shift: self.modifiers & 4 != 0,
+                meta: self.modifiers & 8 != 0,
+            },
+        };
+        keys.occupied_toggle_chords(false)
+            .iter()
+            .any(|(other, _)| *other == chord)
+            || keys
+                .toggle_chords()
+                .iter()
+                .any(|(slot, other)| *slot != ToggleHotkeySlot::VoiceInput && *other == Some(chord))
+    }
+
     fn valid(&self) -> bool {
         if self.key_code > 126 || self.modifiers > 15 || matches!(self.key_code, 53 | 57 | 63) {
             return false;
@@ -4573,7 +4665,7 @@ impl Preferences {
                 .voice_input
                 .macos_hotkey
                 .as_ref()
-                .is_some_and(|key| !key.valid())
+                .is_some_and(|key| !key.valid() || key.conflicts_with(&self.keybindings))
             || !POLISH_PROVIDERS.contains(&self.voice_input.polish_provider.as_str())
             || !valid_model_path(&self.voice_input.asr_model_path)
             || !valid_model_mirror(&self.voice_input.asr_model_mirror)

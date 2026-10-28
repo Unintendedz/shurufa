@@ -27,6 +27,13 @@ int main() {
             auto chord = shortcut.observe(Event(8, flags, NSEventTypeKeyDown), config, false);
             assert(!chord.consumed && chord.action == Action::None);
             assert(shortcut.observe(up, config, false).action == Action::None);
+            // 同组的另一侧也是另一个实体键，不能当作仍然单按右侧。
+            shortcut.reset();
+            assert(shortcut.observe(down, config, false).action == Action::None);
+            const unsigned short otherKey = code.intValue == 54 ? 55 : 58;
+            const auto both = flags | (code.intValue == 54 ? NX_DEVICELCMDKEYMASK : NX_DEVICELALTKEYMASK);
+            assert(shortcut.observe(Event(otherKey, both, NSEventTypeFlagsChanged), config, false).action == Action::None);
+            assert(shortcut.observe(up, config, false).action == Action::None);
             for (NSString *mode in @[@"hold", @"legacy"]) {
                 config.mode = mode; shortcut.reset();
                 assert(shortcut.observe(down, config, false).action == Action::Toggle);
@@ -36,6 +43,11 @@ int main() {
                 assert(shortcut.observe(down, config, false).action == Action::Toggle);
                 chord = shortcut.observe(Event(8, flags, NSEventTypeKeyDown), config, true);
                 assert(!chord.consumed && chord.action == Action::Cancel);
+                assert(shortcut.observe(up, config, false).action == Action::None);
+                shortcut.reset();
+                // 已在录音时按普通组合键不能在修饰键按下时提前提交。
+                assert(shortcut.observe(down, config, true).action == Action::None);
+                assert(shortcut.observe(Event(8, flags, NSEventTypeKeyDown), config, true).action == Action::Cancel);
                 assert(shortcut.observe(up, config, false).action == Action::None);
             }
         }
@@ -71,5 +83,13 @@ int main() {
             @{@"key_code":@53, @"modifiers":@8}, @{@"key_code":@57, @"modifiers":@0},
             @{@"key_code":@54, @"modifiers":@8}, @{@"key_code":@1.5, @"modifiers":@1}]) assert(!MSIMEVoiceShortcutValid(invalid));
         assert(MSIMEVoiceShortcutValid(@{@"key_code":@54, @"modifiers":@1}));
+        // Control 已报侧别而 Option 没报时，只回退 Option 自己的侧别。
+        MSIMEConfiguredVoiceShortcut fallback;
+        MSIMEConfiguredVoiceShortcut::Options options{nil, @"hold", false, false, true, false};
+        const auto control = NSEventModifierFlagControl | NX_DEVICERCTLKEYMASK;
+        fallback.observe(Event(62, control, NSEventTypeFlagsChanged), options, false);
+        const auto result = fallback.observe(Event(61, control | NSEventModifierFlagOption, NSEventTypeFlagsChanged),
+            options, false, control | NSEventModifierFlagOption | NX_DEVICERALTKEYMASK);
+        assert(result.action == Action::Toggle);
     }
 }
