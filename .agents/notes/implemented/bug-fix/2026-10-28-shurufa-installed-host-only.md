@@ -20,6 +20,8 @@ Shurufa 常驻服务只接受 `~/Library/Input Methods/Shurufa.app` 和 `/Librar
 
 原生启动路径测试覆盖用户级、系统级、构建和备份路径；构建目录无常驻服务器；安装后登记和进程只指向安装目录，CDHash 与构建产物一致。测试不选择系统输入源，也不注入键盘事件。
 
+安装脚本在 open 后等待主进程出现，再检查 LaunchServices 路径集合恰好只有目标安装目录、主进程数量恰好为一且可执行文件路径一致；不满足就失败，不把按 bundle id 查询成功当作完整安装验收。
+
 ## Consequences
 
 系统实际的跨应用切换手感仍交由用户验收。仅对 Shurufa 生效，其他 edition 保持原来的开发启动路径。

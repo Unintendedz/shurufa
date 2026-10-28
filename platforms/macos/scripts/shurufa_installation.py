@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """安装前整理同标识的登记、进程与旧备份，不选择输入源。"""
 import os
+import json
 import plistlib
 import signal
 import subprocess
@@ -86,6 +87,25 @@ def prepare():
             print(f"Preserved: {preserve_bundle(bundle)}")
 
 
+def installation_matches(paths, processes, destination):
+    executable = destination / "Contents/MacOS/Shurufa"
+    return set(path.resolve() for path in paths) == {destination.resolve()} and \
+        len(processes) == 1 and processes[0][1].resolve() == executable.resolve()
+
+
+def verify(destination):
+    for _ in range(50):
+        processes = host_processes()
+        if len(processes) == 1 and processes[0][1] == destination / "Contents/MacOS/Shurufa":
+            break
+        time.sleep(0.1)
+    paths = registered_paths(subprocess.check_output([LSREGISTER, "-dump"], text=True))
+    if not installation_matches(paths, processes, destination):
+        raise RuntimeError("安装后登记或进程不是唯一的安装版，请保留日志检查；没有切换当前输入源")
+    print(json.dumps({"registered_paths":[str(path) for path in paths],
+        "processes":[{"pid":pid,"executable":str(path)} for pid,path in processes]}, ensure_ascii=False))
+
+
 if __name__ == "__main__":
     if len(sys.argv) == 2 and sys.argv[1] == "prepare":
         prepare()
@@ -93,5 +113,7 @@ if __name__ == "__main__":
         print(preserve_bundle(Path(sys.argv[2])))
     elif len(sys.argv) == 3 and sys.argv[1] == "unregister":
         unregister(Path(sys.argv[2]).resolve())
+    elif len(sys.argv) == 3 and sys.argv[1] == "verify":
+        verify(Path(sys.argv[2]).resolve())
     else:
         raise SystemExit("usage: shurufa_installation.py prepare | preserve <bundle>")

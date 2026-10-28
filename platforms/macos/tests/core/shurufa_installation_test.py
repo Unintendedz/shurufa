@@ -12,6 +12,14 @@ spec.loader.exec_module(installation)
 
 
 class InstallationTests(unittest.TestCase):
+    def test_final_state_requires_only_installed_path_and_one_process(self):
+        destination = Path("/synthetic/Input Methods/Shurufa.app")
+        process = (123, destination / "Contents/MacOS/Shurufa")
+        self.assertTrue(installation.installation_matches([destination], [process], destination))
+        self.assertFalse(installation.installation_matches([destination, Path("/synthetic/build/Shurufa.app")], [process], destination))
+        self.assertFalse(installation.installation_matches([destination], [process, process], destination))
+        self.assertFalse(installation.installation_matches([destination], [], destination))
+
     def test_registered_paths_only_match_exact_identifier(self):
         separator = "\n" + "-" * 80 + "\n"
         dump = separator.join([

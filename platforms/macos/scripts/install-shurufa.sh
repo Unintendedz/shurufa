@@ -41,3 +41,4 @@ fi
 "$executable" --enabled-input-modes
 # 系统已有实例时 open 会复用它，不直接派生第二个服务器。
 open -g "$destination"
+python3 "$root/platforms/macos/scripts/shurufa_installation.py" verify "$destination"
