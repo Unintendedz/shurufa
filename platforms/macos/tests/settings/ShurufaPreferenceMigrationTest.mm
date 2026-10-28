@@ -51,5 +51,18 @@ int main() {
             assert(MSIMEMigrateShurufaVoiceShortcut(defaults, load, save) && saves == 1);
         }
         [defaults removePersistentDomainForName:suite];
+        document = @{@"revision":@7,@"preferences":@{@"voice_input":@{@"stream_inline_preedit":@YES,@"asr_provider":@"textstream"}}};
+        [defaults setBool:YES forKey:@"MSIMEClientVoiceStreamInlinePreedit"];
+        saves = 0;
+        assert(!MSIMEMigrateShurufaVoicePresentation(defaults, load, ^NSDictionary *(uint64_t, NSDictionary *) { return nil; }));
+        assert([defaults boolForKey:@"MSIMEClientVoiceStreamInlinePreedit"] && ![defaults boolForKey:@"ShurufaVoiceOverlayMigrationV1"]);
+        assert(MSIMEMigrateShurufaVoicePresentation(defaults, load, save));
+        assert(![defaults boolForKey:@"MSIMEClientVoiceStreamInlinePreedit"] && saves == 1);
+        assert([document[@"preferences"][@"voice_input"][@"stream_inline_preedit"] isEqual:@NO]);
+        assert([document[@"preferences"][@"voice_input"][@"asr_provider"] isEqual:@"textstream"]);
+        [defaults setBool:YES forKey:@"MSIMEClientVoiceStreamInlinePreedit"];
+        assert(MSIMEMigrateShurufaVoicePresentation(defaults, load, save) && saves == 1);
+        assert([defaults boolForKey:@"MSIMEClientVoiceStreamInlinePreedit"]);
+        [defaults removePersistentDomainForName:suite];
     }
 }

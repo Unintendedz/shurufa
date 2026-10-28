@@ -2841,8 +2841,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     [self preferencesChanged];
 }
 - (BOOL)voiceStreamInlinePreedit {
-    return [_defaults objectForKey:VoiceStreamInlinePreeditKey] == nil ||
-           [_defaults boolForKey:VoiceStreamInlinePreeditKey];
+    return MSIMEVoiceStreamInlinePreeditEnabled(_defaults);
 }
 - (void)setVoiceStreamInlinePreedit:(BOOL)value {
     [_defaults setBool:value forKey:VoiceStreamInlinePreeditKey];
@@ -4055,7 +4054,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     _voiceSoundToggle = MSIMESettingSwitch(self, @selector(voiceSoundChanged:), @"播放提示音");
     _voiceMuteSystemAudioToggle = MSIMESettingSwitch(self, @selector(voiceMuteSystemAudioChanged:), @"录音时静音系统音频");
     _voiceStreamInlinePreeditToggle =
-        MSIMESettingSwitch(self, @selector(voiceStreamInlinePreeditChanged:), @"实时显示识别结果");
+        MSIMESettingSwitch(self, @selector(voiceStreamInlinePreeditChanged:), MSIMEEditionIsShurufa() ? @"在编辑框实时显示" : @"实时显示识别结果");
     _voiceHotkeyCtrlF9Toggle = MSIMESettingSwitch(self, @selector(voiceHotkeyCtrlF9Changed:), @"Control + F9 语音输入");
     _voiceHotkeyRightAltToggle = MSIMESettingSwitch(self, @selector(voiceHotkeyRightAltChanged:), @"右 Option 语音输入");
     _voiceHotkeyCtrlCommandToggle =
@@ -4858,8 +4857,8 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
         [self settingRow:@"识别语言" control:_voiceLanguageButton],
         [self settingRow:@"播放提示音" detail:@"开始与结束录音时各响一声。" control:_voiceSoundToggle],
         [self settingRow:@"录音时静音系统音频" detail:@"录完自动恢复原来的音量。" control:_voiceMuteSystemAudioToggle],
-        [self settingRow:@"实时显示识别结果"
-                  detail:@"边说边把还没定稿的文字显示在输入位置；关掉则只在识别结束后一次上屏。"
+        [self settingRow:MSIMEEditionIsShurufa() ? @"在编辑框实时显示" : @"实时显示识别结果"
+                  detail:MSIMEEditionIsShurufa() ? @"关闭后只在悬浮窗预览，完成后一次上屏。" : @"边说边把还没定稿的文字显示在输入位置；关掉则只在识别结束后一次上屏。"
                  control:_voiceStreamInlinePreeditToggle],
     ], 0.0);
     voiceCard.accessibilityLabel = @"语音卡片";

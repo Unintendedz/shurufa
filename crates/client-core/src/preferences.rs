@@ -4403,6 +4403,7 @@ impl Preferences {
             preferences.local_modes.temporary_japanese = false;
             preferences.plugins = PluginPreferences::default();
             preferences.voice_input.enabled = true;
+            preferences.voice_input.stream_inline_preedit = false;
             preferences.voice_input.macos_hotkey = Some(MacosVoiceHotkey {
                 key_code: 61,
                 modifiers: 0,

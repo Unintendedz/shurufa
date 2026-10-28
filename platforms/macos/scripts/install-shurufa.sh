@@ -28,6 +28,7 @@ executable="$destination/Contents/MacOS/Shurufa"
 "$executable" --prepare-host
 "$executable" --migrate-caps-lock
 "$executable" --migrate-voice-shortcut
+"$executable" --migrate-voice-presentation
 set +e
 "$executable" --register-input-source
 registration=$?

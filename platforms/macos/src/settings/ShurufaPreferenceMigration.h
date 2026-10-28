@@ -47,3 +47,22 @@ static inline BOOL MSIMEMigrateShurufaCapsLock(NSUserDefaults *defaults,
     [defaults synchronize];
     return YES;
 }
+
+// 用户明确要求现有安装改为浮层预览；共享保存成功后再更新本机镜像和一次性标记。
+static inline BOOL MSIMEMigrateShurufaVoicePresentation(NSUserDefaults *defaults,
+    NSDictionary *(^load)(void), NSDictionary *(^save)(uint64_t, NSDictionary *)) {
+    NSString *marker = @"ShurufaVoiceOverlayMigrationV1";
+    if ([defaults boolForKey:marker]) return YES;
+    NSDictionary *snapshot = load();
+    if (![snapshot[@"preferences"] isKindOfClass:NSDictionary.class] || ![snapshot[@"revision"] isKindOfClass:NSNumber.class]) return NO;
+    NSMutableDictionary *updated = [snapshot mutableCopy];
+    NSMutableDictionary *preferences = [snapshot[@"preferences"] mutableCopy];
+    NSMutableDictionary *voice = [preferences[@"voice_input"] mutableCopy] ?: [NSMutableDictionary dictionary];
+    voice[@"stream_inline_preedit"] = @NO;
+    preferences[@"voice_input"] = voice; updated[@"preferences"] = preferences;
+    if (!save([snapshot[@"revision"] unsignedLongLongValue], updated)) return NO;
+    [defaults setBool:NO forKey:@"MSIMEClientVoiceStreamInlinePreedit"];
+    [defaults setBool:YES forKey:marker];
+    [defaults synchronize];
+    return YES;
+}

@@ -8214,6 +8214,8 @@ fn shurufa_defaults_use_textstream_with_polish_and_validate() {
     assert!(defaults.keybindings.switch_language_caps_lock);
     assert!(!Preferences::default().keybindings.switch_language_caps_lock);
     assert_eq!(defaults.voice_input.asr_provider, "textstream");
+    assert!(!defaults.voice_input.stream_inline_preedit);
+    assert!(Preferences::default().voice_input.stream_inline_preedit);
     assert_eq!(defaults.voice_input.hotkey_mode, VoiceHotkeyMode::Hold);
     assert_eq!(
         defaults.voice_input.macos_hotkey,

@@ -269,6 +269,24 @@ int main(int argc, char **argv) {
             assert(source.active && [overlay.preview isEqual:@"synthetic partial after blur"] && !origin.marked.length);
             [owner cancelLiveVoiceInput];
             assert(!source.active && !origin.commits.count && !MSIMEVoiceRecordingOwner);
+            // 从首个 partial 起只更新浮层；整理完成后才向编辑框提交一次。
+            assert(!MSIMEVoiceStreamInlinePreeditEnabled(nil));
+            voiceArguments[@"MSIMEClientVoiceStreamInlinePreedit"] = @NO;
+            [defaults setVolatileDomain:voiceArguments forName:NSArgumentDomain];
+            [owner setValue:origin forKey:@"activeClient"]; MSIMEFocusedController = owner;
+            owner.usePolishFixture = YES;
+            [owner toggleVoiceInput:nil];
+            source.transcript(@"synthetic overlay first partial", NO);
+            assert(!origin.marked.length && !origin.commits.count && [overlay.preview isEqual:@"synthetic overlay first partial"]);
+            overlay.actionHandler(NO);
+            source.transcript(@"synthetic overlay final", YES);
+            assert(!origin.commits.count && owner.polishFixture.submissions == 1);
+            owner.polishFixture.completion(@"synthetic final polished once", nil);
+            assert(origin.commits.count == 1 && [origin.commits.lastObject isEqual:@"synthetic final polished once"]);
+            origin.commits = [NSMutableArray array]; owner.usePolishFixture = NO;
+            voiceArguments[@"MSIMEClientVoiceStreamInlinePreedit"] = @YES;
+            [defaults setVolatileDomain:voiceArguments forName:NSArgumentDomain];
+            puts("PASS overlay-only: first partial, no marked text, one polished commit");
             for (NSUInteger route=0; route<3; ++route) {
                 LiveTextFixture *next = [LiveTextFixture new];
                 PersistentControllerFixture *destination = [PersistentControllerFixture alloc];
