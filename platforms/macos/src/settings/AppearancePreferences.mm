@@ -4699,13 +4699,13 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
         [self settingRow:@"单按 Shift 切换中英文" control:_shiftTapShortcutToggle aka:@[@"中英文切换"]],
         [self settingRow:@"单按 Control 切换中英文" control:_controlTapShortcutToggle aka:@[@"中英文切换"]],
         [self settingRow:@"单按 Caps Lock 切换中英文"
-                  detail:@"轻点（300 毫秒内松开）切换中英文，不打开大写锁定；按住更久照常打开大写锁定。若打开了系统的「使用大写锁定键切换 ABC」，请先把它关掉。部分外接键盘不报告 Caps Lock 是否按住，第一次在这类键盘上轻点时，系统会请求「输入监控」授权：允许后轻点才能切换，不允许时轻点照常打开大写锁定。"
+                  detail:MSIMEEditionIsShurufa() ? @"轻点切换中英文，按住为大写锁定。" : @"轻点（300 毫秒内松开）切换中英文，不打开大写锁定；按住更久照常打开大写锁定。若打开了系统的「使用大写锁定键切换 ABC」，请先把它关掉。部分外接键盘不报告 Caps Lock 是否按住，第一次在这类键盘上轻点时，系统会请求「输入监控」授权：允许后轻点才能切换，不允许时轻点照常打开大写锁定。"
                  control:_capsLockTapShortcutToggle
                      aka:@[@"中英文切换", @"大写锁定"]],
         [self settingRow:@"Control + Option + 空格切换中英文" control:_controlOptionSpaceShortcutToggle aka:@[@"中英文切换"]],
         [self settingRow:@"Control + Shift + F 切换简繁" control:_characterSetShortcutToggle aka:@[@"繁体"]],
         [self settingRow:@"Option + Shift + H 切换全半角"
-                  detail:@"关掉后这个组合键交给应用处理；Control + Shift + 空格 与工具栏的全半角按钮不受影响。"
+                  detail:MSIMEEditionIsShurufa() ? @"" : @"关掉后这个组合键交给应用处理；Control + Shift + 空格 与工具栏的全半角按钮不受影响。"
                  control:_fullWidthShortcutToggle
                      aka:@[@"全角", @"半角"]],
     ]];
