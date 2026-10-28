@@ -518,6 +518,7 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
         case MSIMEVoiceFailureSpeechPermission: message = @"请在系统设置允许语音识别"; break;
         case MSIMEVoiceFailureCapture: message = @"录音失败，请检查麦克风设置"; break;
         case MSIMEVoiceFailureProvider: message = @"识别失败，请检查语音服务设置"; break;
+        case MSIMEVoiceFailureSession: message = @"语音会话不可用，请重试"; break;
         case MSIMEVoiceFailureNoSpeech: message = @"未识别到语音，请重试"; break;
         case MSIMEVoiceFailureTimeout: message = @"语音处理超时，请重试"; break;
         case MSIMEVoiceFailureMissingToken: message = @"请先在设置的“语音输入”分区填写当前 ASR 提供商的 API Token。"; break;

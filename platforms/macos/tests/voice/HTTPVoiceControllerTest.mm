@@ -214,6 +214,8 @@ int main() {
         capture.failStart = NO;
         assert([controller startHTTPVoiceInputWithOptions:@{}]);
         void (^oldFailure)(NSError *) = capture.failure;
+        // 真实 PCM 服务先取消采集，再交付同一请求的失败回调。
+        capture.active = NO;
         oldFailure([NSError errorWithDomain:@"synthetic" code:1 userInfo:nil]);
         assert(!capture.active && controller.requestFixture.cancellations == 1 && !controller.requestFixture.submitted);
         assert(overlay.failure == MSIMEVoiceFailureCapture);

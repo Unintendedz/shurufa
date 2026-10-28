@@ -185,6 +185,7 @@ static int MSIMEBindSyntheticVoiceSocket(NSString *path)
 }
 
 @interface LiveHostFixture : MSIMEClientSession
+@property BOOL rejectVoiceResult;
 @property(atomic) NSUInteger providerStops;
 @property(atomic) NSUInteger providerCancels;
 @property(atomic) BOOL providerStarted;
@@ -193,6 +194,9 @@ static int MSIMEBindSyntheticVoiceSocket(NSString *path)
 @property dispatch_semaphore_t providerDone;
 @end
 @implementation LiveHostFixture
+- (NSDictionary *)applyVoiceText:(NSString *)text generation:(uint64_t)generation error:(NSError **)error {
+    return self.rejectVoiceResult ? nil : [super applyVoiceText:text generation:generation error:error];
+}
 - (BOOL)voiceProviderStream:(NSDictionary *)query socket:(NSString *)socket update:(MSIMEVoiceProviderUpdate)update phase:(MSIMEVoiceProviderPhase)phase error:(NSError **)error {
     (void)error;
     assert([socket isEqual:MSIMESyntheticVoiceSocket()] && [query[@"generation"] unsignedLongLongValue]);
@@ -395,12 +399,40 @@ int main(int argc, char **argv) {
             [owner toggleVoiceInput:nil];
             source.transcript(@"汉语", YES);
             assert([origin.commits.lastObject isEqual:@"漢語"]);
+            owner.copiedText = nil;
+            [owner toggleVoiceInput:nil];
+            [owner deactivateServer:origin];
+            MSIMEFocusedController = nil;
+            source.transcript(@"汉语", YES);
+            assert([owner.copiedText isEqual:@"漢語"]);
             [outputDefaults removePersistentDomainForName:outputSuite];
-            puts("PASS persistent: traditional output");
+            puts("PASS persistent: traditional insertion and clipboard");
+            [owner setValue:origin forKey:@"activeClient"];
+            [owner toggleVoiceInput:nil];
+            [owner deactivateServer:origin];
+            [source cancelWithError:nil];
+            [owner reportVoiceFailure:MSIMEVoiceFailureCapture];
+            assert(overlay.failure == MSIMEVoiceFailureCapture && !MSIMEVoiceRecordingOwner);
+            [owner setValue:origin forKey:@"activeClient"];
+            [owner toggleVoiceInput:nil];
+            session.rejectVoiceResult = YES;
+            source.transcript(@"synthetic unavailable final", YES);
+            assert(overlay.failure == MSIMEVoiceFailureSession && !source.active);
+            session.rejectVoiceResult = NO;
+            [NSApplication sharedApplication];
+            [owner setValue:nil forKey:@"voiceOverlay"];
+            voiceArguments[@"MSIMEClientVoiceASRProvider"] = @"openai";
+            voiceArguments[@"MSIMEClientVoiceASRToken"] = @"";
+            [defaults setVolatileDomain:voiceArguments forName:NSArgumentDomain];
+            [owner toggleVoiceInput:nil];
+            MSIMEVoiceWaveOverlay *startupFailure = [owner valueForKey:@"voiceOverlay"];
+            assert(startupFailure.collectionBehavior & NSWindowCollectionBehaviorCanJoinAllSpaces);
+            assert(startupFailure.collectionBehavior & NSWindowCollectionBehaviorFullScreenAuxiliary);
+            [startupFailure setListening:NO];
             MSIMEFocusedController = nil;
             method_setImplementation(method, original);
             method_setImplementation(deactivate, originalDeactivate);
-            assert(PersistentBaseDeactivations == 11);
+            assert(PersistentBaseDeactivations == 13);
             [defaults setVolatileDomain:old forName:NSArgumentDomain];
             assert([session closeWithError:nil]);
             assert([NSFileManager.defaultManager removeItemAtPath:root error:nil]);

@@ -5541,6 +5541,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     if ([self ownsDoubaoVoiceFocus]) {
         if (!text.length) { [self reportVoiceFailure:MSIMEVoiceFailureNoSpeech]; return; }
         NSDictionary *result = text.length ? [_doubaoVoiceSession applyVoiceText:text generation:_doubaoVoiceGeneration error:nil] : nil;
+        if (!result) { [self reportVoiceFailure:MSIMEVoiceFailureSession]; return; }
         if (result) { if (![self ownsPersistentVoiceRecording]) _doubaoVoiceMarked = NO; [self applyVoiceResult:result route:_doubaoVoiceCommit]; }
     }
     [self cancelDoubaoVoiceInput];
@@ -5592,7 +5593,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
 }
 - (void)reportVoiceFailure:(MSIMEVoiceFailure)failure { [self reportVoiceFailure:failure detail:nil]; }
 - (void)reportVoiceFailure:(MSIMEVoiceFailure)failure detail:(NSString *)detail {
-    const BOOL persistent = [self ownsPersistentVoiceRecording];
+    const BOOL persistent = MSIMEEditionIsShurufa() && MSIMEVoiceRecordingOwner == self;
     _voicePermissionToken = nil; _voiceHoldShortcut.reset(); _configuredVoiceShortcut.reset();
     [self cancelHTTPVoiceInput]; [self cancelDoubaoVoiceInput]; [self cancelLiveVoiceInput];
     if (_voiceService.active) [_voiceService cancelWithError:nil];
@@ -5600,6 +5601,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     if (!_activeClient && !persistent) return;
     if (!_voiceOverlay) {
         _voiceOverlay = [MSIMEVoiceWaveOverlay new];
+        [_voiceOverlay setPersistentRecording:MSIMEEditionIsShurufa()];
         [_voiceOverlay applyThemePreferences:_voiceThemePreferences ?: @{}];
     }
     [self refreshVoiceOverlayScreen];
@@ -5777,7 +5779,8 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
         (void)failure;
         MSIMEInputController *controller = weakSelf;
         if (!controller || controller->_httpVoiceRequest != request) return;
-        if (![controller voiceFocusMatchesClient:controller->_httpVoiceClient session:controller->_httpVoiceSession generation:controller->_httpVoiceGeneration]) { [controller cancelHTTPVoiceInput]; return; }
+        // 采集服务先停机再回报错误，active 为 NO 不代表这次请求已经过期。
+        if (![controller voiceIdentityMatchesClient:controller->_httpVoiceClient session:controller->_httpVoiceSession generation:controller->_httpVoiceGeneration]) { [controller cancelHTTPVoiceInput]; return; }
         [controller reportVoiceFailure:MSIMEVoiceFailureCapture];
     } error:&error]) { [self reportVoiceFailure:MSIMEVoiceFailureCapture]; return NO; }
     [self voiceCaptureDidStart];
@@ -5808,7 +5811,8 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
             // Native host session methods are main-thread-only. Recheck the
             // departing focus identity before the runtime's own generation check.
             NSDictionary *result = [session applyVoiceText:text generation:generation error:nil];
-            if (result) [controller applyVoiceResult:result route:controller->_httpVoiceCommit];
+            if (!result) { [controller reportVoiceFailure:MSIMEVoiceFailureSession]; return; }
+            [controller applyVoiceResult:result route:controller->_httpVoiceCommit];
         }
         [controller cancelHTTPVoiceInput];
     } error:&error]) [self reportVoiceFailure:MSIMEVoiceFailureProvider detail:MSIMEVoiceFailureDetail(error)];
@@ -5816,9 +5820,12 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
 - (BOOL)ownsPersistentVoiceRecording {
     return MSIMEEditionIsShurufa() && MSIMEVoiceRecordingOwner == self && _voiceService.active;
 }
+- (BOOL)voiceIdentityMatchesClient:(id)client session:(MSIMEClientSession *)session generation:(uint64_t)generation {
+    return ((MSIMEEditionIsShurufa() && MSIMEVoiceRecordingOwner == self) || (_activeClient == client && _session == session)) &&
+        _voiceGeneration == generation;
+}
 - (BOOL)voiceFocusMatchesClient:(id)client session:(MSIMEClientSession *)session generation:(uint64_t)generation {
-    return ([self ownsPersistentVoiceRecording] || (_activeClient == client && _session == session)) &&
-        _voiceGeneration == generation && _voiceService.active;
+    return [self voiceIdentityMatchesClient:client session:session generation:generation] && _voiceService.active;
 }
 - (void)suspendVoiceForFocusChange {
     _voicePermissionToken = nil;
@@ -5940,6 +5947,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     if ([self ownsLiveVoiceToken:token]) {
         if (!text.length) { [self reportVoiceFailure:MSIMEVoiceFailureNoSpeech]; return; }
         NSDictionary *result = text.length ? [_liveVoiceSession applyVoiceText:text generation:_liveVoiceGeneration error:nil] : nil;
+        if (!result) { [self reportVoiceFailure:MSIMEVoiceFailureSession]; return; }
         if (result) { if (![self ownsPersistentVoiceRecording]) _liveVoiceMarked = NO; [self applyVoiceResult:result route:_liveVoiceCommit]; }
     }
     [self cancelLiveVoiceInput];
@@ -6066,6 +6074,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     if (!_voiceAudioMuter) _voiceAudioMuter = [[MSIMEVoiceAudioMuter alloc] init];
     if (!_voiceOverlay) {
         _voiceOverlay = [[MSIMEVoiceWaveOverlay alloc] init];
+        [_voiceOverlay setPersistentRecording:MSIMEEditionIsShurufa()];
         [_voiceOverlay applyThemePreferences:_voiceThemePreferences ?: @{}];
     }
     [self refreshVoiceOverlayScreen];
@@ -8479,10 +8488,11 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     if ([self ownsPersistentVoiceRecording] && [text isKindOfClass:NSString.class] && text.length) {
         [self detachVoiceMarkedText];
         MSIMEInputController *destination = [self currentVoiceDestination];
+        MSIMEAppearancePreferences *outputAppearance = destination ? destination->_appearance : _appearance;
+        if (outputAppearance.traditionalOutput && MSIMEScriptConversionApplies(transition[@"commit_context"]))
+            text = MSIMEChineseOutputString(text, YES);
         if (destination) {
             if (destination->_session) [destination apply:[destination->_session command:MSIME_FINISH_COMPOSITION error:nil]];
-            if (destination->_appearance.traditionalOutput && MSIMEScriptConversionApplies(transition[@"commit_context"]))
-                text = MSIMEChineseOutputString(text, YES);
             // 与普通上屏一致，先更新前文，避免同步客户端回调读到录音前的标点状态。
             [destination noteSmartPunctuationShadow:[text characterAtIndex:text.length - 1]];
             [(id<MSIMETextClient>)destination->_activeClient insertText:text replacementRange:NSMakeRange(NSNotFound,NSNotFound)];
