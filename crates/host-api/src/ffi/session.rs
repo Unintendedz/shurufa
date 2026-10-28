@@ -36,7 +36,10 @@ pub(crate) fn create_session(bytes: &[u8], usage: SessionUse) -> Result<Value, S
     if options.api_version != 1 {
         return Err("unsupported host API version".into());
     }
-    options.preferences.validate().map_err(|e| e.to_string())?;
+    options
+        .preferences
+        .validate_for_edition(options.edition())
+        .map_err(|e| e.to_string())?;
     let page_size = host_page_size(options.preferences.candidate_page_size);
     let applied = options.preferences.clone();
     let ai_provider_cache = {

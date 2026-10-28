@@ -21394,3 +21394,30 @@ fn world_clock_validates_and_forwards_offline_requests() {
         false
     );
 }
+
+#[test]
+fn shurufa_macos_voice_hotkey_survives_runtime_validation() {
+    let directory = tempfile::tempdir().unwrap();
+    for name in ["resources", "user", "cache", "dictionaries"] {
+        std::fs::create_dir_all(directory.path().join(name)).unwrap();
+    }
+    let mut preferences = Preferences::for_edition(Edition::by_id("shurufa").unwrap());
+    preferences.voice_input.macos_hotkey = Some(msime_client_core::preferences::MacosVoiceHotkey {
+        key_code: 40,
+        modifiers: 13,
+    });
+    let mut options = empty_host_options(directory.path());
+    options["edition"] = json!("shurufa");
+    options["preferences"] = json!(preferences);
+    let bytes = options.to_string();
+    let created = read(unsafe { msime_client_create(bytes.as_ptr(), bytes.len()) });
+    assert_eq!(created["ok"], true, "{created}");
+    let handle = created["value"]["session"].as_u64().unwrap();
+    assert_eq!(update(handle, 1, &preferences)["ok"], true);
+    preferences.voice_input.macos_hotkey = Some(msime_client_core::preferences::MacosVoiceHotkey {
+        key_code: 8,
+        modifiers: 7,
+    });
+    assert_eq!(update(handle, 2, &preferences)["ok"], false);
+    assert_eq!(read(msime_client_destroy(handle))["ok"], true);
+}

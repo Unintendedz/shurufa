@@ -1160,7 +1160,10 @@ impl HostSession {
         if snapshot.format_version != 1 {
             return Err("unsupported preferences format".into());
         }
-        snapshot.preferences.validate().map_err(|e| e.to_string())?;
+        snapshot
+            .preferences
+            .validate_for_edition(self.edition)
+            .map_err(|e| e.to_string())?;
         if let Some(previous) = &self.requested {
             if snapshot.revision < previous.revision
                 || (snapshot.revision == previous.revision && snapshot != *previous)

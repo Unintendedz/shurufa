@@ -50,6 +50,10 @@ static inline NSString *MSIMEVoiceShortcutConflict(NSDictionary *binding, MSIMEA
     if (code == 53) return @"Esc 留作取消录音，不能设为语音快捷键。";
     if (code == 57) return @"Caps Lock 留作中英文切换，不能设为语音快捷键。";
     if (!MSIMEVoiceShortcutValid(binding)) return @"请使用单个修饰键、功能键，或带 Control、Option、Command 的组合键，避免占用正常打字。";
+    if (flags == 7 && [@[@8,@15,@17] containsObject:@(code)])
+        return @"这个组合键已用于输入法维护，请选择其他快捷键。";
+    if (!MSIMEEditionIsShurufa() && code == 40 && flags == 13)
+        return @"这个组合键已用于屏幕键盘，请选择其他快捷键。";
     if (!appearance) return nil;
     if (flags == 0 && ((code == 56 || code == 60) && appearance.shiftTapShortcut))
         return @"这个 Shift 键已用于切换中英文，请先在按键设置中关闭该切换方式。";

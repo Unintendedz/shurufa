@@ -1066,7 +1066,12 @@ fn parse_options(bytes: &[u8]) -> Result<EngineOptions, &'static str> {
     validate_options(options)
 }
 fn validate_options(options: HostOptions) -> Result<EngineOptions, &'static str> {
-    if options.api_version != 1 || options.preferences.validate().is_err() {
+    if options.api_version != 1
+        || options
+            .preferences
+            .validate_for_edition(options.edition())
+            .is_err()
+    {
         return Err("invalid snapshot options");
     }
     Ok(options.into_engine_options())

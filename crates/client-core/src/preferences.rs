@@ -1820,7 +1820,11 @@ pub struct MacosVoiceHotkey {
 }
 
 impl MacosVoiceHotkey {
-    fn conflicts_with(&self, keys: &KeybindingPreferences) -> bool {
+    fn conflicts_with(
+        &self,
+        keys: &KeybindingPreferences,
+        edition: &crate::edition::Edition,
+    ) -> bool {
         use crate::key_chord::{ChordKey, ChordModifiers, KeyChord};
         if self.modifiers == 0 {
             if matches!(self.key_code, 56 | 60) && keys.switch_language_shift {
@@ -1905,7 +1909,12 @@ impl MacosVoiceHotkey {
         };
         keys.occupied_toggle_chords(false)
             .iter()
-            .any(|(other, _)| *other == chord)
+            .any(|(other, owner)| {
+                // macOS 不处理 Linux 的 Ctrl+Space；Shurufa 已移除屏幕键盘入口。
+                *other == chord
+                    && *owner != ToggleChordOwner::SwitchLanguageCtrlSpace
+                    && !(edition.id == "shurufa" && *owner == ToggleChordOwner::MacosScreenKeyboard)
+            })
             || keys
                 .toggle_chords()
                 .iter()
@@ -4590,6 +4599,14 @@ impl Preferences {
     }
 
     pub fn validate(&self) -> Result<(), PreferencesError> {
+        self.validate_for_edition(crate::edition::Edition::full())
+    }
+
+    /// 按当前产品实际提供的 macOS 快捷键校验，不占用已移除能力的组合键。
+    pub fn validate_for_edition(
+        &self,
+        edition: &crate::edition::Edition,
+    ) -> Result<(), PreferencesError> {
         let expected = default_text_edit_button_order();
         if self.touch_text_edit_button_order.len() != expected.len()
             || !expected
@@ -4674,7 +4691,7 @@ impl Preferences {
                 .voice_input
                 .macos_hotkey
                 .as_ref()
-                .is_some_and(|key| !key.valid() || key.conflicts_with(&self.keybindings))
+                .is_some_and(|key| !key.valid() || key.conflicts_with(&self.keybindings, edition))
             || !POLISH_PROVIDERS.contains(&self.voice_input.polish_provider.as_str())
             || !valid_model_path(&self.voice_input.asr_model_path)
             || !valid_model_mirror(&self.voice_input.asr_model_mirror)
@@ -5194,7 +5211,7 @@ impl PreferencesStore {
         if snapshot.format_version != 1 {
             return Err(PreferencesError::UnsupportedFormat);
         }
-        snapshot.preferences.validate()?;
+        snapshot.preferences.validate_for_edition(self.edition())?;
         snapshot
             .preferences
             .voice_input
@@ -5324,7 +5341,7 @@ impl PreferencesStore {
         preferences.keybindings.normalize_toggle_hotkeys();
         // 双拼辅助码触发方式的互斥规则在写入端归一：末尾间接与句中间接的同一枚触发键只能归一边（句中开着时归句中），`mid_sentence` 与 `direct_helpcode` 同真时按万象式直接。
         preferences.shuangpin_helpcode.modes = preferences.shuangpin_helpcode.modes.normalized();
-        preferences.validate()?;
+        preferences.validate_for_edition(self.edition())?;
         // Hosts save whenever a setting might have changed, several processes and controllers at a time, and every reader reloads and reapplies the whole document when the revision moves. Writing the same settings again would cost an fsync under the exclusive lock and a reload everywhere for nothing, so an unchanged document keeps its revision. An existing file only: the first save still creates it.
         if current.revision > 0 && preferences == current.preferences {
             return Ok(current);
@@ -5383,7 +5400,9 @@ impl PreferencesStore {
         }
         let backup_path = self.write_backup(&bytes, time::OffsetDateTime::now_utc())?;
         let (preferences, salvaged) = match &document {
-            Some(document) => salvage_preferences(document, self.default_preferences())?,
+            Some(document) => {
+                salvage_preferences(document, self.default_preferences(), self.edition())?
+            }
             None => (self.default_preferences(), false),
         };
         let revision = match document
@@ -5572,9 +5591,12 @@ fn restore_unknown_fields(preferences: &mut serde_json::Value, unknown: &[Unknow
 }
 
 /// Whether `preferences` is a document `load` would accept.
-fn acceptable_preferences(candidate: &serde_json::Map<String, serde_json::Value>) -> bool {
+fn acceptable_preferences(
+    candidate: &serde_json::Map<String, serde_json::Value>,
+    edition: &crate::edition::Edition,
+) -> bool {
     serde_json::from_value::<Preferences>(serde_json::Value::Object(candidate.clone()))
-        .is_ok_and(|preferences| preferences.validate().is_ok())
+        .is_ok_and(|preferences| preferences.validate_for_edition(edition).is_ok())
 }
 
 /// Carry every setting of a damaged document that the current schema accepts onto the defaults, one top-level key at a time, retrying a rejected section one field at a time. Returns the result and whether anything was kept.
@@ -5583,6 +5605,7 @@ fn acceptable_preferences(candidate: &serde_json::Map<String, serde_json::Value>
 fn salvage_preferences(
     document: &serde_json::Value,
     default: Preferences,
+    edition: &crate::edition::Edition,
 ) -> Result<(Preferences, bool), PreferencesError> {
     let serde_json::Value::Object(mut salvaged) = serde_json::to_value(&default)? else {
         return Ok((default, false));
@@ -5607,7 +5630,7 @@ fn salvage_preferences(
     for (key, value) in &source {
         let mut candidate = salvaged.clone();
         candidate.insert(key.clone(), value.clone());
-        if acceptable_preferences(&candidate) {
+        if acceptable_preferences(&candidate, edition) {
             salvaged = candidate;
             kept = true;
             continue;
@@ -5625,7 +5648,7 @@ fn salvage_preferences(
             trial.insert(field.clone(), field_value.clone());
             let mut candidate = salvaged.clone();
             candidate.insert(key.clone(), serde_json::Value::Object(trial.clone()));
-            if acceptable_preferences(&candidate) {
+            if acceptable_preferences(&candidate, edition) {
                 section = trial;
                 section_kept = true;
             }

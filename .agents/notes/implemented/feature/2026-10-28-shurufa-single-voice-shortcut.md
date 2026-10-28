@@ -31,6 +31,12 @@ Status: implemented
 
 恢复不清语音服务、端点、模型和密钥：共享 `restored_to_defaults_for` 本来就保留这一整组，避免凭据留下却被改指向默认端点。回归覆盖关闭 Caps Lock、设置组合键/toggle/关闭语音后恢复、导出共享快照、重新载入与服务凭据保留；旧代码 Caps Lock 回归退出 134，修复后专项退出 0。
 
+### 按实际能力校验组合键
+
+macOS 专用语音绑定不占用 Linux 的 Ctrl+Space；Shurufa 也不占用已移除屏幕键盘的 Control+Shift+Command+K。偏好存储的保存、重载、修复和原生运行时创建、更新均使用所属 edition 校验；full edition 继续保留屏幕键盘组合键。原生录键预检对仍存在的 Control+Option+Shift+C/R/T 维护键给出明确冲突提示，与共享校验一致。不增加系统快捷键黑名单，用户主动录制的有效组合键仍由用户决定。
+
+旧存储对空闲组合键的回归退出 101；修复后保存/重载、运行时创建/更新及原生预检通过。client-core 654 项全部通过；格式化通过，普通 clippy 完成。严格 `-D warnings` 被未改动的 `chunks_exact_to_as_chunks` 和既有测试初始化告警阻断，不把它写成全绿。
+
 ## Consequences
 
 迁移测试覆盖无绑定、组合键 toggle、legacy 组合键、legacy 单侧修饰键、保存失败和重复运行。共享默认偏好通过校验。真实 AppKit 截图使用合成配置，实际键盘与系统输入法分发仍由用户验收。

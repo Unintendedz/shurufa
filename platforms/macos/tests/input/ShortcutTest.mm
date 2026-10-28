@@ -13358,6 +13358,9 @@ int main(int argc, char **argv) {
             assert(MSIMEVoiceShortcutConflict(@{@"key_code":@0, @"modifiers":@0}, prefs));
             assert(!MSIMEVoiceShortcutConflict(@{@"key_code":@54, @"modifiers":@0}, prefs));
             assert(!MSIMEVoiceShortcutConflict(@{@"key_code":@9, @"modifiers":@3}, prefs));
+            for (NSNumber *code in @[@8,@15,@17]) assert(MSIMEVoiceShortcutConflict(@{@"key_code":code,@"modifiers":@7},prefs));
+            assert(MSIMEVoiceShortcutConflict(@{@"key_code":@40,@"modifiers":@13},prefs));
+            assert(!MSIMEVoiceShortcutConflict(@{@"key_code":@49,@"modifiers":@1},prefs));
             prefs.controlTapShortcut = YES;
             assert(MSIMEVoiceShortcutConflict(@{@"key_code":@59, @"modifiers":@0}, prefs));
             prefs.shiftTapShortcut = NO;

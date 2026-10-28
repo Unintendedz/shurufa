@@ -8300,3 +8300,40 @@ fn macos_voice_hotkeys_reject_conflicts_in_both_edit_directions() {
     preferences.keybindings.toggle_punctuation = "Ctrl+Alt+F8".into();
     assert!(preferences.validate().is_err());
 }
+
+#[test]
+fn shurufa_macos_voice_hotkeys_use_actual_platform_occupancy() {
+    let edition = crate::edition::Edition::by_id("shurufa").unwrap();
+    for (key_code, modifiers) in [(40, 13), (49, 1)] {
+        let directory = tempfile::tempdir().unwrap();
+        let store = PreferencesStore::for_edition(directory.path(), edition);
+        let mut preferences = Preferences::for_edition(edition);
+        preferences.voice_input.macos_hotkey = Some(MacosVoiceHotkey {
+            key_code,
+            modifiers,
+        });
+        let saved = store
+            .save(0, preferences)
+            .expect("Shurufa 未占用的 macOS 组合键必须可保存");
+        assert_eq!(
+            store.load().unwrap().preferences.voice_input,
+            saved.preferences.voice_input
+        );
+    }
+    for key_code in [8, 15, 17] {
+        let directory = tempfile::tempdir().unwrap();
+        let store = PreferencesStore::for_edition(directory.path(), edition);
+        let mut preferences = Preferences::for_edition(edition);
+        preferences.voice_input.macos_hotkey = Some(MacosVoiceHotkey {
+            key_code,
+            modifiers: 7,
+        });
+        assert!(store.save(0, preferences).is_err());
+    }
+    let mut full = Preferences::default();
+    full.voice_input.macos_hotkey = Some(MacosVoiceHotkey {
+        key_code: 40,
+        modifiers: 13,
+    });
+    assert!(full.validate().is_err());
+}
