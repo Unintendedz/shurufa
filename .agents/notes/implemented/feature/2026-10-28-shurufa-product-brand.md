@@ -12,7 +12,7 @@ edition 身份已经隔离 bundle、输入源和数据目录，但共享 AppKit 
 
 ### 图标来源与生成
 
-应用图标用内置 image_gen 生成两份候选，采用用户批准的 A：青蓝色 macOS 圆角图块，白色“中”的竖画与麦克风支架合为一个轮廓，少量珊瑚色底座；透明外缘，不用树、枝叶或现有产品标志。提示词要求 1024 母版、正视、少细节、16 像素可辨。完整提示词与两个候选留在 `target/round-c/icon/`，采用的母版提交为 `platforms/macos/resources/shurufa/app-icon-1024.png`。
+初版应用图标采用已获批准的 A：青蓝色圆角图块，以白色“中”与麦克风支架组成轮廓。本次按监督者转达的既定默认选择，应用图标换成 `target/round-c/icon-v2/candidate-1.png`：磨砂玻璃底、蓝色光标与声波。1024×1024 候选逐字节复制为 `platforms/macos/resources/shurufa/app-icon-1024.png`，由现有脚本生成 icns 并更新清单；没有重新绘制或修改候选像素。24 个菜单 SVG/TIFF 的 SHA-256 与替换前逐一相同，菜单栏字形不变。
 
 菜单标志为确定路径的“中＋麦克风”，模式图标只保留居中的中、双、A 等字形，不使用容易误认为录音状态的声纹。所有路径以 SVG 提交；`scripts/render_shurufa_icons.swift` 直接渲染 SVG，`scripts/build_shurufa_icons.sh` 用 sips/iconutil 从母版产生完整 iconset/icns，同时生成 16×16@72dpi、32×32@144dpi 双页 TIFF 和 SHA-256 清单。CMake 只为 shurufa 选择该资源目录。原生候选、模式提示、关于和工具栏共用包内 icns；候选栏右侧枝叶是纯装饰，对 Shurufa 停止绘制但保留原布局。语音浮层没有旧品牌图形。
 
