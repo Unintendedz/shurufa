@@ -8469,6 +8469,12 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     return MSIMEWriteVoiceClipboard(text, NSPasteboard.generalPasteboard);
 }
 - (void)applyVoiceResult:(NSDictionary *)transition route:(const MSIMEVoiceCommitRoute &)route {
+    // 语音不修改引擎，桥接层只附当前 view；它仍携带本方案的简繁转换规则。
+    if (!transition[@"commit_context"] && [transition[@"view"] isKindOfClass:NSDictionary.class]) {
+        NSMutableDictionary *contextual = [transition mutableCopy];
+        contextual[@"commit_context"] = transition[@"view"];
+        transition = contextual;
+    }
     NSString *text = transition[@"commit"];
     if ([self ownsPersistentVoiceRecording] && [text isKindOfClass:NSString.class] && text.length) {
         [self detachVoiceMarkedText];

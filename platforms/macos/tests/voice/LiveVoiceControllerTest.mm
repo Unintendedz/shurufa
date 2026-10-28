@@ -385,6 +385,18 @@ int main(int argc, char **argv) {
             source.transcript(@"synthetic failed clipboard", YES);
             assert([overlay.preview isEqual:@"复制失败"] && !owner.copiedText && !source.active);
             puts("PASS persistent: blur error, punctuation shadow, clipboard failure");
+            NSString *outputSuite = [@"shurufa.synthetic.voice-output." stringByAppendingString:NSUUID.UUID.UUIDString];
+            NSUserDefaults *outputDefaults = [[NSUserDefaults alloc] initWithSuiteName:outputSuite];
+            [outputDefaults setBool:YES forKey:@"MSIMEClientTraditionalOutput"];
+            [owner setValue:[[MSIMEAppearancePreferences alloc] initWithDefaults:outputDefaults] forKey:@"appearance"];
+            owner.copyFails = NO;
+            MSIMEFocusedController = owner;
+            [session setEnglishMode:NO error:nil];
+            [owner toggleVoiceInput:nil];
+            source.transcript(@"汉语", YES);
+            assert([origin.commits.lastObject isEqual:@"漢語"]);
+            [outputDefaults removePersistentDomainForName:outputSuite];
+            puts("PASS persistent: traditional output");
             MSIMEFocusedController = nil;
             method_setImplementation(method, original);
             method_setImplementation(deactivate, originalDeactivate);
