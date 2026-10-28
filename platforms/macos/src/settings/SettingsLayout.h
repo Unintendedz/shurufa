@@ -1,6 +1,8 @@
 #pragma once
 
 #import <AppKit/AppKit.h>
+#import "KeycapPresentation.h"
+#import "../core/EditionIdentity.h"
 
 // The shared building blocks of the settings window: the metrics, the cards, and the label/control
 // row. They live here rather than in AppearancePreferences.mm because pages built elsewhere — the
@@ -136,13 +138,14 @@ static inline NSView *MSIMEPreferenceRowWithDetailLabelOfWidth(NSString *title, 
     NSTextField *label = [NSTextField labelWithString:title];
     label.font = [NSFont systemFontOfSize:msime::mac::layout::kBodyFontSize weight:NSFontWeightRegular];
     label.translatesAutoresizingMaskIntoConstraints = NO;
-    NSView *labelColumn = label;
+    NSView *titleView = MSIMEEditionIsShurufa() ? MSIMEKeycapSettingLabel(title) ?: label : label;
+    NSView *labelColumn = titleView;
     if (detailLabel != nil) {
         // The sentence is what gives way when the row runs out of width: left at the default it
         // insists on the width of one line and pushes the control past the edge of the card.
         [detailLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
                                               forOrientation:NSLayoutConstraintOrientationHorizontal];
-        NSStackView *column = [NSStackView stackViewWithViews:@[ label, detailLabel ]];
+        NSStackView *column = [NSStackView stackViewWithViews:@[ titleView, detailLabel ]];
         column.orientation = NSUserInterfaceLayoutOrientationVertical;
         column.alignment = NSLayoutAttributeLeading;
         column.spacing = 2.0;

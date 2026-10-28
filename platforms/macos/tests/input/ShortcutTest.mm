@@ -13300,7 +13300,11 @@ int main(int argc, char **argv) {
                 [prefs.window.contentView layoutSubtreeIfNeeded];
                 AssertShurufaVisibleText(prefs.window.contentView);
             }
-            if (argc == 4) {
+            if (argc >= 4) {
+                if (argc >= 5) [prefs showSettingsPageWithIdentifier:[NSString stringWithUTF8String:argv[4]]];
+                NSString *theme = NSProcessInfo.processInfo.environment[@"MSIME_SNAPSHOT_THEME"];
+                prefs.window.appearance = [NSAppearance appearanceNamed:[theme isEqual:@"dark"] ? NSAppearanceNameDarkAqua : NSAppearanceNameAqua];
+                [prefs.window.contentView layoutSubtreeIfNeeded];
                 [prefs refreshUpdateControls];
                 NSView *content = prefs.window.contentView;
                 [content display];

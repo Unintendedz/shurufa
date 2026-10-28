@@ -4394,6 +4394,15 @@ impl Preferences {
             preferences.local_modes.temporary_japanese = false;
             preferences.plugins = PluginPreferences::default();
             preferences.voice_input.enabled = true;
+            preferences.voice_input.macos_hotkey = Some(MacosVoiceHotkey {
+                key_code: 61,
+                modifiers: 0,
+            });
+            preferences.voice_input.hotkey_mode = VoiceHotkeyMode::Hold;
+            preferences.voice_input.hotkey_ctrl_f9 = false;
+            preferences.voice_input.hotkey_ralt = false;
+            preferences.voice_input.hotkey_ctrl_win = false;
+            preferences.voice_input.hotkey_rctrl_ralt = false;
             // 本机 TextStream 流式识别；整理默认开，宿主仍要求有整理服务的凭据才会发请求。
             preferences.voice_input.asr_provider = "textstream".into();
             preferences.voice_input.polish_enabled = true;

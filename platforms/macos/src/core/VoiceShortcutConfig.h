@@ -1,5 +1,6 @@
 #pragma once
 #import <Foundation/Foundation.h>
+#import "EditionIdentity.h"
 
 // 修饰键位是跨文档的明确数值：Control=1、Option=2、Shift=4、Command=8。
 static inline BOOL MSIMEVoiceModifierKey(unsigned short key) {
@@ -30,11 +31,17 @@ static inline BOOL MSIMEVoiceShortcutValid(id value) {
 }
 static inline NSString *MSIMEVoiceHotkeyMode(NSUserDefaults *defaults) {
     NSString *mode = [defaults stringForKey:@"MSIMEClientVoiceHotkeyMode"];
-    return [@[@"hold", @"toggle"] containsObject:mode ?: @""] ? mode : @"legacy";
+    if ([@[@"hold", @"toggle"] containsObject:mode ?: @""]) return mode;
+    if (MSIMEEditionIsShurufa()) {
+        id binding = [defaults objectForKey:@"MSIMEClientVoiceMacOSHotkey"];
+        return !MSIMEVoiceShortcutValid(binding) || (MSIMEVoiceModifierKey([binding[@"key_code"] unsignedShortValue]) &&
+            [binding[@"modifiers"] unsignedIntValue] == 0) ? @"hold" : @"toggle";
+    }
+    return @"legacy";
 }
 static inline NSDictionary *MSIMEVoiceCustomShortcut(NSUserDefaults *defaults) {
     id value = [defaults objectForKey:@"MSIMEClientVoiceMacOSHotkey"];
-    return MSIMEVoiceShortcutValid(value) ? value : nil;
+    return MSIMEVoiceShortcutValid(value) ? value : MSIMEEditionIsShurufa() ? @{@"key_code":@61,@"modifiers":@0} : nil;
 }
 static inline BOOL MSIMEVoiceShortcutOccupies(NSUserDefaults *defaults, NSArray<NSNumber *> *keys, unsigned modifiers) {
     NSDictionary *binding = MSIMEVoiceCustomShortcut(defaults);

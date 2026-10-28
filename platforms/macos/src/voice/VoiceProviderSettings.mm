@@ -420,6 +420,7 @@ static NSString *SharedSetting(NSString *key, NSString *fallback)
     BOOL _loading;
     NSPopUpButton *_hotkeyMode;
     NSTextField *_hotkeyLabel, *_hotkeyNotice, *_builtinHotkeyStatus, *_builtinHotkeyHelp;
+    NSStackView *_hotkeyCaps;
     NSButton *_recordHotkey, *_clearHotkey;
     NSArray<NSSwitch *> *_builtinHotkeySwitches;
     id _hotkeyMonitor, _hotkeyResignObserver;
@@ -459,32 +460,37 @@ static void ShowNotice(NSTextField *label, NSString *message, NSColor *color)
     _hotkeyLabel.accessibilityLabel = @"当前自定义语音快捷键";
     _recordHotkey = [NSButton buttonWithTitle:@"录制快捷键…" target:self action:@selector(recordHotkey:)];
     _clearHotkey = [NSButton buttonWithTitle:@"清除" target:self action:@selector(clearHotkey:)];
-    NSStackView *hotkeyRow = [NSStackView stackViewWithViews:@[_hotkeyLabel, _recordHotkey, _clearHotkey]];
+    _hotkeyCaps = [NSStackView stackViewWithViews:@[]];
+    NSStackView *hotkeyRow = [NSStackView stackViewWithViews:MSIMEEditionIsShurufa()
+        ? @[_hotkeyCaps, _recordHotkey] : @[_hotkeyLabel, _recordHotkey, _clearHotkey]];
     hotkeyRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     hotkeyRow.spacing = 8;
     _hotkeyMode = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-    [_hotkeyMode addItemsWithTitles:@[@"原有行为（默认）", @"按住说话", @"切换"]];
+    [_hotkeyMode addItemsWithTitles:MSIMEEditionIsShurufa() ? @[@"按住说话", @"切换"] : @[@"原有行为（默认）", @"按住说话", @"切换"]];
     _hotkeyMode.accessibilityLabel = @"语音快捷键触发模式";
     _hotkeyMode.target = self; _hotkeyMode.action = @selector(hotkeyModeChanged:);
     _hotkeyNotice = MSIMEDetailLabel(@"");
     _hotkeyNotice.hidden = YES;
     NSMutableArray *switches = [NSMutableArray array];
     NSMutableArray *shortcutRows = [NSMutableArray arrayWithArray:@[
-        MSIMEPreferenceRow(@"自定义快捷键", hotkeyRow), MSIMEPreferenceRow(@"触发模式", _hotkeyMode)]];
+        MSIMEPreferenceRow(MSIMEEditionIsShurufa() ? @"快捷键" : @"自定义快捷键", hotkeyRow),
+        MSIMEPreferenceRow(MSIMEEditionIsShurufa() ? @"触发方式" : @"触发模式", _hotkeyMode)]];
     for (NSString *title in @[@"Control+F9", @"右 Option", @"Control+Command", @"右 Control+右 Option"]) {
         NSSwitch *control = MSIMESettingSwitch(self, @selector(builtinHotkeyChanged:), title);
         control.tag = switches.count;
         [switches addObject:control];
-        [shortcutRows addObject:MSIMESwitchRow(title, control, @"")];
+        if (!MSIMEEditionIsShurufa()) [shortcutRows addObject:MSIMESwitchRow(title, control, @"")];
     }
     _builtinHotkeySwitches = switches;
     _builtinHotkeyStatus = MSIMEDetailLabel(@"已由自定义快捷键替代；清除自定义后恢复内置选择。");
-    [shortcutRows addObject:_builtinHotkeyStatus];
     _builtinHotkeyHelp = MSIMEDetailLabel(@"自定义快捷键会替代内置快捷键，清除后恢复内置选择。");
+    if (!MSIMEEditionIsShurufa()) {
+    [shortcutRows addObject:_builtinHotkeyStatus];
     [shortcutRows addObject:_builtinHotkeyHelp];
     [shortcutRows addObject:MSIMEDetailLabel([NSString stringWithFormat:@"快捷键在 %@ 是当前输入法、光标在文本框里时生效。", MSIMEEditionDisplayName()])];
     [shortcutRows addObject:MSIMEDetailLabel(@"原有行为（默认）：右 Option 和修饰键组合按住说话；Control+F9 按一下开始、再按一下结束。自定义单个修饰键按住说话，自定义组合键切换。")];
     [shortcutRows addObject:MSIMEDetailLabel(@"按住说话：所有快捷键按住开始、松开结束。切换：按一下开始、再按一下结束；单个修饰键在松开时触发。录音中按 Esc 取消，切换应用会取消录音。")];
+    }
     [shortcutRows addObject:_hotkeyNotice];
     NSBox *shortcutCard = MSIMECardWithViews(shortcutRows, 0);
 
@@ -683,10 +689,13 @@ static void ShowNotice(NSTextField *label, NSString *message, NSColor *color)
     NSDictionary *custom = MSIMEVoiceCustomShortcut(defaults);
     _hotkeyLabel.stringValue = MSIMEVoiceShortcutTitle(custom);
     _hotkeyLabel.toolTip = _hotkeyLabel.stringValue;
+    for (NSView *view in _hotkeyCaps.arrangedSubviews.copy) { [_hotkeyCaps removeArrangedSubview:view]; [view removeFromSuperview]; }
+    [_hotkeyCaps addArrangedSubview:MSIMEVoiceShortcutKeycaps(custom)];
     _clearHotkey.enabled = custom != nil;
     _builtinHotkeyStatus.hidden = custom == nil;
     _builtinHotkeyHelp.hidden = custom != nil;
-    [_hotkeyMode selectItemAtIndex:[@[@"legacy", @"hold", @"toggle"] indexOfObject:MSIMEVoiceHotkeyMode(defaults)]];
+    NSArray *modes = MSIMEEditionIsShurufa() ? @[@"hold",@"toggle"] : @[@"legacy",@"hold",@"toggle"];
+    [_hotkeyMode selectItemAtIndex:[modes indexOfObject:MSIMEVoiceHotkeyMode(defaults)]];
     NSArray *keys = @[@"MSIMEClientVoiceHotkeyCtrlF9", @"MSIMEClientVoiceHotkeyRightAlt",
         @"MSIMEClientVoiceHotkeyCtrlCommand", @"MSIMEClientVoiceHotkeyCtrlOption"];
     for (NSUInteger index = 0; index < keys.count; ++index) {
@@ -727,7 +736,8 @@ static void ShowNotice(NSTextField *label, NSString *message, NSColor *color)
 }
 - (void)hotkeyModeChanged:(id)sender {
     (void)sender;
-    if (!_loading) [self saveHotkeyPatch:@{@"hotkey_mode":@[@"legacy", @"hold", @"toggle"][_hotkeyMode.indexOfSelectedItem]}];
+    NSArray *modes = MSIMEEditionIsShurufa() ? @[@"hold",@"toggle"] : @[@"legacy",@"hold",@"toggle"];
+    if (!_loading) [self saveHotkeyPatch:@{@"hotkey_mode":modes[_hotkeyMode.indexOfSelectedItem]}];
 }
 - (void)builtinHotkeyChanged:(NSSwitch *)sender {
     if (!_loading) [self saveHotkeyPatch:@{[self builtinHotkeyKeys][sender.tag]:@(sender.state == NSControlStateValueOn)}];
@@ -782,6 +792,11 @@ static void ShowNotice(NSTextField *label, NSString *message, NSColor *color)
             }
             return nil;
         }];
+}
+- (void)focusShortcutSettings {
+    [self.window.contentView layoutSubtreeIfNeeded];
+    [_recordHotkey scrollRectToVisible:NSInsetRect(_recordHotkey.bounds, -12, -12)];
+    [self.window makeFirstResponder:_recordHotkey];
 }
 - (void)fetchPolishModels:(id)sender {
     (void)sender;

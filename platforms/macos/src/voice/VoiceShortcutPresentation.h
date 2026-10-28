@@ -2,6 +2,7 @@
 #import "ConfiguredVoiceShortcut.h"
 #import "../settings/AppearancePreferences.h"
 #import "../input/ToggleHotkeyEvent.h"
+#import "../settings/KeycapPresentation.h"
 
 static inline NSString *MSIMEVoiceShortcutTitle(NSDictionary *binding) {
     if (!binding) return @"未设置";
@@ -25,6 +26,22 @@ static inline NSString *MSIMEVoiceShortcutTitle(NSDictionary *binding) {
     if (flags & 8) [parts addObject:@"Command"];
     [parts addObject:primary];
     return [parts componentsJoinedByString:@"+"];
+}
+
+static inline NSView *MSIMEVoiceShortcutKeycaps(NSDictionary *binding) {
+    if (!binding) return [NSTextField labelWithString:@"未设置"];
+    NSMutableArray<NSView *> *keys = [NSMutableArray array];
+    unsigned flags = [binding[@"modifiers"] unsignedIntValue];
+    for (NSArray *item in @[@[@1,@"⌃"],@[@2,@"⌥"],@[@4,@"⇧"],@[@8,@"⌘"]])
+        if (flags & [item[0] unsignedIntValue]) [keys addObject:MSIMEKeycap(item[1])];
+    NSNumber *code = binding[@"key_code"];
+    NSDictionary *symbols = @{@54:@"⌘",@55:@"⌘",@56:@"⇧",@60:@"⇧",@58:@"⌥",@61:@"⌥",@59:@"⌃",@62:@"⌃",
+        @123:@"←",@124:@"→",@125:@"↓",@126:@"↑",@49:@"空格",@36:@"↩",@48:@"⇥",@51:@"⌫"};
+    NSString *symbol = symbols[code] ?: MSIMEVoiceShortcutTitle(@{@"key_code":code,@"modifiers":@0});
+    NSString *side = MSIMEVoiceModifierKey(code.unsignedShortValue) ?
+        ([@[@54,@60,@61,@62] containsObject:code] ? @"右" : @"左") : nil;
+    [keys addObject:MSIMEKeycap(symbol, side)];
+    return MSIMEKeycapRow(keys, MSIMEVoiceShortcutTitle(binding));
 }
 
 static inline NSString *MSIMEVoiceShortcutConflict(NSDictionary *binding, MSIMEAppearancePreferences *appearance) {

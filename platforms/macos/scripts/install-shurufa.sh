@@ -27,6 +27,7 @@ python3 "$root/platforms/macos/scripts/shurufa_installation.py" unregister "$sou
 executable="$destination/Contents/MacOS/Shurufa"
 "$executable" --prepare-host
 "$executable" --migrate-caps-lock
+"$executable" --migrate-voice-shortcut
 set +e
 "$executable" --register-input-source
 registration=$?

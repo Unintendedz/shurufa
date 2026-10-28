@@ -35,6 +35,7 @@ FOUNDATION_EXPORT BOOL MSIMEVoiceASRProviderUsesService(NSString *provider);
 @interface MetasequoiaVoiceProviderSettingsView : NSView
 /// Fills the controls from storage. Call it whenever the form becomes visible.
 - (void)reloadSettings;
+- (void)focusShortcutSettings;
 @end
 
 @interface MetasequoiaVoiceProviderSettingsWindow : NSWindowController

@@ -4694,7 +4694,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     ], 6.0);
     pagingCard.accessibilityLabel = @"候选翻页卡片";
     _voiceHotkeyModeDescription = MSIMEDetailLabel(@"");
-    NSBox *switchingCard = MSIMECardWithViews(@[
+    NSMutableArray<NSView *> *switchingRows = [NSMutableArray arrayWithArray:@[
         [self settingRow:@"Shift + 空格切换中英文" control:_inputModeShortcutToggle aka:@[@"中英文切换"]],
         [self settingRow:@"单按 Shift 切换中英文" control:_shiftTapShortcutToggle aka:@[@"中英文切换"]],
         [self settingRow:@"单按 Control 切换中英文" control:_controlTapShortcutToggle aka:@[@"中英文切换"]],
@@ -4708,6 +4708,14 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
                   detail:@"关掉后这个组合键交给应用处理；Control + Shift + 空格 与工具栏的全半角按钮不受影响。"
                  control:_fullWidthShortcutToggle
                      aka:@[@"全角", @"半角"]],
+    ]];
+    if (MSIMEEditionIsShurufa()) {
+        NSButton *voiceEntry = [NSButton buttonWithTitle:@"设置语音快捷键…" target:self action:@selector(showVoiceShortcuts:)];
+        voiceEntry.bezelStyle = NSBezelStyleRounded;
+        [switchingRows addObject:MSIMECardSeparator()];
+        [switchingRows addObject:[self settingRow:@"语音输入" control:voiceEntry]];
+    } else {
+        [switchingRows addObjectsFromArray:@[
         MSIMECardSeparator(),
         MSIMECardHeader(@"语音听写"),
         _voiceHotkeyModeDescription,
@@ -4718,7 +4726,9 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
         [self settingRow:@"Control + Command 语音输入" control:_voiceHotkeyCtrlCommandToggle aka:@[@"听写"]],
         // 按住说话时按空格锁定录音在 macOS 上固定为开（InputController 不再读存下的值），这里不再给开关。
         [self settingRow:@"右 Control + 右 Option 语音输入" control:_voiceHotkeyCtrlOptionToggle aka:@[@"听写"]],
-    ], 0.0);
+        ]];
+    }
+    NSBox *switchingCard = MSIMECardWithViews(switchingRows, 0.0);
     switchingCard.accessibilityLabel = @"输入状态切换卡片";
     // Switching between Chinese and English is what this page is opened for; the paging matrix is
     // what it was opened on. At the default height the six switching rows began below the fold, under
@@ -5776,6 +5786,12 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
 - (void)voiceShortcutConfigurationChanged:(NSNotification *)notification {
     (void)notification;
     [self refreshControls];
+}
+- (void)showVoiceShortcuts:(id)sender {
+    (void)sender;
+    [self showSettingsPageWithIdentifier:@"voice"];
+    if ([_voiceSettingsView respondsToSelector:@selector(focusShortcutSettings)])
+        [(id)_voiceSettingsView performSelector:@selector(focusShortcutSettings)];
 }
 - (void)uninstallInputSource:(id)sender {
     (void)sender;
