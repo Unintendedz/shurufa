@@ -26,6 +26,11 @@ static inline unsigned MSIMEVoiceModifierBitForKey(unsigned short code) {
         default: return 0;
     }
 }
+static inline NSEventModifierFlags MSIMEVoiceModifierGroupSides(unsigned group) {
+    return group == 8 ? NX_DEVICELCMDKEYMASK | NX_DEVICERCMDKEYMASK :
+        group == 4 ? NX_DEVICELSHIFTKEYMASK | NX_DEVICERSHIFTKEYMASK :
+        group == 2 ? NX_DEVICELALTKEYMASK | NX_DEVICERALTKEYMASK : NX_DEVICELCTLKEYMASK | NX_DEVICERCTLKEYMASK;
+}
 
 // 明确的按下/松开状态机。切换模式的裸修饰键等松开才开始，组合键不经过计时猜测。
 class MSIMEConfiguredVoiceShortcut {
@@ -56,9 +61,7 @@ public:
             const auto side = MSIMEVoiceSideFlag(key);
             const unsigned group = MSIMEVoiceModifierBitForKey(key);
             // 只更新当前事件的侧别；物理快照不提前计入尚未分发的另一侧按键。
-            const auto groupSides = group == 8 ? NX_DEVICELCMDKEYMASK | NX_DEVICERCMDKEYMASK :
-                group == 4 ? NX_DEVICELSHIFTKEYMASK | NX_DEVICERSHIFTKEYMASK :
-                group == 2 ? NX_DEVICELALTKEYMASK | NX_DEVICERALTKEYMASK : NX_DEVICELCTLKEYMASK | NX_DEVICERCTLKEYMASK;
+            const auto groupSides = MSIMEVoiceModifierGroupSides(group);
             const auto sideFlags = (event.modifierFlags & groupSides) ? event.modifierFlags : physicalFlags;
             const bool down = (modifiers & group) && (sideFlags & side);
             if (side) {
@@ -104,8 +107,10 @@ public:
             const unsigned short code = [options.custom[@"key_code"] unsignedShortValue];
             modifier = MSIMEVoiceModifierKey(code);
             required = [options.custom[@"modifiers"] unsignedIntValue];
+            const auto primarySide = MSIMEVoiceSideFlag(code);
+            const auto primaryGroup = MSIMEVoiceModifierGroupSides(MSIMEVoiceModifierBitForKey(code));
             match = key == code && (modifier
-                ? type == NSEventTypeFlagsChanged && (sides_ & MSIMEVoiceSideFlag(code)) && modifiers == (required | MSIMEVoiceModifierBitForKey(code))
+                ? type == NSEventTypeFlagsChanged && (sides_ & primaryGroup) == primarySide && modifiers == (required | MSIMEVoiceModifierBitForKey(code))
                 : type == NSEventTypeKeyDown && modifiers == required);
         } else if (type == NSEventTypeKeyDown && options.toggleMatch) {
             match = true;

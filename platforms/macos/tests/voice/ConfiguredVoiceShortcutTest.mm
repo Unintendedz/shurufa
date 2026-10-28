@@ -34,6 +34,14 @@ int main() {
             const auto both = flags | (code.intValue == 54 ? NX_DEVICELCMDKEYMASK : NX_DEVICELALTKEYMASK);
             assert(shortcut.observe(Event(otherKey, both, NSEventTypeFlagsChanged), config, false).action == Action::None);
             assert(shortcut.observe(up, config, false).action == Action::None);
+            // 另一侧先按下时，同样不能把双侧组合识别成单个右侧修饰键。
+            shortcut.reset();
+            const auto otherFlags = code.intValue == 54
+                ? NSEventModifierFlagCommand | NX_DEVICELCMDKEYMASK
+                : NSEventModifierFlagOption | NX_DEVICELALTKEYMASK;
+            shortcut.observe(Event(otherKey, otherFlags, NSEventTypeFlagsChanged), config, false);
+            assert(shortcut.observe(Event(code.unsignedShortValue, both, NSEventTypeFlagsChanged), config, false).action == Action::None);
+            assert(shortcut.observe(Event(code.unsignedShortValue, otherFlags, NSEventTypeFlagsChanged), config, false).action == Action::None);
             for (NSString *mode in @[@"hold", @"legacy"]) {
                 config.mode = mode; shortcut.reset();
                 assert(shortcut.observe(down, config, false).action == Action::Toggle);
