@@ -316,23 +316,27 @@ set_source_files_properties(${MSIME_HELPCODE_RESOURCES} PROPERTIES MACOSX_PACKAG
 set_target_properties(MSIMEClientInputMethod PROPERTIES OUTPUT_NAME "${MSIME_INPUT_METHOD_NAME}")
 # The preferences window runs under NSApplicationActivationPolicyRegular, so the bundle appears in
 # the Dock and needs an icon; without CFBundleIconFile plus the file itself it shows the generic one.
-target_sources(MSIMEClientInputMethod PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/resources/MSIMEClientInputMethod.icns")
-set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/resources/MSIMEClientInputMethod.icns"
+set(MSIME_ICON_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/resources")
+if(MSIME_EDITION STREQUAL "shurufa")
+  set(MSIME_ICON_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/resources/shurufa")
+endif()
+target_sources(MSIMEClientInputMethod PRIVATE "${MSIME_ICON_ROOT}/MSIMEClientInputMethod.icns")
+set_source_files_properties("${MSIME_ICON_ROOT}/MSIMEClientInputMethod.icns"
   PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
 # 输入菜单自己的图标，是模板 TIFF 而不是应用图标：bundle 的标志（切换 HUD 也显示它），以及十一个输入模式各自的大字图标。标志为什么不能和应用图标是同一个文件，见 Info.plist.in 里 tsInputMethodIconFileKey 旁的注释。
 set(MSIME_MENU_ICON_RESOURCES
-  "${CMAKE_CURRENT_SOURCE_DIR}/resources/MSIMEClientInputMethodMenuIcon.tiff"
-  "${CMAKE_CURRENT_SOURCE_DIR}/resources/MSIMEClientInputMethodMenuIconChinese.tiff"
-  "${CMAKE_CURRENT_SOURCE_DIR}/resources/MSIMEClientInputMethodMenuIconShuangpin.tiff"
-  "${CMAKE_CURRENT_SOURCE_DIR}/resources/MSIMEClientInputMethodMenuIconWubi.tiff"
-  "${CMAKE_CURRENT_SOURCE_DIR}/resources/MSIMEClientInputMethodMenuIconCantonese.tiff"
-  "${CMAKE_CURRENT_SOURCE_DIR}/resources/MSIMEClientInputMethodMenuIconZhuyin.tiff"
-  "${CMAKE_CURRENT_SOURCE_DIR}/resources/MSIMEClientInputMethodMenuIconJapanese.tiff"
-  "${CMAKE_CURRENT_SOURCE_DIR}/resources/MSIMEClientInputMethodMenuIconKorean.tiff"
-  "${CMAKE_CURRENT_SOURCE_DIR}/resources/MSIMEClientInputMethodMenuIconVietnamese.tiff"
-  "${CMAKE_CURRENT_SOURCE_DIR}/resources/MSIMEClientInputMethodMenuIconTibetan.tiff"
-  "${CMAKE_CURRENT_SOURCE_DIR}/resources/MSIMEClientInputMethodMenuIconStroke.tiff"
-  "${CMAKE_CURRENT_SOURCE_DIR}/resources/MSIMEClientInputMethodMenuIconEnglish.tiff")
+  "${MSIME_ICON_ROOT}/MSIMEClientInputMethodMenuIcon.tiff"
+  "${MSIME_ICON_ROOT}/MSIMEClientInputMethodMenuIconChinese.tiff"
+  "${MSIME_ICON_ROOT}/MSIMEClientInputMethodMenuIconShuangpin.tiff"
+  "${MSIME_ICON_ROOT}/MSIMEClientInputMethodMenuIconWubi.tiff"
+  "${MSIME_ICON_ROOT}/MSIMEClientInputMethodMenuIconCantonese.tiff"
+  "${MSIME_ICON_ROOT}/MSIMEClientInputMethodMenuIconZhuyin.tiff"
+  "${MSIME_ICON_ROOT}/MSIMEClientInputMethodMenuIconJapanese.tiff"
+  "${MSIME_ICON_ROOT}/MSIMEClientInputMethodMenuIconKorean.tiff"
+  "${MSIME_ICON_ROOT}/MSIMEClientInputMethodMenuIconVietnamese.tiff"
+  "${MSIME_ICON_ROOT}/MSIMEClientInputMethodMenuIconTibetan.tiff"
+  "${MSIME_ICON_ROOT}/MSIMEClientInputMethodMenuIconStroke.tiff"
+  "${MSIME_ICON_ROOT}/MSIMEClientInputMethodMenuIconEnglish.tiff")
 target_sources(MSIMEClientInputMethod PRIVATE ${MSIME_MENU_ICON_RESOURCES})
 set_source_files_properties(${MSIME_MENU_ICON_RESOURCES} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
 # The voice start/end cues are the product's own, not system sounds. They are staged straight from the Windows installer's copy rather than adding another copy to the tree; VoiceCuePlayer looks them up in Resources/audios, mirroring the assets/audios layout Windows installs.
@@ -1058,6 +1062,11 @@ target_link_libraries(shortcut-test PRIVATE "-framework AVFoundation" "-framewor
 add_test(NAME shortcut COMMAND shortcut-test)
 add_test(NAME caps-lock COMMAND shortcut-test --caps-lock)
 add_test(NAME voice-shortcut-conflicts COMMAND shortcut-test --voice-shortcut-conflicts)
+if(MSIME_EDITION STREQUAL "shurufa")
+  add_test(NAME shurufa-settings-brand COMMAND shortcut-test --shurufa-settings "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>")
+  file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/shurufa-settings-home")
+  set_tests_properties(shurufa-settings-brand PROPERTIES TIMEOUT 60 ENVIRONMENT "CFFIXED_USER_HOME=${CMAKE_CURRENT_BINARY_DIR}/shurufa-settings-home")
+endif()
 add_test(NAME shortcut-expanded-scroll COMMAND shortcut-test --expanded-scroll)
 add_test(NAME shortcut-vim-mode COMMAND shortcut-test --vim-mode)
 add_test(NAME shortcut-nested-commit COMMAND shortcut-test --nested-commit)

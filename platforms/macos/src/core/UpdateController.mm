@@ -1,4 +1,5 @@
 #import "UpdateController.h"
+#import "EditionIdentity.h"
 
 #ifndef MSIME_ENABLE_SPARKLE
 #define MSIME_ENABLE_SPARKLE 1
@@ -275,7 +276,7 @@ static NSString *MetasequoiaLaunchUpdateChannel = nil;
 - (void)checkForUpdates:(id)sender
 {
     self.activationHandler();
-    [self.driver checkForUpdates:sender];
+    if (MSIMEEditionOffersUpstreamLinks()) [self.driver checkForUpdates:sender];
 }
 
 - (void)installDownloadedUpdateIfReady

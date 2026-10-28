@@ -11,6 +11,31 @@
 #import "../settings/TestPreferenceSuite.h"
 #import "../settings/PreferenceViewLookup.h"
 
+@interface MSIMEAppearancePreferences (ShurufaBrandTest)
+- (void)refreshUpdateControls;
+@end
+
+static NSBundle *ShurufaTestBundle;
+static NSBundle *ShurufaMainBundle(id, SEL) { return ShurufaTestBundle; }
+static void AssertShurufaVisibleText(NSView *view) {
+    if (view.hidden) return;
+    for (NSString *selectorName in @[@"stringValue", @"title", @"accessibilityLabel", @"accessibilityHelp", @"toolTip"]) {
+        SEL selector = NSSelectorFromString(selectorName);
+        if (![view respondsToSelector:selector]) continue;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        id value = [view performSelector:selector];
+#pragma clang diagnostic pop
+        if (![value isKindOfClass:NSString.class]) continue;
+        for (NSString *brand in @[@"水杉", @"Metasequoia", @"MSIME", @"msime.app", @"github.com/metasequoiaime"])
+            if ([value containsString:brand]) {
+                fprintf(stderr, "Shurufa visible branding: %s\n", [value UTF8String]);
+                assert(false);
+            }
+    }
+    for (NSView *child in view.subviews) AssertShurufaVisibleText(child);
+}
+
 // 既有候选文字回归使用出厂徽标；包装只属于本测试，不让其他引入控制器的测试产生未使用函数。
 static NSString *CandidateDisplay(NSDictionary *candidate, BOOL traditional) {
     return CandidateDisplayWithBadges(candidate, traditional,
@@ -13248,6 +13273,39 @@ int main(int argc, char **argv) {
         if (argc == 2 && std::string(argv[1]) == "--english-punctuation") {
             @autoreleasepool { TestPerApplicationPunctuationAndWidth(); }
             @autoreleasepool { TestEnglishModePunctuationAndWidthOutput(); }
+            return 0;
+        }
+        if (argc >= 3 && std::string(argv[1]) == "--shurufa-settings") {
+            ShurufaTestBundle = [NSBundle bundleWithPath:[NSString stringWithUTF8String:argv[2]]];
+            assert(ShurufaTestBundle);
+            Method mainBundle = class_getClassMethod(NSBundle.class, @selector(mainBundle));
+            IMP original = method_setImplementation(mainBundle, (IMP)ShurufaMainBundle);
+            assert(MSIMEEditionIsShurufa());
+            NSUserDefaults *standard = NSUserDefaults.standardUserDefaults;
+            NSDictionary *oldArguments = [standard volatileDomainForName:NSArgumentDomain];
+            [standard setVolatileDomain:@{@"MSIMEClientVoiceASRProvider":@"textstream",
+                @"MSIMEClientVoicePolishToken":@"synthetic-only", @"MSIMEClientVoicePolishTokens":@{@"deepseek":@"synthetic-only"},
+                @"MSIMEClientVoicePolish":@YES} forName:NSArgumentDomain];
+            NSString *suite = [@"shurufa.synthetic.branding." stringByAppendingString:NSUUID.UUID.UUIDString];
+            NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+            MSIMEAppearancePreferences *prefs = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults];
+            for (NSString *page in @[@"input", @"habits", @"shortcuts", @"voice", @"appearance", @"dictionary", @"about"]) {
+                assert([prefs showSettingsPageWithIdentifier:page]);
+                [prefs.window.contentView layoutSubtreeIfNeeded];
+                AssertShurufaVisibleText(prefs.window.contentView);
+            }
+            if (argc == 4) {
+                [prefs refreshUpdateControls];
+                NSView *content = prefs.window.contentView;
+                [content display];
+                NSBitmapImageRep *image = [content bitmapImageRepForCachingDisplayInRect:content.bounds];
+                [content cacheDisplayInRect:content.bounds toBitmapImageRep:image];
+                assert([[image representationUsingType:NSBitmapImageFileTypePNG properties:@{}]
+                    writeToFile:[NSString stringWithUTF8String:argv[3]] atomically:YES]);
+            }
+            MSIMERemoveTestPreferenceSuite(defaults, suite);
+            [standard setVolatileDomain:oldArguments forName:NSArgumentDomain];
+            method_setImplementation(mainBundle, original);
             return 0;
         }
         if (argc == 2 && std::string(argv[1]) == "--caps-lock") {

@@ -613,7 +613,8 @@ mod tests {
                 "wubi",
                 "japanese",
                 "vietnamese",
-                "tibetan"
+                "tibetan",
+                "shurufa"
             ]
         );
         assert_eq!(ids.iter().collect::<BTreeSet<_>>().len(), ids.len());
@@ -726,7 +727,7 @@ mod tests {
         }
     }
 
-    /// 离线释义和手写只认中文：两者都等于版本是否提供中文方案，与 `scripts/test-editions.py` 对版本表的检查是同一条规则。
+    /// 上游中文版本提供离线释义和手写；精简的 Shurufa 明确关闭这两项。
     #[test]
     fn chinese_only_features_follow_the_chinese_schemes() {
         for edition in Edition::all() {
@@ -734,19 +735,16 @@ mod tests {
                 .input_schemes
                 .iter()
                 .any(|scheme| ChineseScheme::of(*scheme).is_some());
+            let offers_extra = writes_chinese && edition.id != "shurufa";
             assert_eq!(
-                edition.features.offline_glosses, writes_chinese,
+                edition.features.offline_glosses, offers_extra,
                 "{}",
                 edition.id
             );
-            assert_eq!(
-                edition.features.handwriting, writes_chinese,
-                "{}",
-                edition.id
-            );
+            assert_eq!(edition.features.handwriting, offers_extra, "{}", edition.id);
             assert_eq!(
                 edition.offers_touch_scheme(TouchKeyboardScheme::Handwriting),
-                writes_chinese,
+                offers_extra,
                 "{}",
                 edition.id
             );

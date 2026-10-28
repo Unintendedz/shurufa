@@ -1530,6 +1530,7 @@ static CGFloat MSIMEPreeditSlotWidth(void *) { return MSIMEPreeditCaretGap; }
 - (NSView *)hitTest:(NSPoint)point { (void)point; return nil; }
 - (void)drawRect:(NSRect)dirtyRect {
     (void)dirtyRect;
+    if (MSIMEEditionIsShurufa()) return;
     NSColor *tint = self.tintColor ?: NSColor.controlAccentColor;
     const NSRect bounds = NSInsetRect(self.bounds, 1, 1);
     // 一根斜枝从左下到右上，三片叶沿着它排开，越往上越大越浓。
@@ -6085,7 +6086,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     }
     start();
 }
-- (void)openWebsite:(id)sender { (void)sender; [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:@"https://msime.app/"]]; }
+- (void)openWebsite:(id)sender { (void)sender; if (MSIMEEditionOffersUpstreamLinks()) [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:@"https://msime.app/"]]; }
 - (void)showHelp:(id)sender { (void)sender; MSIMEOpenDesktopRoute(@"settings:help", NSWorkspace.sharedWorkspace, ^{ [[MSIMESupportWindowController sharedController] showPage:MSIMESupportPageHelp]; }); }
 - (void)showAbout:(id)sender {
     (void)sender;
@@ -7133,10 +7134,11 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
 }
 - (void)floatingToolbarDidRequestOpenWebsite:(MSIMEFloatingToolbarPanel *)toolbar {
     (void)toolbar;
-    [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:@"https://msime.app/"]];
+    [self openWebsite:nil];
 }
 - (void)floatingToolbarDidRequestPromotion:(MSIMEFloatingToolbarPanel *)toolbar {
     (void)toolbar;
+    if (!MSIMEEditionOffersUpstreamLinks()) return;
     if (!_activeClient) return;
     if (_session && [_view[@"editing_text"] length]) [self apply:[_session command:MSIME_FINISH_COMPOSITION error:nil]];
     NSString *text = @"水杉输入法\n一款博采众长的输入法，目前正在广纳言路，茁壮成长中\n官网：https://msime.app/\nGit 项目：https://github.com/metasequoiaime/msime";
@@ -7176,7 +7178,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         if (!launched) {
             if (owner && MSIMESessionRecoveryPanel.recoveryDelegate == owner) {
                 [MSIMESessionRecoveryPanel setRestartPending:NO];
-                MSIMESessionRecoveryPanel.message.stringValue = @"未能启动输入法重启。请先切换系统中文输入法继续输入，并检查水杉输入法是否安装完整。";
+                MSIMESessionRecoveryPanel.message.stringValue = MSIMEEditionText(@"未能启动输入法重启。请先切换系统中文输入法继续输入，并检查水杉输入法是否安装完整。");
             }
             NSBeep();
             return;
@@ -7754,7 +7756,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         if (!event.isARepeat) [self toggleRuntimeFullWidthInput];
         return YES;
     }
-    if (shortcutLetter == 'k' &&
+    if (!MSIMEEditionIsShurufa() && shortcutLetter == 'k' &&
         (event.modifierFlags & (competing | NSEventModifierFlagShift)) ==
             (NSEventModifierFlagControl | NSEventModifierFlagShift | NSEventModifierFlagCommand)) {
         if (!event.isARepeat) [self showScreenKeyboard:nil];

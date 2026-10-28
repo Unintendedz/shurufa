@@ -45,6 +45,21 @@ static inline NSString *MSIMEEditionDisplayNameIn(NSDictionary *info) {
     return MSIMEEditionStringIn(info, @"CFBundleDisplayName") ?: @"水杉输入法";
 }
 
+// 共享原生界面的产品文案在展示边界改名，不改类名、偏好键、错误域或第三方许可。
+static inline NSString *MSIMEEditionTextIn(NSDictionary *info, NSString *text) {
+    if (!MSIMEEditionIsShurufaIn(info)) return text;
+    NSString *name = MSIMEEditionDisplayNameIn(info);
+    for (NSString *source in @[@"水杉输入法", @"水杉 IME", @"Metasequoia IME", @"Metasequoia", @"水杉", @"MSIME"])
+        text = [text stringByReplacingOccurrencesOfString:source withString:name];
+    return text;
+}
+static inline NSString *MSIMEEditionDescriptionIn(NSDictionary *info) {
+    return MSIMEEditionIsShurufaIn(info) ? @"轻量中文输入法，支持本地语音识别与文本整理。" : @"Metasequoia IME";
+}
+static inline BOOL MSIMEEditionOffersUpstreamLinksIn(NSDictionary *info) {
+    return !MSIMEEditionIsShurufaIn(info);
+}
+
 // 输入法 bundle 在 ~/Library/Input Methods 下的文件名。full 是「水杉输入法.app」；其他版本是可执行文件名加 .app（scripts/edition_bundle.py 让两者同名）。卸载按它找要移到废纸篓的 bundle，所以不能退回 full 的名字。
 static inline NSString *MSIMEInputMethodBundleNameIn(NSDictionary *info) {
     if (MSIMEEditionIsFullIn(info)) return @"水杉输入法.app";
@@ -127,6 +142,9 @@ static inline NSString *MSIMEStateDirectoryName(void) { return MSIMEStateDirecto
 static inline NSString *MSIMELocalVoiceHelperName(void) { return MSIMELocalVoiceHelperNameIn(MSIMEEditionInfo()); }
 static inline NSString *MSIMEInputMethodBundleIdentifier(void) { return MSIMEInputMethodBundleIdentifierIn(MSIMEEditionInfo()); }
 static inline NSString *MSIMEEditionDisplayName(void) { return MSIMEEditionDisplayNameIn(MSIMEEditionInfo()); }
+static inline NSString *MSIMEEditionText(NSString *text) { return MSIMEEditionTextIn(MSIMEEditionInfo(), text); }
+static inline NSString *MSIMEEditionDescription(void) { return MSIMEEditionDescriptionIn(MSIMEEditionInfo()); }
+static inline BOOL MSIMEEditionOffersUpstreamLinks(void) { return MSIMEEditionOffersUpstreamLinksIn(MSIMEEditionInfo()); }
 static inline NSString *MSIMEInputMethodBundleName(void) { return MSIMEInputMethodBundleNameIn(MSIMEEditionInfo()); }
 static inline NSString *MSIMESettingsBundleIdentifier(void) { return MSIMESettingsBundleIdentifierIn(MSIMEEditionInfo()); }
 static inline NSString *MSIMEKeychainService(void) { return MSIMEKeychainServiceIn(MSIMEEditionInfo()); }

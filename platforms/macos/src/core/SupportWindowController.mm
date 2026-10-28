@@ -49,10 +49,12 @@ NSStackView *Stack(NSArray<NSView *> *views, CGFloat spacing) {
 }
 
 void OpenURL(NSString *url) {
+    if (!MSIMEEditionOffersUpstreamLinks()) return;
     [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:url]];
 }
 
 void InvokeUpdateController(void) {
+    if (!MSIMEEditionOffersUpstreamLinks()) return;
     // MSIMEUpdateController is a source-level alias; the Objective-C runtime name is the
     // Metasequoia-prefixed class.
     Class type = NSClassFromString(@"MetasequoiaUpdateController");
@@ -160,6 +162,11 @@ void OpenPreferences(void) {
             break;
     }
 
+    if (!MSIMEEditionOffersUpstreamLinks()) {
+        title = [@"关于 " stringByAppendingString:MSIMEEditionDisplayName()];
+        NSString *version = NSBundle.mainBundle.infoDictionary[@"CFBundleShortVersionString"] ?: @MSIME_MACOS_VERSION_STRING;
+        views = @[Heading(MSIMEEditionDisplayName()), Body(version), Body(MSIMEEditionDescription())];
+    }
     NSStackView *stack = Stack(views, 12.0);
     NSView *content = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 620, 500)];
     [content addSubview:stack];

@@ -3894,7 +3894,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     _candidateThemeButton.action = @selector(candidateThemeChanged:);
     _inputModeHUDToggle = MSIMESettingSwitch(self, @selector(inputModeHUDChanged:), @"切换中英文时显示提示");
     _inputModeStatusItemToggle = MSIMESettingSwitch(self, @selector(inputModeStatusItemChanged:), @"菜单栏显示中/英状态");
-    _appLogoToggle = MSIMESettingSwitch(self, @selector(appLogoChanged:), @"显示水杉 logo");
+    _appLogoToggle = MSIMESettingSwitch(self, @selector(appLogoChanged:), MSIMEEditionText(@"显示水杉 logo"));
     _candidatePageNumberToggle = MSIMESettingSwitch(self, @selector(candidatePageNumberChanged:), @"显示页码和翻页按钮");
     _expandCandidatesToggle = MSIMESettingSwitch(self, @selector(expandCandidatesChanged:), @"展开候选");
     _candidateExpandButtonToggle = MSIMESettingSwitch(self, @selector(candidateExpandButtonChanged:), @"显示展开键");
@@ -4407,8 +4407,8 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
                   detail:@"在菜单栏常驻显示当前模式：中文时是所用方案，英文时是「英」。不需要把「英」加成输入源。"
                  control:_inputModeStatusItemToggle
                      aka:@[@"状态栏", @"菜单栏图标"]],
-        [self settingRow:@"显示水杉 logo"
-                  detail:@"在候选窗和悬浮工具栏左端显示水杉图标。"
+        [self settingRow:MSIMEEditionText(@"显示水杉 logo")
+                  detail:MSIMEEditionText(@"在候选窗和悬浮工具栏左端显示水杉图标。")
                  control:_appLogoToggle
                      aka:@[@"图标", @"logo"]],
         [self settingRow:@"显示页码和翻页按钮"
@@ -4595,11 +4595,11 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     _updatePageButton = [NSButton buttonWithTitle:@"检查更新…" target:self action:@selector(checkForUpdates:)];
     _updatePageButton.accessibilityLabel = @"立即检查更新";
     _updatePageButton.hidden = MSIMEEditionIsShurufa();
-    NSBox *updateCard = MSIMECardWithViews(@[
+    NSBox *updateCard = MSIMEEditionOffersUpstreamLinks() ? MSIMECardWithViews(@[
         [self settingRow:@"当前版本" control:_versionLabel aka:@[@"版本号"]],
         [self settingRow:@"自动更新" control:_automaticUpdateLabel],
         [self settingRow:@"立即检查" control:_updatePageButton aka:@[@"检查更新", @"升级"]],
-    ], 0.0);
+    ], 0.0) : nil;
     updateCard.accessibilityLabel = @"软件更新卡片";
     NSButton *websiteButton = [NSButton buttonWithTitle:@"访问 msime.app" target:self action:@selector(openProductWebsite:)];
     MSIMELinkifyButton(websiteButton, @"访问水杉官网");
@@ -4618,7 +4618,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
         _removeUserDataButton, [self settingRow:@"输入源" control:_uninstallButton aka:@[@"卸载", @"删除"]],
     ], 6.0);
     uninstallCard.accessibilityLabel = @"卸载输入源卡片";
-    NSBox *aboutCard = MSIMECardWithViews(@[[self settingRow:@"产品主页" control:websiteButton aka:@[@"官网"]]], 0.0);
+    NSBox *aboutCard = MSIMEEditionOffersUpstreamLinks() ? MSIMECardWithViews(@[[self settingRow:@"产品主页" control:websiteButton aka:@[@"官网"]]], 0.0) : nil;
     aboutCard.accessibilityLabel = @"关于卡片";
     // The sidebar used to open with the icon and the product name above the navigation. Under a
     // transparent titlebar that space belongs to the traffic lights and the search field, so the
@@ -4628,13 +4628,13 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     // then the same artwork by construction and cannot drift apart in shape or colour.
     logo.image = [NSImage imageNamed:NSImageNameApplicationIcon];
     logo.imageScaling = NSImageScaleProportionallyUpOrDown;
-    logo.accessibilityLabel = @"水杉 IME";
+    logo.accessibilityLabel = MSIMEEditionDisplayName();
     logo.translatesAutoresizingMaskIntoConstraints = NO;
     [logo.widthAnchor constraintEqualToConstant:52.0].active = YES;
     [logo.heightAnchor constraintEqualToConstant:52.0].active = YES;
     NSTextField *brand = [NSTextField labelWithString:MSIMEEditionDisplayName()];
     brand.font = [NSFont systemFontOfSize:17.0 weight:NSFontWeightSemibold];
-    NSTextField *tagline = [NSTextField labelWithString:@"Metasequoia IME"];
+    NSTextField *tagline = [NSTextField wrappingLabelWithString:MSIMEEditionDescription()];
     tagline.font = [NSFont systemFontOfSize:kBodyFontSize];
     tagline.textColor = NSColor.secondaryLabelColor;
     NSStackView *brandText = [NSStackView stackViewWithViews:@[brand, tagline]];
@@ -4646,17 +4646,24 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     brandRow.alignment = NSLayoutAttributeCenterY;
     brandRow.spacing = 14.0;
     brandRow.translatesAutoresizingMaskIntoConstraints = NO;
+    NSView *shurufaVersionRow = nil;
+    if (!MSIMEEditionOffersUpstreamLinks()) {
+        [brandRow.heightAnchor constraintEqualToConstant:72.0].active = YES;
+        shurufaVersionRow = [self settingRow:@"当前版本" control:_versionLabel aka:@[@"版本号"]];
+        [shurufaVersionRow.heightAnchor constraintEqualToConstant:34.0].active = YES;
+    }
     // Nothing on this page is a stored preference — the version and the update state are read from
     // the bundle and from Sparkle, and uninstalling is not a setting — so none of its sections
     // offers a restore.
-    NSScrollView *aboutPage = [self page:MSIMESettingsPageAbout
-                                   title:@"关于"
-                                 summary:@"版本与更新，以及水杉输入法的产品主页。"
-                                 content:@[
+    NSArray<NSView *> *aboutContent = MSIMEEditionOffersUpstreamLinks() ? @[
         brandRow, [self sectionHeader:@"软件更新" keys:@[]], updateCard,
         [self sectionHeader:@"产品信息" keys:@[]], aboutCard,
         [self sectionHeader:@"卸载" keys:@[]], uninstallCard,
-    ]];
+    ] : @[brandRow, shurufaVersionRow, [self sectionHeader:@"卸载" keys:@[]], uninstallCard];
+    NSScrollView *aboutPage = [self page:MSIMESettingsPageAbout
+                                   title:@"关于"
+                                 summary:MSIMEEditionOffersUpstreamLinks() ? @"版本与更新，以及水杉输入法的产品主页。" : @""
+                                 content:aboutContent];
 
     // ---- 按键 -------------------------------------------------------------------------------
     // 以词定字 and 翻页 cannot be bound to the same key group, and until now the window let the user
@@ -4925,7 +4932,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     _sidebarOutline.floatsGroupRows = NO;
     _sidebarOutline.allowsEmptySelection = NO;
     _sidebarOutline.rowSizeStyle = NSTableViewRowSizeStyleCustom;
-    _sidebarOutline.accessibilityLabel = @"水杉输入法导航";
+    _sidebarOutline.accessibilityLabel = MSIMEEditionText(@"水杉输入法导航");
     NSTableColumn *sidebarColumn = [[NSTableColumn alloc] initWithIdentifier:@"MSIMESettingsSidebarColumn"];
     sidebarColumn.resizingMask = NSTableColumnAutoresizingMask;
     [_sidebarOutline addTableColumn:sidebarColumn];
@@ -5763,6 +5770,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
 }
 - (void)openProductWebsite:(id)sender {
     (void)sender;
+    if (!MSIMEEditionOffersUpstreamLinks()) return;
     [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:@"https://msime.app"]];
 }
 - (void)voiceShortcutConfigurationChanged:(NSNotification *)notification {
@@ -5911,7 +5919,7 @@ static const NSUInteger MSIMESettingsDocumentLimit = 1 << 20;
 - (void)exportSettings:(id)sender {
     (void)sender;
     NSSavePanel *panel = [NSSavePanel savePanel];
-    panel.nameFieldStringValue = @"水杉输入法设置.json";
+    panel.nameFieldStringValue = MSIMEEditionText(@"水杉输入法设置.json");
     panel.prompt = @"导出";
     panel.message = MSIMESettingsDocumentScope;
     if ([panel runModal] != NSModalResponseOK || panel.URL == nil) return;
@@ -5946,7 +5954,7 @@ static const NSUInteger MSIMESettingsDocumentLimit = 1 << 20;
     if (![document isKindOfClass:NSDictionary.class] ||
         ![document[MSIMESettingsDocumentFormatField] isEqual:MSIMESettingsDocumentFormat]) {
         [self reportSettingsDocumentFailure:@"无法导入这个文件"
-                                     reason:@"它不是水杉输入法导出的设置文件。"];
+                                     reason:MSIMEEditionText(@"它不是水杉输入法导出的设置文件。")];
         return;
     }
     // 另一个版本导出的文件先收窄到本版本，见 MSIMEAdoptCloudAppearance。
@@ -5954,7 +5962,7 @@ static const NSUInteger MSIMESettingsDocumentLimit = 1 << 20;
     // The same check the account sync puts a downloaded snapshot through — +[MSIMEPreferencesWindowController validateCloudSettingsSnapshot:] is one line around this function — asked here first so that a document this host cannot read is told apart from one it can read and still has to refuse.
     if (![values isKindOfClass:NSDictionary.class] || !MSIMEValidateCloudAppearance(values)) {
         [self reportSettingsDocumentFailure:@"无法导入这个文件"
-                                     reason:@"文件里的设置无法识别，可能来自更新版本的水杉输入法，或者已经被改动过。"];
+                                     reason:MSIMEEditionText(@"文件里的设置无法识别，可能来自更新版本的水杉输入法，或者已经被改动过。")];
         return;
     }
     if (![self applyCloudSettingsSnapshot:values]) {
