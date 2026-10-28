@@ -1386,6 +1386,7 @@ target_compile_options(shurufa-preference-migration-test PRIVATE -fobjc-arc -Wal
 target_link_libraries(shurufa-preference-migration-test PRIVATE "-framework Foundation")
 add_test(NAME shurufa-preference-migration COMMAND shurufa-preference-migration-test)
 add_test(NAME shurufa-installation COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/shurufa_installation_test.py")
+add_test(NAME shurufa-brand-audit COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/shurufa_brand_audit_test.py")
 add_executable(support-window-test tests/core/SupportWindowTest.mm src/core/SupportWindowController.mm)
 target_compile_options(support-window-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(support-window-test PRIVATE "-framework AppKit")

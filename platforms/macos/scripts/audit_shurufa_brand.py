@@ -52,16 +52,32 @@ def metadata_strings(value, trail=""):
         yield trail, value
 
 
+ICON_NAMES = {"MSIMEClientInputMethod.icns"} | {
+    "MSIMEClientInputMethodMenuIcon" + suffix + ".tiff"
+    for suffix in ("", "Chinese", "Shuangpin", "English", "Wubi", "Cantonese", "Zhuyin",
+                   "Japanese", "Korean", "Vietnamese", "Tibetan", "Stroke")
+}
+
+
+def audit_icons(bundle, manifest):
+    failures = []
+    verified = 0
+    for name in sorted(ICON_NAMES | set(manifest)):
+        icon = bundle / "Contents/Resources" / name
+        actual = hashlib.sha256(icon.read_bytes()).hexdigest() if icon.is_file() else None
+        expected = manifest.get(name)
+        if name not in ICON_NAMES or expected is None or actual != expected:
+            failures.append({"path": name, "expected": expected, "actual": actual})
+        else:
+            verified += 1
+    return failures, verified
+
+
 def audit(bundle):
     hits = []
     visible_failures = []
     icon_manifest = json.loads((Path(__file__).parents[1] / "resources/shurufa/icon-sha256.json").read_text())
-    icon_failures = []
-    for name, expected in icon_manifest.items():
-        icon = bundle / "Contents/Resources" / name
-        actual = hashlib.sha256(icon.read_bytes()).hexdigest() if icon.is_file() else None
-        if actual != expected:
-            icon_failures.append({"path":name, "expected":expected, "actual":actual})
+    icon_failures, verified_icons = audit_icons(bundle, icon_manifest)
     for file in sorted(bundle.rglob("*")):
         if not file.is_file():
             continue
@@ -114,7 +130,7 @@ def audit(bundle):
                         "token":token, "reason":reason, "excerpt":excerpt})
                     offset = data.find(needle, offset + len(needle))
     return {"bundle":str(bundle), "visible_metadata_failures":visible_failures,
-        "icon_hash_failures":icon_failures, "verified_icon_count":len(icon_manifest) - len(icon_failures),
+        "icon_hash_failures":icon_failures, "verified_icon_count":verified_icons,
         "counts_by_reason":dict(collections.Counter(hit["reason"] for hit in hits)), "hits":hits}
 
 
