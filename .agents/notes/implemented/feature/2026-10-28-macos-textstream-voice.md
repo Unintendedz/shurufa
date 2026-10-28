@@ -14,9 +14,13 @@ macOS 宿主的本地识别只有 `msime-voice-local`（sherpa-onnx）一条路�
 - 整理沿用现有 `polish_*` 链路，`textstream` 下默认开启（用户没存过开关时按开，仍要求有凭据才发请求）；整理失败或超时原样上屏识别文字。新增只能调小的 `polish_timeout_ms` 选项，仅为测试超时路径。
 - 从 OpenLess 导入是输入法设置窗口里由用户触发的动作：读登录钥匙串里 `com.openless.app`/`credentials.v2` 的凭据（系统会弹授权框），读 `preferences.json`、`style-packs.json`，把当前整理风格的提示词写进自定义方案 1 并选中。不读历史、录音、速记。提示词取值顺序固定：内置风格的用户覆盖值，其次 style-packs.json 里同 id 的包，最后 `styleSystemPrompts`。
 
-### 设置编辑
+### 设置编辑与模型列表
 
 所有通过 `MSIMEPresentWindow` 展示的原生设置窗口安装标准编辑菜单，Command+V/C/X/A/Z 经 AppKit 响应链到当前文本框。保留系统文本框的右键菜单和安全文本框对复制密钥的保护。测试进程使用独立剪贴板，不读写用户剪贴板。
+
+整理模型行提供「获取模型列表」按钮，后台线程复用 `msime_client_ai_models` 请求当前地址旁的 `/models`。按 JSON 的 `data[].id` 确定性读取并保留服务顺序，不猜模型、不内置列表；选择后走原保存入口，手动填写始终可用。请求期间禁用按钮；地址或密钥改变后丢弃旧结果。原有 FFI 调用保留粗粒度错误码，新界面用可选 `detailed_errors` 获得中文鉴权、不支持、超时提示，不透传服务原文或密钥。
+
+本地假服务覆盖方舟 `/api/v3`、DeepSeek 根路径、硅基流动 `/v1` 三种路径、鉴权和不支持状态、空列表与响应体超时。此覆盖证明兼容接口路径和格式，不代表各供应商的实时可用性。
 
 ## Alternatives considered
 

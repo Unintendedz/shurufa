@@ -9,6 +9,8 @@
 #import "MSIMEClientSession.h"
 #import "../core/SharedVoicePreferences.h"
 #import "VoiceShortcutPresentation.h"
+#include "../../../common/HostApiString.h"
+#include "msime_client.h"
 NSNotificationName const MSIMEVoiceProviderSettingsDidChangeNotification = @"MSIMEClientVoiceProviderSettingsDidChange";
 #import <Security/Security.h>
 #import "../core/WindowPresentation.h"
@@ -403,6 +405,8 @@ static NSString *SharedSetting(NSString *key, NSString *fallback)
     NSView *_endpointRow, *_modelRow, *_tokenRow, *_modelPathRow, *_textStreamRow;
     NSTextField *_textStreamStatus, *_polishKeyStatus;
     NSButton *_textStreamInstall, *_openLessImport;
+    NSButton *_fetchPolishModels;
+    NSArray<NSString *> *_availablePolishModels;
     /// One message per card, on the card that owns the field it is about.
     NSTextField *_recognitionNotice, *_polishNotice;
     NSString *_loadedProvider;
@@ -504,6 +508,14 @@ static void ShowNotice(NSTextField *label, NSString *message, NSColor *color)
     _polish = MSIMESettingSwitch(self, @selector(polishChanged:), @"识别后整理文本");
     _polishEndpoint = [self fieldLabelled:@"整理服务地址" secure:NO];
     _polishModel = [self fieldLabelled:@"整理模型" secure:NO];
+    _fetchPolishModels = [NSButton buttonWithTitle:@"获取模型列表" target:self action:@selector(fetchPolishModels:)];
+    _fetchPolishModels.accessibilityLabel = @"获取整理模型列表";
+    NSStackView *polishModelRow = [NSStackView stackViewWithViews:@[_polishModel, _fetchPolishModels]];
+    polishModelRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    polishModelRow.spacing = 8;
+    [polishModelRow.widthAnchor constraintGreaterThanOrEqualToConstant:320].active = YES;
+    [_polishModel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [_fetchPolishModels setContentCompressionResistancePriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
     _polishToken = (NSSecureTextField *)[self fieldLabelled:@"整理 API 密钥" secure:YES];
     _polishPromptID = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     _polishPromptID.accessibilityLabel = @"整理方案";
@@ -551,7 +563,7 @@ static void ShowNotice(NSTextField *label, NSString *message, NSColor *color)
     NSBox *polishCard = MSIMECardWithViews(@[
         MSIMESwitchRow(@"识别后整理文本", _polish, @"会把本次转写的文本发送到下面的服务"),
         MSIMEPreferenceRow(@"服务地址", _polishEndpoint),
-        MSIMEPreferenceRow(@"整理模型", _polishModel),
+        MSIMEPreferenceRow(@"整理模型", polishModelRow),
         MSIMEPreferenceRow(@"API 密钥", _polishToken),
         MSIMEPreferenceRow(@"整理方案", _polishPromptID),
         MSIMEPreferenceRowWithDetail(@"整理提示词", @"留空使用所选方案自带的提示词；选中自定义方案时，这里写的内容保存在该方案里。",
@@ -770,6 +782,55 @@ static void ShowNotice(NSTextField *label, NSString *message, NSColor *color)
             }
             return nil;
         }];
+}
+- (void)fetchPolishModels:(id)sender {
+    (void)sender;
+    NSString *endpoint = [_polishEndpoint.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    NSString *token = [_polishToken.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    NSData *request = [NSJSONSerialization dataWithJSONObject:@{@"endpoint":endpoint, @"token":token, @"detailed_errors":@YES} options:0 error:nil];
+    _fetchPolishModels.enabled = NO;
+    ShowNotice(_polishNotice, @"正在获取模型列表…", NSColor.secondaryLabelColor);
+    __weak MetasequoiaVoiceProviderSettingsView *weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        auto raw = msime::host_api::own_string(msime_client_ai_models(static_cast<const uint8_t *>(request.bytes), request.length));
+        NSData *data = raw ? [NSData dataWithBytes:raw.get() length:strlen(raw.get())] : nil;
+        NSDictionary *reply = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            MetasequoiaVoiceProviderSettingsView *view = weakSelf;
+            if (!view) return;
+            view->_fetchPolishModels.enabled = YES;
+            if (![endpoint isEqual:[view->_polishEndpoint.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet]] ||
+                ![token isEqual:[view->_polishToken.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet]]) {
+                ShowNotice(view->_polishNotice, @"服务配置已变化，请重新获取模型列表。", NSColor.secondaryLabelColor);
+                return;
+            }
+            if (![reply[@"ok"] isEqual:@YES] || ![reply[@"value"] isKindOfClass:NSArray.class]) {
+                NSDictionary *messages = @{
+                    @"ai_invalid":@"服务地址或密钥格式不正确，请检查后重试。",
+                    @"ai_models_unauthorized":@"密钥无效或没有读取模型列表的权限。",
+                    @"ai_models_unsupported":@"该服务不支持获取模型列表，或服务地址路径不正确；请检查地址或手动填写模型。",
+                    @"ai_models_timeout":@"请求超时，请检查网络或稍后重试。",
+                    @"ai_models_invalid":@"服务返回的模型列表无法识别，请手动填写模型。"
+                };
+                ShowNotice(view->_polishNotice, messages[reply[@"error"] ?: @""] ?: @"无法连接模型列表接口，请检查服务地址和网络。", NSColor.systemRedColor);
+                return;
+            }
+            view->_availablePolishModels = reply[@"value"];
+            NSMenu *models = [[NSMenu alloc] initWithTitle:@"选择整理模型"];
+            for (NSString *identifier in view->_availablePolishModels) {
+                NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:identifier action:@selector(selectPolishModel:) keyEquivalent:@""];
+                item.target = view; item.representedObject = identifier;
+                [models addItem:item];
+            }
+            ShowNotice(view->_polishNotice, [NSString stringWithFormat:@"已获取 %lu 个模型，也可继续手动填写。", (unsigned long)models.numberOfItems], NSColor.secondaryLabelColor);
+            if (view.window.isVisible) [models popUpMenuPositioningItem:nil atLocation:NSMakePoint(0, NSHeight(view->_fetchPolishModels.bounds)) inView:view->_fetchPolishModels];
+        });
+    });
+}
+- (void)selectPolishModel:(NSMenuItem *)sender {
+    if (![sender.representedObject isKindOfClass:NSString.class]) return;
+    _polishModel.stringValue = sender.representedObject;
+    [self commit:nil];
 }
 - (void)viewWillMoveToWindow:(NSWindow *)newWindow {
     if (!newWindow) [self stopRecordingHotkey];

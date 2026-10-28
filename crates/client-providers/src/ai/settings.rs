@@ -27,6 +27,12 @@ pub enum AiSettingsError {
     Invalid,
     /// 模型列表请求没有成功：连不上、超时或服务返回了错误状态。
     ModelsUnavailable,
+    /// 模型列表接口拒绝密钥或权限。
+    ModelsUnauthorized,
+    /// 服务未提供模型列表接口。
+    ModelsUnsupported,
+    /// 模型列表请求超时。
+    ModelsTimeout,
     /// 模型列表的响应过大，或不是带模型 id 的 `{data:[{id}]}`。
     ModelsInvalid,
     /// 测试请求没有成功。
@@ -39,10 +45,23 @@ impl AiSettingsError {
     pub fn code(self) -> &'static str {
         match self {
             Self::Invalid => "ai_invalid",
-            Self::ModelsUnavailable => "ai_models_unavailable",
+            Self::ModelsUnavailable
+            | Self::ModelsUnauthorized
+            | Self::ModelsUnsupported
+            | Self::ModelsTimeout => "ai_models_unavailable",
             Self::ModelsInvalid => "ai_models_invalid",
             Self::TestUnavailable => "ai_test_unavailable",
             Self::TestInvalid => "ai_test_invalid",
+        }
+    }
+
+    /// 新界面可请求具体错误码，原有调用方仍使用兼容的粗粒度错误码。
+    pub fn detailed_code(self) -> &'static str {
+        match self {
+            Self::ModelsUnauthorized => "ai_models_unauthorized",
+            Self::ModelsUnsupported => "ai_models_unsupported",
+            Self::ModelsTimeout => "ai_models_timeout",
+            _ => self.code(),
         }
     }
 }
@@ -50,6 +69,7 @@ impl AiSettingsError {
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum ResponseBodyError {
     TooLarge,
+    Timeout,
     Read,
 }
 
@@ -90,7 +110,18 @@ pub(crate) fn read_response_body(reader: impl Read) -> Result<Vec<u8>, ResponseB
     reader
         .take(MAX_RESPONSE_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
-        .map_err(|_| ResponseBodyError::Read)?;
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::TimedOut
+                || error
+                    .get_ref()
+                    .and_then(|source| source.downcast_ref::<reqwest::Error>())
+                    .is_some_and(reqwest::Error::is_timeout)
+            {
+                ResponseBodyError::Timeout
+            } else {
+                ResponseBodyError::Read
+            }
+        })?;
     if bytes.len() > MAX_RESPONSE_BYTES {
         return Err(ResponseBodyError::TooLarge);
     }
@@ -111,12 +142,32 @@ pub fn fetch_models(endpoint: &str, token: &str) -> Result<Vec<String>, AiSettin
     let endpoint = validate_endpoint(endpoint)?;
     validate_token(token)?;
     let client = client(&endpoint).ok_or(AiSettingsError::ModelsUnavailable)?;
+    fetch_models_with_client(endpoint, token, &client)
+}
+
+fn fetch_models_with_client(
+    endpoint: Url,
+    token: &str,
+    client: &reqwest::blocking::Client,
+) -> Result<Vec<String>, AiSettingsError> {
     let response = authorize(client.get(endpoint::models_url(endpoint, true)), token)
         .send()
-        .and_then(reqwest::blocking::Response::error_for_status)
-        .map_err(|_| AiSettingsError::ModelsUnavailable)?;
+        .map_err(|error| {
+            if error.is_timeout() {
+                AiSettingsError::ModelsTimeout
+            } else {
+                AiSettingsError::ModelsUnavailable
+            }
+        })?;
+    match response.status().as_u16() {
+        200..=299 => {}
+        401 | 403 => return Err(AiSettingsError::ModelsUnauthorized),
+        404 | 405 | 501 => return Err(AiSettingsError::ModelsUnsupported),
+        _ => return Err(AiSettingsError::ModelsUnavailable),
+    }
     let body = read_response_body(response).map_err(|error| match error {
         ResponseBodyError::TooLarge => AiSettingsError::ModelsInvalid,
+        ResponseBodyError::Timeout => AiSettingsError::ModelsTimeout,
         ResponseBodyError::Read => AiSettingsError::ModelsUnavailable,
     })?;
     parse_models(&body)
@@ -181,7 +232,7 @@ pub fn test_polish(
         .map_err(|_| AiSettingsError::TestUnavailable)?;
     let body = read_response_body(response).map_err(|error| match error {
         ResponseBodyError::TooLarge => AiSettingsError::TestInvalid,
-        ResponseBodyError::Read => AiSettingsError::TestUnavailable,
+        ResponseBodyError::Read | ResponseBodyError::Timeout => AiSettingsError::TestUnavailable,
     })?;
     parse_test_reply(&body)
 }
@@ -201,6 +252,102 @@ pub fn parse_test_reply(body: &[u8]) -> Result<String, AiSettingsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn model_server(
+        status: u16,
+        body: &'static str,
+        delay_body: bool,
+    ) -> (String, std::thread::JoinHandle<String>) {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut reader = BufReader::new(socket.try_clone().unwrap());
+            let mut request = String::new();
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                    break;
+                }
+                request.push_str(&line);
+            }
+            write!(socket, "HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+            if delay_body {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            let _ = socket.write_all(body.as_bytes());
+            request
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    #[test]
+    fn models_use_the_configured_path_and_only_data_ids() {
+        // 方舟、DeepSeek、硅基流动的路径形状；只访问本机假服务。
+        for (path, models_path) in [
+            ("/api/v3/chat/completions", "/api/v3/models"),
+            ("/chat/completions", "/models"),
+            ("/v1/chat/completions", "/v1/models"),
+        ] {
+            let (base, server) = model_server(
+                200,
+                r#"{"data":[{"id":"fixture-b"},{"name":"ignored"},{"id":"fixture-a"}],"models":["ignored"]}"#,
+                false,
+            );
+            assert_eq!(
+                fetch_models(&format!("{base}{path}"), "synthetic-token").unwrap(),
+                ["fixture-b", "fixture-a"]
+            );
+            let request = server.join().unwrap();
+            assert!(request.starts_with(&format!("GET {models_path} HTTP/1.1\r\n")));
+            assert!(request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer synthetic-token\r\n"));
+        }
+    }
+
+    #[test]
+    fn models_report_safe_detailed_errors_without_changing_legacy_codes() {
+        for (status, expected) in [
+            (401, AiSettingsError::ModelsUnauthorized),
+            (403, AiSettingsError::ModelsUnauthorized),
+            (404, AiSettingsError::ModelsUnsupported),
+            (405, AiSettingsError::ModelsUnsupported),
+            (501, AiSettingsError::ModelsUnsupported),
+            (500, AiSettingsError::ModelsUnavailable),
+        ] {
+            let (base, server) = model_server(status, "private-server-error", false);
+            let error = fetch_models(&base, "").unwrap_err();
+            assert_eq!(error, expected);
+            assert_eq!(error.code(), "ai_models_unavailable");
+            assert!(!error.detailed_code().contains("private"));
+            server.join().unwrap();
+        }
+        let (base, server) = model_server(200, r#"{"data":[]}"#, false);
+        assert_eq!(
+            fetch_models(&base, "").unwrap_err(),
+            AiSettingsError::ModelsInvalid
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn models_body_timeout_is_reported_as_timeout() {
+        let (base, server) = model_server(200, r#"{"data":[{"id":"fixture"}]}"#, true);
+        let client = endpoint::blocking_client_builder(&validate_endpoint(&base).unwrap())
+            .timeout(Duration::from_millis(50))
+            .build()
+            .unwrap();
+        assert_eq!(
+            fetch_models_with_client(validate_endpoint(&base).unwrap(), "", &client).unwrap_err(),
+            AiSettingsError::ModelsTimeout
+        );
+        server.join().unwrap();
+    }
 
     #[test]
     fn endpoint_validation_accepts_http_api_urls_and_rejects_unsafe_urls() {

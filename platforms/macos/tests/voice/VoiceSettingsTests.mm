@@ -1,8 +1,12 @@
 // Validation of the voice form's stored configuration. validate: reads only the properties, so this never touches the Keychain or the defaults the form saves to.
 #import "../../src/voice/VoiceProviderSettings.h"
 #import "../../src/settings/SettingsLayout.h"
+#import <objc/runtime.h>
 #include <cstdio>
 #include <cstdlib>
+
+static NSBundle *SnapshotBundle;
+static id SnapshotMainBundle(id, SEL) { return SnapshotBundle; }
 
 namespace
 {
@@ -107,6 +111,12 @@ int main(int argc, const char **argv)
         Require([settings validate:nil], "pending TextStream polish blocks recognition settings");
         if (argc >= 2) {
             // 真实 AppKit 表单的离屏截图；使用合成偏好，不访问用户密钥或发送按键。
+            NSString *bundlePath = NSProcessInfo.processInfo.environment[@"MSIME_SNAPSHOT_BUNDLE"];
+            if (bundlePath.length) {
+                SnapshotBundle = [NSBundle bundleWithPath:bundlePath];
+                Require(SnapshotBundle != nil, "snapshot bundle missing");
+                method_setImplementation(class_getClassMethod(NSBundle.class, @selector(mainBundle)), (IMP)SnapshotMainBundle);
+            }
             [NSApplication sharedApplication];
             NSApp.appearance = [NSAppearance appearanceNamed:argc == 3 ? NSAppearanceNameAqua : NSAppearanceNameDarkAqua];
             NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;

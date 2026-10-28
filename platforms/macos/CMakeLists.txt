@@ -1211,6 +1211,12 @@ target_compile_options(voice-provider-settings-validation-test PRIVATE -fobjc-ar
 target_link_libraries(voice-provider-settings-validation-test PRIVATE apple-client "-framework AppKit" "-framework Security"
   "-framework CoreAudio" "-framework AudioToolbox")
 add_test(NAME voice-provider-settings-validation COMMAND voice-provider-settings-validation-test)
+add_executable(voice-shortcut-recorder-test tests/voice/VoiceShortcutRecorderTest.mm
+  src/voice/VoiceProviderSettings.mm src/voice/TextStreamSupport.mm src/voice/OpenLessImport.mm)
+target_compile_options(voice-shortcut-recorder-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(voice-shortcut-recorder-test PRIVATE apple-client "-framework AppKit" "-framework Security"
+  "-framework CoreAudio" "-framework AudioToolbox")
+add_test(NAME voice-shortcut-recorder COMMAND voice-shortcut-recorder-test)
 add_executable(voice-polish-presets-test tests/voice/VoicePolishPresetsTest.mm)
 target_compile_options(voice-polish-presets-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(voice-polish-presets-test PRIVATE "-framework AppKit")

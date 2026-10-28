@@ -19685,6 +19685,49 @@ fn ai_settings_exports_reject_invalid_requests_offline() {
 }
 
 #[test]
+fn ai_models_detailed_errors_are_opt_in() {
+    use std::io::{BufRead, BufReader, Write};
+    for detailed in [false, true] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!(
+            "http://{}/api/v3/chat/completions",
+            listener.local_addr().unwrap()
+        );
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                .unwrap();
+            let mut reader = BufReader::new(socket.try_clone().unwrap());
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                    break;
+                }
+            }
+            socket
+                .write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+        let request =
+            json!({"endpoint":endpoint,"token":"synthetic","detailed_errors":detailed}).to_string();
+        let reply = read(unsafe { msime_client_ai_models(request.as_ptr(), request.len()) });
+        assert_eq!(
+            reply["error"],
+            if detailed {
+                "ai_models_unauthorized"
+            } else {
+                "ai_models_unavailable"
+            }
+        );
+        assert_eq!(reply["ok"], false);
+        server.join().unwrap();
+    }
+}
+
+#[test]
 fn ai_endpoint_check_export_reports_the_origin_problem_and_hint() {
     let check = |endpoint: &str| {
         read(unsafe { msime_client_ai_endpoint_check(endpoint.as_ptr(), endpoint.len()) })["value"]
