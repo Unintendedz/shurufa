@@ -470,6 +470,10 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
 }
 - (void)setPersistentRecording:(BOOL)persistent {
     _persistentRecording = persistent;
+    self.collectionBehavior = persistent
+        ? NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary |
+          NSWindowCollectionBehaviorTransient | NSWindowCollectionBehaviorIgnoresCycle
+        : NSWindowCollectionBehaviorDefault;
     [self layoutPresentation];
 }
 - (void)setShortcutMonitoringAvailable:(BOOL)available {
@@ -480,9 +484,9 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
     (void)sender;
     [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:@"x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"]];
 }
-- (void)showCopied {
+- (void)showCopyResult:(BOOL)copied {
     _transcript = @"";
-    [self showStatus:@"已复制" listening:NO failure:YES];
+    [self showStatus:copied ? @"已复制" : @"复制失败" listening:NO failure:YES];
     const NSUInteger generation = _presentationGeneration;
     __weak MSIMEVoiceWaveOverlay *weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3*NSEC_PER_SEC), dispatch_get_main_queue(), ^{

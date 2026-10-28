@@ -85,7 +85,7 @@
 @implementation LivePresentationFixture
 - (void)setPersistentRecording:(BOOL)value { (void)value; }
 - (void)setShortcutMonitoringAvailable:(BOOL)value { (void)value; }
-- (void)showCopied { self.preview = @"已复制"; }
+- (void)showCopyResult:(BOOL)copied { self.preview = copied ? @"已复制" : @"复制失败"; }
 - (void)setInputLevel:(float)level { self.lastLevel = level; ++self.levelUpdates; }
 - (void)dismissProcessing { self.dismissed = YES; }
 - (void)setListening:(BOOL)listening { self.phase = listening ? 1 : 0; self.failure = 0; self.preview = @""; self.locked = NO; }
@@ -143,6 +143,7 @@
 @interface PersistentControllerFixture : LiveControllerFixture
 @property(copy) void (^recordingMonitor)(NSEvent *);
 @property BOOL monitorDenied;
+@property BOOL copyFails;
 @property PersistentStreamFixture *streamFixture;
 @property(copy) NSString *copiedText;
 @end
@@ -153,7 +154,7 @@
     (void)options; (void)error; self.streamFixture = [PersistentStreamFixture new]; return self.streamFixture;
 }
 - (MSIMEHTTPVoiceRequest *)makeDoubaoPolishRequest:(NSDictionary *)options { return [self makeLiveVoicePolishRequest:options]; }
-- (void)copyVoiceText:(NSString *)text { self.copiedText = text; }
+- (BOOL)copyVoiceText:(NSString *)text { if (self.copyFails) return NO; self.copiedText = text; return YES; }
 @end
 static NSBundle *PersistentTestBundle;
 static id PersistentMainBundle(id, SEL) { return PersistentTestBundle; }
@@ -361,10 +362,33 @@ int main(int argc, char **argv) {
                 assert(!source.active && !MSIMEVoiceRecordingOwner);
             }
             puts("PASS persistent: TextStream blur, return/clipboard, denied-monitor finish button, cancel");
+            // 失败发生在失焦之后仍须明确反馈；最终插入应更新目标前文。
+            [owner setValue:origin forKey:@"activeClient"];
+            [owner toggleVoiceInput:nil];
+            [owner deactivateServer:origin];
+            [owner reportVoiceFailure:MSIMEVoiceFailureNoSpeech];
+            const BOOL failureVisible = overlay.failure == MSIMEVoiceFailureNoSpeech;
+            printf("persistent blur failure visible: %d\n", failureVisible);
+            [owner setValue:origin forKey:@"activeClient"];
+            MSIMEFocusedController = owner;
+            owner.usePolishFixture = NO;
+            [owner noteSmartPunctuationShadow:'1'];
+            [owner toggleVoiceInput:nil];
+            source.transcript(@"合成结果", YES);
+            const BOOL shadowUpdated = [owner precedingForSmartPunctuation:origin] == u'果';
+            printf("persistent final shadow updated: %d\n", shadowUpdated);
+            fflush(stdout);
+            assert(failureVisible && shadowUpdated);
+            owner.copyFails = YES; owner.copiedText = nil;
+            MSIMEFocusedController = nil;
+            [owner toggleVoiceInput:nil];
+            source.transcript(@"synthetic failed clipboard", YES);
+            assert([overlay.preview isEqual:@"复制失败"] && !owner.copiedText && !source.active);
+            puts("PASS persistent: blur error, punctuation shadow, clipboard failure");
             MSIMEFocusedController = nil;
             method_setImplementation(method, original);
             method_setImplementation(deactivate, originalDeactivate);
-            assert(PersistentBaseDeactivations == 10);
+            assert(PersistentBaseDeactivations == 11);
             [defaults setVolatileDomain:old forName:NSArgumentDomain];
             assert([session closeWithError:nil]);
             assert([NSFileManager.defaultManager removeItemAtPath:root error:nil]);

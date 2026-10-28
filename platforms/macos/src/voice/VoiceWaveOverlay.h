@@ -58,7 +58,7 @@ typedef NS_ENUM(NSUInteger, MSIMEVoiceFailure) {
 - (void)setTranscript:(NSString *)text;
 - (void)setPersistentRecording:(BOOL)persistent;
 - (void)setShortcutMonitoringAvailable:(BOOL)available;
-- (void)showCopied;
+- (void)showCopyResult:(BOOL)copied;
 @property(nonatomic, readonly, copy) NSString *statusText;
 @property(nonatomic, readonly, copy) NSString *transcriptText;
 @end

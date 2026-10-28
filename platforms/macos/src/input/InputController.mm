@@ -1715,7 +1715,7 @@ static NSImage *MSIMECandidateLogoImage() {
     BOOL _liveVoiceMarked;
     BOOL _liveVoiceProcessing;
     NSString *_voicePreviewText;
-    BOOL _voiceCopiedResult;
+    NSNumber *_voiceCopiedResult;
     id _globalVoiceHotkeyMonitor;
     id _voicePermissionToken;
     uint64_t _voiceGeneration;
@@ -5592,11 +5592,12 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
 }
 - (void)reportVoiceFailure:(MSIMEVoiceFailure)failure { [self reportVoiceFailure:failure detail:nil]; }
 - (void)reportVoiceFailure:(MSIMEVoiceFailure)failure detail:(NSString *)detail {
+    const BOOL persistent = [self ownsPersistentVoiceRecording];
     _voicePermissionToken = nil; _voiceHoldShortcut.reset(); _configuredVoiceShortcut.reset();
     [self cancelHTTPVoiceInput]; [self cancelDoubaoVoiceInput]; [self cancelLiveVoiceInput];
     if (_voiceService.active) [_voiceService cancelWithError:nil];
     [_voiceAudioMuter restore]; [self voiceCaptureDidEnd];
-    if (!_activeClient) return;
+    if (!_activeClient && !persistent) return;
     if (!_voiceOverlay) {
         _voiceOverlay = [MSIMEVoiceWaveOverlay new];
         [_voiceOverlay applyThemePreferences:_voiceThemePreferences ?: @{}];
@@ -5847,8 +5848,8 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
 - (void)releaseVoiceRecordingOwnership {
     if (MSIMEVoiceRecordingOwner != self || _voiceService.active) return;
     MSIMERecordingMonitor.stop();
-    if (_voiceCopiedResult) [_voiceOverlay showCopied];
-    _voiceCopiedResult = NO; _voicePreviewText = nil;
+    if (_voiceCopiedResult) [_voiceOverlay showCopyResult:_voiceCopiedResult.boolValue];
+    _voiceCopiedResult = nil; _voicePreviewText = nil;
     MSIMEVoiceRecordingOwner = nil;
 }
 - (BOOL)ownsLiveVoiceToken:(id)token {
@@ -5902,7 +5903,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     return token;
 }
 - (void)bindVoiceOverlayActions {
-    if (MSIMEEditionIsShurufa()) { MSIMEVoiceRecordingOwner = self; _voiceCopiedResult = NO; _voicePreviewText = nil; }
+    if (MSIMEEditionIsShurufa()) { MSIMEVoiceRecordingOwner = self; _voiceCopiedResult = nil; _voicePreviewText = nil; }
     __weak MSIMEInputController *weakSelf = self;
     id client = _activeClient;
     MSIMEClientSession *session = _session;
@@ -8464,9 +8465,8 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     NSString *mode = [focused selectedSystemInputModeID];
     return [@[MSIMEChineseInputModeID, MSIMEShuangpinInputModeID, MSIMEEnglishInputModeID] containsObject:mode ?: @""] ? focused : nil;
 }
-- (void)copyVoiceText:(NSString *)text {
-    NSPasteboard *board = NSPasteboard.generalPasteboard;
-    [board clearContents]; [board setString:text forType:NSPasteboardTypeString];
+- (BOOL)copyVoiceText:(NSString *)text {
+    return MSIMEWriteVoiceClipboard(text, NSPasteboard.generalPasteboard);
 }
 - (void)applyVoiceResult:(NSDictionary *)transition route:(const MSIMEVoiceCommitRoute &)route {
     NSString *text = transition[@"commit"];
@@ -8477,10 +8477,14 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
             if (destination->_session) [destination apply:[destination->_session command:MSIME_FINISH_COMPOSITION error:nil]];
             if (destination->_appearance.traditionalOutput && MSIMEScriptConversionApplies(transition[@"commit_context"]))
                 text = MSIMEChineseOutputString(text, YES);
+            // 与普通上屏一致，先更新前文，避免同步客户端回调读到录音前的标点状态。
+            [destination noteSmartPunctuationShadow:[text characterAtIndex:text.length - 1]];
             [(id<MSIMETextClient>)destination->_activeClient insertText:text replacementRange:NSMakeRange(NSNotFound,NSNotFound)];
             destination->_clientHasMarkedText = NO;
+            MSIMERecordTypingStatistics(destination->_preferencesDirectory ?: MSIMEStatisticsHostOptions(destination->_session)[@"preferences_directory"],
+                                        text, msime::mac::TypingSource::Voice);
         } else {
-            [self copyVoiceText:text]; _voiceCopiedResult = YES;
+            _voiceCopiedResult = @([self copyVoiceText:text]);
         }
         return;
     }

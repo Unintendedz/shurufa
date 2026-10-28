@@ -230,6 +230,8 @@ int main(int argc, char **argv) {
         [panel setListening:NO];
         // 跨窗口录音始终保留真实 AppKit 按钮，不取得键盘焦点。
         [panel setPersistentRecording:YES];
+        assert(panel.collectionBehavior & NSWindowCollectionBehaviorCanJoinAllSpaces);
+        assert(panel.collectionBehavior & NSWindowCollectionBehaviorFullScreenAuxiliary);
         panel.actionHandler = ^(BOOL cancel) { if (cancel) ++cancels; else ++confirms; };
         for (NSString *theme in @[@"light", @"dark"]) {
             [panel applyThemePreferences:@{@"theme":theme}];
@@ -239,7 +241,7 @@ int main(int argc, char **argv) {
                 [panel setListening:YES];
                 [panel setTranscript:@"这是一段合成转写，用于验证跨窗口录音。\n切换页面后，文字仍在这里继续显示。"];
                 if ([state isEqual:@"copied"]) {
-                    [panel showCopied];
+                    [panel showCopyResult:YES];
                     assert([panel.statusText isEqual:@"已复制"] && panel.visible && cancelButton.hidden && confirmButton.hidden);
                 } else {
                     assert(!panel.ignoresMouseEvents && !cancelButton.hidden && !confirmButton.hidden);
