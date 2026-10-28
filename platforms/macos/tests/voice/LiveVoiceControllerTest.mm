@@ -769,6 +769,30 @@ int main(int argc, char **) {
             assert(customController.polishFixture.submissions == 1);
             customController.polishFixture.completion(@"synthetic toggle polished", nil);
             assert(customClient.commits.count == 1 && !customCapture.active);
+            // 经完整控制器入口复验 Option+左方向键，在 marked text 存在时再次按下应结束。
+            configured[@"MSIMEClientVoiceMacOSHotkey"] = @{@"key_code":@123,@"modifiers":@2};
+            [defaults setVolatileDomain:configured forName:NSArgumentDomain];
+            const auto arrowFlags = NSEventModifierFlagOption | NSEventModifierFlagFunction | NSEventModifierFlagNumericPad;
+            auto arrowDown = key(123, arrowFlags, NSEventTypeKeyDown);
+            auto arrowUp = key(123, arrowFlags, NSEventTypeKeyUp);
+            assert([customController handleEvent:arrowDown client:customClient] && customCapture.active);
+            [customController handleEvent:arrowUp client:customClient];
+            customCapture.transcript(@"synthetic arrow partial", NO);
+            assert(customClient.marked.length);
+            assert([customController handleEvent:arrowDown client:customClient]);
+            assert([[customController valueForKey:@"liveVoiceProcessing"] boolValue]);
+            [customController cancelLiveVoiceInput];
+            [customController voiceProviderSettingsChanged:nil];
+            auto missingReleaseKey = [&](NSTimeInterval timestamp) {
+                return [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:arrowFlags
+                    timestamp:timestamp windowNumber:0 context:nil characters:@"" charactersIgnoringModifiers:@""
+                    isARepeat:NO keyCode:123];
+            };
+            assert([customController handleEvent:missingReleaseKey(10) client:customClient] && customCapture.active);
+            customCapture.transcript(@"synthetic missing-release partial", NO);
+            assert([customController handleEvent:missingReleaseKey(11) client:customClient]);
+            assert([[customController valueForKey:@"liveVoiceProcessing"] boolValue]);
+            [customController cancelLiveVoiceInput];
             [defaults setVolatileDomain:old forName:NSArgumentDomain];
         }
         CGEventRef injected = CGEventCreateKeyboardEvent(nullptr, 0, true);

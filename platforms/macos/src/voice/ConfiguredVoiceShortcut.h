@@ -66,6 +66,13 @@ public:
                 else sides_ &= ~side;
             }
         }
+        // IMK 客户端可能不转发组合键的 KeyUp。新的非重复 KeyDown 本身就是新一轮按下，
+        // 不让 toggle 永远卡在上一轮；同一时间戳的全局/IMK 双入口仍只处理一次。
+        if (type == NSEventTypeKeyDown && key == primary_ && event.timestamp > 0) {
+            if (active_ && event.timestamp == primaryDownTimestamp_) return {true};
+            if (active_ && !hold_ && !modifier_ && !event.isARepeat && modifiers == expected_)
+                active_ = false;
+        }
         if (active_) {
             const bool release = modifier_ ? !(sides_ & MSIMEVoiceSideFlag(primary_)) ||
                 (modifiers & required_) != required_ :
@@ -110,6 +117,7 @@ public:
         }
         if (!match) return {};
         active_ = true; primary_ = key; modifier_ = modifier; required_ = required; expected_ = modifiers;
+        if (type == NSEventTypeKeyDown) primaryDownTimestamp_ = event.timestamp;
         began_ = true;
         cancelled_ = false; locked_ = false; started_ = !recording;
         hold_ = [options.mode isEqual:@"hold"] || ([options.mode isEqual:@"legacy"] && modifier && required == 0);
@@ -120,6 +128,7 @@ private:
     NSEventModifierFlags sides_ = 0;
     unsigned short primary_ = 0;
     unsigned required_ = 0, expected_ = 0;
+    NSTimeInterval primaryDownTimestamp_ = 0;
     int suppressedKey_ = -1;
     bool active_ = false, modifier_ = false, hold_ = false, started_ = false, cancelled_ = false, locked_ = false;
     bool began_ = false;
