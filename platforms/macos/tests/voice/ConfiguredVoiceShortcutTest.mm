@@ -2,9 +2,9 @@
 #include <cassert>
 #include <initializer_list>
 
-static NSEvent *Event(unsigned short key, NSEventModifierFlags flags, NSEventType type) {
-    return [NSEvent keyEventWithType:type location:NSZeroPoint modifierFlags:flags timestamp:1 windowNumber:0 context:nil
-        characters:@"" charactersIgnoringModifiers:@"" isARepeat:NO keyCode:key];
+static NSEvent *Event(unsigned short key, NSEventModifierFlags flags, NSEventType type, NSTimeInterval timestamp = 1, BOOL repeat = NO) {
+    return [NSEvent keyEventWithType:type location:NSZeroPoint modifierFlags:flags timestamp:timestamp windowNumber:0 context:nil
+        characters:@"" charactersIgnoringModifiers:@"" isARepeat:repeat keyCode:key];
 }
 int main() {
     @autoreleasepool {
@@ -75,6 +75,39 @@ int main() {
             auto modifierUp = shortcut.observe(Event(59, NSEventModifierFlagOption, NSEventTypeFlagsChanged), config, true);
             assert(modifierUp.action == ([mode isEqual:@"hold"] ? Action::Toggle : Action::None));
             assert(shortcut.observe(Event(9, 0, NSEventTypeKeyUp), config, false).consumed);
+        }
+        // IMK 只转发 KeyDown 和 FlagsChanged，从不转发 KeyUp：先松开修饰键后，第二次按下组合键仍要结束录音。
+        {
+            MSIMEConfiguredVoiceShortcut shortcut;
+            MSIMEConfiguredVoiceShortcut::Options config{@{@"key_code":@123, @"modifiers":@2}, @"toggle", false, false, false, false};
+            const auto arrow = NSEventModifierFlagOption | NSEventModifierFlagFunction | NSEventModifierFlagNumericPad;
+            assert(shortcut.observe(Event(123, arrow, NSEventTypeKeyDown, 10), config, false).action == Action::Toggle);
+            assert(shortcut.observe(Event(58, 0, NSEventTypeFlagsChanged, 10.1), config, true).action == Action::None);
+            assert(shortcut.observe(Event(58, NSEventModifierFlagOption, NSEventTypeFlagsChanged, 12), config, true).action == Action::None);
+            const auto second = shortcut.observe(Event(123, arrow, NSEventTypeKeyDown, 12.1), config, true);
+            assert(second.consumed && second.action == Action::Toggle);
+            assert(shortcut.observe(Event(58, 0, NSEventTypeFlagsChanged, 12.2), config, false).action == Action::None);
+            assert(shortcut.observe(Event(123, arrow, NSEventTypeKeyDown, 14), config, false).action == Action::Toggle);
+        }
+        // 按住模式先松开修饰键：自动重复的 KeyDown 仍被吞掉，新的一次按下照常开始。
+        {
+            MSIMEConfiguredVoiceShortcut shortcut;
+            MSIMEConfiguredVoiceShortcut::Options config{@{@"key_code":@123, @"modifiers":@2}, @"hold", false, false, false, false};
+            const auto arrow = NSEventModifierFlagOption | NSEventModifierFlagFunction | NSEventModifierFlagNumericPad;
+            assert(shortcut.observe(Event(123, arrow, NSEventTypeKeyDown, 20), config, false).action == Action::Toggle);
+            const auto release = shortcut.observe(Event(58, 0, NSEventTypeFlagsChanged, 20.5), config, true);
+            assert(release.action == Action::Toggle && release.onRelease);
+            const auto repeat = shortcut.observe(Event(123, NSEventModifierFlagFunction, NSEventTypeKeyDown, 20.6, YES), config, false);
+            assert(repeat.consumed && repeat.action == Action::None);
+            assert(shortcut.observe(Event(123, arrow, NSEventTypeKeyDown, 22), config, false).action == Action::Toggle);
+        }
+        // Esc 取消后收不到 KeyUp，下一次 Esc 要交还给应用。
+        {
+            MSIMEConfiguredVoiceShortcut shortcut;
+            MSIMEConfiguredVoiceShortcut::Options config{@{@"key_code":@123, @"modifiers":@2}, @"toggle", false, false, false, false};
+            assert(shortcut.observe(Event(53, 0, NSEventTypeKeyDown, 30), config, true).action == Action::Cancel);
+            const auto next = shortcut.observe(Event(53, 0, NSEventTypeKeyDown, 31), config, false);
+            assert(!next.consumed && next.action == Action::None);
         }
         // 内置 Control+F9 和 Control+Option+V 也受明确模式控制。
         for (unsigned short key : {101, 9}) {

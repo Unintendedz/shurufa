@@ -56,7 +56,11 @@ public:
             return {true, Action::Cancel};
         }
         if (type == NSEventTypeKeyUp && key == suppressedKey_) { suppressedKey_ = -1; return {true}; }
-        if (type == NSEventTypeKeyDown && key == suppressedKey_) return {true};
+        // IMK 从不转发 KeyUp，只能靠它解除的吞键会一直留着；非自动重复的 KeyDown 说明这个键已经松开又按下，是新的一次按键。
+        if (type == NSEventTypeKeyDown && key == suppressedKey_) {
+            if (event.isARepeat) return {true};
+            suppressedKey_ = -1;
+        }
         if (type == NSEventTypeFlagsChanged) {
             const auto side = MSIMEVoiceSideFlag(key);
             const unsigned group = MSIMEVoiceModifierBitForKey(key);
