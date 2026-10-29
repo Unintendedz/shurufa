@@ -209,3 +209,31 @@ fn removed_input_modes_stay_unreachable_after_legacy_preferences_and_updates() {
     }
     value(msime_client_destroy(handle));
 }
+
+#[test]
+fn embedded_shurufa_options_default_missing_helpcode_off() {
+    for supplied in [
+        None,
+        Some(json!({"schema":"ziranma","show_in_candidate_window":false})),
+        Some(json!({"enabled":true,"schema":"ziranma","show_in_candidate_window":false})),
+        Some(json!({"enabled":false,"schema":"ziranma","show_in_candidate_window":false})),
+    ] {
+        let mut document = json!({"api_version":1,"edition":"shurufa","resources":"/synthetic/resources",
+            "user_data":"/synthetic/user","cache":"/synthetic/cache","dictionaries":"/synthetic/dictionaries","preferences":Preferences::for_edition(Edition::by_id("shurufa").unwrap())});
+        if let Some(value) = &supplied {
+            document["preferences"]["quanpin_helpcode"] = value.clone();
+        } else {
+            document["preferences"]
+                .as_object_mut()
+                .unwrap()
+                .remove("quanpin_helpcode");
+        }
+        let options = HostOptions::from_document(document).unwrap();
+        let expected = supplied
+            .as_ref()
+            .and_then(|value| value.get("enabled"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        assert_eq!(options.preferences.quanpin_helpcode.enabled, expected);
+    }
+}

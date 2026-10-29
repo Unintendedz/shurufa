@@ -5217,6 +5217,14 @@ impl PreferencesStore {
         if snapshot.format_version != 1 {
             return Err(PreferencesError::UnsupportedFormat);
         }
+        // 缺键沿用独立版默认值，明确存下的 true/false 都保持原样。
+        if self.edition().id == "shurufa"
+            && document
+                .pointer("/preferences/quanpin_helpcode/enabled")
+                .is_none()
+        {
+            snapshot.preferences.quanpin_helpcode.enabled = false;
+        }
         snapshot.preferences.validate_for_edition(self.edition())?;
         snapshot
             .preferences

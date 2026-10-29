@@ -8340,3 +8340,49 @@ fn shurufa_macos_voice_hotkeys_use_actual_platform_occupancy() {
     });
     assert!(full.validate().is_err());
 }
+
+#[test]
+fn shurufa_missing_helpcode_uses_edition_default_without_overwriting_explicit_values() {
+    for edition_id in ["shurufa", "full"] {
+        let edition = crate::edition::Edition::by_id(edition_id).unwrap();
+        for supplied in [
+            None,
+            Some(serde_json::json!({"schema":"ziranma","show_in_candidate_window":false})),
+            Some(
+                serde_json::json!({"enabled":true,"schema":"ziranma","show_in_candidate_window":false}),
+            ),
+            Some(
+                serde_json::json!({"enabled":false,"schema":"ziranma","show_in_candidate_window":false}),
+            ),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut document = serde_json::json!({"format_version":1,"revision":1,"preferences":Preferences::for_edition(edition)});
+            match &supplied {
+                Some(value) => document["preferences"]["quanpin_helpcode"] = value.clone(),
+                None => {
+                    document["preferences"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("quanpin_helpcode");
+                }
+            }
+            fs::write(
+                directory.path().join("preferences.json"),
+                serde_json::to_vec(&document).unwrap(),
+            )
+            .unwrap();
+            let loaded = PreferencesStore::for_edition(directory.path(), edition)
+                .load()
+                .unwrap();
+            let expected = supplied
+                .as_ref()
+                .and_then(|value| value.get("enabled"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(edition_id != "shurufa");
+            assert_eq!(
+                loaded.preferences.quanpin_helpcode.enabled, expected,
+                "{edition_id}: {supplied:?}"
+            );
+        }
+    }
+}

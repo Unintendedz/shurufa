@@ -2158,7 +2158,15 @@ impl HostOptions {
 
     /// 解析 HostOptions 文档。其中的 `preferences` 是准备运行时配置那一刻的副本，升级时被原样带下去（`refresh_options_file`）。#2830 退役 `autocorrect` 时，带着它的副本曾让会话、快照和词库请求全部被拒，macOS 每个按键都像在英文模式下一样直接交给应用；偏好结构现在不拒绝不认识的键，新增或退役一个键不会再让副本读不了，但取值的类型或格式变化仍会。副本被拒时，改用 `preferences_directory` 下实时的 preferences.json——设置界面会保持它最新并负责修复，宿主在会话打开后本来也会应用它。副本能解析时照原样使用。
     pub(crate) fn from_document(mut document: Value) -> Option<Self> {
-        if let Ok(options) = Self::deserialize(&document) {
+        if let Ok(mut options) = Self::deserialize(&document) {
+            // 直接传入的旧运行时文档与偏好存储采用相同的缺键规则。
+            if options.edition().id == "shurufa"
+                && document
+                    .pointer("/preferences/quanpin_helpcode/enabled")
+                    .is_none()
+            {
+                options.preferences.quanpin_helpcode.enabled = false;
+            }
             return Some(options);
         }
         let directory = std::path::PathBuf::from(document.get("preferences_directory")?.as_str()?);
