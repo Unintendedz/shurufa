@@ -11,7 +11,7 @@ static inline BOOL MSIMEVoiceInputEnabled(NSUserDefaults *defaults) {
 // Shurufa 默认在浮层预览；显式偏好仍由已有开关管理，其他 edition 保持原默认。
 static inline BOOL MSIMEVoiceStreamInlinePreeditEnabled(NSUserDefaults *defaults) {
     id value = [defaults objectForKey:@"MSIMEClientVoiceStreamInlinePreedit"];
-    return value ? [value boolValue] : !MSIMEEditionIsShurufa();
+    return value ? [defaults boolForKey:@"MSIMEClientVoiceStreamInlinePreedit"] : !MSIMEEditionIsShurufa();
 }
 
 // Muting other audio is on out of the box, like the source and the shared macOS default.

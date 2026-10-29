@@ -6,6 +6,11 @@ int main() {
     @autoreleasepool {
         NSString *suite = [@"app.msime.test.voice." stringByAppendingString:NSUUID.UUID.UUIDString];
         NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+        for (id value in @[@[], @{}, NSData.data, @YES, @NO]) {
+            [defaults setObject:value forKey:@"MSIMEClientVoiceStreamInlinePreedit"];
+            assert(MSIMEVoiceStreamInlinePreeditEnabled(defaults) == [defaults boolForKey:@"MSIMEClientVoiceStreamInlinePreedit"]);
+        }
+        [defaults removeObjectForKey:@"MSIMEClientVoiceStreamInlinePreedit"];
         assert(MSIMEVoiceInputEnabled(defaults));
         assert(MSIMEVoiceCuesEnabled(defaults));
         NSDictionary *voice = @{
