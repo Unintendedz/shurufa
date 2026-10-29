@@ -8,7 +8,7 @@ full 是现有产品本身：对 full，这里的每个输出都与输入逐字�
 其他版本的 Info.plist 由 full 的模板变换而来：
 
 - `CFBundleIdentifier`、`CFBundleExecutable`、`CFBundleName`、`CFBundleDisplayName` 换成版本表里的值，`InputMethodConnectionName` 是新 bundle id 加 `_Connection`（imklaunchagent 只认这种形式，见 Info.plist.in）；
-- 输入模式只留下本版本的方案对应的模式，再加上「英」（Roman）。主模式 `.Hans` 总是在：输入控制器把它当作任何方案都能退回的模式，安装时它总被启用（粤、注、越、藏、笔这些按需模式安装时不启用）。版本不含全拼时，`.Hans` 换上默认方案的图标和名字，默认方案自己的模式不再单列，所以五笔版的菜单里只有「五」和「英」，日文版只有「日」和「英」；
+- 输入模式只留下本版本的方案对应的模式，非 Shurufa 版本再加上「英」（Roman）。主模式 `.Hans` 总是在：输入控制器把它当作任何方案都能退回的模式，安装时它总被启用（粤、注、越、藏、笔这些按需模式安装时不启用）。版本不含全拼时，`.Hans` 换上默认方案的图标和名字，默认方案自己的模式不再单列，所以五笔版的菜单里只有「五」和「英」，日文版只有「日」和「英」；
 - 默认方案不是中文方案时（日文、越南文、藏文版），`.Hans` 还换上默认方案模式的语言、字符集和脚本（`TISIntendedLanguage` 是 ja、vi 或 bo），「英」的 `TISIntendedLanguage` 也随之改成这个语言，系统设置的「添加」对话框把整个输入法列在这个语言下，而不是「简体中文」；
 - 加上 `MSIMEEdition`、`MSIMEInputSchemes`、`MSIMEDefaultScheme`、`MSIMESettingsBundleIdentifier`、`MSIMEKeychainService`，版本表 `preference_defaults` 里的 `MSIMEWubiMixedPinyinDefault`，以及不提供手写（`features.handwriting` 为 false）时的 `MSIMEHandwriting` = false：输入法据此不在菜单和悬浮工具栏上放手写入口（`EditionIdentity.h` 的 `MSIMEEditionOffersHandwritingIn`），没有这个键就是有手写；
 - 去掉模板里的 XML 注释：它们描述的是 full 的十个模式。
@@ -87,7 +87,8 @@ def mode_plan(entry: dict) -> dict[str, str]:
         suffix = SCHEME_MODES[scheme]
         if suffix not in (PRIMARY, primary_source):
             plan[suffix] = suffix
-    plan[ENGLISH] = ENGLISH
+    if entry["id"] != "shurufa":
+        plan[ENGLISH] = ENGLISH
     return plan
 
 

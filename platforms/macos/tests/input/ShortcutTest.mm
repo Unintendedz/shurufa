@@ -13479,6 +13479,8 @@ int main(int argc, char **argv) {
             Method mainBundle = class_getClassMethod(NSBundle.class, @selector(mainBundle));
             IMP original = method_setImplementation(mainBundle, (IMP)ShurufaMainBundle);
             assert(MSIMEEditionIsShurufa());
+            assert(!MSIMEInputModeDeclaredIn(ShurufaTestBundle.infoDictionary,
+                [ShurufaTestBundle.bundleIdentifier stringByAppendingString:@".Roman"]));
             NSUserDefaults *standard = NSUserDefaults.standardUserDefaults;
             NSDictionary *oldArguments = [standard volatileDomainForName:NSArgumentDomain];
             [standard setVolatileDomain:@{@"MSIMEClientVoiceASRProvider":@"textstream",
@@ -13491,6 +13493,27 @@ int main(int argc, char **argv) {
                 assert([prefs showSettingsPageWithIdentifier:page]);
                 [prefs.window.contentView layoutSubtreeIfNeeded];
                 AssertShurufaVisibleText(prefs.window.contentView);
+            }
+            // 被移除的设置不能从可见页面重新出现；基本字符能力仍可设置。
+            for (NSString *page in @[@"input",@"habits",@"shortcuts",@"appearance"]) {
+                assert([prefs showSettingsPageWithIdentifier:page]);
+            for (NSString *action in @[@"defaultImeModeChanged:",@"imeModeScopeChanged:",@"shiftTapShortcutChanged:",
+                @"controlTapShortcutChanged:",@"inputModeShortcutChanged:",@"controlOptionSpaceShortcutChanged:",
+                @"fullWidthShortcutChanged:",@"characterSetShortcutChanged:",@"smartPunctuationChanged:",
+                @"smartPunctuationRepeatChanged:",@"smartPunctuationSpaceChanged:",@"pairedPunctuationChanged:",
+                @"localModeChanged:",@"wordCharacterChanged:"]) {
+                for (NSControl *control in MSIMEFindPreferenceControls(prefs.window.contentView,NSSelectorFromString(action))) {
+                    BOOL hidden = NO;
+                    for (NSView *view = control; view; view=view.superview) hidden |= view.hidden;
+                    assert(hidden);
+                }
+            }
+            }
+            assert([prefs showSettingsPageWithIdentifier:@"habits"]);
+            for (NSString *action in @[@"traditionalOutputChanged:",@"punctuationChanged:",@"fullWidthChanged:"]) {
+                NSControl *control = MSIMEFindPreferenceControl(prefs.window.contentView,NSSelectorFromString(action));
+                assert(control);
+                for (NSView *view = control; view; view=view.superview) assert(!view.hidden);
             }
             // 旧 true 不能恢复 Caps 接管；真实设置树没有对应控件。
             [prefs applySharedInputPreferences:@{@"keybindings":@{@"switch_language_caps_lock":@YES}}];

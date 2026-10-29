@@ -775,6 +775,7 @@ static BOOL ShurufaSettingsPageVisible(NSInteger page) {
 }
 static BOOL ShurufaHiddenSetting(NSString *title) {
     if (!MSIMEEditionIsShurufa()) return NO;
+    if ([@[@"切换中英文时显示提示", @"菜单栏显示中/英状态"] containsObject:title]) return YES;
     for (NSString *word in @[@"云候选", @"翻译", @"释义", @"五笔", @"日语", @"日文", @"粤拼",
             @"注音", @"越南", @"藏文", @"韩语", @"Emoji", @"表情", @"颜文字", @"剪贴板",
             @"账号", @"同步", @"皮肤", @"插件", @"浮动工具栏", @"悬浮工具栏", @"屏幕键盘",
@@ -924,6 +925,12 @@ static NSScrollView *PreferencesPage(NSString *title, NSString *summary, NSArray
     stack.alignment = NSLayoutAttributeLeading;
     stack.distribution = NSStackViewDistributionFill;
     stack.spacing = 10.0;
+    if (MSIMEEditionIsShurufa()) {
+        // 精简后的短页面按内容取最小高度，剩余空间留在卡片外。
+        NSLayoutConstraint *compact = [stack.heightAnchor constraintEqualToConstant:0];
+        compact.priority = NSLayoutPriorityFittingSizeCompression;
+        compact.active = YES;
+    }
     NSView *previous = nil;
     for (NSView *view in content) {
         [stack addArrangedSubview:view];
@@ -4057,7 +4064,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     _capsLockTapShortcutToggle = MSIMESettingSwitch(self, @selector(capsLockTapShortcutChanged:), @"单按 Caps Lock 切换中英文");
     _controlOptionSpaceShortcutToggle = MSIMESettingSwitch(self, @selector(controlOptionSpaceShortcutChanged:), @"Control + Option + 空格切换中英文");
     _characterSetShortcutToggle = MSIMESettingSwitch(self, @selector(characterSetShortcutChanged:), @"Control + Shift + F 切换简繁");
-    _fullWidthToggle = MSIMESettingSwitch(self, @selector(fullWidthChanged:), @"全角输入（Option + Shift + H）");
+    _fullWidthToggle = MSIMESettingSwitch(self, @selector(fullWidthChanged:), MSIMEEditionIsShurufa() ? @"全角输入" : @"全角输入（Option + Shift + H）");
     _fullWidthShortcutToggle = MSIMESettingSwitch(self, @selector(fullWidthShortcutChanged:), @"Option + Shift + H 切换全半角");
     _voiceEnabledToggle = MSIMESettingSwitch(self, @selector(voiceEnabledChanged:), @"启用语音输入");
     _voiceLanguageButton = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
@@ -4093,7 +4100,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     _pairedPunctuationToggle = MSIMESettingSwitch(self, @selector(pairedPunctuationChanged:), @"成对标点");
     _punctuationLockButton = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     [_punctuationLockButton
-        addItemsWithTitles:@[ @"跟随中英文状态", @"始终使用中文标点", @"始终使用英文标点" ]];
+        addItemsWithTitles:@[ MSIMEEditionIsShurufa() ? @"跟随中文标点设置" : @"跟随中英文状态", @"始终使用中文标点", @"始终使用英文标点" ]];
     _punctuationLockButton.accessibilityLabel = @"固定标点";
     _punctuationLockButton.target = self;
     _punctuationLockButton.action = @selector(punctuationLockChanged:);
@@ -4162,6 +4169,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
                      aka:@[@"按应用", @"全局"]],
     ], 0.0);
     inputModeCard.accessibilityLabel = @"输入模式卡片";
+    if (MSIMEEditionIsShurufa()) { inputModeCard.hidden = YES; inputModeCard.accessibilityHidden = YES; }
     NSBox *appRuleCard = MSIMECardWithViews(@[
         MSIMEDetailLabel(@"这里的规则优先于「模式作用范围」和记忆：规则保存在本机，切换输入源或重新登录后仍然有效。没有规则的应用按记忆走，而记忆只存在于当前这次输入法进程里，切换到别的输入源就清空了。"),
         [self registerSearchRow:MSIMEStackedPreferenceRow(@"按应用指定输入模式", _appRuleStatusLabel, appRuleControls)
@@ -4169,6 +4177,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
                             aka:@[@"应用例外", @"白名单"]],
     ], 6.0);
     appRuleCard.accessibilityLabel = @"应用例外卡片";
+    if (MSIMEEditionIsShurufa()) { appRuleCard.hidden = YES; appRuleCard.accessibilityHidden = YES; }
 
     // The scheme is one choice, so it reads as radios with each scheme's own popup trailing it,
     // disabled until that scheme is selected. The stored value stays the same scheme string.
@@ -4299,7 +4308,12 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     ]];
 
     // ---- 输入习惯 ---------------------------------------------------------------------------
-    NSBox *punctuationCard = MSIMECardWithViews(@[
+    NSBox *punctuationCard = MSIMECardWithViews(MSIMEEditionIsShurufa() ? @[
+        [self settingRow:@"中文标点" control:_punctuationToggle],
+        [self settingRow:@"固定标点" control:_punctuationLockButton],
+        [self settingRow:@"全角输入" control:_fullWidthToggle],
+        [self settingRow:@"简繁输入" control:_traditionalOutputToggle aka:@[@"繁体", @"繁體"]],
+    ] : @[
         [self settingRow:@"中文标点" detail:@"Control + . 切换中英文标点。" control:_punctuationToggle],
         [self settingRow:@"智能标点"
                   detail:@"前一个字符为字母或数字时保留逗号、句号和冒号为 ASCII 形式。"
@@ -4332,6 +4346,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
         [self settingRow:@"颜文字混输" detail:@"在中文组词中提供颜文字候选。" control:_mixedKaomojiToggle],
     ], 0.0);
     mixedCard.accessibilityLabel = @"中英混输卡片";
+    if (MSIMEEditionIsShurufa()) { mixedCard.hidden = YES; mixedCard.accessibilityHidden = YES; }
     // The example moves out of the name and under it: a label is what the setting is called, and 「（sahng → shang）」 is not part of what this one is called, it is what it does.
     //
     // The sentence above them is written as the window runs, because what it has to say depends on a scheme chosen on another page; see -refreshControls.
@@ -4381,10 +4396,11 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
         [self settingCheckboxes:modeButtons columns:2],
     ], 8.0);
     localModesCard.accessibilityLabel = @"快捷模式卡片";
+    if (MSIMEEditionIsShurufa()) { localModesCard.hidden = YES; localModesCard.accessibilityHidden = YES; }
 
     NSScrollView *habitsPage = [self page:MSIMESettingsPageInputHabits
                                     title:@"输入习惯"
-                                  summary:@"标点、混输、拼音匹配，以及 Shift 加一个字母的快捷模式。"
+                                  summary:MSIMEEditionIsShurufa() ? @"标点、字符和拼音匹配。" : @"标点、混输、拼音匹配，以及 Shift 加一个字母的快捷模式。"
                                   content:@[
         [self sectionHeader:@"标点与字符"
                        keys:@[ChinesePunctuationKey, SmartPunctuationKey, SmartPunctuationRepeatToChineseKey,
@@ -4433,11 +4449,11 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
                  control:_inputModeStatusItemToggle
                      aka:@[@"状态栏", @"菜单栏图标"]],
         [self settingRow:MSIMEEditionText(@"显示水杉 logo")
-                  detail:MSIMEEditionText(@"在候选窗和悬浮工具栏左端显示水杉图标。")
+                  detail:MSIMEEditionText(MSIMEEditionIsShurufa() ? @"在候选窗左端显示水杉图标。" : @"在候选窗和悬浮工具栏左端显示水杉图标。")
                  control:_appLogoToggle
                      aka:@[@"图标", @"logo"]],
         [self settingRow:@"显示页码和翻页按钮"
-                  detail:@"关闭后候选窗不再显示「1 / 3」和 ‹ ›，仍可用键盘翻页；鼠标滚轮翻页默认关闭，需要时在「按键 › 候选翻页与选字」里打开。"
+                  detail:MSIMEEditionIsShurufa() ? @"关闭后仍可用键盘和滚轮浏览候选。" : @"关闭后候选窗不再显示「1 / 3」和 ‹ ›，仍可用键盘翻页；鼠标滚轮翻页默认关闭，需要时在「按键 › 候选翻页与选字」里打开。"
                  control:_candidatePageNumberToggle
                      aka:@[@"页码", @"翻页箭头", @"紧凑"]],
         // 横排候选窗按 ↓ 展开成多行候选网格（#7307），竖排候选窗不受影响。
@@ -4718,8 +4734,9 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
         [self settingRow:@"首字／尾字键组" detailLabel:_wordCharacterConflictLabel control:_wordCharacterKeys],
     ], 6.0);
     pagingCard.accessibilityLabel = @"候选翻页卡片";
+    if (MSIMEEditionIsShurufa()) { pagingCard.hidden = YES; pagingCard.accessibilityHidden = YES; }
     _voiceHotkeyModeDescription = MSIMEDetailLabel(@"");
-    NSMutableArray<NSView *> *switchingRows = [NSMutableArray arrayWithArray:@[
+    NSMutableArray<NSView *> *switchingRows = [NSMutableArray arrayWithArray:MSIMEEditionIsShurufa() ? @[] : @[
         [self settingRow:@"Shift + 空格切换中英文" control:_inputModeShortcutToggle aka:@[@"中英文切换"]],
         [self settingRow:@"单按 Shift 切换中英文" control:_shiftTapShortcutToggle aka:@[@"中英文切换"]],
         [self settingRow:@"单按 Control 切换中英文" control:_controlTapShortcutToggle aka:@[@"中英文切换"]],
@@ -4739,7 +4756,6 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     if (MSIMEEditionIsShurufa()) {
         NSButton *voiceEntry = [NSButton buttonWithTitle:@"设置语音快捷键…" target:self action:@selector(showVoiceShortcuts:)];
         voiceEntry.bezelStyle = NSBezelStyleRounded;
-        [switchingRows addObject:MSIMECardSeparator()];
         [switchingRows addObject:[self settingRow:@"语音输入" control:voiceEntry]];
     } else {
         [switchingRows addObjectsFromArray:@[
@@ -4764,9 +4780,9 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     // The five dictation shortcuts are in the same card, under a heading of their own: every other key binding in the window is on this page, and they were the one group that was not — they were in MSIMEVoiceSettings, a window nothing opened.
     NSScrollView *keysPage = [self page:MSIMESettingsPageKeys
                                   title:@"按键"
-                                summary:@"切换中英文、翻页选字与开始语音输入使用的按键。"
+                                summary:MSIMEEditionIsShurufa() ? @"设置语音输入使用的按键。" : @"切换中英文、翻页选字与开始语音输入使用的按键。"
                                 content:@[
-        [self sectionHeader:@"输入状态切换"
+        [self sectionHeader:MSIMEEditionIsShurufa() ? @"语音输入" : @"输入状态切换"
                        keys:@[InputModeShortcutKey, ShiftTapShortcutKey, ControlTapShortcutKey, CapsLockTapShortcutKey, TrilingualCycleKey,
                               ControlOptionSpaceShortcutKey, CharacterSetShortcutKey, FullWidthShortcutKey,
                               VoiceHotkeyCtrlF9Key, VoiceHotkeyRightAltKey, VoiceHotkeyCtrlCommandKey,
@@ -5904,6 +5920,10 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
         [_restorableSections addObject:section];
     }
     NSView *header = MSIMESectionHeaderRow(title, link);
+    if (MSIMEEditionIsShurufa() && [@[@"输入模式", @"应用例外", @"中英与符号混输", @"快捷模式", @"候选翻页与选字"] containsObject:title]) {
+        header.hidden = YES;
+        header.accessibilityHidden = YES;
+    }
     // Which heading this is, for -page:title:summary:content: to hand to the settings registered by the card that follows it. A section with nothing to restore has no link and so no entry in _restorableSections, but it still names the settings under it.
     [_sectionTitlesByHeader setObject:title forKey:header];
     return header;

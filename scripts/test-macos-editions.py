@@ -117,8 +117,10 @@ def check_edition(errors: list[str], generator, table: dict, entry: dict, others
     declared = {identifier[len(bundle) + 1:] for identifier in modes}
     if declared != set(plan):
         errors.append(f"{where}: declares modes {sorted(declared)}, expected {sorted(plan)}")
-    if "Hans" not in declared or "Roman" not in declared:
-        errors.append(f"{where}: the Chinese (.Hans) and English (.Roman) modes must both be declared")
+    if "Hans" not in declared:
+        errors.append(f"{where}: 必须声明中文主模式 .Hans")
+    if ("Roman" in declared) != (edition_id != "shurufa"):
+        errors.append(f"{where}: Shurufa 不声明 .Roman，其他版本必须保留英文模式")
     visible = plist["ComponentInputModeDict"]["tsVisibleInputModeOrderedArrayKey"]
     if set(visible) != set(modes):
         errors.append(f"{where}: tsVisibleInputModeOrderedArrayKey {visible} does not list exactly the declared modes")
@@ -131,10 +133,10 @@ def check_edition(errors: list[str], generator, table: dict, entry: dict, others
         icon = template_modes[f"{full_bundle}.{source}"]["tsInputModeMenuIconFileKey"]
         if body.get("tsInputModeMenuIconFileKey") != icon:
             errors.append(f"{where}: mode {suffix} should show the {source} icon {icon}")
-    # 系统设置「添加」对话框按 TISIntendedLanguage 分组：主模式和「英」都在主模式所借模式的语言下（日文版 ja、越南文版 vi、藏文版 bo，中文的版本 zh-Hans），主模式装好就启用。
+    # 系统设置按 TISIntendedLanguage 分组；Shurufa 没有「英」，其他版本的「英」仍随主模式归组。
     primary = template_modes[f"{full_bundle}.{plan['Hans']}"]
     language = primary["TISIntendedLanguage"]
-    for suffix in ("Hans", "Roman"):
+    for suffix in (("Hans",) if edition_id == "shurufa" else ("Hans", "Roman")):
         body = modes.get(f"{bundle}.{suffix}", {})
         if body.get("TISIntendedLanguage") != language:
             errors.append(f"{where}: mode {suffix} is filed under {body.get('TISIntendedLanguage')!r}, expected {language!r}")
