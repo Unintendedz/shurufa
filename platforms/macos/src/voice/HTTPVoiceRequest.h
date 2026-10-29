@@ -5,6 +5,8 @@
 @interface MSIMEHTTPVoiceRequest : NSObject
 // Optional main-queue phase notification, snapshotted at request start.
 @property(copy) void (^polishingHandler)(void);
+// 主队列完成回调前更新；整理失败仍返回原始转写，取消不交付结果。
+@property(nonatomic, readonly) BOOL polishFailed;
 - (instancetype)init NS_UNAVAILABLE;
 + (instancetype)new NS_UNAVAILABLE;
 - (instancetype)initWithOptions:(NSDictionary *)options error:(NSError **)error;

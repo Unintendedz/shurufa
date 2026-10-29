@@ -85,6 +85,7 @@
 @implementation LivePresentationFixture
 - (void)setPersistentRecording:(BOOL)value { (void)value; }
 - (void)setShortcutMonitoringAvailable:(BOOL)value { (void)value; }
+- (void)showCompletionNotice:(NSString *)notice { self.preview = notice; }
 - (void)showCopyResult:(BOOL)copied { self.preview = copied ? @"已复制" : @"复制失败"; }
 - (void)setInputLevel:(float)level { self.lastLevel = level; ++self.levelUpdates; }
 - (void)dismissProcessing { self.dismissed = YES; }
@@ -98,6 +99,7 @@
 - (void)restore {}
 @end
 @interface LivePolishFixture : NSObject
+@property BOOL polishFailed;
 @property(copy) void (^completion)(NSString *, NSError *);
 @property(copy) NSString *input;
 @property NSUInteger submissions;
@@ -315,6 +317,65 @@ int main(int argc, char **argv) {
                 else assert(owner.copiedText == nil);
             }
             puts("PASS persistent: blur, return/new client/clipboard, polish, duplicate final");
+            // 整理回退只在原文实际投递后提示，复制失败优先显示复制结果。
+            for (NSUInteger route = 0; route < 3; ++route) {
+                [owner setValue:origin forKey:@"activeClient"];
+                MSIMEFocusedController = route == 0 ? owner : nil;
+                owner.copyFails = route == 2; owner.copiedText = nil;
+                origin.commits = [NSMutableArray array];
+                [owner toggleVoiceInput:nil];
+                source.transcript(@"synthetic original", YES);
+                LivePolishFixture *failedPolisher = owner.polishFixture;
+                [owner expireLiveVoice:[owner valueForKey:@"liveVoiceToken"]];
+                assert(source.active && !origin.commits.count && !owner.copiedText);
+                failedPolisher.polishFailed = YES;
+                failedPolisher.completion(@"synthetic original", nil);
+                assert(!source.active && !MSIMEVoiceRecordingOwner);
+                NSString *notice = route == 0 ? @"整理失败，已输入原文" : route == 1 ? @"整理失败，已复制原文" : @"复制失败";
+                assert([overlay.preview isEqual:notice]);
+                if (route == 0) assert(origin.commits.count == 1 && [origin.commits.lastObject isEqual:@"synthetic original"]);
+                else assert(!origin.commits.count);
+                if (route == 1) assert([owner.copiedText isEqual:@"synthetic original"]);
+                // 晚到的失败完成不能给下一代录音写入提示。
+                [owner toggleVoiceInput:nil];
+                failedPolisher.completion(@"synthetic late", nil);
+                assert(source.active && !overlay.preview.length);
+                [owner cancelLiveVoiceInput];
+            }
+            owner.copyFails = NO;
+            puts("PASS polish fallback: inserted, copied, clipboard failure, stale completion");
+            // 原生表单可保存的长提示词让请求创建失败时，仍必须输入原文并提示。
+            NSDictionary *beforeInvalidPolish = [voiceArguments copy];
+            voiceArguments[@"MSIMEClientVoicePolish"] = @YES;
+            voiceArguments[@"MSIMEClientVoicePolishToken"] = @"synthetic-only";
+            voiceArguments[@"MSIMEClientVoicePolishPromptCustom1"] = [@"x" stringByPaddingToLength:8193 withString:@"x" startingAtIndex:0];
+            [defaults setVolatileDomain:voiceArguments forName:NSArgumentDomain];
+            owner.usePolishFixture = NO;
+            MSIMEFocusedController = owner;
+            for (NSNumber *streaming in @[@NO, @YES]) {
+                origin.commits = [NSMutableArray array];
+                [owner setValue:origin forKey:@"activeClient"];
+                if (streaming.boolValue) {
+                    uint64_t generation = 0;
+                    assert([source startWithSession:session generation:&generation error:nil]);
+                    [owner setValue:@(generation) forKey:@"voiceGeneration"];
+                    assert(([owner startDoubaoVoiceInputWithOptions:@{@"asr_provider":@"textstream",@"polish_enabled":@YES,
+                        @"polish_token":@"synthetic-only",@"polish_prompt_custom_1":voiceArguments[@"MSIMEClientVoicePolishPromptCustom1"]}]));
+                    assert(![owner valueForKey:@"doubaoPolishRequest"]);
+                    owner.streamFixture.result(@"synthetic original after invalid polish", YES, nil);
+                } else {
+                    [owner toggleVoiceInput:nil];
+                    assert(source.active && ![owner valueForKey:@"livePolishRequest"]);
+                    source.transcript(@"synthetic original after invalid polish", YES);
+                }
+                assert(!source.active && origin.commits.count == 1);
+                assert([origin.commits.lastObject isEqual:@"synthetic original after invalid polish"]);
+                assert([overlay.preview isEqual:@"整理失败，已输入原文"]);
+            }
+            [voiceArguments setDictionary:beforeInvalidPolish];
+            [defaults setVolatileDomain:voiceArguments forName:NSArgumentDomain];
+            owner.usePolishFixture = YES;
+            puts("PASS polish initialization failure: system and TextStream preserve original");
             // 事件仅作为状态机参数，不向系统注入按键。
             auto event = [](NSEventType type, unsigned short code, NSEventModifierFlags flags, NSTimeInterval time) {
                 return [NSEvent keyEventWithType:type location:NSZeroPoint modifierFlags:flags timestamp:time windowNumber:0

@@ -51,3 +51,5 @@ HarmonyOS 的 `voice-polish-reply.test.ts` 由现有 `tests/run.sh` 自动发现
 [OpenAI Chat Completions 响应说明](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/retrieve) 将 `length` 定义为输出预算耗尽，将 `content_filter` 定义为正文因过滤而省略。官方 Python SDK 的 `lib/_parsing/_completions.py` 在解析前也对这两种结束原因抛出异常。
 
 [Android `JSONObject` 源码](https://android.googlesource.com/platform/libcore/+/refs/heads/main/json/src/main/java/org/json/JSONObject.java) 的 `isNull` 同时接受缺省字段和 JSON `null`；`false`、`0`、空字符串与空对象不属于空值，因此顶层错误不能按真假判断。
+
+Shurufa 的静默回退现由[整理地址与反馈](2026-10-29-shurufa-polish-endpoint-feedback.md)补充：仍保留完整原文，但实际投递后显示短提示。其他宿主的反馈规则保持。

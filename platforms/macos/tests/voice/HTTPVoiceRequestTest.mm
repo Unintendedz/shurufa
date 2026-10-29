@@ -30,7 +30,7 @@ int main(int argc, char **argv) {
         __block NSUInteger polishing = 0;
         request.polishingHandler = ^{ assert(NSThread.isMainThread && !done); ++polishing; };
         assert([request recognizePCM:pcm completion:^(NSString *text, NSError *error) {
-            assert(NSThread.isMainThread && !error && [text isEqual:@"synthetic polished"]); done = YES;
+            assert(NSThread.isMainThread && !error && !request.polishFailed && [text isEqual:@"synthetic polished"]); done = YES;
         } error:nil]);
         request.polishingHandler = ^{ assert(false && "phase handler must be frozen at start"); };
         [pcm setLength:0];
@@ -43,7 +43,7 @@ int main(int argc, char **argv) {
         done = NO;
         NSData *valid = [NSData dataWithBytes:samples length:sizeof(samples)];
         assert([request recognizePCM:valid completion:^(NSString *text, NSError *error) {
-            assert(!error && [text isEqual:@"synthetic transcript"]); done = YES;
+            assert(!error && request.polishFailed && [text isEqual:@"synthetic transcript"]); done = YES;
         } error:nil]);
         Wait(^BOOL { return done; });
         // Polish sits in the same path as the transcript, so a slow service delays the text itself. Six
@@ -55,7 +55,7 @@ int main(int argc, char **argv) {
         done = NO;
         const NSTimeInterval started = NSProcessInfo.processInfo.systemUptime;
         assert([request recognizePCM:valid completion:^(NSString *text, NSError *error) {
-            assert(NSThread.isMainThread && !error && [text isEqual:@"synthetic polished"]); done = YES;
+            assert(NSThread.isMainThread && !error && !request.polishFailed && [text isEqual:@"synthetic polished"]); done = YES;
         } error:nil]);
         Wait(^BOOL { return done; });
         const NSTimeInterval elapsed = NSProcessInfo.processInfo.systemUptime - started;

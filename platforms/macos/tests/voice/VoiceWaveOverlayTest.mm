@@ -235,7 +235,7 @@ int main(int argc, char **argv) {
         panel.actionHandler = ^(BOOL cancel) { if (cancel) ++cancels; else ++confirms; };
         for (NSString *theme in @[@"light", @"dark"]) {
             [panel applyThemePreferences:@{@"theme":theme}];
-            for (NSString *state in @[@"recording", @"permission", @"copied"]) {
+            for (NSString *state in @[@"recording", @"permission", @"copied", @"polish-input", @"polish-copy"]) {
                 panel.actionHandler = ^(BOOL cancel) { if (cancel) ++cancels; else ++confirms; };
                 [panel setShortcutMonitoringAvailable:![state isEqual:@"permission"]];
                 [panel setListening:YES];
@@ -243,6 +243,13 @@ int main(int argc, char **argv) {
                 if ([state isEqual:@"copied"]) {
                     [panel showCopyResult:YES];
                     assert([panel.statusText isEqual:@"已复制"] && panel.visible && cancelButton.hidden && confirmButton.hidden);
+                } else if ([state hasPrefix:@"polish-"]) {
+                    NSString *notice = [state isEqual:@"polish-input"] ? @"整理失败，已输入原文" : @"整理失败，已复制原文";
+                    [panel showCompletionNotice:notice];
+                    assert([panel.statusText isEqual:notice] && panel.visible && cancelButton.hidden && confirmButton.hidden);
+                    assert(!panel.transcriptText.length && panel.frame.size.height == 40);
+                    CGFloat labelWidth = [notice sizeWithAttributes:@{NSFontAttributeName:[NSFont systemFontOfSize:14]}].width;
+                    assert(labelWidth <= panel.frame.size.width - 28);
                 } else {
                     assert(!panel.ignoresMouseEvents && !cancelButton.hidden && !confirmButton.hidden);
                     assert([confirmButton.title isEqual:@"完成"]);

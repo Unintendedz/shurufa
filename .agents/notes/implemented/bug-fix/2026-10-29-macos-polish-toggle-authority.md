@@ -10,7 +10,7 @@ Status: implemented
 
 原生请求参数在发现明确的布尔整理开关时，将 `polish_enabled` 和 `polish_text` 统一为该值。缺少明确开关时保留已有兼容默认值，不改出厂偏好。原生设置保存也同步旧字段，避免重新导出矛盾状态。共享 Rust 与其他平台的默认值和配置格式保持不变。
 
-本篇补充[TextStream 语音](../feature/2026-10-28-macos-textstream-voice.md)已有的开关权威规则，将原生关闭操作落实到所有本机识别通道。
+本篇补充[TextStream 语音](../feature/2026-10-28-macos-textstream-voice.md)已有的开关权威规则，将原生关闭操作落实到所有本机识别通道。它与[整理失败反馈](2026-10-29-shurufa-polish-endpoint-feedback.md)分别负责是否发请求和失败后如何交付。
 
 ## Alternatives considered
 

@@ -5,6 +5,7 @@
 #include <cassert>
 
 @interface HTTPRequestFixture : NSObject
+@property BOOL polishFailed;
 @property(copy) void (^polishingHandler)(void);
 @property(copy) void (^completion)(NSString *, NSError *);
 @property NSUInteger cancellations;

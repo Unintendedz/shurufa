@@ -1,5 +1,7 @@
 #import "HTTPVoiceRequest.h"
 #import "VoiceFailureMessages.h"
+#import "../core/EditionIdentity.h"
+#import <os/log.h>
 #include "../../../../shared/voice/VoiceProviders.h"
 #include "../../../../shared/voice/PolishPrompt.h"
 #include <algorithm>
@@ -25,14 +27,36 @@ BOOL Endpoint(const std::string &value) {
     return url.host.length && !url.user && !url.password && !url.fragment &&
         ([url.scheme.lowercaseString isEqual:@"https"] || (loopback && [url.scheme.lowercaseString isEqual:@"http"]));
 }
-std::string Polish(std::string text, NSDictionary *options, const std::shared_ptr<std::atomic_bool> &cancelled, void (^polishing)(void) = nil) {
+std::string PolishEndpoint(const std::string &value) {
+    if (!Endpoint(value)) return {};
+    if (!MSIMEEditionIsShurufa()) return value;
+    NSURLComponents *url = [NSURLComponents componentsWithString:@(value.c_str())];
+    NSString *path = url.percentEncodedPath;
+    while ([path hasSuffix:@"/"]) path = [path substringToIndex:path.length - 1];
+    NSString *last = path.lastPathComponent;
+    const BOOL version = [last hasPrefix:@"v"] && last.length > 1 &&
+        [[last substringFromIndex:1] rangeOfCharacterFromSet:
+            [NSCharacterSet characterSetWithCharactersInString:@"0123456789"].invertedSet].location == NSNotFound;
+    const BOOL prefix = !path.length || version || [path hasSuffix:@"/v1beta/openai"];
+    // 只补明确的 API 根路径；自定义完整路由（包括尾斜杠）保持原样。
+    if (prefix) path = [path stringByAppendingString:@"/chat/completions"];
+    else if (![path hasSuffix:@"/chat/completions"]) return value;
+    url.percentEncodedPath = path;
+    return std::string(url.string.UTF8String ?: "");
+}
+std::string Polish(std::string text, NSDictionary *options, const std::shared_ptr<std::atomic_bool> &cancelled,
+                   bool &failed, void (^polishing)(void) = nil) {
+    failed = false;
     if (text.empty() || cancelled->load() ||
         !([options[@"polish_enabled"] boolValue] || [options[@"polish_text"] boolValue]) || ![options[@"polish_token"] length]) return text;
+    const NSTimeInterval started = NSProcessInfo.processInfo.systemUptime;
+    const char *status = "failed";
     try {
         auto provider = String(options, @"polish_provider");
         auto endpoint = String(options, @"polish_endpoint");
         auto model = String(options, @"polish_model");
         if (endpoint.empty()) endpoint = msime::voice::default_polish_endpoint(provider);
+        endpoint = PolishEndpoint(endpoint);
         if (model.empty()) model = msime::voice::default_polish_model(provider);
         msime::windows::PolishPromptSlots slots;
         slots.id = String(options, @"polish_prompt_id");
@@ -40,28 +64,30 @@ std::string Polish(std::string text, NSDictionary *options, const std::shared_pt
         slots.custom_2 = String(options, @"polish_prompt_custom_2");
         slots.custom_3 = String(options, @"polish_prompt_custom_3");
         auto prompt = msime::windows::polish_prompt_for(slots);
-        if (Endpoint(endpoint)) {
-            // A block captures a C++ reference as the reference, not as a copy of what it names. This one
-            // runs on main after Polish has returned, when the request owning `cancelled` may already be
-            // gone, so it has to hold its own share of the flag - reading through the parameter crashed.
+        if (!endpoint.empty()) {
+            // 异步阶段通知保留取消标记的副本，不能捕获参数引用。
             if (polishing) {
                 std::shared_ptr<std::atomic_bool> flag = cancelled;
                 dispatch_async(dispatch_get_main_queue(), ^{ if (!flag->load()) polishing(); });
             }
-            // 30s, the budget the reference host uses and for the reason it measured: a chat completion
-            // cleaning up to a minute of transcript does not answer inside the 3s default, and the catch
-            // below keeps the ASR text without telling anyone - so the transcript reached the provider and
-            // the cleaned answer was discarded every time. Waiting is the lesser cost; sending the text and
-            // binning the reply is the one nobody asked for.
-            // 整理预算默认 30 秒；`polish_timeout_ms` 只能把它调小（测试用），不会放宽。
+            // 整理预算默认 30 秒；测试只能调小，不放宽。失败保留完整识别文字。
             long budget = 30000;
             id requested = options[@"polish_timeout_ms"];
             if ([requested isKindOfClass:NSNumber.class] && [requested longValue] >= 200) budget = std::min(budget, [requested longValue]);
             auto polished = msime::voice::polish_cloud_text(text, provider, endpoint, model,
                 String(options, @"polish_token"), prompt, String(options, @"polish_thinking"), cancelled, budget);
-            if (!polished.empty() && polished.size() <= 65536) text = std::move(polished);
-        }
-    } catch (const std::exception &) { /* Optional polish failure preserves ASR. */ }
+            NSString *validText = [[NSString alloc] initWithBytes:polished.data() length:polished.size() encoding:NSUTF8StringEncoding];
+            if (validText.length && polished.size() <= 65536) { text = std::move(polished); status = "ok"; }
+            else failed = true;
+        } else { failed = true; status = "invalid_endpoint"; }
+    } catch (const std::exception &) { failed = true; }
+    if (cancelled->load()) { failed = false; status = "cancelled"; }
+    static os_log_t log;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ log = os_log_create(MSIMEInputMethodBundleIdentifier().UTF8String, "voice"); });
+    // 只保留状态与耗时；不记录地址、模型、凭据、请求或回复正文。
+    os_log(log, "voice_polish status=%{public}s elapsed_ms=%.0f", status,
+           (NSProcessInfo.processInfo.systemUptime - started) * 1000.0);
     return text;
 }
 }
@@ -144,21 +170,29 @@ std::string Polish(std::string text, NSDictionary *options, const std::shared_pt
         auto cancelled = _cancelled;
         NSDictionary *options = _options;
         void (^polishing)(void) = [self.polishingHandler copy];
+        __weak MSIMEHTTPVoiceRequest *weakSelf = self;
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
             NSString *result = nil;
             NSError *failure = nil;
+            bool polishFailed = false;
             try {
                 auto language = String(options, @"language");
                 if (language == "en-US" || language == "en-us") language = "en";
                 if (language == "zh-CN") language = "zh-cn";
                 auto text = msime::voice::recognize_cloud_asr(samples, String(options, @"asr_provider"),
                     String(options, @"asr_endpoint"), String(options, @"asr_model"), String(options, @"asr_token"), language, cancelled);
-                text = Polish(std::move(text), options, cancelled, polishing);
+                text = Polish(std::move(text), options, cancelled, polishFailed, polishing);
                 result = [[NSString alloc] initWithBytes:text.data() length:text.size() encoding:NSUTF8StringEncoding];
                 if (!result.length) failure = Failure();
             } catch (const msime::voice::CloudAsrError &cloudError) { failure = Failure(cloudError.user_message()); }
             catch (const std::exception &) { failure = Failure(); }
-            dispatch_async(dispatch_get_main_queue(), ^{ if (!cancelled->load()) completion(failure ? nil : result, failure); });
+            dispatch_async(dispatch_get_main_queue(), ^{
+                MSIMEHTTPVoiceRequest *request = weakSelf;
+                if (!cancelled->load() && request) {
+                    request->_polishFailed = polishFailed;
+                    completion(failure ? nil : result, failure);
+                }
+            });
         });
         return YES;
     }
@@ -173,10 +207,18 @@ std::string Polish(std::string text, NSDictionary *options, const std::shared_pt
         auto cancelled = _cancelled;
         NSDictionary *options = _options;
         NSString *original = [text copy];
+        __weak MSIMEHTTPVoiceRequest *weakSelf = self;
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-            auto polished = Polish(std::string(static_cast<const char *>(data.bytes), data.length), options, cancelled);
+            bool polishFailed = false;
+            auto polished = Polish(std::string(static_cast<const char *>(data.bytes), data.length), options, cancelled, polishFailed);
             NSString *result = [[NSString alloc] initWithBytes:polished.data() length:polished.size() encoding:NSUTF8StringEncoding];
-            dispatch_async(dispatch_get_main_queue(), ^{ if (!cancelled->load()) completion(result.length ? result : original, nil); });
+            dispatch_async(dispatch_get_main_queue(), ^{
+                MSIMEHTTPVoiceRequest *request = weakSelf;
+                if (!cancelled->load() && request) {
+                    request->_polishFailed = polishFailed;
+                    completion(result.length ? result : original, nil);
+                }
+            });
         });
         return YES;
     }

@@ -95,6 +95,7 @@
 @end
 
 @interface DoubaoPolishFixture : NSObject
+@property BOOL polishFailed;
 @property(copy) void (^completion)(NSString *, NSError *);
 @property NSUInteger submissions;
 @property NSUInteger cancellations;

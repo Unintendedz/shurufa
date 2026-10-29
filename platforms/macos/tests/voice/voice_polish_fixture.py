@@ -32,19 +32,28 @@ class Handler(BaseHTTPRequestHandler):
             assert data["model"] == "fixture-model"
             assert data["messages"][0]["content"] == "synthetic prompt"
             assert data["messages"][1]["content"] == "<asr_text>\nsynthetic transcript\n</asr_text>"
+            # 兼容服务把 API 根目录重定向；产品必须直接请求对话路径。
+            if self.path == "/v1":
+                self.send_response(301)
+                self.send_header("Location", "/v1/")
+                self.end_headers()
+                counts[self.path] = counts.get(self.path, 0) + 1
+                return
+            assert "thinking" not in data and "reasoning_effort" not in data
+            path = self.path.split("?")[0].removesuffix("/chat/completions")
             counts[self.path] = counts.get(self.path, 0) + 1
-            if self.path == "/stall-headers":
+            if path == "/stall-headers":
                 time.sleep(6)
-            self.send_response(500 if self.path == "/failure" else 200)
+            self.send_response(500 if path == "/failure" else 200)
             self.end_headers()
-            if self.path == "/stall-body":
+            if path == "/stall-body":
                 self.wfile.flush()
                 time.sleep(6)
-            value = "" if self.path == "/empty" else "synthetic polished"
+            value = "" if path == "/empty" else "synthetic polished"
             payload = {"choices": [{"message": {"content": value}}]}
-            if self.path in ("/length", "/content_filter"):
-                payload["choices"][0]["finish_reason"] = self.path[1:]
-            elif self.path == "/error":
+            if path in ("/length", "/content_filter"):
+                payload["choices"][0]["finish_reason"] = path[1:]
+            elif path == "/error":
                 payload["error"] = {"message": "synthetic failure"}
             self.wfile.write(json.dumps(payload).encode())
         except (BrokenPipeError, ConnectionResetError):
@@ -61,9 +70,12 @@ try:
     # Two six-second stalls are waited out rather than abandoned, so the whole run needs room for them.
     result = subprocess.run([sys.argv[1], f"http://127.0.0.1:{server.server_port}"], timeout=60)
     assert result.returncode == 0 and not errors
-    assert counts == {"/polish": 1, "/failure": 1, "/empty": 1,
+    assert counts == {"/polish": 2, "/failure": 1, "/empty": 1,
                       "/length": 1, "/content_filter": 1, "/error": 1,
-                      "/stall-headers": 2, "/stall-body": 1}
+                      "/stall-headers": 2, "/stall-body": 1,
+                      "/v1/chat/completions": 4, "/prefix/v1/chat/completions?tenant=synthetic": 1,
+                      "/chat/completions": 1, "/v1": 1, "/v1/clean/": 1,
+                      "/api/v3/chat/completions": 1, "/v1beta/openai/chat/completions": 1}
 finally:
     server.shutdown()
     server.server_close()

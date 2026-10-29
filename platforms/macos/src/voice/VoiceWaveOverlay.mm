@@ -485,8 +485,11 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
     [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:@"x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"]];
 }
 - (void)showCopyResult:(BOOL)copied {
+    [self showCompletionNotice:copied ? @"已复制" : @"复制失败"];
+}
+- (void)showCompletionNotice:(NSString *)notice {
     _transcript = @"";
-    [self showStatus:copied ? @"已复制" : @"复制失败" listening:NO failure:YES];
+    [self showStatus:notice listening:NO failure:YES];
     const NSUInteger generation = _presentationGeneration;
     __weak MSIMEVoiceWaveOverlay *weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3*NSEC_PER_SEC), dispatch_get_main_queue(), ^{
