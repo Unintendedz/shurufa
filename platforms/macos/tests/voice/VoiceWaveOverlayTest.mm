@@ -258,8 +258,9 @@ int main(int argc, char **argv) {
                     const NSUInteger beforeConfirm = confirms, beforeCancel = cancels;
                     [confirmButton performClick:nil]; [cancelButton performClick:nil];
                     assert(confirms == beforeConfirm+1 && cancels == beforeCancel+1);
-                    NSTextField *notice = [panel valueForKey:@"monitorNotice"];
-                    assert(notice.hidden == ![state isEqual:@"permission"]);
+                    // 一条细长的录音条，不论有没有输入监控授权都不出现授权提示。
+                    assert(panel.frame.size.height == 40);
+                    for (NSView *subview in panel.contentView.subviews) assert(subview == cancelButton || subview == confirmButton);
                 }
                 assert(!panel.canBecomeKeyWindow && !panel.canBecomeMainWindow && !panel.hidesOnDeactivate);
                 [panel.contentView display];

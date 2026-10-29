@@ -8,6 +8,7 @@ constexpr CGFloat kCompactWidth = 78, kCompactHeight = 32;
 constexpr CGFloat kProcessingWidth = 112, kProcessingHeight = 40;
 constexpr CGFloat kActionWidth = 142, kActionHeight = 40;
 constexpr CGFloat kTranscriptWidth = 420, kTranscriptHeight = 112;
+constexpr CGFloat kPersistentWidth = 460;
 constexpr CGFloat kActionCenterInset = 18, kActionRadius = 12, kActionContentInset = 35;
 constexpr CGFloat kTranscriptHorizontalPadding = 14, kTranscriptTextTop = 33, kTranscriptTextBottom = 8, kTranscriptLineHeight = 22;
 constexpr CGFloat kTranscriptFontSize = 15, kStatusFontSize = 14;
@@ -138,6 +139,8 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
 @property(nonatomic) BOOL showsLabel;
 @property(nonatomic) BOOL showsActions;
 @property(nonatomic) CGFloat footerHeight;
+/// 一条细长的录音条：只画一行最新转写，左右是圆形取消和完成。
+@property(nonatomic) BOOL singleLine;
 /// Already cut to the newest three lines; nil when the layout has no transcript area.
 @property(nonatomic, copy) NSString *visibleTranscript;
 - (void)advanceWave;
@@ -170,7 +173,8 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
     const BOOL label = self.showsLabel;
     const BOOL transcript = self.visibleTranscript.length > 0;
 
-    const CGFloat corner = self.footerHeight > 0 ? 16.0 : actions || (label && !transcript) ? h * 0.5 : (transcript ? 16.0 : 10.0);
+    const BOOL singleLine = self.singleLine;
+    const CGFloat corner = singleLine ? h * 0.5 : self.footerHeight > 0 ? 16.0 : actions || (label && !transcript) ? h * 0.5 : (transcript ? 16.0 : 10.0);
     NSBezierPath *panel = [NSBezierPath bezierPathWithRoundedRect:NSMakeRect(0.5, 0.5, w - 1.0, h - 1.0) xRadius:corner yRadius:corner];
     [background setFill]; [panel fill];
     [border setStroke]; panel.lineWidth = 1.0; [panel stroke];
@@ -178,8 +182,14 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
     const CGFloat contentLeft = actions ? kActionContentInset : 0.0;
     const CGFloat contentRight = actions ? w - kActionContentInset : w;
     const CGFloat contentWidth = contentRight - contentLeft;
-    const CGFloat centerY = transcript || self.footerHeight > 0 ? 18.0 : h * 0.5;
-    if (label) {
+    const CGFloat centerY = !singleLine && (transcript || self.footerHeight > 0) ? 18.0 : h * 0.5;
+    if (singleLine && transcript && !label) {
+        NSMutableParagraphStyle *style = [NSMutableParagraphStyle new];
+        style.lineBreakMode = NSLineBreakByClipping;
+        NSDictionary *attributes = @{NSFontAttributeName: VoiceTranscriptFont(), NSForegroundColorAttributeName: foreground, NSParagraphStyleAttributeName: style};
+        const CGFloat lineHeight = ceil(VoiceTranscriptFont().ascender - VoiceTranscriptFont().descender + VoiceTranscriptFont().leading);
+        [self.visibleTranscript drawInRect:NSMakeRect(contentLeft + 8.0, centerY - lineHeight * 0.5, contentWidth - 16.0, lineHeight) withAttributes:attributes];
+    } else if (label) {
         NSMutableParagraphStyle *style = [NSMutableParagraphStyle new];
         style.alignment = NSTextAlignmentCenter;
         style.lineBreakMode = NSLineBreakByTruncatingTail;
@@ -188,7 +198,7 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
         [self.status drawInRect:NSMakeRect(contentLeft, centerY - lineHeight * 0.5, contentWidth, lineHeight) withAttributes:attributes];
     } else {
         [foreground setFill];
-        const CGFloat waveWidth = transcript ? MIN(78.0, w) : (actions ? MIN(78.0, contentWidth) : w);
+        const CGFloat waveWidth = transcript || singleLine ? MIN(78.0, w) : (actions ? MIN(78.0, contentWidth) : w);
         const CGFloat waveLeft = actions ? contentLeft + (contentWidth - waveWidth) * 0.5 : (transcript ? (w - waveWidth) * 0.5 : 0.0);
         const CGFloat sideMargin = kDotRadius + 0.25;
         const CGFloat trackWidth = MAX(1.0, waveWidth - 2.0 * sideMargin);
@@ -210,7 +220,7 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
         }
     }
 
-    if (transcript) {
+    if (transcript && !singleLine) {
         NSMutableParagraphStyle *style = [NSMutableParagraphStyle new];
         style.minimumLineHeight = kTranscriptLineHeight;
         style.maximumLineHeight = kTranscriptLineHeight;
@@ -263,9 +273,7 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
     BOOL _followsSystemAppearance;
     id _screenObserver;
     BOOL _persistentRecording;
-    BOOL _shortcutMonitoringAvailable;
-    NSTextField *_monitorNotice;
-    NSButton *_monitorPermission;
+    NSUInteger _visibleTranscriptLines;
 }
 - (instancetype)init {
     self = [super initWithContentRect:NSMakeRect(0, 0, kCompactWidth, kCompactHeight)
@@ -285,14 +293,6 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
             button.accessibilityLabel = button.title;
             [_view addSubview:button];
         }
-        _monitorNotice = [NSTextField labelWithString:@"允许输入监控后，可跨应用使用快捷键。"];
-        _monitorNotice.font = [NSFont systemFontOfSize:11];
-        _monitorNotice.textColor = NSColor.secondaryLabelColor;
-        _monitorNotice.hidden = YES; [_view addSubview:_monitorNotice];
-        _monitorPermission = [NSButton buttonWithTitle:@"允许输入监控…" target:self action:@selector(openInputMonitoring:)];
-        _monitorPermission.refusesFirstResponder = YES;
-        _monitorPermission.bezelStyle = NSBezelStyleRounded;
-        _monitorPermission.hidden = YES; [_view addSubview:_monitorPermission];
         __weak MSIMEVoiceWaveOverlay *weakSelf = self;
         _screenObserver = [NSNotificationCenter.defaultCenter
             addObserverForName:NSApplicationDidChangeScreenParametersNotification
@@ -370,14 +370,21 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
            (_processing || ((_recordingLocked || _persistentRecording) && _view.listening));
 }
 - (NSString *)visibleTranscriptForWidth:(CGFloat)width {
+    return [self visibleTranscriptForWidth:width lines:kMaxTranscriptLines];
+}
+- (NSString *)visibleTranscriptForWidth:(CGFloat)width lines:(NSUInteger)lines {
     if (!_transcript.length) return nil;
-    if (_visibleTranscript && _visibleTranscriptWidth == width && [_visibleTranscriptSource isEqualToString:_transcript]) return _visibleTranscript;
+    if (_visibleTranscript && _visibleTranscriptWidth == width && _visibleTranscriptLines == lines &&
+        [_visibleTranscriptSource isEqualToString:_transcript]) return _visibleTranscript;
     NSFont *font = VoiceTranscriptFont();
-    _visibleTranscript = MSIMEVoiceTranscriptVisibleText(_transcript, kMaxTranscriptLines, ^NSUInteger(NSString *candidate) {
+    // 单行预览把换行当空格，只留下最新说的那一段。
+    NSString *source = lines == 1 ? [[_transcript componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet] componentsJoinedByString:@" "] : _transcript;
+    _visibleTranscript = MSIMEVoiceTranscriptVisibleText(source, lines, ^NSUInteger(NSString *candidate) {
         return MSIMEVoiceTranscriptLineCount(candidate, font, width);
     });
     _visibleTranscriptSource = _transcript;
     _visibleTranscriptWidth = width;
+    _visibleTranscriptLines = lines;
     return _visibleTranscript;
 }
 - (void)layoutPresentation {
@@ -397,12 +404,14 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
     }
     const BOOL persistentActions = actions && _persistentRecording;
     if (persistentActions) {
-        size = NSMakeSize(460, _shortcutMonitoringAvailable ? 152 : 186);
-        visible = [self visibleTranscriptForWidth:size.width - 2.0 * kTranscriptHorizontalPadding];
+        // 跨窗口录音只占屏幕底部一条：左边取消，右边完成，中间一行最新转写。
+        size = NSMakeSize(kPersistentWidth, kActionHeight);
+        visible = [self visibleTranscriptForWidth:kPersistentWidth - 2.0 * kActionContentInset - 16.0 lines:1];
     }
-    _view.footerHeight = persistentActions ? (_shortcutMonitoringAvailable ? 40 : 74) : 0;
-    _view.showsLabel = _showingFailure || _processing || persistentActions;
-    _view.showsActions = actions && !persistentActions;
+    _view.footerHeight = 0;
+    _view.singleLine = persistentActions;
+    _view.showsLabel = _showingFailure || _processing;
+    _view.showsActions = actions;
     _view.visibleTranscript = visible;
     NSScreen *screen = [self resolvedPreferredScreen];
     const NSPoint origin = screen ? MSIMEVoiceWaveOverlayOriginForFrames(screen.frame, screen.visibleFrame, size) : self.frame.origin;
@@ -411,19 +420,8 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
     // The view is flipped, so these centers match the source's top-left coordinates.
     _cancelButton.frame = NSMakeRect(kActionCenterInset - kActionRadius, size.height * 0.5 - kActionRadius, kActionRadius * 2.0, kActionRadius * 2.0);
     _confirmButton.frame = NSMakeRect(size.width - kActionCenterInset - kActionRadius, size.height * 0.5 - kActionRadius, kActionRadius * 2.0, kActionRadius * 2.0);
-    for (NSButton *button in @[_cancelButton, _confirmButton]) {
-        button.transparent = !persistentActions; button.bordered = persistentActions;
-        button.bezelStyle = NSBezelStyleRounded;
-    }
     _confirmButton.title = persistentActions ? @"完成" : @"确认";
     _confirmButton.accessibilityLabel = _confirmButton.title;
-    if (persistentActions) {
-        _cancelButton.frame = NSMakeRect(size.width-178,size.height-36,76,28);
-        _confirmButton.frame = NSMakeRect(size.width-92,size.height-36,76,28);
-    }
-    _monitorNotice.hidden = _monitorPermission.hidden = !persistentActions || _shortcutMonitoringAvailable;
-    _monitorNotice.frame = NSMakeRect(14,size.height-64,size.width-28,20);
-    _monitorPermission.frame = NSMakeRect(14,size.height-36,142,28);
     // Only the round actions take the pointer; this panel still cannot become key/main or redirect typing away from the IMK client.
     self.ignoresMouseEvents = !actions;
     [self updateWaveAnimation];
@@ -476,14 +474,8 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
         : NSWindowCollectionBehaviorDefault;
     [self layoutPresentation];
 }
-- (void)setShortcutMonitoringAvailable:(BOOL)available {
-    _shortcutMonitoringAvailable = available;
-    [self layoutPresentation];
-}
-- (void)openInputMonitoring:(id)sender {
-    (void)sender;
-    [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:@"x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"]];
-}
+// 跨应用监听只是锦上添花：没有授权时，在使用 Shurufa 的应用里按快捷键照样能结束录音，不在录音条上提示授权。
+- (void)setShortcutMonitoringAvailable:(BOOL)available { (void)available; }
 - (void)showCopyResult:(BOOL)copied {
     [self showCompletionNotice:copied ? @"已复制" : @"复制失败"];
 }
