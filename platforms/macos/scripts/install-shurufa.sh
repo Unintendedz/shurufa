@@ -13,11 +13,12 @@ staging="$(mktemp -d "$destination_root/.shurufa-install.XXXXXX")"
 trap 'rm -rf "$staging"' EXIT
 ditto "$source_bundle" "$staging/Shurufa.app"
 codesign --verify --deep --strict "$staging/Shurufa.app"
-python3 "$root/platforms/macos/scripts/shurufa_installation.py" prepare
+python3 "$root/platforms/macos/scripts/shurufa_installation.py" prepare "$destination"
 if [[ -e "$destination" ]]; then
   backup="$HOME/Library/Application Support/Shurufa Installation Backups/$(date +%Y%m%d-%H%M%S)"
   mkdir -p "$backup"
   mv "$destination" "$backup/Shurufa.app"
+  python3 "$root/platforms/macos/scripts/shurufa_installation.py" unregister "$backup/Shurufa.app"
   python3 "$root/platforms/macos/scripts/shurufa_installation.py" preserve "$backup/Shurufa.app"
 fi
 mv "$staging/Shurufa.app" "$destination"
@@ -48,6 +49,8 @@ if [[ "$registration" -ne 0 ]]; then
   exit "$registration"
 fi
 "$executable" --enabled-input-modes
+python3 "$root/platforms/macos/scripts/shurufa_installation.py" retire-caches "$(getconf DARWIN_USER_CACHE_DIR)" \
+  "$HOME/Library/Application Support/Shurufa Installation Backups/input-source-caches-$(date +%Y%m%d-%H%M%S)"
 # 系统已有实例时 open 会复用它，不直接派生第二个服务器。
 open -g "$destination"
 python3 "$root/platforms/macos/scripts/shurufa_installation.py" verify "$destination"

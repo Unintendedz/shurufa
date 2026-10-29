@@ -79,9 +79,12 @@ def migrate_backups(legacy_root, backup_root):
         path.rename(backup_root / path.name)
 
 
-def prepare():
+def prepare(destination):
     dump = subprocess.check_output([LSREGISTER, "-dump"], text=True)
     for path in registered_paths(dump):
+        # 安装位置原地替换后由 lsregister -f 更新；先注销它会让系统把 Shurufa 移出输入菜单。
+        if path == destination:
+            continue
         unregister(path)
         print(f"Unregistered: {path}")
     for pid, executable in host_processes():
@@ -123,6 +126,29 @@ def input_source_preferences_match(entries, declared_modes):
     return True
 
 
+INPUT_SOURCE_CACHE_NAMES = ("com.apple.IntlDataCache.le", "com.apple.IntlDataCache.le.kbdx")
+
+
+def retire_app_input_source_caches(cache_root, backup):
+    """沙盒应用各自留一份输入源缓存，系统不会因重装刷新它：旧副本里没有新声明的 Caps Lock 能力、留着已删除的模式，
+    微信的副本里甚至没有 Shurufa。移到备份目录后，应用下次启动按当前登记重建；顶层那份系统自己维护，不动。"""
+    moved = []
+    for directory in sorted(cache_root.iterdir()):
+        for name in INPUT_SOURCE_CACHE_NAMES:
+            cache = directory / name
+            try:
+                if directory.is_symlink() or not directory.is_dir() or cache.is_symlink() or not cache.is_file():
+                    continue
+            except PermissionError:
+                # 系统沙盒目录（例如 WebKit、快捷指令的）不允许访问，跳过。
+                break
+            target = backup / directory.name
+            target.mkdir(parents=True, exist_ok=True)
+            cache.rename(target / name)
+            moved.append(directory.name)
+    return sorted(set(moved))
+
+
 def enabled_input_source_entries(hitoolbox, inputsources):
     """新版 macOS 把第三方输入法记在 com.apple.inputsources 的 AppleEnabledThirdPartyInputSources，两处都要读。"""
     return list(hitoolbox.get("AppleEnabledInputSources", [])) + list(inputsources.get("AppleEnabledThirdPartyInputSources", []))
@@ -150,12 +176,15 @@ def verify(destination):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 2 and sys.argv[1] == "prepare":
-        prepare()
+    if len(sys.argv) == 3 and sys.argv[1] == "prepare":
+        prepare(Path(sys.argv[2]).resolve())
     elif len(sys.argv) == 3 and sys.argv[1] == "preserve":
         print(preserve_bundle(Path(sys.argv[2])))
     elif len(sys.argv) == 3 and sys.argv[1] == "unregister":
         unregister(Path(sys.argv[2]).resolve())
+    elif len(sys.argv) == 4 and sys.argv[1] == "retire-caches":
+        moved = retire_app_input_source_caches(Path(sys.argv[2]), Path(sys.argv[3]))
+        print(json.dumps({"retired_input_source_caches": moved}, ensure_ascii=False))
     elif len(sys.argv) == 3 and sys.argv[1] == "verify":
         verify(Path(sys.argv[2]).resolve())
     else:

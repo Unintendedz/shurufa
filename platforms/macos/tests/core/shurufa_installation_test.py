@@ -44,6 +44,25 @@ class InstallationTests(unittest.TestCase):
         self.assertFalse(installation.input_source_preferences_match(
             installation.enabled_input_source_entries({"AppleEnabledInputSources": [abc]}, {}), declared))
 
+    def test_app_input_source_caches_move_to_backup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "C"
+            backup = Path(directory) / "backup"
+            app = root / "com.synthetic.app"
+            app.mkdir(parents=True)
+            for name in installation.INPUT_SOURCE_CACHE_NAMES:
+                (app / name).write_bytes(b"synthetic stale cache")
+                (root / name).write_bytes(b"synthetic system cache")
+            (app / "other.cache").write_bytes(b"synthetic unrelated")
+            (root / "plain-app").mkdir()
+            self.assertEqual(installation.retire_app_input_source_caches(root, backup), ["com.synthetic.app"])
+            for name in installation.INPUT_SOURCE_CACHE_NAMES:
+                self.assertFalse((app / name).exists())
+                self.assertEqual((backup / "com.synthetic.app" / name).read_bytes(), b"synthetic stale cache")
+                self.assertEqual((root / name).read_bytes(), b"synthetic system cache")
+            self.assertTrue((app / "other.cache").exists())
+            self.assertEqual(installation.retire_app_input_source_caches(root, backup), [])
+
     def test_old_backups_move_outside_the_removable_state_root(self):
         with tempfile.TemporaryDirectory() as directory:
             support = Path(directory)
