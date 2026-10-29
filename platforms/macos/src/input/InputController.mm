@@ -1662,6 +1662,10 @@ static __weak MSIMEInputController *MSIMEFocusedController;
 // 录音跨焦点持有原控制器，异步识别仍属于同一代次；最终投递另取当前焦点。
 static MSIMEInputController *MSIMEVoiceRecordingOwner;
 static MSIMEVoiceRecordingMonitor MSIMERecordingMonitor;
+// IMK、AppKit 全局监听与录音 tap 共用回执；结束录音重置手势时不清回执。
+struct MSIMEVoiceEventReceipt { NSTimeInterval timestamp = 0; BOOL consumed = NO; };
+static std::unordered_map<uint32_t, MSIMEVoiceEventReceipt> MSIMEVoiceEventReceipts;
+
 
 // The full-colour brand mark the floating toolbar and the mode HUD lead with, loaded once. Nil when the bundle has no icon, and the top row then carries no mark.
 static NSImage *MSIMECandidateLogoImage() {
@@ -4286,6 +4290,15 @@ static const NSTimeInterval kSettledRerankPoll = 1.0 / 60.0;
     return MSIMEVoiceCustomShortcut(defaults) != nil || ![MSIMEVoiceHotkeyMode(defaults) isEqual:@"legacy"];
 }
 - (BOOL)handleConfiguredVoiceShortcut:(NSEvent *)event {
+    std::optional<uint32_t> eventSlot;
+    const NSInteger kind = event.type == NSEventTypeKeyDown ? 0 : event.type == NSEventTypeKeyUp ? 1 : event.type == NSEventTypeFlagsChanged ? 2 : -1;
+    if (MSIMEEditionIsShurufa() && kind >= 0 && event.keyCode < 128 && event.timestamp > 0) {
+        // 使用事件自带的顺序标识，不设时间窗口，也不记录字符。
+        eventSlot = (uint32_t)(kind * 128 * 16 + event.keyCode * 16 + MSIMEVoiceModifierBits(event.modifierFlags));
+        auto previous = MSIMEVoiceEventReceipts.find(*eventSlot);
+        if (previous != MSIMEVoiceEventReceipts.end() && event.timestamp <= previous->second.timestamp)
+            return previous->second.consumed;
+    }
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
     NSDictionary *custom = MSIMEVoiceCustomShortcut(defaults);
     NSString *mode = MSIMEVoiceHotkeyMode(defaults);
@@ -4296,6 +4309,7 @@ static const NSTimeInterval kSettledRerankPoll = 1.0 / 60.0;
         [defaults boolForKey:@"MSIMEClientVoiceHotkeyCtrlOption"] != NO,
         event.type == NSEventTypeKeyDown && [self matchesVoiceToggleHotkey:event] != NO
     }, _voiceService.active, event.type == NSEventTypeFlagsChanged ? MSIMEPhysicalModifierFlagsState(kCGEventSourceStateHIDSystemState) : 0);
+    if (eventSlot) MSIMEVoiceEventReceipts[*eventSlot] = {event.timestamp, result.consumed};
     if (_configuredVoiceShortcut.began()) _voiceHoldGeneration = _voiceGeneration;
     if (result.consumed || result.action != MSIMEVoiceHoldShortcut::Action::None) [self resetModifierTap];
     if (_configuredVoiceShortcut.locked() && _voiceService.active) [_voiceOverlay setRecordingLocked:YES];

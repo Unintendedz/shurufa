@@ -452,6 +452,48 @@ int main(int argc, char **argv) {
             voiceArguments[@"MSIMEClientVoiceMacOSHotkey"] = @{@"key_code":@123,@"modifiers":@2};
             [defaults setVolatileDomain:voiceArguments forName:NSArgumentDomain];
             puts("PASS queued monitor: processing Esc, early final, new hold, stale KeyUp");
+            // 同一次物理按键可能先走 IMK，KeyUp 后才由只读 tap 的主队列回调送达。
+            NSDictionary *beforeDuplicateVoiceArguments = [voiceArguments copy];
+            const BOOL beforeDuplicatePolishFixture = owner.usePolishFixture;
+            [owner setValue:origin forKey:@"activeClient"];
+            MSIMEFocusedController = owner;
+            owner.usePolishFixture = NO;
+            voiceArguments[@"MSIMEClientVoicePolish"] = @NO;
+            voiceArguments[@"MSIMEClientVoicePolishText"] = @NO;
+            voiceArguments[@"MSIMEClientVoiceStreamInlinePreedit"] = @NO;
+            [defaults setVolatileDomain:voiceArguments forName:NSArgumentDomain];
+            NSEvent *start = event(NSEventTypeKeyDown,123,NSEventModifierFlagOption,100);
+            assert([owner handleEvent:start client:origin]);
+            auto firstMonitor = owner.recordingMonitor;
+            assert([owner handleEvent:event(NSEventTypeKeyUp,123,NSEventModifierFlagOption,100.1) client:origin]);
+            MSIMEQueueVoiceRecordingEvent(firstMonitor,start.CGEvent);
+            MSIMEVoiceMeterFixturePump();
+            assert(source.active && ![[owner valueForKey:@"liveVoiceProcessing"] boolValue]);
+            NSEvent *stop = event(NSEventTypeKeyDown,123,NSEventModifierFlagOption,101);
+            assert([owner handleEvent:stop client:origin]);
+            assert([[owner valueForKey:@"liveVoiceProcessing"] boolValue]);
+            auto final = source.transcript;
+            final(@"synthetic one toggle result",YES);
+            assert(!source.active);
+            // 最终投递已重置手势；迟到的 AppKit 全局副本也不能重新开麦。
+            auto global = [owner globalVoiceHotkeyHandler];
+            global(stop);
+            assert(!source.active);
+            PersistentControllerFixture *nextController = [PersistentControllerFixture alloc];
+            LiveCaptureFixture *nextCapture = [LiveCaptureFixture new];
+            [nextController setValue:session forKey:@"session"];
+            [nextController setValue:origin forKey:@"activeClient"];
+            [nextController setValue:nextCapture forKey:@"voiceService"];
+            assert([nextController handleConfiguredVoiceShortcut:stop] && !nextCapture.active);
+
+            assert([owner handleEvent:event(NSEventTypeKeyDown,123,NSEventModifierFlagOption,102) client:origin]);
+            assert(source.active);
+            [owner cancelLiveVoiceInput];
+            owner.usePolishFixture = beforeDuplicatePolishFixture;
+            [voiceArguments setDictionary:beforeDuplicateVoiceArguments];
+            [defaults setVolatileDomain:voiceArguments forName:NSArgumentDomain];
+            puts("PASS duplicate toggle: IMK/tap/KeyUp/final/global do not stop twice or restart");
+
             // TextStream 使用实际工厂分支，替身只替换模型与麦克风。
             for (NSUInteger action = 0; action < 3; ++action) {
                 [owner setValue:origin forKey:@"activeClient"];
