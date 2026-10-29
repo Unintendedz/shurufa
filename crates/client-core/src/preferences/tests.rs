@@ -8212,6 +8212,7 @@ fn shurufa_defaults_use_textstream_with_polish_and_validate() {
     let edition = crate::edition::Edition::by_id("shurufa").expect("shurufa edition");
     let defaults = Preferences::for_edition(edition);
     assert!(!defaults.keybindings.switch_language_caps_lock);
+    assert!(!defaults.quanpin_helpcode.enabled);
     assert!(!Preferences::default().keybindings.switch_language_caps_lock);
     assert_eq!(defaults.voice_input.asr_provider, "textstream");
     assert!(!defaults.voice_input.stream_inline_preedit);

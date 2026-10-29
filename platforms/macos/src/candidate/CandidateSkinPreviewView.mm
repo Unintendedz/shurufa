@@ -326,7 +326,7 @@ void DrawPreviewCandidates(NSRect rect, const msime::mac::ResolvedSkin &skin, BO
             NSFontAttributeName : [NSFont systemFontOfSize:msime::candidate::kCandidatePageIndicatorPointSize],
             NSForegroundColorAttributeName : PreviewColor(tokens.number),
         };
-        NSString *status = @"全拼 · 中 · 简";
+        NSString *status = MSIMEEditionIsShurufa() ? @"全拼 · 简" : @"全拼 · 中 · 简";
         const CGFloat dividerX = NSMaxX(caret) + 8.0;
         const CGFloat statusX = dividerX + 1.0 + 8.0;
         if (statusX + [status sizeWithAttributes:statusAttributes].width <= NSMaxX(preeditRow)) {

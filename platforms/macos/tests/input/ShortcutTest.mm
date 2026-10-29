@@ -2977,6 +2977,7 @@ static void TestShurufaRemovedLanguageShortcuts() {
 }
 
 static void TestShurufaCompositionPolicy() {
+    assert([MSIMECandidateStatusText(@"全拼", @{@"script_conversion":@YES}, NO, NO) isEqual:@"全拼 · 简"]);
     NSString *suite = [@"shurufa.composition-policy." stringByAppendingString:NSUUID.UUID.UUIDString];
     NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
     MSIMEAppearancePreferences *appearance = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults];
@@ -13489,6 +13490,10 @@ int main(int argc, char **argv) {
             NSString *suite = [@"shurufa.synthetic.branding." stringByAppendingString:NSUUID.UUID.UUIDString];
             NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
             MSIMEAppearancePreferences *prefs = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults];
+            assert(!prefs.quanpinHelpcodeEnabled);
+            [prefs applySharedAssistancePreferences:@{@"quanpin_helpcode":@{@"enabled":@YES}}];
+            assert(prefs.quanpinHelpcodeEnabled);
+            [prefs applySharedAssistancePreferences:@{@"quanpin_helpcode":@{@"enabled":@NO}}];
             for (NSString *page in @[@"input", @"habits", @"shortcuts", @"voice", @"appearance", @"dictionary", @"about"]) {
                 assert([prefs showSettingsPageWithIdentifier:page]);
                 [prefs.window.contentView layoutSubtreeIfNeeded];

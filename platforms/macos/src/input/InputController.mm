@@ -449,7 +449,7 @@ static NSString *MSIMECandidateStatusText(NSString *schemeTitle, NSDictionary *v
     if ([schemeTitle isKindOfClass:NSString.class] && schemeTitle.length) [parts addObject:schemeTitle];
     NSString *localMode = [view[@"local_mode"] isKindOfClass:NSString.class] ? view[@"local_mode"] : @"none";
     const BOOL english = MSIMEStrictBoolean(view[@"dedicated_english"]) || [localMode isEqual:@"temporary_english"];
-    [parts addObject:english ? @"英" : @"中"];
+    if (!MSIMEEditionIsShurufa()) [parts addObject:english ? @"英" : @"中"];
     if (!english && MSIMEStrictBoolean(view[@"script_conversion"])) [parts addObject:traditional ? @"繁" : @"简"];
     if (fullWidth) [parts addObject:@"全角"];
     return [parts componentsJoinedByString:@" · "];

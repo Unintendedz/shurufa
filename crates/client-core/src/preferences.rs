@@ -4386,6 +4386,7 @@ impl Preferences {
         if edition.id == "shurufa" {
             // Caps Lock 由系统切换 ABC，Shurufa 不接管此键。
             preferences.keybindings.switch_language_caps_lock = false;
+            preferences.quanpin_helpcode.enabled = false;
             // Shurufa 新装只提供本地输入；AI 候选须单独开启，语音整理默认开启但需要用户配置整理服务的凭据才会生效。
             preferences.usage_reporting = false;
             preferences.cloud_candidates = false;
