@@ -123,6 +123,11 @@ def input_source_preferences_match(entries, declared_modes):
     return True
 
 
+def enabled_input_source_entries(hitoolbox, inputsources):
+    """新版 macOS 把第三方输入法记在 com.apple.inputsources 的 AppleEnabledThirdPartyInputSources，两处都要读。"""
+    return list(hitoolbox.get("AppleEnabledInputSources", [])) + list(inputsources.get("AppleEnabledThirdPartyInputSources", []))
+
+
 def verify(destination):
     for _ in range(50):
         processes = host_processes()
@@ -132,8 +137,9 @@ def verify(destination):
     paths = registered_paths(subprocess.check_output([LSREGISTER, "-dump"], text=True))
     if not installation_matches(paths, processes, destination):
         raise RuntimeError("安装后登记或进程不是唯一的安装版，请保留日志检查；没有切换当前输入源")
-    preferences = plistlib.loads(subprocess.check_output(["defaults", "export", "com.apple.HIToolbox", "-"]))
-    entries = preferences.get("AppleEnabledInputSources", [])
+    entries = enabled_input_source_entries(*(
+        plistlib.loads(subprocess.check_output(["defaults", "export", domain, "-"]))
+        for domain in ("com.apple.HIToolbox", "com.apple.inputsources")))
     info = plistlib.loads((destination / "Contents/Info.plist").read_bytes())
     declared = set(info["ComponentInputModeDict"]["tsInputModeListKey"])
     if not input_source_preferences_match(entries, declared):

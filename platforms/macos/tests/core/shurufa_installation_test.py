@@ -32,6 +32,18 @@ class InstallationTests(unittest.TestCase):
         self.assertFalse(installation.input_source_preferences_match([parent, roman], declared))
         self.assertFalse(installation.input_source_preferences_match([{**hans, "Input Mode": "com.apple.keylayout.ABC"}], declared))
 
+    def test_enabled_entries_include_third_party_list(self):
+        identifier = installation.IDENTIFIER
+        declared = {identifier + ".Hans"}
+        hans = {"Bundle ID": identifier, "InputSourceKind": "Input Mode", "Input Mode": identifier + ".Hans"}
+        abc = {"InputSourceKind": "Keyboard Layout", "KeyboardLayout ID": 252, "KeyboardLayout Name": "ABC"}
+        entries = installation.enabled_input_source_entries(
+            {"AppleEnabledInputSources": [abc]}, {"AppleEnabledThirdPartyInputSources": [hans]})
+        self.assertEqual(entries, [abc, hans])
+        self.assertTrue(installation.input_source_preferences_match(entries, declared))
+        self.assertFalse(installation.input_source_preferences_match(
+            installation.enabled_input_source_entries({"AppleEnabledInputSources": [abc]}, {}), declared))
+
     def test_old_backups_move_outside_the_removable_state_root(self):
         with tempfile.TemporaryDirectory() as directory:
             support = Path(directory)

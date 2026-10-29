@@ -13,11 +13,6 @@ staging="$(mktemp -d "$destination_root/.shurufa-install.XXXXXX")"
 trap 'rm -rf "$staging"' EXIT
 ditto "$source_bundle" "$staging/Shurufa.app"
 codesign --verify --deep --strict "$staging/Shurufa.app"
-# 在注销旧登记前记录模式选择，刷新时只恢复新包仍声明的那些模式。
-previous_modes=""
-if [[ -x "$destination/Contents/MacOS/Shurufa" ]]; then
-  previous_modes="$("$destination/Contents/MacOS/Shurufa" --enabled-input-modes)"
-fi
 python3 "$root/platforms/macos/scripts/shurufa_installation.py" prepare
 if [[ -e "$destination" ]]; then
   backup="$HOME/Library/Application Support/Shurufa Installation Backups/$(date +%Y%m%d-%H%M%S)"
@@ -36,7 +31,9 @@ executable="$destination/Contents/MacOS/Shurufa"
 "$executable" --migrate-voice-presentation
 "$executable" --migrate-quanpin-helpcode
 set +e
-"$executable" --refresh-installed-input-sources "$previous_modes"
+# 只登记新包，不停用再启用：macOS 27 上 TISEnableInputSource 对键盘输入模式返回 noErr 却不生效，
+# 先停用会让 Shurufa 从输入菜单消失，用户只能手动删掉再添加。已启用的模式按 bundle ID 记录，原地替换后照常可用。
+"$executable" --register-input-source
 registration=$?
 "$executable" --input-source-registered
 listed=$?
