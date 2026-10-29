@@ -1327,6 +1327,7 @@ fn session_options(scheme: Scheme, paths: RuntimePaths) -> SessionOptions {
         kaomoji: false,
         super_jianpin: false,
         temporary_english: false,
+        url: true,
         temporary_japanese: false,
         expression: false,
         command: false,

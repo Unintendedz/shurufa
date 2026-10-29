@@ -190,6 +190,7 @@ pub fn product_options(options: &mut SessionOptions) {
         kaomoji: true,
         super_jianpin: true,
         temporary_english: true,
+        url: true,
         temporary_japanese: true,
         expression: false,
         command: false,
