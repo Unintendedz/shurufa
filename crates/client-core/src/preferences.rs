@@ -4380,8 +4380,8 @@ impl Preferences {
         }
         preferences.touch_keyboard_schemes = TouchKeyboardSchemePreferences::for_edition(edition);
         if edition.id == "shurufa" {
-            // 本产品用 Caps Lock 轻点切换中英文，其他 edition 保持缺省关闭。
-            preferences.keybindings.switch_language_caps_lock = true;
+            // Caps Lock 由系统切换 ABC，Shurufa 不接管此键。
+            preferences.keybindings.switch_language_caps_lock = false;
             // Shurufa 新装只提供本地输入；AI 候选须单独开启，语音整理默认开启但需要用户配置整理服务的凭据才会生效。
             preferences.usage_reporting = false;
             preferences.cloud_candidates = false;

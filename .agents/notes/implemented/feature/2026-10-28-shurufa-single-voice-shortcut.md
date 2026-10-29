@@ -46,3 +46,5 @@ macOS 专用语音绑定不占用 Linux 的 Ctrl+Space；Shurufa 也不占用已
 ## Consequences
 
 迁移测试覆盖无绑定、组合键 toggle、legacy 组合键、legacy 单侧修饰键、保存失败和重复运行。共享默认偏好通过校验。真实 AppKit 截图使用合成配置，实际键盘与系统输入法分发仍由用户验收。
+
+Caps 默认开启与恢复规则由[系统 Caps Lock 决定](../simplification/2026-10-29-shurufa-system-caps-lock.md)取代；Shurufa 旧 true 也不再生效。语音恢复规则保持。

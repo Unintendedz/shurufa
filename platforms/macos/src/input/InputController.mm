@@ -1126,6 +1126,7 @@ static NSArray *MSIMEExpandedComposition(NSDictionary *view) {
 // start. Once a composition or candidate list exists, the same key belongs to
 // Engine and must not be bypassed.
 static BOOL MSIMECapsLockFreshUppercaseBypass(NSEvent *event, NSDictionary *view) {
+    if (MSIMEEditionIsShurufa()) return NO;
     if (!event || event.type != NSEventTypeKeyDown) return NO;
     const NSEventModifierFlags competing = NSEventModifierFlagShift | NSEventModifierFlagControl |
                                            NSEventModifierFlagOption | NSEventModifierFlagCommand;
@@ -4612,9 +4613,11 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
 }
 // 把大写锁定状态交给会话：「大写锁定时使用英文标点」（`caps_lock_ascii_punctuation`）由共享层按它决定标点去向，宿主只负责报告。
 - (void)syncCapsLock {
+    if (MSIMEEditionIsShurufa()) return;
     if (_session) [_session setCapsLockEnabled:_capsLock error:nil];
 }
 - (void)adoptCapsLockState:(BOOL)capsLock {
+    if (MSIMEEditionIsShurufa()) return;
     if (_capsLock == capsLock) return;
     _capsLock = capsLock;
     [self syncCapsLock];
@@ -4627,12 +4630,14 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
 }
 // 失焦、换会话等外部重置打断了待定的轻点：大写锁定按实际状态报告，不再切换。
 - (void)abandonCapsLockTap {
+    if (MSIMEEditionIsShurufa()) return;
     const bool pending = _capsLockTap.armed();
     [self cancelCapsLockTap];
     if (pending) [self adoptCapsLockState:([NSEvent modifierFlags] & NSEventModifierFlagCapsLock) != 0];
 }
 // 返回 YES 表示这次大写锁定打开可能是一次轻点：先不报告给会话和工具栏，等 pollCapsLockTap 认定。
 - (BOOL)observeCapsLockTap:(NSEvent *)event capsLock:(BOOL)capsLock sender:(id)sender {
+    if (MSIMEEditionIsShurufa()) return NO;
     const NSEventModifierFlags others = NSEventModifierFlagShift | NSEventModifierFlagControl |
         NSEventModifierFlagOption | NSEventModifierFlagCommand | NSEventModifierFlagFunction;
     if (_capsLockTap.armed() && event.type == NSEventTypeFlagsChanged && capsLock &&
@@ -4668,6 +4673,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
 }
 // 定时器调用，测试也直接调用它来推进合成的时钟和按键状态。
 - (void)pollCapsLockTap {
+    if (MSIMEEditionIsShurufa()) return;
     if (!_capsLockTap.armed()) {
         [self cancelCapsLockTap];
         return;
@@ -6353,7 +6359,7 @@ static constexpr NSUInteger MSIMEIdleDictionarySessionLimit = 4;
     [_appearance activateInputModeForApplication:[sender respondsToSelector:@selector(bundleIdentifier)] ? [sender bundleIdentifier] : nil];
     // 系统可能仍在从强制 ASCII 的应用恢复输入源；离开激活调用栈后再核对实际模式，避免重复选择把它退回 U.S.（#8993）。
     [self scheduleSystemInputModeSyncForClient:sender];
-    _capsLock = ([NSEvent modifierFlags] & NSEventModifierFlagCapsLock) != 0;
+    _capsLock = !MSIMEEditionIsShurufa() && ([NSEvent modifierFlags] & NSEventModifierFlagCapsLock) != 0;
     [self syncCapsLock];
     _toolbar = [MSIMEFloatingToolbarPanel sharedPanel];
     [_toolbar applyLightSkin:[_appearance resolvedSkinForDark:NO].tokens darkSkin:[_appearance resolvedSkinForDark:YES].tokens];
@@ -7652,19 +7658,26 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     CGEventRef nativeEvent = event.CGEvent;
     if (nativeEvent && CGEventGetIntegerValueField(nativeEvent, kCGEventSourceUserData) == MSIMEVoiceCommitEventTag) return NO;
     if (event.type != NSEventTypeKeyDown && event.type != NSEventTypeKeyUp && event.type != NSEventTypeFlagsChanged) return NO;
-    BOOL capsLock = (event.modifierFlags & NSEventModifierFlagCapsLock) != 0;
-    if (_capsLockTapReleased && !capsLock) _capsLockTapReleased = NO;
-    BOOL staleCapsLock = NO;
-    if (_capsLockTapReleased && event.type == NSEventTypeFlagsChanged && event.keyCode == 0x39 && capsLock) {
-        // 这时如果确实又按下了 Caps Lock，物理状态仍会是按下；否则只是合成撤回后迟到的旧状态。
-        if (MSIMECapsLockKeyHeld()) _capsLockTapReleased = NO;
-        else { capsLock = NO; staleCapsLock = YES; }
+    // Shurufa 把 Caps Lock 完全交给系统，不读实体状态，也不撤回系统锁定位。
+    if (MSIMEEditionIsShurufa() && event.keyCode == 0x39) {
+        [self resetModifierTap];
+        return NO;
     }
-    if (_capsLockTapReleased && event.type == NSEventTypeKeyDown && event.keyCode != 0x39 && capsLock) {
-        capsLock = NO;
-        staleCapsLock = YES;
+    if (!MSIMEEditionIsShurufa()) {
+        BOOL capsLock = (event.modifierFlags & NSEventModifierFlagCapsLock) != 0;
+        if (_capsLockTapReleased && !capsLock) _capsLockTapReleased = NO;
+        BOOL staleCapsLock = NO;
+        if (_capsLockTapReleased && event.type == NSEventTypeFlagsChanged && event.keyCode == 0x39 && capsLock) {
+            // 这时如果确实又按下了 Caps Lock，物理状态仍会是按下；否则只是合成撤回后迟到的旧状态。
+            if (MSIMECapsLockKeyHeld()) _capsLockTapReleased = NO;
+            else { capsLock = NO; staleCapsLock = YES; }
+        }
+        if (_capsLockTapReleased && event.type == NSEventTypeKeyDown && event.keyCode != 0x39 && capsLock) {
+            capsLock = NO;
+            staleCapsLock = YES;
+        }
+        if (!staleCapsLock && ![self observeCapsLockTap:event capsLock:capsLock sender:sender]) [self adoptCapsLockState:capsLock];
     }
-    if (!staleCapsLock && ![self observeCapsLockTap:event capsLock:capsLock sender:sender]) [self adoptCapsLockState:capsLock];
     if (!sender) {
         _voicePermissionToken = nil;
         [_voiceOverlay dismissFailure];

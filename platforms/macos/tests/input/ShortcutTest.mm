@@ -13301,6 +13301,41 @@ int main(int argc, char **argv) {
                 [prefs.window.contentView layoutSubtreeIfNeeded];
                 AssertShurufaVisibleText(prefs.window.contentView);
             }
+            // 旧 true 不能恢复 Caps 接管；真实设置树没有对应控件。
+            [prefs applySharedInputPreferences:@{@"keybindings":@{@"switch_language_caps_lock":@YES}}];
+            prefs.capsLockTapShortcut = YES;
+            assert(!prefs.capsLockTapShortcut);
+            assert(!MSIMEFindPreferenceControl(prefs.window.contentView, NSSelectorFromString(@"capsLockTapShortcutChanged:")));
+            const auto realHIDStart = MSIMECapsLockHIDStart;
+            const auto realRelease = MSIMECapsLockRelease;
+            MSIMECapsLockHIDStart = &SyntheticCapsHIDStart;
+            MSIMECapsLockRelease = &SyntheticCapsRelease;
+            gCapsHIDStarts = 0; gCapsReleases = 0;
+            ModeController *capsController = [ModeController alloc];
+            ShortcutClient *capsClient = [ShortcutClient new];
+            ShortcutSession *capsSession = [ShortcutSession new];
+            [capsController setValue:prefs forKey:@"appearance"];
+            [capsController setValue:capsClient forKey:@"activeClient"];
+            [capsController setValue:capsSession forKey:@"session"];
+            prefs.englishMode = NO;
+            for (NSNumber *flags in @[@(NSEventModifierFlagCapsLock), @0]) {
+                NSEvent *event = TapEvent(NSEventTypeFlagsChanged, 0x39, flags.unsignedLongLongValue, 1.0);
+                assert(![capsController handleEvent:event client:capsClient]);
+                assert(![capsController observeCapsLockTap:event capsLock:YES sender:capsClient]);
+                [capsController pollCapsLockTap];
+                [capsController adoptCapsLockState:YES];
+                [capsController syncCapsLock];
+            }
+            assert(!gCapsHIDStarts && !gCapsReleases && !capsSession.capsLockCalls && !prefs.englishMode);
+            assert(![capsController valueForKey:@"capsLockTapTimer"]);
+            // Caps 打断待定 Shift 轻点，但仍不读取 Caps HID 或触发内部切换。
+            prefs.shiftTapShortcut = YES;
+            (void)[capsController observeModifierTap:TapEvent(NSEventTypeFlagsChanged,56,NSEventModifierFlagShift,2.0) client:capsClient];
+            assert(![capsController handleEvent:TapEvent(NSEventTypeFlagsChanged,0x39,NSEventModifierFlagShift | NSEventModifierFlagCapsLock,2.1) client:capsClient]);
+            assert(![capsController observeModifierTap:TapEvent(NSEventTypeFlagsChanged,56,NSEventModifierFlagCapsLock,2.2) client:capsClient]);
+            assert(!prefs.englishMode && !gCapsHIDStarts && !gCapsReleases);
+            assert(!MSIMECapsLockFreshUppercaseBypass(LayoutKey(0, @"A", NSEventModifierFlagCapsLock), @{}));
+            MSIMECapsLockHIDStart = realHIDStart; MSIMECapsLockRelease = realRelease;
             if (argc >= 4) {
                 if (argc >= 5) [prefs showSettingsPageWithIdentifier:[NSString stringWithUTF8String:argv[4]]];
                 NSString *theme = NSProcessInfo.processInfo.environment[@"MSIME_SNAPSHOT_THEME"];
@@ -13330,14 +13365,14 @@ int main(int argc, char **argv) {
             const BOOL voiceRestored = [restored[@"voice_input"][@"macos_hotkey"][@"key_code"] isEqual:@61] &&
                 [restored[@"voice_input"][@"hotkey_mode"] isEqual:@"hold"] && [restored[@"voice_input"][@"enabled"] boolValue];
             printf("restore defaults: caps=%d voice=%d\n",capsRestored,voiceRestored); fflush(stdout);
-            assert(capsRestored && voiceRestored);
+            assert(!capsRestored && voiceRestored);
             assert([[prefs restorableKeys] containsObject:@"MSIMEClientVoiceMacOSHotkey"]);
             assert([[prefs restorableKeys] containsObject:@"MSIMEClientVoiceHotkeyMode"]);
             assert([restored[@"voice_input"][@"asr_provider"] isEqual:@"system"]);
             assert([restored[@"voice_input"][@"asr_token"] isEqual:@"synthetic-preserved"]);
             [prefs applySharedInputPreferences:restored];
             MSIMEApplySharedVoicePreferences(restored[@"voice_input"], defaults);
-            assert(prefs.capsLockTapShortcut && [MSIMEVoiceHotkeyMode(defaults) isEqual:@"hold"]);
+            assert(!prefs.capsLockTapShortcut && [MSIMEVoiceHotkeyMode(defaults) isEqual:@"hold"]);
             [defaults setObject:@{@"key_code":@60,@"modifiers":@0} forKey:@"MSIMEClientVoiceMacOSHotkey"];
             prefs.shiftTapShortcut = NO;
             NSDictionary *beforeConflict = [defaults persistentDomainForName:suite];

@@ -27,10 +27,10 @@ static inline BOOL MSIMEMigrateShurufaVoiceShortcut(NSUserDefaults *defaults,
     return YES;
 }
 
-// 用户要求为现有安装开启 Caps Lock 切换；只迁移一次，之后设置页的关闭选择保留。
+// 用户要求交还系统 Caps Lock；新标记覆盖曾经开启本功能的 V1 安装。
 static inline BOOL MSIMEMigrateShurufaCapsLock(NSUserDefaults *defaults,
     NSDictionary *(^load)(void), NSDictionary *(^save)(uint64_t, NSDictionary *)) {
-    NSString *marker = @"ShurufaCapsLockMigrationV1";
+    NSString *marker = @"ShurufaCapsLockMigrationV2";
     if ([defaults boolForKey:marker]) return YES;
     NSDictionary *snapshot = load();
     if (![snapshot[@"preferences"] isKindOfClass:NSDictionary.class] ||
@@ -38,11 +38,11 @@ static inline BOOL MSIMEMigrateShurufaCapsLock(NSUserDefaults *defaults,
     NSMutableDictionary *updated = [snapshot mutableCopy];
     NSMutableDictionary *preferences = [snapshot[@"preferences"] mutableCopy];
     NSMutableDictionary *keys = [preferences[@"keybindings"] mutableCopy] ?: [NSMutableDictionary dictionary];
-    keys[@"switch_language_caps_lock"] = @YES;
+    keys[@"switch_language_caps_lock"] = @NO;
     preferences[@"keybindings"] = keys;
     updated[@"preferences"] = preferences;
     if (!save([snapshot[@"revision"] unsignedLongLongValue], updated)) return NO;
-    [defaults setBool:YES forKey:@"MSIMEClientCapsLockTapShortcut"];
+    [defaults setBool:NO forKey:@"MSIMEClientCapsLockTapShortcut"];
     [defaults setBool:YES forKey:marker];
     [defaults synchronize];
     return YES;

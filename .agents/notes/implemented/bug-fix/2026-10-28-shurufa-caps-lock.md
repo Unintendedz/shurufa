@@ -8,6 +8,8 @@ Status: implemented
 
 ## Decision
 
+默认开启与安装迁移现由[交还系统 Caps Lock](../simplification/2026-10-29-shurufa-system-caps-lock.md)取代；以下保留当时理由，Shift 大写修复仍适用。
+
 仅 Shurufa 的新装默认打开 Caps Lock 轻点切换。安装脚本执行一次有版本标记的偏好迁移，通过现有共享偏好 API 只改该字段，再同步本地 NSUserDefaults，并重新生成运行时快照；保存失败不标记完成。此后用户在设置页关闭该功能，重复安装保留关闭选择。
 
 英文输入撤回旧 Caps Lock 位时，显式按住 Shift 的字母不再降为小写。沿用已有确定性的实体按键状态、300 毫秒阈值和先撤回锁定再切换的规则。轻点切换后系统大写锁定关闭，长按保留大写锁定；已有锁定时再次按下只关闭锁定。不模拟键盘输入，不改用户系统的 Caps Lock 输入源设置。
