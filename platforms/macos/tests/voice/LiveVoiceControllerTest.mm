@@ -323,12 +323,17 @@ int main(int argc, char **argv) {
             voiceArguments[@"MSIMEClientVoiceHotkeyMode"] = @"toggle";
             voiceArguments[@"MSIMEClientVoiceMacOSHotkey"] = @{@"key_code":@123,@"modifiers":@2};
             [defaults setVolatileDomain:voiceArguments forName:NSArgumentDomain];
+            void (^previousMonitor)(NSEvent *) = nil;
             for (NSUInteger action = 0; action < 3; ++action) {
                 [owner setValue:origin forKey:@"activeClient"];
                 origin.commits = [NSMutableArray array]; owner.copiedText = nil;
                 owner.monitorDenied = action == 2;
                 [owner handleConfiguredVoiceShortcut:event(NSEventTypeKeyDown,123,NSEventModifierFlagOption,10+action*10)];
                 assert(source.active);
+                // 上一代 tap 排队的 Esc 不能取消新录音。
+                if (previousMonitor) previousMonitor(event(NSEventTypeKeyDown,53,0,99));
+                assert(source.active);
+                previousMonitor = owner.recordingMonitor;
                 auto finalReply = source.transcript;
                 finalReply(@"synthetic before shortcut", NO);
                 [owner deactivateServer:origin];
@@ -336,7 +341,13 @@ int main(int argc, char **argv) {
                 if (action == 0) {
                     // 缺 KeyUp，结束键从录音全局监听到达；同一事件重复到达只结束一次。
                     NSEvent *finish = event(NSEventTypeKeyDown,123,NSEventModifierFlagOption,11);
+                    const NSUInteger stops = source.captureStops;
+                    MSIMEQueueVoiceRecordingEvent(owner.recordingMonitor, finish.CGEvent);
+                    assert(source.captureStops == stops && ![[owner valueForKey:@"liveVoiceProcessing"] boolValue]);
+                    MSIMEVoiceMeterFixturePump();
+                    assert(source.captureStops == stops + 1);
                     owner.recordingMonitor(finish); owner.recordingMonitor(finish);
+                    assert(source.active && source.captureStops == stops + 1);
                     assert([[owner valueForKey:@"liveVoiceProcessing"] boolValue]);
                     finalReply(@"synthetic shortcut final", YES);
                     assert(owner.polishFixture.submissions == 1);
@@ -351,6 +362,35 @@ int main(int argc, char **argv) {
                 assert(!source.active && !MSIMEVoiceRecordingOwner);
             }
             puts("PASS persistent: global finish/Esc, missing KeyUp, denied-monitor cancel button");
+            // 整理期间 Esc 仍可取消，最终结束后旧按住状态不能吞掉下一次右 Option。
+            [owner setValue:origin forKey:@"activeClient"];
+            owner.monitorDenied = NO;
+            [owner toggleVoiceInput:nil];
+            source.transcript(@"synthetic pending polish", YES);
+            assert(source.active && owner.polishFixture.submissions == 1);
+            owner.recordingMonitor(event(NSEventTypeKeyDown,53,0,60));
+            assert(!source.active);
+            voiceArguments[@"MSIMEClientVoiceHotkeyMode"] = @"hold";
+            voiceArguments[@"MSIMEClientVoiceMacOSHotkey"] = @{@"key_code":@61,@"modifiers":@0};
+            [defaults setVolatileDomain:voiceArguments forName:NSArgumentDomain];
+            const NSEventModifierFlags rightOption = NSEventModifierFlagOption | NX_DEVICERALTKEYMASK;
+            [owner handleConfiguredVoiceShortcut:event(NSEventTypeFlagsChanged,61,rightOption,61)];
+            assert(source.active);
+            auto completedMonitor = owner.recordingMonitor;
+            source.transcript(@"synthetic early final", YES);
+            owner.polishFixture.completion(@"synthetic polished early", nil);
+            assert(!source.active);
+            [owner handleConfiguredVoiceShortcut:event(NSEventTypeFlagsChanged,61,rightOption,62)];
+            assert(source.active && ![[owner valueForKey:@"liveVoiceProcessing"] boolValue]);
+            completedMonitor(event(NSEventTypeFlagsChanged,61,0,61.5));
+            assert(source.active && ![[owner valueForKey:@"liveVoiceProcessing"] boolValue]);
+            owner.recordingMonitor(event(NSEventTypeFlagsChanged,61,0,62.5));
+            assert([[owner valueForKey:@"liveVoiceProcessing"] boolValue]);
+            [owner cancelLiveVoiceInput];
+            voiceArguments[@"MSIMEClientVoiceHotkeyMode"] = @"toggle";
+            voiceArguments[@"MSIMEClientVoiceMacOSHotkey"] = @{@"key_code":@123,@"modifiers":@2};
+            [defaults setVolatileDomain:voiceArguments forName:NSArgumentDomain];
+            puts("PASS queued monitor: processing Esc, early final, new hold, stale KeyUp");
             // TextStream 使用实际工厂分支，替身只替换模型与麦克风。
             for (NSUInteger action = 0; action < 3; ++action) {
                 [owner setValue:origin forKey:@"activeClient"];

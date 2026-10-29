@@ -5861,6 +5861,8 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
 - (void)releaseVoiceRecordingOwnership {
     if (MSIMEVoiceRecordingOwner != self || _voiceService.active) return;
     MSIMERecordingMonitor.stop();
+    // 最终投递或取消后丢弃旧手势，不能依赖可能晚到的 KeyUp 清理下一轮状态。
+    _voiceHoldShortcut.reset(); _configuredVoiceShortcut.reset();
     if (_voiceCopiedResult) [_voiceOverlay showCopyResult:_voiceCopiedResult.boolValue];
     _voiceCopiedResult = nil; _voicePreviewText = nil;
     MSIMEVoiceRecordingOwner = nil;
@@ -5942,7 +5944,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
         [_voiceOverlay setPersistentRecording:YES];
         BOOL available = [self startVoiceRecordingMonitor:^(NSEvent *event) {
             MSIMEInputController *owner = weakSelf;
-            if (![owner ownsPersistentVoiceRecording]) return;
+            if (![owner ownsPersistentVoiceRecording] || owner->_voiceGeneration != generation) return;
             [owner handleConfiguredVoiceShortcut:event];
         }];
         [_voiceOverlay setShortcutMonitoringAvailable:available];

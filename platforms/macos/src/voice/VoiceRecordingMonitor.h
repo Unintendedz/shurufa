@@ -17,6 +17,11 @@ static inline bool MSIMEEnsureInputMonitoringAccess() {
 }
 
 // 录音期间的只读监听；不改写、不吞掉、不向系统注入任何按键。
+static inline void MSIMEQueueVoiceRecordingEvent(void (^handler)(NSEvent *), CGEventRef event) {
+    NSEvent *snapshot = [NSEvent eventWithCGEvent:event];
+    dispatch_async(dispatch_get_main_queue(), ^{ handler(snapshot); });
+}
+
 class MSIMEVoiceRecordingMonitor {
 public:
     ~MSIMEVoiceRecordingMonitor() { stop(); }
@@ -43,11 +48,17 @@ private:
     static CGEventRef callback(CGEventTapProxy, CGEventType type, CGEventRef event, void *context) {
         auto *monitor = static_cast<MSIMEVoiceRecordingMonitor *>(context);
         if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) {
-            if (monitor->tap_) CGEventTapEnable(monitor->tap_, true);
+            CFMachPortRef tap = monitor->tap_;
+            if (tap) {
+                CFRetain(tap);
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (CFMachPortIsValid(tap)) CGEventTapEnable(tap, true);
+                    CFRelease(tap);
+                });
+            }
         } else if (monitor->handler_ && event) {
-            // 结束或取消会立即移除监听，局部强引用让当前回调正常返回。
-            auto handler = monitor->handler_;
-            handler([NSEvent eventWithCGEvent:event]);
+            // 先让 tap 返回。停止音频、锁和设备拆卸只能在随后的主队列任务中执行。
+            MSIMEQueueVoiceRecordingEvent(monitor->handler_, event);
         }
         return event;
     }
