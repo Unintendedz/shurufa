@@ -423,7 +423,9 @@ enum class LocalRequestState : int { idle, streaming, finishing, closed };
     _runtime = @"";
     id language = options[@"language"];
     _language = [language isKindOfClass:NSString.class] ? [language copy] : @"";
-    _hotwordMode = @"native";
+    // 不把用户词库当作 Qwen3-ASR 的上下文：上下文是提示文本，小模型在停顿或听不清时会把它原样吐进转写，
+    // 用户看到的就是以前输入过的内容冒出来。
+    _hotwordMode = @"";
     _hostOptions = [hostOptions isKindOfClass:NSDictionary.class] ? [hostOptions copy] : nil;
     _state.store(LocalRequestState::idle);
     return self;
