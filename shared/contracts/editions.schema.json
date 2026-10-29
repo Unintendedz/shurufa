@@ -128,10 +128,21 @@
               "additionalProperties": false,
               "required": ["input_method_bundle_id", "input_method_name", "settings_bundle_id", "keychain_service", "cask", "dmg_prefix"],
               "properties": {
+                "state_directory_name": {
+                  "description": "独立版可显式指定 Application Support 目录名；缺省沿用设置应用标识。",
+                  "type": "string", "minLength": 1
+                },
+                "voice_helper_name": {
+                  "description": "独立版随包语音 helper 的可执行文件名。",
+                  "type": "string", "minLength": 1
+                },
                 "input_method_bundle_id": {
                   "description": "InputMethodKit bundle 的 CFBundleIdentifier，也是它的 NSUserDefaults 域、os_log 子系统和 TIS 输入模式标识符的前缀；连接名是它加上 `_Connection`。不能等于另一个版本的 bundle id，也不能以另一个版本的 bundle id 加点开头，否则一个版本的输入模式会和另一个版本撞名。",
                   "type": "string",
-                  "pattern": "^app\\.msime\\.inputmethod\\.[A-Za-z][A-Za-z0-9]*$"
+                  "anyOf": [
+                    { "pattern": "^app\\.msime\\.inputmethod\\.[A-Za-z][A-Za-z0-9]*$" },
+                    { "const": "dev.shurufa.inputmethod.Shurufa" }
+                  ]
                 },
                 "input_method_name": {
                   "description": "输入法 bundle 的文件名（不含 .app）和可执行文件名。Dock 和进程列表显示的就是它。",
@@ -141,7 +152,10 @@
                 "settings_bundle_id": {
                   "description": "设置应用（Tauri）的 bundle identifier，也是 Application Support 下状态目录的名字和设置应用的 NSUserDefaults 域。",
                   "type": "string",
-                  "pattern": "^app\\.msime\\.macos(\\.[a-z][a-z0-9]*)?$"
+                  "anyOf": [
+                    { "pattern": "^app\\.msime\\.macos(\\.[a-z][a-z0-9]*)?$" },
+                    { "const": "dev.shurufa.settings" }
+                  ]
                 },
                 "keychain_service": {
                   "description": "原生账号窗口存访问令牌的钥匙串服务名；刷新令牌存在它加上 `.refresh` 的服务名下。",

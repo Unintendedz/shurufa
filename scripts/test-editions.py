@@ -213,6 +213,15 @@ def check_keys(errors: list[str], where: str, value: object, expected: set[str],
     return not unknown and not missing
 
 
+def string_matches_schema(value: str, rule: dict) -> bool:
+    """保留原有字符串模式校验，同时允许 schema 明确列出的独立产品标识。"""
+    if "const" in rule:
+        return value == rule["const"]
+    if "anyOf" in rule:
+        return any(string_matches_schema(value, branch) for branch in rule["anyOf"])
+    return "pattern" not in rule or re.search(rule["pattern"], value) is not None
+
+
 def check_schema_shape(errors: list[str], table: dict, schema: dict) -> None:
     """版本表的字段集合与 schema 声明的一致，避免 schema 只是一份没人对照的说明。"""
     check_keys(errors, "editions.json", table, schema_keys(schema), set(schema["required"]))
@@ -250,8 +259,8 @@ def check_strings(errors: list[str], where: str, section: dict, node: dict) -> N
         minimum = rule.get("minLength", 1)
         if not isinstance(value, str) or len(value) < minimum:
             errors.append(f"{where}.{key}: expected a non-empty string")
-        elif "pattern" in rule and not re.search(rule["pattern"], value):
-            errors.append(f"{where}.{key}: {value!r} does not match {rule['pattern']}")
+        elif not string_matches_schema(value, rule):
+            errors.append(f"{where}.{key}: {value!r} does not match the declared string constraints")
 
 
 def check_editions(errors: list[str], table: dict, frozen: dict) -> None:
@@ -340,12 +349,14 @@ def check_editions(errors: list[str], table: dict, frozen: dict) -> None:
         if "sentence-model" in chosen and not entry["features"]["neural_keyboard"]:
             errors.append(f"{where}: ships the sentence-model component but neural_keyboard is off")
         writes_chinese = bool(CHINESE_SCHEMES & set(schemes))
+        # Shurufa 明确只提供中文输入、神经排序与语音，不附带释义和手写。
+        offers_chinese_extras = writes_chinese and edition_id != "shurufa"
         for feature in CHINESE_FEATURES:
             enabled = entry["features"][feature]
             if not isinstance(enabled, bool):
                 errors.append(f"{where}: features.{feature} must be a boolean")
-            elif enabled != writes_chinese:
-                errors.append(f"{where}: features.{feature} must be {str(writes_chinese).lower()}, because the edition {'offers' if writes_chinese else 'offers none of'} the Chinese schemes {sorted(CHINESE_SCHEMES)}")
+            elif enabled != offers_chinese_extras:
+                errors.append(f"{where}: features.{feature} must be {str(offers_chinese_extras).lower()} for this edition")
 
         dictionaries = entry["language_dictionaries"]
         for name in dictionaries:

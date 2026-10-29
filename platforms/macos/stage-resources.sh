@@ -77,7 +77,7 @@ glosses_source=${3:-$repo_root/target/offline-glosses}
 glosses_destination="$repo_root/target/macos/offline-glosses"
 rm -rf "$glosses_destination"
 if [ "$(python3 "$repo_root/platforms/macos/scripts/edition_bundle.py" field --edition "$edition" features.offline_glosses)" != true ]; then
-  echo "edition $edition offers no Chinese scheme; offline glosses are not staged"
+  echo "edition $edition does not include offline glosses; offline glosses are not staged"
 elif compgen -G "$glosses_source/zh-*.db" >/dev/null && [ -f "$glosses_source/offline-glosses-NOTICE.txt" ]; then
   mkdir -p "$glosses_destination"
   cp "$glosses_source"/zh-*.db "$glosses_source/offline-glosses-NOTICE.txt" "$glosses_destination/"

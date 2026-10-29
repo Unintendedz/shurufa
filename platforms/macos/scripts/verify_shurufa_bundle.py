@@ -19,7 +19,7 @@ assert info["MSIMESettingsBundleIdentifier"] == "dev.shurufa.settings"
 assert info["MSIMEKeychainService"] == "dev.shurufa.account"
 assert info["MSIMEInputSchemes"] == ["quanpin", "shuangpin"]
 modes = sorted(info["ComponentInputModeDict"]["tsInputModeListKey"])
-assert modes == sorted(identifier + "." + suffix for suffix in ("Hans", "Shuangpin", "Roman"))
+assert modes == sorted(identifier + "." + suffix for suffix in ("Hans", "Shuangpin"))
 assert not any(key.startswith("SU") for key in info)
 assert not (contents / "Frameworks/Sparkle.framework").exists()
 executable = contents / "MacOS" / info["CFBundleExecutable"]
