@@ -13509,6 +13509,7 @@ int main(int argc, char **argv) {
             Method mainBundle = class_getClassMethod(NSBundle.class, @selector(mainBundle));
             IMP original = method_setImplementation(mainBundle, (IMP)ShurufaMainBundle);
             assert(MSIMEEditionIsShurufa());
+            assert([ShurufaTestBundle.infoDictionary[@"TICapsLockLanguageSwitchCapable"] isEqual:@YES]);
             assert(!MSIMEInputModeDeclaredIn(ShurufaTestBundle.infoDictionary,
                 [ShurufaTestBundle.bundleIdentifier stringByAppendingString:@".Roman"]));
             NSUserDefaults *standard = NSUserDefaults.standardUserDefaults;

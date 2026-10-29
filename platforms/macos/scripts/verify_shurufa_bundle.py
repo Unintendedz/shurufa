@@ -13,6 +13,7 @@ info = plistlib.loads((contents / "Info.plist").read_bytes())
 identifier = "dev.shurufa.inputmethod.Shurufa"
 assert info["CFBundleIdentifier"] == identifier
 assert info["CFBundleDisplayName"] == "Shurufa"
+assert info.get("TICapsLockLanguageSwitchCapable") is True
 assert info["InputMethodConnectionName"] == identifier + "_Connection"
 assert info["MSIMEStateDirectoryName"] == "Shurufa"
 assert info["MSIMESettingsBundleIdentifier"] == "dev.shurufa.settings"

@@ -19,3 +19,9 @@ Shurufa 的 Caps 事件取消待定 Shift/Control 轻点后交还系统，避免
 ## Consequences
 
 Shurufa 不再提供内部 Caps 中英文切换，系统的 Caps 键输入源设置由用户管理。合成控制器回归覆盖旧 true、Caps 开关事件、轮询入口、零 HID 启动和撤回、零会话报告、设置树控件移除及 V1 到 V2 迁移；物理键盘与系统 ABC 切换仍由用户装机验收。
+
+## System capability declaration
+
+控制器收到 Caps 的 flagsChanged 时已经返回 NO；`recognizedEvents` 保留 flagsChanged 是为了单修饰键语音绑定，不代表消费每个 Caps 事件。实际包缺少 macOS 10.15 起支持的 `TICapsLockLanguageSwitchCapable`，系统开关因而没有本产品的能力声明。Shurufa 生成的顶层 Info.plist 现在声明 true，系统设置继续决定 Caps 与 ABC 切换，不新增手动 TISSelectInputSource 路径，也不修改锁定位或大写灯。原生旧 true/Caps 合成回归与产物声明检查共同守住这条路径。
+
+依据：[Apple 属性声明](https://developer.apple.com/documentation/bundleresources/information-property-list/ticapslocklanguageswitchcapable)。物理 Caps 和系统设置仍需装机后由用户验收。

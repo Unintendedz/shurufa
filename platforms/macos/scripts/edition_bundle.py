@@ -126,6 +126,8 @@ def edition_keys(entry: dict) -> str:
         f"<key>MSIMESettingsBundleIdentifier</key><string>{macos['settings_bundle_id']}</string>",
         f"<key>MSIMEKeychainService</key><string>{escape(macos['keychain_service'])}</string>",
     ]
+    if entry["id"] == "shurufa":
+        lines.append("<key>TICapsLockLanguageSwitchCapable</key><true/>")
     for field, key in (("state_directory_name", "MSIMEStateDirectoryName"),
                        ("voice_helper_name", "MSIMELocalVoiceHelperName")):
         if macos.get(field):

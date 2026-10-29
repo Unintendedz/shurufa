@@ -117,6 +117,8 @@ def check_edition(errors: list[str], generator, table: dict, entry: dict, others
     declared = {identifier[len(bundle) + 1:] for identifier in modes}
     if declared != set(plan):
         errors.append(f"{where}: declares modes {sorted(declared)}, expected {sorted(plan)}")
+    if edition_id == "shurufa" and plist.get("TICapsLockLanguageSwitchCapable") is not True:
+        errors.append(f"{where}: Shurufa 必须声明系统 Caps Lock 切换能力")
     if "Hans" not in declared:
         errors.append(f"{where}: 必须声明中文主模式 .Hans")
     if ("Roman" in declared) != (edition_id != "shurufa"):
