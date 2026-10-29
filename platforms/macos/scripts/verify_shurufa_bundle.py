@@ -14,6 +14,8 @@ identifier = "dev.shurufa.inputmethod.Shurufa"
 assert info["CFBundleIdentifier"] == identifier
 assert info["CFBundleDisplayName"] == "Shurufa"
 assert info.get("TICapsLockLanguageSwitchCapable") is True
+assert info.get("TISIntendedLanguage") == "zh-Hans"
+assert info.get("tsInputMethodCharacterRepertoireKey") == ["Hans"]
 assert info["InputMethodConnectionName"] == identifier + "_Connection"
 assert info["MSIMEStateDirectoryName"] == "Shurufa"
 assert info["MSIMESettingsBundleIdentifier"] == "dev.shurufa.settings"

@@ -128,6 +128,9 @@ def edition_keys(entry: dict) -> str:
     ]
     if entry["id"] == "shurufa":
         lines.append("<key>TICapsLockLanguageSwitchCapable</key><true/>")
+        # 父来源也声明简体中文：不声明时系统把父来源当作 en（拉丁类），与系统拼音的父来源 zh-Hans 不同。
+        lines.append("<key>TISIntendedLanguage</key><string>zh-Hans</string>")
+        lines.append("<key>tsInputMethodCharacterRepertoireKey</key><array><string>Hans</string></array>")
     for field, key in (("state_directory_name", "MSIMEStateDirectoryName"),
                        ("voice_helper_name", "MSIMELocalVoiceHelperName")):
         if macos.get(field):
