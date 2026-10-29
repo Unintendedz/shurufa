@@ -1529,9 +1529,10 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
         merged[@"plugins"] = plugins;
     }
     merged[@"candidate_page_size"] = @(self.pageSize);
-    if ([_defaults dictionaryForKey:WordCharacterKey]) merged[@"word_character"] = [self wordCharacterOptions];
+    // 固定导航仅用于运行时，不能回写旧文档并与保留的以词定字配置冲突。
+    if (!MSIMEEditionIsShurufa() && [_defaults dictionaryForKey:WordCharacterKey]) merged[@"word_character"] = [self wordCharacterOptions];
     NSDictionary *navigationOverrides = [_defaults dictionaryForKey:NavigationKey];
-    if (navigationOverrides.count) {
+    if (!MSIMEEditionIsShurufa() && navigationOverrides.count) {
         NSMutableDictionary *navigation = [merged[@"navigation"] mutableCopy] ?: [NSMutableDictionary dictionary];
         for (NSArray *entry in NavigationControls())
             if (LocalModeBoolean(navigationOverrides[entry[0]])) navigation[entry[0]] = @([self navigationEnabled:entry[0]]);
@@ -1914,7 +1915,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     [_defaults setBool:value forKey:InputModeHUDKey];
     [self preferencesChanged];
 }
-- (BOOL)inputModeStatusItem {
+- (BOOL)inputModeStatusItem { if (MSIMEEditionIsShurufa()) return NO;
     if (_sharedInputModeStatusItem) return _sharedInputModeStatusItem.boolValue;
     return [_defaults boolForKey:InputModeStatusItemKey];
 }

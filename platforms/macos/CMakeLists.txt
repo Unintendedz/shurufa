@@ -1064,12 +1064,13 @@ add_test(NAME caps-lock COMMAND shortcut-test --caps-lock)
 add_test(NAME input-source-restore COMMAND shortcut-test --input-source-restore)
 add_test(NAME voice-shortcut-conflicts COMMAND shortcut-test --voice-shortcut-conflicts)
 if(MSIME_EDITION STREQUAL "shurufa")
+  add_test(NAME shurufa-legacy-save COMMAND shortcut-test --shurufa-legacy-save "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>")
   add_test(NAME shurufa-composition COMMAND shortcut-test --shurufa-composition "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>")
   add_test(NAME shurufa-system-shortcuts COMMAND shortcut-test --shurufa-system-shortcuts "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>")
   add_test(NAME shurufa-system-source COMMAND shortcut-test --shurufa-system-source "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>")
   add_test(NAME shurufa-settings-brand COMMAND shortcut-test --shurufa-settings "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>")
   file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/shurufa-settings-home")
-  set_tests_properties(shurufa-settings-brand shurufa-system-source shurufa-system-shortcuts shurufa-composition PROPERTIES TIMEOUT 60 ENVIRONMENT "CFFIXED_USER_HOME=${CMAKE_CURRENT_BINARY_DIR}/shurufa-settings-home")
+  set_tests_properties(shurufa-settings-brand shurufa-system-source shurufa-system-shortcuts shurufa-composition shurufa-legacy-save PROPERTIES TIMEOUT 60 ENVIRONMENT "CFFIXED_USER_HOME=${CMAKE_CURRENT_BINARY_DIR}/shurufa-settings-home")
 endif()
 add_test(NAME shortcut-expanded-scroll COMMAND shortcut-test --expanded-scroll)
 add_test(NAME shortcut-vim-mode COMMAND shortcut-test --vim-mode)
@@ -1466,6 +1467,7 @@ add_executable(input-source-registration-test tests/input/InputSourceRegistratio
 target_compile_options(input-source-registration-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(input-source-registration-test PRIVATE "-framework AppKit" "-framework Carbon" "-framework Foundation")
 add_test(NAME input-source-registration COMMAND input-source-registration-test)
+
 # The page-size rules had a test file and no target: it had never been built, let alone run, which is
 # how a clamp that rewrote the shared default stayed in place.
 add_executable(candidate-page-size-test tests/candidate/CandidatePageSizeTest.cpp)

@@ -3036,6 +3036,34 @@ static void TestShurufaCompositionPolicy() {
     puts("Shurufa composition: legacy features disabled; bracket/arrows/digits/space navigation preserved");
 }
 
+static void TestShurufaLegacyPreferenceSave() {
+    NSString *suite = [@"shurufa.legacy-save." stringByAppendingString:NSUUID.UUID.UUIDString];
+    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+    MSIMEAppearancePreferences *appearance = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults];
+    NSString *root = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
+    NSError *error = nil;
+    NSDictionary *snapshot = [MSIMEClientSession loadPreferencesInDirectory:root error:&error];
+    assert(snapshot && !error);
+    assert([snapshot[@"preferences"][@"word_character"][@"enabled"] boolValue]);
+    assert(![snapshot[@"preferences"][@"navigation"][@"brackets"] boolValue]);
+    [appearance applySharedInputPreferences:snapshot[@"preferences"]];
+    [defaults setObject:@{@"brackets":@NO,@"mouse_wheel":@YES} forKey:@"MSIMEClientNavigation"];
+    assert(![defaults objectForKey:@"MSIMEClientWordCharacter"]);
+    NSDictionary *merged = [appearance sharedPreferencesByMerging:snapshot[@"preferences"]];
+    NSDictionary *saved = [MSIMEClientSession savePreferencesInDirectory:root expectedRevision:[snapshot[@"revision"] unsignedLongLongValue]
+        snapshot:@{@"format_version":@1,@"revision":snapshot[@"revision"],@"preferences":merged} error:&error];
+    if (!saved) fprintf(stderr,"legacy settings save: %s\n",error.localizedDescription.UTF8String);
+    assert(saved && !error);
+    assert([saved[@"preferences"][@"word_character"][@"enabled"] boolValue]);
+    assert(![saved[@"preferences"][@"navigation"][@"brackets"] boolValue]);
+    assert([appearance navigationEnabled:@"brackets"] && ![[appearance wordCharacterOptions][@"enabled"] boolValue]);
+    appearance.inputModeStatusItem = YES;
+    assert(!appearance.inputModeStatusItem);
+    MSIMERemoveTestPreferenceSuite(defaults, suite);
+    assert([NSFileManager.defaultManager removeItemAtPath:root error:nil]);
+    puts("Shurufa legacy save: stored preferences remain valid; runtime policy stays fixed");
+}
+
 // The selected input mode, 中, 英 or 日, follows the controller's state. A mode the system reports - picked from the input menu or reached with Ctrl+Space - sets the Chinese/English state and, for 中 and 日, the scheme, and is not selected back.
 static void TestSystemInputModeReport(MSIMEAppearancePreferences *appearance) {
     ModeController *controller = [ModeController alloc];
@@ -13462,7 +13490,7 @@ int main(int argc, char **argv) {
             @autoreleasepool { TestEnglishModePunctuationAndWidthOutput(); }
             return 0;
         }
-        if (argc == 3 && (std::string(argv[1]) == "--shurufa-system-source" || std::string(argv[1]) == "--shurufa-system-shortcuts" || std::string(argv[1]) == "--shurufa-composition")) {
+        if (argc == 3 && (std::string(argv[1]) == "--shurufa-system-source" || std::string(argv[1]) == "--shurufa-system-shortcuts" || std::string(argv[1]) == "--shurufa-composition" || std::string(argv[1]) == "--shurufa-legacy-save")) {
             ShurufaTestBundle = [NSBundle bundleWithPath:[NSString stringWithUTF8String:argv[2]]];
             assert(ShurufaTestBundle);
             Method mainBundle = class_getClassMethod(NSBundle.class, @selector(mainBundle));
@@ -13470,7 +13498,8 @@ int main(int argc, char **argv) {
             assert(MSIMEEditionIsShurufa());
             if (std::string(argv[1]) == "--shurufa-system-source") TestShurufaSystemSourceAuthority();
             else if (std::string(argv[1]) == "--shurufa-system-shortcuts") TestShurufaRemovedLanguageShortcuts();
-            else TestShurufaCompositionPolicy();
+            else if (std::string(argv[1]) == "--shurufa-composition") TestShurufaCompositionPolicy();
+            else TestShurufaLegacyPreferenceSave();
             method_setImplementation(mainBundle, original);
             return 0;
         }
