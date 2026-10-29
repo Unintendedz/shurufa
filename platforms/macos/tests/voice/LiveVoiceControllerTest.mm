@@ -720,7 +720,20 @@ int main(int argc, char **argv) {
         assert(configured); [configured cancel];
         configured = [builder makeLiveVoicePolishRequest:@{@"polish_enabled": @NO, @"polish_text": @YES, @"polish_token": @"fixture-only"}];
         assert(configured); [configured cancel];
+        // 用户关闭整理后，旧 polish_text=true 也不应创建真实整理请求。
+        controller.usePolishFixture = NO;
+        voiceArguments[@"MSIMEClientVoicePolish"] = @NO;
+        voiceArguments[@"MSIMEClientVoicePolishText"] = @YES;
+        voiceArguments[@"MSIMEClientVoicePolishToken"] = @"fixture-only";
+        [defaults setVolatileDomain:voiceArguments forName:NSArgumentDomain];
+        [controller toggleVoiceInput:nil];
+        assert(capture.active && ![controller valueForKey:@"livePolishRequest"]);
+        const NSUInteger beforeDisabledPolish = client.commits.count;
+        capture.transcript(@"synthetic polish disabled", YES);
+        assert(!capture.active && client.commits.count == beforeDisabledPolish + 1);
+        assert([client.commits.lastObject isEqual:@"synthetic polish disabled"]);
         controller.usePolishFixture = YES;
+        voiceArguments[@"MSIMEClientVoicePolish"] = @YES;
         voiceArguments[@"MSIMEClientVoicePolishText"] = @YES;
         voiceArguments[@"MSIMEClientVoicePolishToken"] = @"fixture-only";
         voiceArguments[@"MSIMEClientVoicePolishPromptCustom1"] = @"synthetic original prompt";
@@ -739,7 +752,7 @@ int main(int argc, char **argv) {
         assert(polish.submissions == 1 && [polish.input isEqual:@"synthetic original"]);
         assert(presentation.phase == 3);
         assert([controller.polishOptions[@"polish_prompt_custom_1"] isEqual:@"synthetic original prompt"]);
-        assert([controller.polishOptions[@"polish_text"] isEqual:@YES] && [controller.polishOptions[@"polish_enabled"] isEqual:@NO]);
+        assert([controller.polishOptions[@"polish_text"] isEqual:@YES] && [controller.polishOptions[@"polish_enabled"] isEqual:@YES]);
         assert(capture.captureStops > beforePolishStops && capture.active && client.commits.count == beforePolish);
         assert([client.marked isEqual:@"synthetic partial before polish"]);
         polish.completion(@"synthetic polished", nil);

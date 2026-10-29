@@ -382,6 +382,7 @@ static NSString *SharedSetting(NSString *key, NSString *fallback)
                             self.polishToken, YES)
                  forKey:@"MSIMEClientVoicePolishTokens"];
     [defaults setBool:self.polishEnabled forKey:@"MSIMEClientVoicePolish"];
+    [defaults setBool:self.polishEnabled forKey:@"MSIMEClientVoicePolishText"];
     [[NSNotificationCenter defaultCenter] postNotificationName:MSIMEVoiceProviderSettingsDidChangeNotification object:self];
     return YES;
 }

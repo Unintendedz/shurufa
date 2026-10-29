@@ -87,7 +87,10 @@ int main() {
         for (NSString *key in base) assert([query[key] isEqual:base[key]]);
         assert(base.count == 3 && [NSJSONSerialization isValidJSONObject:query]);
         MSIMEApplySharedVoicePreferences(@{@"polish_text": @YES, @"polish_enabled": @NO}, defaults);
-        assert([MSIMEVoiceProviderOptions(base, defaults)[@"polish_text"] isEqual:@YES]);
+        for (NSString *provider in @[@"system", @"openai", @"doubao", @"local", @"textstream"]) {
+            NSDictionary *off = MSIMEVoiceProviderOptions(@{@"asr_provider":provider,@"polish_enabled":@YES}, defaults);
+            assert([off[@"polish_enabled"] isEqual:@NO] && [off[@"polish_text"] isEqual:@NO]);
+        }
         MSIMEApplySharedVoicePreferences(@{@"polish_text": @NO}, defaults);
         assert([MSIMEVoiceProviderOptions(base, defaults)[@"polish_text"] isEqual:@NO]);
         MSIMEApplySharedVoicePreferences(@{@"doubao_auth_mode": @"legacy"}, defaults);

@@ -81,5 +81,11 @@ static inline NSDictionary *MSIMEVoiceProviderOptions(NSDictionary *query, NSUse
             CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID();
         result[option[0]] = valid ? value : option[2];
     }
+    // 明确保存的整理开关优先于旧 polish_text；未设置时保留原有兼容默认值。
+    id polish = [defaults objectForKey:@"MSIMEClientVoicePolish"];
+    if ([polish isKindOfClass:NSNumber.class] && CFGetTypeID((__bridge CFTypeRef)polish) == CFBooleanGetTypeID()) {
+        result[@"polish_enabled"] = polish;
+        result[@"polish_text"] = polish;
+    }
     return [result copy];
 }
