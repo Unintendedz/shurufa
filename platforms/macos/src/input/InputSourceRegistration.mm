@@ -220,3 +220,106 @@ void MSIMELaunchInputSourceReregistration(NSURL *bundleURL, NSWorkspace *workspa
         else dispatch_async(dispatch_get_main_queue(), ^{ completion(launched); });
     }];
 }
+
+
+bool MSIMEShouldRefreshInstalledInputSources(int argc, const char *argv[]) {
+    return argc == 3 && argv && argv[1] && argv[2] && std::strcmp(argv[1], "--refresh-installed-input-sources") == 0;
+}
+
+OSStatus MSIMERefreshInstalledInputSources(NSURL *bundleURL, NSString *bundleIdentifier,
+    NSArray<NSString *> *declaredModes, NSArray<NSString *> *previousModes,
+    MSIMEInputSourceRegistrar registrar, MSIMEInputSourceLister lister,
+    MSIMEInputSourcePropertyGetter getter, MSIMEInputSourceEnabler enabler,
+    MSIMEInputSourceEnabler disabler) {
+    if (!bundleURL || !bundleIdentifier.length || !registrar || !lister || !getter || !enabler || !disabler) return paramErr;
+    NSString *primary = [bundleIdentifier stringByAppendingString:@".Hans"];
+    NSSet<NSString *> *declared = [NSSet setWithArray:declaredModes ?: @[]];
+    if (![declared containsObject:primary]) return paramErr;
+    NSMutableSet<NSString *> *wanted = [NSMutableSet setWithArray:previousModes ?: @[]];
+    [wanted intersectSet:declared];
+    if (!wanted.count) [wanted addObject:primary];
+    NSDictionary *filter = @{(__bridge NSString *)kTISPropertyBundleID:bundleIdentifier};
+    auto read = ^NSArray *{ return CFBridgingRelease(lister((__bridge CFDictionaryRef)filter, true)) ?: @[]; };
+    auto identifier = ^NSString *(TISInputSourceRef source) {
+        void *value = getter(source, kTISPropertyInputSourceID);
+        return value && CFGetTypeID(value) == CFStringGetTypeID() ? (__bridge NSString *)value : nil;
+    };
+    auto boolean = ^BOOL(TISInputSourceRef source, CFStringRef key) {
+        void *value = getter(source, key);
+        return value && CFGetTypeID(value) == CFBooleanGetTypeID() && CFBooleanGetValue((CFBooleanRef)value);
+    };
+    auto find = ^TISInputSourceRef(NSArray *sources, NSString *name) {
+        for (id object in sources) {
+            TISInputSourceRef source = (__bridge TISInputSourceRef)object;
+            if ([identifier(source) isEqual:name]) return source;
+        }
+        return (TISInputSourceRef)nullptr;
+    };
+    auto change = ^OSStatus(TISInputSourceRef source, BOOL enabled) {
+        OSStatus status = (enabled ? enabler : disabler)(source);
+        NSLog(@"input_source_refresh action=%@ source=%@ status=%d", enabled ? @"enable" : @"disable", identifier(source), (int)status);
+        return status;
+    };
+    NSArray *before = read();
+    TISInputSourceRef parent = find(before, bundleIdentifier);
+    const BOOL parentWasEnabled = parent && boolean(parent, kTISPropertyInputSourceIsEnabled);
+    // 先移除模式，再移除容器；不能假定停用父来源会替我们停用所有模式。
+    for (id object in before) {
+        TISInputSourceRef source = (__bridge TISInputSourceRef)object;
+        if (![identifier(source) isEqual:bundleIdentifier] && boolean(source, kTISPropertyInputSourceIsEnabled)) {
+            OSStatus status = change(source, NO);
+            if (status != noErr) return status;
+        }
+    }
+    if (parentWasEnabled) {
+        OSStatus status = change(parent, NO);
+        if (status != noErr) return status;
+        // 某些系统版本会返回 noErr 却不改变模式状态，不能把空操作当作刷新成功。
+        NSArray *disabled = read();
+        TISInputSourceRef observed = find(disabled, bundleIdentifier);
+        if (observed && boolean(observed, kTISPropertyInputSourceIsEnabled)) {
+            NSLog(@"input_source_refresh verification=parent_still_enabled");
+            return paramErr;
+        }
+    }
+    OSStatus status = registrar((__bridge CFURLRef)bundleURL);
+    NSLog(@"input_source_refresh action=register status=%d", (int)status);
+    if (status != noErr) return status;
+    NSArray *registered = read();
+    parent = find(registered, bundleIdentifier);
+    if (!parent) return fnfErr;
+    status = change(parent, YES);
+    if (status != noErr) return status;
+    // 登记后重新取引用；安装前的模式对象不能代表新包声明的模式。
+    NSArray *modes = read();
+    for (id object in modes) {
+        TISInputSourceRef source = (__bridge TISInputSourceRef)object;
+        NSString *name = identifier(source);
+        if (!name || [name isEqual:bundleIdentifier]) continue;
+        BOOL enabled = [wanted containsObject:name];
+        if (enabled || boolean(source, kTISPropertyInputSourceIsEnabled)) {
+            status = change(source, enabled);
+            if (status != noErr) return status;
+        }
+    }
+    NSArray *after = read();
+    parent = find(after, bundleIdentifier);
+    if (!parent || !boolean(parent, kTISPropertyInputSourceIsEnabled)) return paramErr;
+    for (NSString *name in wanted) {
+        TISInputSourceRef source = find(after, name);
+        if (!source || !boolean(source, kTISPropertyInputSourceIsEnabled) || !boolean(source, kTISPropertyInputSourceIsSelectCapable)) {
+            NSLog(@"input_source_refresh verification=mode_not_selectable source=%@", name);
+            return paramErr;
+        }
+    }
+    for (id object in after) {
+        TISInputSourceRef source = (__bridge TISInputSourceRef)object;
+        NSString *name = identifier(source);
+        if (![name isEqual:bundleIdentifier] && ![wanted containsObject:name] && boolean(source, kTISPropertyInputSourceIsEnabled)) {
+            NSLog(@"input_source_refresh verification=unexpected_enabled_mode source=%@", name);
+            return paramErr;
+        }
+    }
+    NSLog(@"input_source_refresh verified_modes=%@", [[wanted allObjects] sortedArrayUsingSelector:@selector(compare:)]);
+    return noErr;
+}

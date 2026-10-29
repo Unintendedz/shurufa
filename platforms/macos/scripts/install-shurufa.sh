@@ -13,6 +13,11 @@ staging="$(mktemp -d "$destination_root/.shurufa-install.XXXXXX")"
 trap 'rm -rf "$staging"' EXIT
 ditto "$source_bundle" "$staging/Shurufa.app"
 codesign --verify --deep --strict "$staging/Shurufa.app"
+# 在注销旧登记前记录模式选择，刷新时只恢复新包仍声明的那些模式。
+previous_modes=""
+if [[ -x "$destination/Contents/MacOS/Shurufa" ]]; then
+  previous_modes="$("$destination/Contents/MacOS/Shurufa" --enabled-input-modes)"
+fi
 python3 "$root/platforms/macos/scripts/shurufa_installation.py" prepare
 if [[ -e "$destination" ]]; then
   backup="$HOME/Library/Application Support/Shurufa Installation Backups/$(date +%Y%m%d-%H%M%S)"
@@ -29,8 +34,9 @@ executable="$destination/Contents/MacOS/Shurufa"
 "$executable" --migrate-caps-lock
 "$executable" --migrate-voice-shortcut
 "$executable" --migrate-voice-presentation
+"$executable" --migrate-quanpin-helpcode
 set +e
-"$executable" --register-input-source
+"$executable" --refresh-installed-input-sources "$previous_modes"
 registration=$?
 "$executable" --input-source-registered
 listed=$?
@@ -39,6 +45,10 @@ printf 'Installed: %s\nRegistration exit: %s; registry query exit: %s\n' "$desti
 if [[ "$listed" -ne 0 ]]; then
   echo "Shurufa 已安装；当前登录会话还未列出新输入源，需要注销并重新登录后在系统设置中添加。" >&2
   exit 2
+fi
+if [[ "$registration" -ne 0 ]]; then
+  echo "Shurufa 输入源刷新失败；请保留前后状态与备份，不把登记可见当作刷新成功。" >&2
+  exit "$registration"
 fi
 "$executable" --enabled-input-modes
 # 系统已有实例时 open 会复用它，不直接派生第二个服务器。

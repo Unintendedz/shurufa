@@ -66,3 +66,23 @@ static inline BOOL MSIMEMigrateShurufaVoicePresentation(NSUserDefaults *defaults
     [defaults synchronize];
     return YES;
 }
+
+
+// 用户确认未使用辅助码，当前安装一次性关闭；以后明确重新开启不再覆盖。
+static inline BOOL MSIMEMigrateShurufaQuanpinHelpcode(NSUserDefaults *defaults,
+    NSDictionary *(^load)(void), NSDictionary *(^save)(uint64_t, NSDictionary *)) {
+    NSString *marker = @"ShurufaQuanpinHelpcodeMigrationV1";
+    if ([defaults boolForKey:marker]) return YES;
+    NSDictionary *snapshot = load();
+    if (![snapshot[@"preferences"] isKindOfClass:NSDictionary.class] || ![snapshot[@"revision"] isKindOfClass:NSNumber.class]) return NO;
+    NSMutableDictionary *updated = [snapshot mutableCopy];
+    NSMutableDictionary *preferences = [snapshot[@"preferences"] mutableCopy];
+    NSMutableDictionary *helpcode = [preferences[@"quanpin_helpcode"] mutableCopy] ?: [NSMutableDictionary dictionary];
+    helpcode[@"enabled"] = @NO;
+    preferences[@"quanpin_helpcode"] = helpcode; updated[@"preferences"] = preferences;
+    if (!save([snapshot[@"revision"] unsignedLongLongValue], updated)) return NO;
+    [defaults setBool:NO forKey:@"MSIMEClientQuanpinHelpcodeEnabled"];
+    [defaults setBool:YES forKey:marker];
+    [defaults synchronize];
+    return YES;
+}

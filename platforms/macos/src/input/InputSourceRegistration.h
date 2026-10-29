@@ -56,3 +56,11 @@ BOOL MSIMEInputSourceIsEnabled(NSString *identifier);
 /// to re-register its source. Completion is always delivered on the main thread.
 void MSIMELaunchInputSourceReregistration(NSURL *bundleURL, NSWorkspace *workspace,
                                           void (^completion)(BOOL launched));
+
+/// 安装器专用刷新：先停用旧模式和父输入源，再登记新包并恢复安装前仍有效的启用模式；不选择输入源。
+bool MSIMEShouldRefreshInstalledInputSources(int argc, const char *argv[]);
+OSStatus MSIMERefreshInstalledInputSources(NSURL *bundleURL, NSString *bundleIdentifier,
+    NSArray<NSString *> *declaredModes, NSArray<NSString *> *previousModes,
+    MSIMEInputSourceRegistrar registrar, MSIMEInputSourceLister lister,
+    MSIMEInputSourcePropertyGetter getter, MSIMEInputSourceEnabler enabler,
+    MSIMEInputSourceEnabler disabler);

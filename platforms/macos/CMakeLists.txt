@@ -1467,6 +1467,10 @@ add_executable(input-source-registration-test tests/input/InputSourceRegistratio
 target_compile_options(input-source-registration-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(input-source-registration-test PRIVATE "-framework AppKit" "-framework Carbon" "-framework Foundation")
 add_test(NAME input-source-registration COMMAND input-source-registration-test)
+add_executable(shurufa-input-source-refresh-test tests/input/ShurufaInputSourceRefreshTest.mm src/input/InputSourceRegistration.mm)
+target_compile_options(shurufa-input-source-refresh-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(shurufa-input-source-refresh-test PRIVATE "-framework AppKit" "-framework Carbon" "-framework Foundation")
+add_test(NAME shurufa-input-source-refresh COMMAND shurufa-input-source-refresh-test)
 
 # The page-size rules had a test file and no target: it had never been built, let alone run, which is
 # how a clamp that rewrote the shared default stayed in place.

@@ -101,11 +101,31 @@ int main(int argc, const char *argv[]) {
                 }, TISEnableInputSource);
             return status == noErr ? 0 : 1;
         }
+        if (MSIMEShouldRefreshInstalledInputSources(argc, argv)) {
+            if (!MSIMEEditionIsShurufa()) return 1;
+            NSDictionary *modes = NSBundle.mainBundle.infoDictionary[@"ComponentInputModeDict"][@"tsInputModeListKey"];
+            NSArray *previous = [[NSString stringWithUTF8String:argv[2]] componentsSeparatedByString:@"\n"];
+            OSStatus status = MSIMERefreshInstalledInputSources(NSBundle.mainBundle.bundleURL, NSBundle.mainBundle.bundleIdentifier,
+                modes.allKeys, previous, TISRegisterInputSource, TISCreateInputSourceList,
+                [](TISInputSourceRef source, CFStringRef key) -> void * { return (void *)TISGetInputSourceProperty(source, key); },
+                TISEnableInputSource, TISDisableInputSource);
+            return status == noErr ? 0 : 1;
+        }
         if (!MSIMEPrepareShurufaHost()) {
             std::fprintf(stderr, "Shurufa: cannot prepare bundled input resources\n");
             return 1;
         }
         for (int index = 1; index < argc; ++index) {
+            if (strcmp(argv[index], "--migrate-quanpin-helpcode") == 0) {
+                if (!MSIMEEditionIsShurufa()) return 1;
+                NSString *directory = MSIMEDefaultClientStateDirectory(NSFileManager.defaultManager).path;
+                const BOOL migrated = MSIMEMigrateShurufaQuanpinHelpcode(NSUserDefaults.standardUserDefaults,
+                    ^NSDictionary *{ return [MSIMEClientSession loadPreferencesInDirectory:directory error:nil]; },
+                    ^NSDictionary *(uint64_t revision, NSDictionary *snapshot) {
+                        return [MSIMEClientSession savePreferencesInDirectory:directory expectedRevision:revision snapshot:snapshot error:nil];
+                    });
+                return migrated ? 0 : 1;
+            }
             if (strcmp(argv[index], "--migrate-voice-presentation") == 0) {
                 if (!MSIMEEditionIsShurufa()) return 1;
                 NSString *directory = MSIMEDefaultClientStateDirectory(NSFileManager.defaultManager).path;

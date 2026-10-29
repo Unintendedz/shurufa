@@ -109,6 +109,20 @@ def installation_matches(paths, processes, destination):
         len(processes) == 1 and processes[0][1].resolve() == executable.resolve()
 
 
+def input_source_preferences_match(entries, declared_modes):
+    """只认本 bundle 的有效模式或父来源，拒绝缺失和旧模式残留。"""
+    own = [entry for entry in entries if isinstance(entry, dict) and entry.get("Bundle ID") == IDENTIFIER]
+    if not own:
+        return False
+    for entry in own:
+        if entry.get("InputSourceKind") == "Input Mode":
+            if entry.get("Input Mode") not in declared_modes:
+                return False
+        elif entry.get("InputSourceKind") != "Keyboard Input Method":
+            return False
+    return True
+
+
 def verify(destination):
     for _ in range(50):
         processes = host_processes()
@@ -118,8 +132,15 @@ def verify(destination):
     paths = registered_paths(subprocess.check_output([LSREGISTER, "-dump"], text=True))
     if not installation_matches(paths, processes, destination):
         raise RuntimeError("安装后登记或进程不是唯一的安装版，请保留日志检查；没有切换当前输入源")
+    preferences = plistlib.loads(subprocess.check_output(["defaults", "export", "com.apple.HIToolbox", "-"]))
+    entries = preferences.get("AppleEnabledInputSources", [])
+    info = plistlib.loads((destination / "Contents/Info.plist").read_bytes())
+    declared = set(info["ComponentInputModeDict"]["tsInputModeListKey"])
+    if not input_source_preferences_match(entries, declared):
+        raise RuntimeError("TIS 登记可见但系统启用列表缺少有效的 Shurufa 输入源；刷新尚未通过验收")
     print(json.dumps({"registered_paths":[str(path) for path in paths],
-        "processes":[{"pid":pid,"executable":str(path)} for pid,path in processes]}, ensure_ascii=False))
+        "processes":[{"pid":pid,"executable":str(path)} for pid,path in processes],
+        "enabled_input_sources":[entry for entry in entries if entry.get("Bundle ID") == IDENTIFIER]}, ensure_ascii=False))
 
 
 if __name__ == "__main__":

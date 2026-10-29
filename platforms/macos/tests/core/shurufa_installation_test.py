@@ -20,6 +20,18 @@ class InstallationTests(unittest.TestCase):
         self.assertFalse(installation.installation_matches([destination], [process, process], destination))
         self.assertFalse(installation.installation_matches([destination], [], destination))
 
+    def test_enabled_preferences_reject_missing_or_removed_modes(self):
+        identifier = installation.IDENTIFIER
+        declared = {identifier + ".Hans", identifier + ".Shuangpin"}
+        parent = {"Bundle ID": identifier, "InputSourceKind": "Keyboard Input Method"}
+        hans = {"Bundle ID": identifier, "InputSourceKind": "Input Mode", "Input Mode": identifier + ".Hans"}
+        roman = {**hans, "Input Mode": identifier + ".Roman"}
+        self.assertFalse(installation.input_source_preferences_match([], declared))
+        self.assertTrue(installation.input_source_preferences_match([parent], declared))
+        self.assertTrue(installation.input_source_preferences_match([hans], declared))
+        self.assertFalse(installation.input_source_preferences_match([parent, roman], declared))
+        self.assertFalse(installation.input_source_preferences_match([{**hans, "Input Mode": "com.apple.keylayout.ABC"}], declared))
+
     def test_old_backups_move_outside_the_removable_state_root(self):
         with tempfile.TemporaryDirectory() as directory:
             support = Path(directory)

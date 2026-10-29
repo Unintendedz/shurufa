@@ -67,5 +67,19 @@ int main() {
         assert(MSIMEMigrateShurufaVoicePresentation(defaults, load, save) && saves == 1);
         assert([defaults boolForKey:@"MSIMEClientVoiceStreamInlinePreedit"]);
         [defaults removePersistentDomainForName:suite];
+        document = @{@"revision":@7,@"preferences":@{@"quanpin_helpcode":@{@"enabled":@YES,@"schema":@"ziranma"},@"traditional_chinese_output":@YES}};
+        [defaults setBool:YES forKey:@"MSIMEClientQuanpinHelpcodeEnabled"];
+        saves = 0;
+        assert(!MSIMEMigrateShurufaQuanpinHelpcode(defaults, load, ^NSDictionary *(uint64_t, NSDictionary *) { return nil; }));
+        assert([defaults boolForKey:@"MSIMEClientQuanpinHelpcodeEnabled"] && ![defaults boolForKey:@"ShurufaQuanpinHelpcodeMigrationV1"]);
+        assert(MSIMEMigrateShurufaQuanpinHelpcode(defaults, load, save));
+        assert(![defaults boolForKey:@"MSIMEClientQuanpinHelpcodeEnabled"] && saves == 1);
+        assert([document[@"preferences"][@"quanpin_helpcode"][@"enabled"] isEqual:@NO]);
+        assert([document[@"preferences"][@"quanpin_helpcode"][@"schema"] isEqual:@"ziranma"]);
+        assert([document[@"preferences"][@"traditional_chinese_output"] isEqual:@YES]);
+        [defaults setBool:YES forKey:@"MSIMEClientQuanpinHelpcodeEnabled"];
+        assert(MSIMEMigrateShurufaQuanpinHelpcode(defaults, load, save) && saves == 1);
+        assert([defaults boolForKey:@"MSIMEClientQuanpinHelpcodeEnabled"]);
+        [defaults removePersistentDomainForName:suite];
     }
 }
