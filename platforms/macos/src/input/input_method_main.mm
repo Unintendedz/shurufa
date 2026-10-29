@@ -215,10 +215,10 @@ int main(int argc, const char *argv[]) {
                 } switchedAway:^{
                     // Leaving this input method is the counterpart of TSF Deactivate, which clears the open/close, punctuation and width compartments together: every app, in either ime_mode_scope, starts from default_ime_mode and the saved punctuation and width when it comes back. The shared record of the shown mode is cleared too, so picking either mode entry on the way back is adopted as a choice. Focus changes between clients never get here.
                     MSIMEAppearancePreferences *preferences = [MSIMEAppearancePreferences sharedPreferences];
-                    [preferences resetRememberedInputModes];
+                    if (!MSIMEEditionIsShurufa()) [preferences resetRememberedInputModes];
                     [preferences resetAllRuntimeInputState];
                     MSIMEResetSystemInputModeState(MSIMESharedSystemInputModeState());
-                    [[MSIMEFloatingToolbarPanel sharedPanel] deactivateForInputSourceSwitch];
+                    if (!MSIMEEditionIsShurufa()) [[MSIMEFloatingToolbarPanel sharedPanel] deactivateForInputSourceSwitch];
                     // 切到 ABC 等别的输入源后，菜单栏状态项不能留着一个过期的「中」；切回来时 activateServer: 的同步会按当前模式重新放上。焦点在客户端之间移动不会走到这里，所以 deactivateServer: 不隐藏它。
                     [[MSIMEInputModeStatusItem sharedItem] hide];
                     // 用户刚离开水杉，这时装后台下好的更新不会打断打字：进程退出，切回来时系统从新 bundle 拉起（UpdateController.mm）。

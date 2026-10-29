@@ -5225,6 +5225,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     [self setEnglishInputMode:enabled showHUD:YES];
 }
 - (void)setEnglishInputMode:(BOOL)enabled showHUD:(BOOL)showHUD {
+    if (MSIMEEditionIsShurufa()) return;
     [self ensureAppearance];
     if (enabled) [MSIMEInputSessionRecoveryPanel dismissForDelegate:self];
     const BOOL changed = _appearance.englishMode != enabled;
@@ -5342,6 +5343,12 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
 //
 // 所有方案切换都会走到这里——不论来自输入菜单、两个设置窗口、Tauri 设置页还是用户选中的模式——所以按需模式也在这里打开：实际运行的方案从上次同步的方案（lastSyncedInputScheme，跨启动保留）变成粤拼、注音、越南文、藏文或笔画时，先启用对应模式再选中它。这里看的是实际生效的方案，所以词库装好之前就选了的方案，在词库到位时才算选中。方案和上次同步的一样时不启用任何模式，用户从输入菜单移除的模式不会在每次启动时被加回来。第一次同步（还没有 lastSyncedInputScheme）落在这五个方案上同样启用：这个持久记录是后来才加的，加上它之前就在用粤拼的人，否则要先切走再切回来才能看到「粤」。模式没能打开时不记录这次切换，下一次同步再试。macOS 27 不允许进程启用键盘输入模式，`TISEnableInputSource` 在那里返回 noErr 而状态不变，所以这里在那个版本上打不开任何模式，只是照常记录；用户要在系统设置里自己添加，设置页的「菜单栏入口」会说明去哪里加。
 - (void)syncSystemInputModeForClient:(id)client {
+    if (MSIMEEditionIsShurufa()) {
+        // 系统输入源是唯一权威；旧偏好和模式通知都不能主动选源。
+        NSString *observed = [self selectedSystemInputModeID] ?: @"";
+        os_log(MSIMEUILog(), "mode_sync observed=%{public}@ emitted=0 policy=system_authority", observed);
+        return;
+    }
     // 共享偏好会通知多个 IMK 控制器，已失去焦点的客户端不能改当前系统输入源。
     if (MSIMEFocusedController && MSIMEFocusedController != self) return;
     // 显式同步优先于尚未执行的激活校准，不能再用滞后的 TIS 状态覆盖刚发出的选择。
@@ -5354,16 +5361,8 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     }
     NSString *mode = MSIMEInputModeID(MSIMEInputModeFor(_appearance.englishMode, scheme));
     NSString *observed = [self selectedSystemInputModeID] ?: @"";
-    NSString *previous = MSIMESharedSystemInputModeState().current;
-    const BOOL selected = MSIMESelectSystemInputMode(MSIMESharedSystemInputModeState(), mode, client,
+    MSIMESelectSystemInputMode(MSIMESharedSystemInputModeState(), mode, client,
         MSIMEInputSourceIsEnabled, observed);
-    if (MSIMEEditionIsShurufa() && (selected || !previous || ![mode isEqual:observed])) {
-        // 只记录模式标识和调用位置，不记录应用文本、按键或凭据。
-        NSArray<NSString *> *frames = NSThread.callStackSymbols;
-        NSString *caller = [[frames subarrayWithRange:NSMakeRange(0, MIN((NSUInteger)4, frames.count))] componentsJoinedByString:@" | "];
-        os_log(MSIMEUILog(), "mode_sync requested=%{public}@ cached=%{public}@ observed=%{public}@ emitted=%d caller=%{public}@",
-            mode, previous ?: @"", observed, selected, caller);
-    }
     // 菜单栏状态项显示控制器算出的模式，而不是 MSIMESelectSystemInputMode 回退后的那个：「双」「五」等模式没有加成输入源时系统图标停在「中」，状态项仍显示真实方案。
     [self presentInputModeStatusItem:_appearance.inputModeStatusItem ? mode : nil];
 }
@@ -5378,6 +5377,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
 }
 
 - (void)scheduleSystemInputModeSyncForClient:(id)client {
+    if (MSIMEEditionIsShurufa()) { [self syncSystemInputModeForClient:client]; return; }
     [self presentInputModeStatusItem:_appearance.inputModeStatusItem ? [self currentInputModeID] : nil];
     const NSUInteger generation = ++_inputModeActivationGeneration;
     __weak MSIMEInputController *weakSelf = self;
@@ -5409,8 +5409,13 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     [super setValue:value forTag:tag client:sender];
 }
 - (void)systemDidReportInputMode:(id)value client:(id)sender {
-    // 切换属于将收到下一个按键的会话，也就是持有焦点的控制器的会话，不论系统通知的是哪个控制器。
     MSIMEInputController *focused = MSIMEFocusedController;
+    if (MSIMEEditionIsShurufa()) {
+        // 旧客户端的模式报告不能改变当前会话；英文由系统 ABC 承担。
+        if ((focused && focused != self) || (_activeClient && sender != _activeClient) ||
+            MSIMEInputModeForID(value) == MSIMEInputMode::English) return;
+    }
+    // 其他版本继续把模式报告交给持有焦点的控制器。
     if (focused && focused != self) { [focused systemDidReportInputMode:value client:sender]; return; }
     if (!MSIMEAdoptReportedInputMode(MSIMESharedSystemInputModeState(), value)) return;
     [self ensureAppearance];

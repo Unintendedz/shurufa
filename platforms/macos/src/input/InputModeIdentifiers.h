@@ -294,6 +294,7 @@ static inline NSString *MSIMESchemeForReportedInputMode(MSIMEInputMode mode, NSS
 // Asks the client to show `mode`, unless it already does or the system does not offer it. Returns whether a switch was requested. A scheme whose own mode is not offered falls back to 中: the controller is still composing through the Engine, and 中 is closer to that than an 英 left over from before. A mode the system has just reported as shown is offered by definition, so it is kept rather than second-guessed.
 static inline BOOL MSIMESelectSystemInputMode(MSIMESystemInputModeState &state, NSString *mode, id client,
                                               MSIMEInputModeAvailability available, NSString *observedSource = nil) {
+    if (MSIMEEditionIsShurufa()) return NO;
     if (!available) return NO;
     if (![mode isEqualToString:MSIMEChineseInputModeID] && ![mode isEqualToString:MSIMEEnglishInputModeID] &&
         ![mode isEqualToString:state.current] && !available(mode))

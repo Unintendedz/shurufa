@@ -2856,6 +2856,79 @@ static void TestRestoredInputModeActivation() {
     MSIMERemoveTestPreferenceSuite(defaults, suite);
 }
 
+// 只隔离 IMK IPC、磁盘和会话创建；模式、激活、偏好刷新与按键路径执行真实控制器代码。
+@interface ShurufaSystemSourceController : ModeController
+@property(nonatomic, copy) NSString *syntheticSource;
+@property(nonatomic) NSUInteger sourceReads;
+@property(nonatomic) NSUInteger reports;
+@end
+@implementation ShurufaSystemSourceController
+- (NSDictionary *)runtimeOptions { return @{}; }
+- (void)prepareSession { ++self.preparationCalls; }
+- (void)startPreferencesMonitoring {}
+- (NSString *)selectedSystemInputModeID { ++self.sourceReads; return self.syntheticSource; }
+- (void)systemDidReportInputMode:(id)value client:(id)sender {
+    ++self.reports;
+    [super systemDidReportInputMode:value client:sender];
+}
+@end
+static void ShurufaSyntheticActivation(id, SEL, id) {}
+
+static void TestShurufaSystemSourceAuthority() {
+    NSString *suite = [@"shurufa.system-source." stringByAppendingString:NSUUID.UUID.UUIDString];
+    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+    [defaults setBool:YES forKey:@"MSIMEClientEnglishInputMode"];
+    MSIMEAppearancePreferences *appearance = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults];
+    NSDictionary *legacy = @{@"default_ime_mode":@"english", @"ime_mode_scope":@"app",
+        @"app_input_mode_rules":@{@"test.synthetic.editor":@"english"}};
+    [appearance applySharedInputPreferences:legacy];
+    [appearance activateInputModeForApplication:@"test.synthetic.editor"];
+    appearance.englishMode = YES;
+    assert(!appearance.englishMode && !appearance.activeInputModeApplication);
+    ModeSelectingClient *first = [ModeSelectingClient new], *second = [ModeSelectingClient new];
+    ShurufaSystemSourceController *controller = [ShurufaSystemSourceController alloc];
+    [controller setValue:appearance forKey:@"appearance"];
+    controller.syntheticSource = MSIMEEnglishInputModeID;
+    Method base = class_getInstanceMethod(IMKInputController.class, @selector(activateServer:));
+    IMP original = method_setImplementation(base, (IMP)ShurufaSyntheticActivation);
+    [controller activateServer:first];
+    DrainMainQueue();
+    assert(first.selectedModes.count == 0 && !appearance.englishMode);
+    [appearance applySharedInputPreferences:legacy];
+    [controller appearanceChanged:nil];
+    assert(first.selectedModes.count == 0 && !appearance.englishMode);
+    ShortcutSession *session = [ShortcutSession new];
+    [controller setValue:session forKey:@"session"];
+    [controller setValue:@{@"focused":@YES, @"editing_text":@"", @"candidates":@[]} forKey:@"view"];
+    NSEvent *letter = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0 timestamp:0
+        windowNumber:0 context:nil characters:@"n" charactersIgnoringModifiers:@"n" isARepeat:NO keyCode:kVK_ANSI_N];
+    (void)[controller handleEvent:letter client:first];
+    assert(first.selectedModes.count == 0);
+    (void)[controller handleEvent:letter client:second];
+    assert(first.selectedModes.count == 0 && second.selectedModes.count == 0 && !appearance.englishMode);
+    [controller setEnglishInputMode:YES];
+    [controller systemDidReportInputMode:MSIMEEnglishInputModeID client:second];
+    assert(!appearance.englishMode && second.selectedModes.count == 0);
+    ShurufaSystemSourceController *stale = [ShurufaSystemSourceController alloc];
+    [stale setValue:appearance forKey:@"appearance"];
+    NSUInteger reports = controller.reports;
+    [stale systemDidReportInputMode:MSIMEInputModeID(MSIMEInputMode::Shuangpin) client:first];
+    assert(controller.reports == reports);
+    NSString *scheme = appearance.inputScheme;
+    [controller systemDidReportInputMode:MSIMEInputModeID(MSIMEInputMode::Shuangpin) client:first];
+    assert([appearance.inputScheme isEqual:scheme]);
+    MSIMESystemInputModeState state;
+    assert(!MSIMESelectSystemInputMode(state, MSIMEEnglishInputModeID, second,
+        +[](NSString *) -> BOOL { return YES; }));
+    assert(second.selectedModes.count == 0);
+    method_setImplementation(base, original);
+    [controller releaseBackgroundMusic];
+    MSIMEFocusedController = nil;
+    MSIMEResetSystemInputModeState(MSIMESharedSystemInputModeState());
+    MSIMERemoveTestPreferenceSuite(defaults, suite);
+    puts("Shurufa system source: activation/preferences/keys/client changes select=0");
+}
+
 // The selected input mode, 中, 英 or 日, follows the controller's state. A mode the system reports - picked from the input menu or reached with Ctrl+Space - sets the Chinese/English state and, for 中 and 日, the scheme, and is not selected back.
 static void TestSystemInputModeReport(MSIMEAppearancePreferences *appearance) {
     ModeController *controller = [ModeController alloc];
@@ -13280,6 +13353,16 @@ int main(int argc, char **argv) {
         if (argc == 2 && std::string(argv[1]) == "--english-punctuation") {
             @autoreleasepool { TestPerApplicationPunctuationAndWidth(); }
             @autoreleasepool { TestEnglishModePunctuationAndWidthOutput(); }
+            return 0;
+        }
+        if (argc == 3 && std::string(argv[1]) == "--shurufa-system-source") {
+            ShurufaTestBundle = [NSBundle bundleWithPath:[NSString stringWithUTF8String:argv[2]]];
+            assert(ShurufaTestBundle);
+            Method mainBundle = class_getClassMethod(NSBundle.class, @selector(mainBundle));
+            IMP original = method_setImplementation(mainBundle, (IMP)ShurufaMainBundle);
+            assert(MSIMEEditionIsShurufa());
+            TestShurufaSystemSourceAuthority();
+            method_setImplementation(mainBundle, original);
             return 0;
         }
         if (argc >= 3 && std::string(argv[1]) == "--shurufa-settings") {

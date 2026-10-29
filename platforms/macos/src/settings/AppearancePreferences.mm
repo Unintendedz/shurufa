@@ -2416,6 +2416,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
 }
 - (NSString *)activeInputModeApplication { return _activeModeApplication; }
 - (void)activateInputModeForApplication:(NSString *)identifier {
+    if (MSIMEEditionIsShurufa()) return;
     NSString *next = [identifier isKindOfClass:NSString.class] && identifier.length ? [identifier copy] : nil;
     // Coming back to an application from somewhere else starts it in its rule again, so the hand-made override from the last visit goes. Refocusing within the same application is not a new visit and keeps it.
     if (next != nil && ![next isEqual:_activeModeApplication]) [_inputModeRuleOverrides removeObject:next];
@@ -2495,6 +2496,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     [self preferencesChanged];
 }
 - (BOOL)englishMode {
+    if (MSIMEEditionIsShurufa()) return NO;
     if (!_activeModeApplication) return [_defaults boolForKey:EnglishKey];
     // Rule, then memory, then the default. A rule is what the user decided this application should start in and it is saved, so it goes on answering after -resetRememberedInputModes has thrown away what they happened to do last time; it also holds under 全局 scope, which is what makes it an exception rather than a second way of saying the same thing. What it does not outrank is the user reaching for Shift+空格 inside the application: that writes an override which stands until they leave and come back.
     // 规则按 ASCII 不分大小写查，和偏好库的去重、Windows 的查找一致：共享设置页写下的标识大小写未必和应用的 bundle id 相同。
@@ -2504,6 +2506,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     return mode ? mode.boolValue : [self.defaultImeMode isEqual:@"english"];
 }
 - (void)rememberActiveInputMode:(BOOL)english {
+    if (MSIMEEditionIsShurufa()) return;
     if (!_activeModeApplication) return;
     if (_activeModeGlobal) _globalInputMode = @(english);
     else {
@@ -2723,6 +2726,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     [self preferencesChanged];
 }
 - (void)setEnglishMode:(BOOL)value {
+    if (MSIMEEditionIsShurufa()) return;
     [self overrideActiveInputModeRule];
     [self rememberActiveInputMode:value];
     [_defaults setBool:value forKey:EnglishKey];
