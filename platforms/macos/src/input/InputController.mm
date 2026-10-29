@@ -2017,6 +2017,7 @@ static NSImage *MSIMECandidateLogoImage() {
 
 // Port of Windows _UpdateSmartPunctuationShadow, run once per key down after the key has been handled. Editing and caret keys - Delete, Forward Delete, Return, Enter, Tab, Escape, the arrows, Home/End, Page Up/Down - and any Control, Option or Command chord leave the caret somewhere the shadow cannot follow, so they clear it. An eaten key keeps what a commit or rewrite recorded while it was handled and otherwise clears the shadow: it fed the composition, and the document answers until something is committed. A printable key that passed through to the application is the new shadow. The reference skips its smart punctuation keys because its resolver records them itself; here a smart key that is eaten is recorded by that same commit, and one that passes through (English mode, local modes) is what the application typed, so it is recorded like any other passthrough key.
 - (void)noteKeyForSmartPunctuationShadow:(NSEvent *)event eaten:(BOOL)eaten {
+    if (MSIMEEditionIsShurufa()) return;
     const BOOL written = _smartPunctuationShadowWritten;
     _smartPunctuationShadowWritten = NO;
     if (eaten) {
@@ -4945,7 +4946,6 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
         // 复用现有菜单项和动作，只保留本版的输入入口。
         NSSet<NSString *> *actions = [NSSet setWithArray:@[
             @"retryUnavailableSession:", @"restartUnavailableInputMethod:",
-            @"selectChineseMode:", @"selectEnglishMode:", @"toggleDedicatedEnglishMode:",
             @"toggleTraditionalOutput:", @"toggleFullWidthInput:", @"toggleChinesePunctuation:",
             @"showVoicePanel", @"showVoiceSettings:", @"showAppearance:", @"showAbout:"]];
         for (NSMenuItem *item in menu.itemArray.copy) {
@@ -4958,6 +4958,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
             if (item.separatorItem && separator) [menu removeItem:item];
             separator = item.separatorItem;
         }
+        for (NSMenuItem *item in menu.itemArray) item.keyEquivalent = @"";
         settings.title = @"设置…";
     }
     return menu;
@@ -5209,6 +5210,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
 
 // 撤回普通英文的托管组字时先上屏原始字母，不能选中补全词或隐藏 marked text。
 - (BOOL)setManagedEnglishEnabled:(BOOL)enabled {
+    if (MSIMEEditionIsShurufa()) { _managedEnglishComposition = NO; return YES; }
     if (!_session) { _managedEnglishComposition = NO; return YES; }
     if (_managedEnglishComposition == enabled && (!enabled || MSIMEStrictBoolean([_session viewWithError:nil][@"dedicated_english"]))) return YES;
     if (!enabled && ![self commitManagedEnglishRaw]) return NO;
@@ -5457,6 +5459,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     else [self setEnglishInputMode:NO];
 }
 - (void)setDedicatedEnglishInputMode:(BOOL)enabled {
+    if (MSIMEEditionIsShurufa()) return;
     if (!_activeClient) return;
     [self ensureAppearance];
     if (!_session || _focusPending) [self prepareSession];
@@ -6386,7 +6389,7 @@ static constexpr NSUInteger MSIMEIdleDictionarySessionLimit = 4;
     [self scheduleSystemInputModeSyncForClient:sender];
     _capsLock = !MSIMEEditionIsShurufa() && ([NSEvent modifierFlags] & NSEventModifierFlagCapsLock) != 0;
     [self syncCapsLock];
-    _toolbar = [MSIMEFloatingToolbarPanel sharedPanel];
+    _toolbar = MSIMEEditionIsShurufa() ? nil : [MSIMEFloatingToolbarPanel sharedPanel];
     [_toolbar applyLightSkin:[_appearance resolvedSkinForDark:NO].tokens darkSkin:[_appearance resolvedSkinForDark:YES].tokens];
     [_toolbar applyLightToolbarSkin:[_appearance toolbarSkinForDark:NO]
                             darkSkin:[_appearance toolbarSkinForDark:YES]];
@@ -6768,7 +6771,7 @@ static NSString *MSIMESessionUnavailableReason(NSDictionary *options, NSError *e
         [self syncPunctuation];
         [self syncCharacterWidth];
         [self syncCapsLock];
-        if (reopened) {
+        if (reopened && !MSIMEEditionIsShurufa()) {
             NSDictionary *view = [_session setDedicatedEnglishEnabled:YES error:nil];
             if (view) _view = view;
         }
@@ -8261,6 +8264,13 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     }
     // 「展开候选」打开时横排候选窗的 ↓ 展开多行网格（#7307）；只有一页、竖排、候选列表开着时 openExpandedCandidates 返回 NO，↓ 照下面的规则移高亮。注音组字时 ↓ 打开候选列表（MSIMECandidateListDownKey）在前面，优先于这里。
     if (_panel.isVisible && event.keyCode == 125 && !(event.modifierFlags & NSEventModifierFlagShift) && [self openExpandedCandidates]) return YES;
+    if (MSIMEEditionIsShurufa() && _panel.isVisible && !(event.modifierFlags & NSEventModifierFlagShift) &&
+        (event.keyCode == kVK_LeftArrow || event.keyCode == kVK_RightArrow ||
+         event.keyCode == kVK_UpArrow || event.keyCode == kVK_DownArrow)) {
+        const BOOL previous = event.keyCode == kVK_LeftArrow || event.keyCode == kVK_UpArrow;
+        [self apply:[self candidateCommand:previous ? MSIME_PREVIOUS_CANDIDATE : MSIME_NEXT_CANDIDATE]];
+        return YES;
+    }
     // 拼音普通候选横排时：首选上左键编辑光标，右键先回到拼音末尾，再选择候选；不在首选时左右键只移动候选。首选是全部候选的第一个，翻到后面一页的第一个不算。竖排时左右键与候选方向垂直，只编辑光标，高亮由上下键移动。展开网格和已打开的候选列表先由各自的导航处理。
     // 打开「左 / 右（移动候选项）」时这里不接管：同一条规则由共享 runtime 按同一份偏好判断，五个宿主的口径才一致。
     if (_panel.isVisible && (event.keyCode == 123 || event.keyCode == 124) &&

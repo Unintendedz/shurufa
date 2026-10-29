@@ -29,13 +29,15 @@ pub(crate) enum SessionUse {
 
 /// `msime_client_create` 的本体，返回新会话的 view。
 pub(crate) fn create_session(bytes: &[u8], usage: SessionUse) -> Result<Value, String> {
-    let options = serde_json::from_slice(bytes)
+    let mut options = serde_json::from_slice(bytes)
         .ok()
         .and_then(HostOptions::from_document)
         .ok_or("invalid options document")?;
     if options.api_version != 1 {
         return Err("unsupported host API version".into());
     }
+    let edition = options.edition();
+    apply_shurufa_input_policy(&mut options.preferences, edition);
     options
         .preferences
         .validate_for_edition(options.edition())

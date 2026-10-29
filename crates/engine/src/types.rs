@@ -1370,6 +1370,8 @@ pub struct LocalModeOptions {
     pub kaomoji: bool,
     pub super_jianpin: bool,
     pub temporary_english: bool,
+    /// 宿主是否允许自动进入网址和邮箱模式。
+    pub url: bool,
     pub temporary_japanese: bool,
     pub expression: bool,
     pub command: bool,
@@ -1394,6 +1396,7 @@ impl Default for LocalModeOptions {
             kaomoji: true,
             super_jianpin: true,
             temporary_english: true,
+            url: true,
             temporary_japanese: true,
             expression: false,
             command: false,

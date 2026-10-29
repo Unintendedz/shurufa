@@ -73,6 +73,7 @@ pub extern "C" fn msime_client_set_chinese_punctuation(handle: u64, enabled: boo
 pub extern "C" fn msime_client_set_paired_punctuation(handle: u64, enabled: bool) -> *mut c_char {
     response(|| {
         with_session(handle, |session| {
+            let enabled = enabled && session.edition.id != "shurufa";
             session
                 .runtime
                 .set_paired_punctuation_enabled(enabled)
@@ -111,6 +112,9 @@ pub extern "C" fn msime_client_set_punctuation_lock(handle: u64, lock: u8) -> *m
 pub extern "C" fn msime_client_set_english_mode(handle: u64, enabled: bool) -> *mut c_char {
     response(|| {
         with_session(handle, |session| {
+            if session.edition.id == "shurufa" {
+                return serialized_runtime_view(session);
+            }
             // 切换专用英文会丢掉正在打的组字（IBus 的 Ctrl+Shift+E 不先上屏就调这里）：按旁路调用推导，组字的 end 和候选的 hidden 才不会丢。
             let pending = session.lifecycle_begin(lifecycle::Call::SideChannel);
             let switched = session

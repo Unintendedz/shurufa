@@ -136,6 +136,8 @@ pub struct EngineOptions {
     pub local_kaomoji: bool,
     pub local_super_jianpin: bool,
     pub local_temporary_english: bool,
+    /// 独立宿主可关闭自动网址和邮箱托管，不增加用户偏好项。
+    pub local_url: bool,
     pub local_temporary_japanese: bool,
     /// `V`: calculator, Chinese numerals and dates.
     pub local_expression: bool,
@@ -276,6 +278,7 @@ pub fn prepare_options_for(
         local_kaomoji: true,
         local_super_jianpin: true,
         local_temporary_english: true,
+        local_url: true,
         local_temporary_japanese: true,
         local_expression: false,
         local_command: false,
@@ -423,6 +426,7 @@ pub fn session_options(options: &EngineOptions) -> Result<SessionOptions> {
         kaomoji: options.local_kaomoji,
         super_jianpin: options.local_super_jianpin,
         temporary_english: options.local_temporary_english,
+        url: options.local_url,
         temporary_japanese: options.local_temporary_japanese,
         expression: options.local_expression,
         command: options.local_command,

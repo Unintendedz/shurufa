@@ -5293,6 +5293,7 @@ fn real_engine_options(root: &std::path::Path) -> msime_engine::host::EngineOpti
         local_kaomoji: true,
         local_super_jianpin: true,
         local_temporary_english: true,
+        local_url: true,
         local_temporary_japanese: true,
         local_expression: false,
         local_command: false,

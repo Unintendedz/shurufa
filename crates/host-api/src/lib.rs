@@ -407,6 +407,55 @@ fn japanese_model_available(options: &EngineOptions) -> bool {
     }
 }
 
+/// 只约束运行时副本，旧配置保留在偏好存储中，不能恢复独立版已移除的能力。
+fn apply_shurufa_input_policy(preferences: &mut Preferences, edition: &Edition) {
+    if edition.id != "shurufa" {
+        return;
+    }
+    preferences.paired_punctuation = false;
+    preferences.smart_punctuation = false;
+    preferences.smart_punctuation_direct_digit = false;
+    preferences.smart_punctuation_direct_letter = false;
+    preferences.smart_punctuation_repeat = false;
+    preferences.smart_punctuation_space_convert = false;
+    preferences.english_online_candidates = false;
+    preferences.enter_learns_english_word = false;
+    preferences.multilingual_input.enabled = false;
+    preferences.mixed_input.enabled = false;
+    preferences.mixed_input.english = false;
+    preferences.mixed_input.emoji = false;
+    preferences.mixed_input.kaomoji = false;
+    preferences.mixed_input.symbols = false;
+    preferences.mixed_input.japanese = false;
+    preferences.mixed_input.quick_phrase = false;
+    preferences.local_modes = msime_client_core::preferences::LocalModePreferences {
+        unicode: false,
+        date_time: false,
+        date_time_inline: false,
+        date_time_menu: false,
+        quick_phrase: false,
+        emoji: false,
+        kaomoji: false,
+        super_jianpin: false,
+        temporary_english: false,
+        temporary_japanese: false,
+        expression: false,
+        command: false,
+        mention: false,
+        mention_places: false,
+        chaizi: Some(false),
+        symbol: false,
+        shift_letter_entry: false,
+    };
+    preferences.word_character.enabled = false;
+    preferences.navigation.brackets = true;
+    preferences.navigation.minus_equal = true;
+    preferences.navigation.comma_period = false;
+    preferences.navigation.arrows = true;
+    preferences.navigation.left_right = true;
+    preferences.navigation.mouse_wheel = true;
+}
+
 fn apply_local_mode_resource_gates(options: &mut EngineOptions, edition: &Edition) {
     let resources = std::path::Path::new(&options.resources);
     let has_emoji_catalog = resources.join("msime-others.db").is_file();
@@ -1156,7 +1205,8 @@ impl HostSession {
         result
     }
 
-    fn update(&mut self, snapshot: PreferencesSnapshot) -> Result<Value, String> {
+    fn update(&mut self, mut snapshot: PreferencesSnapshot) -> Result<Value, String> {
+        apply_shurufa_input_policy(&mut snapshot.preferences, self.edition);
         if snapshot.format_version != 1 {
             return Err("unsupported preferences format".into());
         }
@@ -2121,7 +2171,9 @@ impl HostOptions {
         Self::deserialize(&document).ok()
     }
 
-    fn into_engine_options(self) -> EngineOptions {
+    fn into_engine_options(mut self) -> EngineOptions {
+        let edition = self.edition();
+        apply_shurufa_input_policy(&mut self.preferences, edition);
         // 每个平台都这样查找；日文词典只有 macOS 会下载，语言词库由 macOS 和没有随包带齐它们的 Linux 安装下载，别处的状态目录里从来没有它们。
         let state_root = absolute_state_root(self.preferences_directory.as_deref());
         let downloaded = state_root.as_deref().map(DownloadedDictionaries::new);
@@ -2211,6 +2263,7 @@ impl HostOptions {
             local_kaomoji: self.preferences.local_modes.kaomoji,
             local_super_jianpin: self.preferences.local_modes.super_jianpin,
             local_temporary_english: self.preferences.local_modes.temporary_english,
+            local_url: edition.id != "shurufa",
             local_temporary_japanese: self.preferences.local_modes.temporary_japanese,
             local_expression: self.preferences.local_modes.expression,
             local_command: self.preferences.local_modes.command,

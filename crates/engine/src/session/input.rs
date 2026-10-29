@@ -2117,7 +2117,8 @@ impl InputSession {
 
     /// 当前组字能否进入网址模式：方案识别网址、不在本地模式或专用英文、有组字、光标在末尾。
     fn url_entry_ready(&self) -> bool {
-        !self.dedicated_english
+        self.local_mode_options.url
+            && !self.dedicated_english
             && self.local_mode == LocalInputMode::None
             && self.scheme().detects_urls()
             && self.has_composition()
@@ -2393,7 +2394,6 @@ fn local_mode_enabled(options: LocalModeOptions, mode: LocalInputMode) -> bool {
         LocalInputMode::Mention => options.mention,
         LocalInputMode::Chaizi => options.chaizi,
         LocalInputMode::Symbol => options.symbol,
-        // 网址模式默认开启，没有开关。
-        LocalInputMode::Url => true,
+        LocalInputMode::Url => options.url,
     }
 }

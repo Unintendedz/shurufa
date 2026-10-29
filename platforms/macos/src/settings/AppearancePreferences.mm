@@ -1654,6 +1654,7 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     return merged;
 }
 - (BOOL)localModeEnabled:(NSString *)mode {
+    if (MSIMEEditionIsShurufa()) return NO;
     if (!KnownLocalMode(mode)) return NO;
     NSNumber *value = _sharedLocalModes[mode] ?: [_defaults dictionaryForKey:LocalModesKey][mode];
     if (LocalModeBoolean(value)) return value.boolValue;
@@ -2559,12 +2560,12 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
 - (BOOL)fullWidthInput { return _sharedFullWidthInput ? _sharedFullWidthInput.boolValue : [_defaults boolForKey:FullWidthKey]; }
 - (BOOL)chinesePunctuation { if (_sharedChinesePunctuation) return _sharedChinesePunctuation.boolValue; return [_defaults objectForKey:ChinesePunctuationKey] == nil ? YES : [_defaults boolForKey:ChinesePunctuationKey]; }
 // 智能标点和重复标点转中文默认开，与 client-core 的 smart_punctuation_default 相同；共享文档总带着这两个键（旧文档里的旧默认 false 在读入时已一次性改过来），这里的回退只在文档载入之前起作用。
-- (BOOL)smartPunctuation { return _sharedSmartPunctuation ? _sharedSmartPunctuation.boolValue : ([_defaults objectForKey:SmartPunctuationKey] == nil ? YES : [_defaults boolForKey:SmartPunctuationKey]); }
+- (BOOL)smartPunctuation { if (MSIMEEditionIsShurufa()) return NO; return _sharedSmartPunctuation ? _sharedSmartPunctuation.boolValue : ([_defaults objectForKey:SmartPunctuationKey] == nil ? YES : [_defaults boolForKey:SmartPunctuationKey]); }
 - (void)setSmartPunctuation:(BOOL)value { _sharedSmartPunctuation = nil; [_defaults setBool:value forKey:SmartPunctuationKey]; [self preferencesChanged]; }
-- (BOOL)smartPunctuationRepeatToChinese { return _sharedSmartPunctuationRepeatToChinese ? _sharedSmartPunctuationRepeatToChinese.boolValue : ([_defaults objectForKey:SmartPunctuationRepeatToChineseKey] == nil ? YES : [_defaults boolForKey:SmartPunctuationRepeatToChineseKey]); }
+- (BOOL)smartPunctuationRepeatToChinese { if (MSIMEEditionIsShurufa()) return NO; return _sharedSmartPunctuationRepeatToChinese ? _sharedSmartPunctuationRepeatToChinese.boolValue : ([_defaults objectForKey:SmartPunctuationRepeatToChineseKey] == nil ? YES : [_defaults boolForKey:SmartPunctuationRepeatToChineseKey]); }
 - (void)setSmartPunctuationRepeatToChinese:(BOOL)value { _sharedSmartPunctuationRepeatToChinese = nil; [_defaults setBool:value forKey:SmartPunctuationRepeatToChineseKey]; [self preferencesChanged]; }
 // 空格转换默认关，与共享默认相同：它改写的是用户已经看着落下去的字符，又没有反悔手势。
-- (BOOL)smartPunctuationSpaceConvert { return _sharedSmartPunctuationSpaceConvert ? _sharedSmartPunctuationSpaceConvert.boolValue : [_defaults boolForKey:SmartPunctuationSpaceConvertKey]; }
+- (BOOL)smartPunctuationSpaceConvert { if (MSIMEEditionIsShurufa()) return NO; return _sharedSmartPunctuationSpaceConvert ? _sharedSmartPunctuationSpaceConvert.boolValue : [_defaults boolForKey:SmartPunctuationSpaceConvertKey]; }
 - (void)setSmartPunctuationSpaceConvert:(BOOL)value { _sharedSmartPunctuationSpaceConvert = nil; [_defaults setBool:value forKey:SmartPunctuationSpaceConvertKey]; [self preferencesChanged]; }
 // 共享文档的值优先；文档还没有这一项时读升级前留在 defaults 里的选择。
 - (BOOL)shuangpinKeymap { return _sharedShuangpinKeymap ? _sharedShuangpinKeymap.boolValue : [_defaults boolForKey:KeymapKey]; }
@@ -2682,7 +2683,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     [_defaults setBool:value forKey:ChinesePunctuationKey];
     [self preferencesChanged];
 }
-- (BOOL)pairedPunctuation {
+- (BOOL)pairedPunctuation { if (MSIMEEditionIsShurufa()) return NO;
     if (_sharedPairedPunctuation) return _sharedPairedPunctuation.boolValue;
     return [_defaults objectForKey:PairedPunctuationKey] == nil ? YES : [_defaults boolForKey:PairedPunctuationKey];
 }
@@ -2705,15 +2706,15 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     NSDictionary *values = _sharedMixedInput ?: [_defaults dictionaryForKey:MixedInputKey];
     return [values isKindOfClass:NSDictionary.class] ? values : @{};
 }
-- (BOOL)mixedEnglishInput { id value = [self mixedInputValues][@"english"]; return LocalModeBoolean(value) ? [value boolValue] : YES; }
+- (BOOL)mixedEnglishInput { if (MSIMEEditionIsShurufa()) return NO; id value = [self mixedInputValues][@"english"]; return LocalModeBoolean(value) ? [value boolValue] : YES; }
 - (void)setMixedEnglishInput:(BOOL)value { [self setMixedInputValue:@(value) forKey:@"english"]; }
 // Falls back to on, matching `source_mixed_emoji_default` in client-core and the source's `emoji_mixed_input = true`.
-- (BOOL)mixedEmojiInput { id value = [self mixedInputValues][@"emoji"]; return LocalModeBoolean(value) ? [value boolValue] : YES; }
+- (BOOL)mixedEmojiInput { if (MSIMEEditionIsShurufa()) return NO; id value = [self mixedInputValues][@"emoji"]; return LocalModeBoolean(value) ? [value boolValue] : YES; }
 - (void)setMixedEmojiInput:(BOOL)value { [self setMixedInputValue:@(value) forKey:@"emoji"]; }
-- (BOOL)mixedKaomojiInput { id value = [self mixedInputValues][@"kaomoji"]; return LocalModeBoolean(value) ? [value boolValue] : NO; }
+- (BOOL)mixedKaomojiInput { if (MSIMEEditionIsShurufa()) return NO; id value = [self mixedInputValues][@"kaomoji"]; return LocalModeBoolean(value) ? [value boolValue] : NO; }
 - (void)setMixedKaomojiInput:(BOOL)value { [self setMixedInputValue:@(value) forKey:@"kaomoji"]; }
 // 后加的可选成员，缺键按开处理，与 client-core 的 `MixedInputPreferences::symbols` 一致。
-- (BOOL)mixedSymbolInput { id value = [self mixedInputValues][@"symbols"]; return LocalModeBoolean(value) ? [value boolValue] : YES; }
+- (BOOL)mixedSymbolInput { if (MSIMEEditionIsShurufa()) return NO; id value = [self mixedInputValues][@"symbols"]; return LocalModeBoolean(value) ? [value boolValue] : YES; }
 - (void)setMixedSymbolInput:(BOOL)value { [self setMixedInputValue:@(value) forKey:@"symbols"]; }
 // 改一项时从当前生效的值（有共享快照时是快照）出发，而不是只从本地存的那份出发：否则共享页改过、本地没存的项（例如在共享页关掉的符号混输）会在这里改一次别的开关后退回默认值。
 - (void)setMixedInputValue:(id)value forKey:(NSString *)key {
@@ -3247,6 +3248,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     return value == 1 || value == 2 ? value : 0;
 }
 - (BOOL)navigationEnabled:(NSString *)key {
+    if (MSIMEEditionIsShurufa()) return [@[@"brackets", @"minus_equal", @"arrows", @"left_right", @"mouse_wheel", @"tab", @"page_up_down"] containsObject:key];
     // Tab / Shift-Tab 和 Page Up / Page Down 固定开启，不读存着的值：候选窗显示时这几个键总归由输入法处理（关掉的也返回已处理），关掉只会让它们什么也不做，并不会还给应用。候选窗没显示时 Tab 一律交给应用；关掉的 Page Up / Page Down 原本直接交给应用，固定开启后先作为翻页命令交给会话，会话不处理才交给应用。设置页也不再给这两组的开关（HostCapabilities.tab_page_paging_switches）。
     if ([key isEqual:@"tab"] || [key isEqual:@"page_up_down"]) return YES;
     id value = _sharedNavigation[key] ?: [_defaults dictionaryForKey:NavigationKey][key];
@@ -3256,6 +3258,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     return [@[@"comma_period", @"arrows", @"left_right"] containsObject:key];
 }
 - (NSDictionary *)wordCharacterOptions {
+    if (MSIMEEditionIsShurufa()) return @{@"enabled":@NO, @"keys":@"brackets"};
     NSDictionary *value = _sharedWordCharacter ?: [_defaults dictionaryForKey:WordCharacterKey];
     return LocalModeBoolean(value[@"enabled"]) && [@[@"brackets", @"minus_equal"] containsObject:value[@"keys"]] ? value : @{@"enabled": @YES, @"keys": @"brackets"};
 }

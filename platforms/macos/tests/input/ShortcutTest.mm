@@ -2892,6 +2892,7 @@ static void TestShurufaSystemSourceAuthority() {
     Method base = class_getInstanceMethod(IMKInputController.class, @selector(activateServer:));
     IMP original = method_setImplementation(base, (IMP)ShurufaSyntheticActivation);
     [controller activateServer:first];
+    assert(![controller valueForKey:@"toolbar"]);
     DrainMainQueue();
     assert(first.selectedModes.count == 0 && !appearance.englishMode);
     [appearance applySharedInputPreferences:legacy];
@@ -2973,6 +2974,65 @@ static void TestShurufaRemovedLanguageShortcuts() {
     [standard setVolatileDomain:previous forName:NSArgumentDomain];
     MSIMERemoveTestPreferenceSuite(defaults, suite);
     puts("Shurufa removed shortcuts: legacy true ignored, composition preserved, voice binding available");
+}
+
+static void TestShurufaCompositionPolicy() {
+    NSString *suite = [@"shurufa.composition-policy." stringByAppendingString:NSUUID.UUID.UUIDString];
+    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+    MSIMEAppearancePreferences *appearance = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults];
+    [appearance applySharedInputPreferences:@{@"smart_punctuation":@YES,@"smart_punctuation_repeat":@YES,
+        @"smart_punctuation_space_convert":@YES,@"paired_punctuation":@YES,
+        @"mixed_input":@{@"english":@YES},@"word_character":@{@"enabled":@YES,@"keys":@"brackets"},
+        @"navigation":@{@"brackets":@NO,@"arrows":@NO,@"left_right":@NO,@"mouse_wheel":@NO}}];
+    assert(!appearance.smartPunctuation && !appearance.smartPunctuationRepeatToChinese &&
+        !appearance.smartPunctuationSpaceConvert && !appearance.pairedPunctuation && !appearance.mixedEnglishInput);
+    for (NSString *mode in @[@"shift_letter_entry",@"temporary_english",@"date_time",@"date_time_inline",@"expression",@"command",@"symbol"]) {
+        [appearance setLocalMode:mode enabled:YES];
+        assert(![appearance localModeEnabled:mode]);
+    }
+    for (NSString *key in @[@"brackets",@"minus_equal",@"arrows",@"left_right",@"mouse_wheel"])
+        assert([appearance navigationEnabled:key]);
+    assert(![[appearance wordCharacterOptions][@"enabled"] boolValue]);
+    ShurufaSystemSourceController *controller = [ShurufaSystemSourceController alloc];
+    ModeSelectingClient *client = [ModeSelectingClient new];
+    ShortcutSession *session = [ShortcutSession new];
+    TestCandidatePanel *panel = [TestCandidatePanel new];
+    NSDictionary *view = @{@"focused":@YES,@"session":@1,@"generation":@1,@"editing_text":@"ni",@"scheme":@0,
+        @"candidates":@[@{@"text":@"拟",@"highlighted":@YES,@"id":@{@"session":@1,@"generation":@1,@"index":@0}}]};
+    session.nextTransition = @{@"handled":@YES,@"view":view};
+    [controller setValue:appearance forKey:@"appearance"];
+    [controller setValue:client forKey:@"activeClient"];
+    [controller setValue:session forKey:@"session"];
+    [controller setValue:panel forKey:@"panel"];
+    for (NSArray *key in @[@[@33,@"[",@(MSIME_PREVIOUS_PAGE)],@[@30,@"]",@(MSIME_NEXT_PAGE)],
+        @[@123,@"",@(MSIME_PREVIOUS_CANDIDATE)],@[@124,@"",@(MSIME_NEXT_CANDIDATE)],
+        @[@126,@"",@(MSIME_PREVIOUS_CANDIDATE)],@[@125,@"",@(MSIME_NEXT_CANDIDATE)],
+        @[@49,@" ",@(MSIME_COMMIT_CANDIDATE)]]) {
+        [controller setValue:view forKey:@"view"]; panel.visible = YES;
+        NSEvent *event = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0 timestamp:0
+            windowNumber:0 context:nil characters:key[1] charactersIgnoringModifiers:key[1] isARepeat:NO keyCode:[key[0] unsignedShortValue]];
+        assert([controller handleEvent:event client:client]);
+        assert(session.lastCommand == [key[2] unsignedIntValue] && session.edgeCalls == 0);
+    }
+    [controller setValue:view forKey:@"view"]; panel.visible = YES;
+    NSView *content = [[NSView alloc] initWithFrame:NSMakeRect(0,0,200,40)];
+    MSIMECandidateButton *button = [[MSIMECandidateButton alloc] initWithFrame:content.bounds];
+    button.tag = 0; button.candidateHighlighted = YES;
+    button.candidateID = view[@"candidates"][0][@"id"];
+    [content addSubview:button];
+    [panel setValue:content forKey:@"contentView"];
+    NSEvent *digit = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0 timestamp:0
+        windowNumber:0 context:nil characters:@"1" charactersIgnoringModifiers:@"1" isARepeat:NO keyCode:18];
+    assert([controller handleEvent:digit client:client] && session.selectCalls == 1);
+    [controller setDedicatedEnglishInputMode:YES];
+    assert(session.englishCandidateCalls == 0);
+    NSMenu *menu = [controller menu];
+    for (NSMenuItem *item in menu.itemArray) {
+        assert(item.action != @selector(selectEnglishMode:) && item.action != @selector(toggleDedicatedEnglishMode:));
+        assert(item.keyEquivalent.length == 0);
+    }
+    MSIMERemoveTestPreferenceSuite(defaults, suite);
+    puts("Shurufa composition: legacy features disabled; bracket/arrows/digits/space navigation preserved");
 }
 
 // The selected input mode, 中, 英 or 日, follows the controller's state. A mode the system reports - picked from the input menu or reached with Ctrl+Space - sets the Chinese/English state and, for 中 and 日, the scheme, and is not selected back.
@@ -13401,14 +13461,15 @@ int main(int argc, char **argv) {
             @autoreleasepool { TestEnglishModePunctuationAndWidthOutput(); }
             return 0;
         }
-        if (argc == 3 && (std::string(argv[1]) == "--shurufa-system-source" || std::string(argv[1]) == "--shurufa-system-shortcuts")) {
+        if (argc == 3 && (std::string(argv[1]) == "--shurufa-system-source" || std::string(argv[1]) == "--shurufa-system-shortcuts" || std::string(argv[1]) == "--shurufa-composition")) {
             ShurufaTestBundle = [NSBundle bundleWithPath:[NSString stringWithUTF8String:argv[2]]];
             assert(ShurufaTestBundle);
             Method mainBundle = class_getClassMethod(NSBundle.class, @selector(mainBundle));
             IMP original = method_setImplementation(mainBundle, (IMP)ShurufaMainBundle);
             assert(MSIMEEditionIsShurufa());
             if (std::string(argv[1]) == "--shurufa-system-source") TestShurufaSystemSourceAuthority();
-            else TestShurufaRemovedLanguageShortcuts();
+            else if (std::string(argv[1]) == "--shurufa-system-shortcuts") TestShurufaRemovedLanguageShortcuts();
+            else TestShurufaCompositionPolicy();
             method_setImplementation(mainBundle, original);
             return 0;
         }

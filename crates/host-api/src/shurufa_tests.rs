@@ -110,3 +110,102 @@ fn bundled_input_learning_and_neural_model() {
     println!("xiaohe shuangpin: nihc -> 你好");
     value(msime_client_destroy(handle));
 }
+
+#[test]
+fn removed_input_modes_stay_unreachable_after_legacy_preferences_and_updates() {
+    let root = tempfile::tempdir().unwrap();
+    let path = |name| {
+        let path = root.path().join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    };
+    let resources = path("resources");
+    let dictionaries = path("dictionaries");
+    for directory in [&resources, &dictionaries] {
+        rusqlite::Connection::open(directory.join("msime-pinyin.db"))
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE tbl_2_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+             INSERT INTO tbl_2_n VALUES('ni''hao','nh','拟好',100);
+             CREATE TABLE quick_parases(key TEXT,value TEXT,weight INTEGER);",
+            )
+            .unwrap();
+    }
+    let mut legacy = msime_client_core::preferences::Preferences::default();
+    legacy.paired_punctuation = true;
+    legacy.smart_punctuation = true;
+    legacy.smart_punctuation_repeat = true;
+    legacy.smart_punctuation_space_convert = true;
+    legacy.mixed_input.english = true;
+    legacy.local_modes.expression = true;
+    legacy.local_modes.command = true;
+    legacy.local_modes.mention = true;
+    legacy.local_modes.chaizi = Some(true);
+    legacy.navigation.mouse_wheel = false;
+    let request = json!({"api_version":1,"edition":"shurufa","resources":resources,
+        "dictionaries":dictionaries,"user_data":path("user"),"cache":path("cache"),"preferences":legacy}).to_string();
+    // SAFETY: 合成配置缓冲区在同步调用期间有效。
+    let created = value(unsafe { msime_client_create(request.as_ptr(), request.len()) });
+    let handle = created["session"].as_u64().unwrap();
+    value(msime_client_focus(handle, true));
+    for revision in 0..2 {
+        if revision > 0 {
+            let snapshot =
+                json!({"format_version":1,"revision":revision,"preferences":legacy}).to_string();
+            // SAFETY: 合成偏好缓冲区在同步调用期间有效。
+            value(unsafe {
+                msime_client_update_preferences(handle, snapshot.as_ptr(), snapshot.len())
+            });
+        }
+        SESSIONS.with(|sessions| {
+            let sessions = sessions.borrow();
+            let session = &sessions[&handle];
+            assert!(
+                !session.options.paired_punctuation && !session.options.local_shift_letter_entry
+            );
+            assert!(!session.options.local_temporary_english && !session.options.local_url);
+            assert!(
+                !session.options.local_date_time_inline && !session.options.local_date_time_menu
+            );
+            assert!(
+                !session.options.local_command
+                    && !session.options.local_mention
+                    && !session.options.local_expression
+            );
+            assert!(!session.options.mixed_english && !session.options.quick_phrase_candidates);
+            assert!(!session.applied.smart_punctuation && !session.applied.word_character.enabled);
+            assert!(session.applied.navigation.brackets && session.applied.navigation.mouse_wheel);
+        });
+        for key in b"UTKEMJYRVCS/@" {
+            value(msime_client_command(handle, 3));
+            let transition = value(msime_client_character(handle, *key, true));
+            assert_eq!(transition["view"]["local_mode"], "none");
+        }
+        let view = type_keys(handle, "www");
+        assert!(!view["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["text"] == "www."));
+        let marked = value(msime_client_character(handle, b'.', false));
+        assert_eq!(marked["view"]["local_mode"], "none");
+        value(msime_client_command(handle, 3));
+        let composing = type_keys(handle, "nihao");
+        let english = value(msime_client_set_english_mode(handle, true));
+        assert_eq!(english["editing_text"], composing["editing_text"]);
+        assert_eq!(english["dedicated_english"], false);
+        value(msime_client_command(handle, 3));
+        value(msime_client_set_paired_punctuation(handle, true));
+        for preceding in ['1', 'a'] {
+            let punctuation = value(msime_client_punctuation_with_context(
+                handle,
+                b',',
+                preceding as u32,
+            ));
+            assert_eq!(punctuation["commit"], "，");
+        }
+        let quote = value(msime_client_punctuation_with_context(handle, b'(', 0));
+        assert_eq!(quote["commit"], "（");
+    }
+    value(msime_client_destroy(handle));
+}
