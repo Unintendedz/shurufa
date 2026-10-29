@@ -3032,6 +3032,16 @@ static void TestShurufaCompositionPolicy() {
         assert(item.action != @selector(selectEnglishMode:) && item.action != @selector(toggleDedicatedEnglishMode:));
         assert(item.keyEquivalent.length == 0);
     }
+    // 轻点 Caps Lock 切到 ABC 时系统先要求结束组字：和系统拼音一样把已打的字母原样上屏，不选候选。
+    ShortcutClient *rawClient = [ShortcutClient new];
+    rawClient.insertions = [NSMutableArray array];
+    [controller setValue:rawClient forKey:@"activeClient"];
+    [controller setValue:@{@"focused":@YES,@"editing_text":@"nihao",@"candidates":@[],@"scheme":@0} forKey:@"view"];
+    session.rawTransition = @{@"handled":@YES,@"commit":@"nihao",@"view":@{@"focused":@YES,@"editing_text":@"",@"candidates":@[],@"scheme":@0}};
+    session.finishTransition = @{@"handled":@YES,@"commit":@"你好",@"view":@{@"focused":@YES,@"editing_text":@"",@"candidates":@[],@"scheme":@0}};
+    [controller commitComposition:rawClient];
+    assert(session.lastCommand == MSIME_COMMIT_RAW);
+    assert([rawClient.committed isEqual:@"nihao"]);
     MSIMERemoveTestPreferenceSuite(defaults, suite);
     puts("Shurufa composition: legacy features disabled; bracket/arrows/digits/space navigation preserved");
 }

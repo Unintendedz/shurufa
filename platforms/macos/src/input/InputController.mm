@@ -7166,6 +7166,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     [_preferencesTimer invalidate];
     _preferencesTimer = nil;
     [self releaseBackgroundMusic];
+    if (MSIMEEditionIsShurufa()) [self commitShurufaRawComposition];
     if (_session) [self apply:[_session setFocused:NO error:nil]];
     [self resetCandidateAnchor];
     [self hideCandidatePanel:"focus_out"];
@@ -8521,6 +8522,13 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     return NO;
 }
 
+// 与系统拼音一致：切换输入源（如轻点 Caps Lock）或系统要求结束组字时，已打的字母原样上屏，不替用户选候选。
+- (void)commitShurufaRawComposition {
+    if (!_session || ![_view[@"editing_text"] length]) return;
+    NSDictionary *raw = [_session command:MSIME_COMMIT_RAW error:nil];
+    if (raw) [self apply:raw];
+}
+
 - (void)commitComposition:(id)sender {
     if (sender != _activeClient || !_session) return;
     [self flushPendingPairedClosing];
@@ -8530,6 +8538,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     [self clearSmartPunctuationSpaceRevert];
     // IMK 要求结束组字时，普通英文原样上屏；其他模式沿用失焦选词与反馈规则。
     if (_managedEnglishComposition) [self commitManagedEnglishRaw];
+    else if (MSIMEEditionIsShurufa()) [self commitShurufaRawComposition];
     else [self apply:[_session command:MSIME_FINISH_ON_FOCUS_LOSS error:nil]];
     // 光标即将离开刚上屏的文字。
     [self invalidateSmartPunctuationShadow];
