@@ -2929,6 +2929,52 @@ static void TestShurufaSystemSourceAuthority() {
     puts("Shurufa system source: activation/preferences/keys/client changes select=0");
 }
 
+static void TestShurufaRemovedLanguageShortcuts() {
+    NSString *suite = [@"shurufa.language-shortcuts." stringByAppendingString:NSUUID.UUID.UUIDString];
+    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+    MSIMEAppearancePreferences *appearance = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults];
+    [appearance applySharedInputPreferences:@{@"keybindings":@{@"switch_language_shift":@YES,
+        @"switch_language_ctrl":@YES, @"switch_language_ctrl_alt_space":@YES,
+        @"toggle_fullwidth_option_shift_h":@YES, @"trilingual_cycle":@YES}}];
+    appearance.shiftTapShortcut = YES; appearance.controlTapShortcut = YES;
+    appearance.inputModeShortcut = YES; appearance.controlOptionSpaceShortcut = YES;
+    appearance.fullWidthShortcut = YES;
+    assert(!appearance.shiftTapShortcut && !appearance.controlTapShortcut && !appearance.inputModeShortcut &&
+        !appearance.controlOptionSpaceShortcut && !appearance.fullWidthShortcut && !appearance.trilingualCycle);
+    NSUserDefaults *standard = NSUserDefaults.standardUserDefaults;
+    NSDictionary *previous = [standard volatileDomainForName:NSArgumentDomain];
+    [standard setVolatileDomain:@{@"MSIMEClientVoiceEnabled":@NO} forName:NSArgumentDomain];
+    ShurufaSystemSourceController *controller = [ShurufaSystemSourceController alloc];
+    ModeSelectingClient *client = [ModeSelectingClient new];
+    ShortcutSession *session = [ShortcutSession new];
+    [controller setValue:appearance forKey:@"appearance"];
+    [controller setValue:client forKey:@"activeClient"];
+    [controller setValue:session forKey:@"session"];
+    [controller setValue:@{@"focused":@YES, @"editing_text":@"ni", @"candidates":@[]} forKey:@"view"];
+    for (NSArray *tap in @[@[@56,@(NSEventModifierFlagShift)],@[@60,@(NSEventModifierFlagShift)],
+        @[@59,@(NSEventModifierFlagControl)],@[@62,@(NSEventModifierFlagControl)]]) {
+        for (NSNumber *flags in @[tap[1],@0]) {
+            assert(![controller handleEvent:TapEvent(NSEventTypeFlagsChanged,[tap[0] unsignedShortValue],flags.unsignedLongLongValue,1.0) client:client]);
+        }
+    }
+    for (NSArray *chord in @[@[@49,@(NSEventModifierFlagShift),@" "],
+        @[@49,@(NSEventModifierFlagControl | NSEventModifierFlagOption),@" "],
+        @[@4,@(NSEventModifierFlagOption | NSEventModifierFlagShift),@"H"]]) {
+        NSEvent *event = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:[chord[1] unsignedLongLongValue]
+            timestamp:2 windowNumber:0 context:nil characters:chord[2] charactersIgnoringModifiers:chord[2] isARepeat:NO keyCode:[chord[0] unsignedShortValue]];
+        assert(![controller handleEvent:event client:client]);
+    }
+    [controller toggleInputModeFromModifierTap];
+    [controller toggleChineseEnglishMode];
+    assert(!appearance.englishMode && !appearance.runtimeFullWidthInput && session.commandCalls == 0 && client.selectedModes.count == 0);
+    for (NSDictionary *binding in @[@{@"key_code":@56,@"modifiers":@0},@{@"key_code":@49,@"modifiers":@3},
+        @{@"key_code":@4,@"modifiers":@6},@{@"key_code":@8,@"modifiers":@7}])
+        assert(!MSIMEVoiceShortcutConflict(binding, appearance));
+    [standard setVolatileDomain:previous forName:NSArgumentDomain];
+    MSIMERemoveTestPreferenceSuite(defaults, suite);
+    puts("Shurufa removed shortcuts: legacy true ignored, composition preserved, voice binding available");
+}
+
 // The selected input mode, 中, 英 or 日, follows the controller's state. A mode the system reports - picked from the input menu or reached with Ctrl+Space - sets the Chinese/English state and, for 中 and 日, the scheme, and is not selected back.
 static void TestSystemInputModeReport(MSIMEAppearancePreferences *appearance) {
     ModeController *controller = [ModeController alloc];
@@ -13355,13 +13401,14 @@ int main(int argc, char **argv) {
             @autoreleasepool { TestEnglishModePunctuationAndWidthOutput(); }
             return 0;
         }
-        if (argc == 3 && std::string(argv[1]) == "--shurufa-system-source") {
+        if (argc == 3 && (std::string(argv[1]) == "--shurufa-system-source" || std::string(argv[1]) == "--shurufa-system-shortcuts")) {
             ShurufaTestBundle = [NSBundle bundleWithPath:[NSString stringWithUTF8String:argv[2]]];
             assert(ShurufaTestBundle);
             Method mainBundle = class_getClassMethod(NSBundle.class, @selector(mainBundle));
             IMP original = method_setImplementation(mainBundle, (IMP)ShurufaMainBundle);
             assert(MSIMEEditionIsShurufa());
-            TestShurufaSystemSourceAuthority();
+            if (std::string(argv[1]) == "--shurufa-system-source") TestShurufaSystemSourceAuthority();
+            else TestShurufaRemovedLanguageShortcuts();
             method_setImplementation(mainBundle, original);
             return 0;
         }
@@ -13458,12 +13505,11 @@ int main(int argc, char **argv) {
             assert(!prefs.capsLockTapShortcut && [MSIMEVoiceHotkeyMode(defaults) isEqual:@"hold"]);
             [defaults setObject:@{@"key_code":@60,@"modifiers":@0} forKey:@"MSIMEClientVoiceMacOSHotkey"];
             prefs.shiftTapShortcut = NO;
-            NSDictionary *beforeConflict = [defaults persistentDomainForName:suite];
-            assert((![prefs removeStoredKeys:@[@"MSIMEClientShiftTapShortcut",@"MSIMEClientCapsLockTapShortcut"]]));
-            assert([[defaults persistentDomainForName:suite] isEqual:beforeConflict]);
+            // 被移除的 Shift 切换不占语音绑定；恢复此分组不会引入冲突。
+            assert(([prefs removeStoredKeys:@[@"MSIMEClientShiftTapShortcut",@"MSIMEClientCapsLockTapShortcut"]]));
             assert(!prefs.shiftTapShortcut);
             assert(([prefs removeStoredKeys:@[@"MSIMEClientShiftTapShortcut",@"MSIMEClientVoiceMacOSHotkey",@"MSIMEClientVoiceHotkeyMode"]]));
-            assert(prefs.shiftTapShortcut && [MSIMEVoiceCustomShortcut(defaults)[@"key_code"] isEqual:@61]);
+            assert(!prefs.shiftTapShortcut && [MSIMEVoiceCustomShortcut(defaults)[@"key_code"] isEqual:@61]);
             MSIMERemoveTestPreferenceSuite(defaults, suite);
             [standard setVolatileDomain:oldArguments forName:NSArgumentDomain];
             method_setImplementation(mainBundle, original);

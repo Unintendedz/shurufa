@@ -1826,6 +1826,10 @@ impl MacosVoiceHotkey {
         edition: &crate::edition::Edition,
     ) -> bool {
         use crate::key_chord::{ChordKey, ChordModifiers, KeyChord};
+        // Shurufa 只保留语音绑定；旧语言切换、维护键及自定义切换均不占键。
+        if edition.id == "shurufa" {
+            return false;
+        }
         if self.modifiers == 0 {
             if matches!(self.key_code, 56 | 60) && keys.switch_language_shift {
                 return true;

@@ -4706,6 +4706,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
 //
 // Commit first, then switch: switching rebuilds the input session, and the other order loses the letters still being composed. setEnglishInputMode: finishes any composition of its own, which is a no-op once this has run.
 - (void)toggleInputModeFromModifierTap {
+    if (MSIMEEditionIsShurufa()) { return; }
     if ([self applyTrilingualCycleIfEnabled]) return;
     if ([_view[@"editing_text"] length] && _session && _activeClient) {
         // 单按修饰键是一次物理按下，却不经过 handleEvent: 的按下报告（它只看 keyDown）。派发前按指针开一轮：不出按键音，与以前一样；原样上屏的提交音照常由核心出。
@@ -4718,6 +4719,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
 
 // 组合键在循环关闭时保留原来的取消组字规则；轻点修饰键单独保留原文提交规则。
 - (void)toggleChineseEnglishMode {
+    if (MSIMEEditionIsShurufa()) { return; }
     if (![self applyTrilingualCycleIfEnabled])
         [self setEnglishInputMode:!_appearance.englishMode];
 }
@@ -7663,6 +7665,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     return msime::mac::CaptureEditableShiftFocus(bundle);
 }
 - (BOOL)observeModifierTap:(NSEvent *)event client:(id)sender {
+    if (MSIMEEditionIsShurufa()) { [self resetModifierTap]; return NO; }
     const BOOL restricted = _appearance.shiftTapRequiresEditable && _appearance.shiftTapShortcut;
     const bool wasArmed = _editableShiftGate.armed();
     const bool allowed = _editableShiftGate.observe(event, restricted, [self, sender] {
@@ -7791,6 +7794,14 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         return YES;
     }
     if (event.type != NSEventTypeKeyDown) return NO;
+    if (MSIMEEditionIsShurufa()) {
+        const auto flags = event.modifierFlags & (NSEventModifierFlagShift | NSEventModifierFlagControl |
+            NSEventModifierFlagOption | NSEventModifierFlagCommand);
+        // 语音绑定优先；已移除的固定切换键不再吞键或提交当前组字。
+        if ((event.keyCode == kVK_Space && (flags == NSEventModifierFlagShift ||
+                flags == (NSEventModifierFlagControl | NSEventModifierFlagOption))) ||
+            (event.keyCode == kVK_ANSI_H && flags == (NSEventModifierFlagOption | NSEventModifierFlagShift))) return NO;
+    }
     [_appearance lockActiveInputMode];
     if (event.keyCode == 51) {
         const BOOL compositionActive = [_view[@"editing_text"] length] || [_view[@"candidates"] count] ||
@@ -7875,7 +7886,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         (event.modifierFlags & NSEventModifierFlagShift) != 0,
         (event.modifierFlags & NSEventModifierFlagOption) != 0,
         (event.modifierFlags & NSEventModifierFlagCommand) != 0);
-    if (maintenanceShortcut != msime::mac::MaintenanceShortcutAction::None) {
+    if (!MSIMEEditionIsShurufa() && maintenanceShortcut != msime::mac::MaintenanceShortcutAction::None) {
         if (event.isARepeat) return YES;
         switch (maintenanceShortcut) {
             case msime::mac::MaintenanceShortcutAction::ClearCache: {

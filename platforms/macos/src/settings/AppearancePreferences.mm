@@ -1376,9 +1376,9 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     }
     return self;
 }
-- (msime::mac::ToggleChord)englishCandidatesToggleChord { return _englishCandidatesToggleChord; }
-- (msime::mac::ToggleChord)fullWidthToggleChord { return _fullWidthToggleChord; }
-- (msime::mac::ToggleChord)punctuationToggleChord { return _punctuationToggleChord; }
+- (msime::mac::ToggleChord)englishCandidatesToggleChord { if (MSIMEEditionIsShurufa()) return {}; return _englishCandidatesToggleChord; }
+- (msime::mac::ToggleChord)fullWidthToggleChord { if (MSIMEEditionIsShurufa()) return {}; return _fullWidthToggleChord; }
+- (msime::mac::ToggleChord)punctuationToggleChord { if (MSIMEEditionIsShurufa()) return {}; return _punctuationToggleChord; }
 - (msime::mac::ToggleChord)voiceInputToggleChord { return _voiceInputToggleChord; }
 - (NSURL *)skinsRoot { return _skinsRoot; }
 - (void)setTranslationPreferencesDirectory:(NSString *)directory {
@@ -2743,10 +2743,12 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     [_inputModeRuleOverrides addObject:_activeModeApplication];
 }
 - (BOOL)inputModeShortcut {
+    if (MSIMEEditionIsShurufa()) return NO;
     if (_sharedInputModeShortcut) return _sharedInputModeShortcut.boolValue;
     return [_defaults objectForKey:InputModeShortcutKey] == nil || [_defaults boolForKey:InputModeShortcutKey];
 }
 - (BOOL)shiftTapShortcut {
+    if (MSIMEEditionIsShurufa()) return NO;
     if (_sharedShiftTapShortcut) return _sharedShiftTapShortcut.boolValue;
     return [_defaults objectForKey:ShiftTapShortcutKey] == nil || [_defaults boolForKey:ShiftTapShortcutKey];
 }
@@ -2759,11 +2761,13 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     [self preferencesChanged];
 }
 - (BOOL)controlTapShortcut {
+    if (MSIMEEditionIsShurufa()) return NO;
     return _sharedControlTapShortcut ? _sharedControlTapShortcut.boolValue : [_defaults boolForKey:ControlTapShortcutKey];
 }
 // 中日英循环切换（共享偏好 `keybindings.trilingual_cycle`，默认关）：打开后「切换中英文」那一组
 // 快捷键按 中 → 日 → 英 → 中 转圈，顺序和「有组字时先上屏」在共享层（`msime_client_language_cycle`）。
 - (BOOL)trilingualCycle {
+    if (MSIMEEditionIsShurufa()) return NO;
     if (_sharedTrilingualCycle) return _sharedTrilingualCycle.boolValue;
     return [_defaults boolForKey:TrilingualCycleKey];
 }
@@ -2790,6 +2794,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     [self preferencesChanged];
 }
 - (BOOL)controlOptionSpaceShortcut {
+    if (MSIMEEditionIsShurufa()) return NO;
     if (_sharedControlOptionSpaceShortcut) return _sharedControlOptionSpaceShortcut.boolValue;
     return [_defaults objectForKey:ControlOptionSpaceShortcutKey] == nil || [_defaults boolForKey:ControlOptionSpaceShortcutKey];
 }
@@ -2800,6 +2805,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     [self preferencesChanged];
 }
 - (BOOL)characterSetShortcut {
+    if (MSIMEEditionIsShurufa()) return NO;
     if (_sharedCharacterSetShortcut) return _sharedCharacterSetShortcut.boolValue;
     return [_defaults objectForKey:CharacterSetShortcutKey] == nil || [_defaults boolForKey:CharacterSetShortcutKey];
 }
@@ -2810,6 +2816,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     [self preferencesChanged];
 }
 - (BOOL)fullWidthShortcut {
+    if (MSIMEEditionIsShurufa()) return NO;
     if (_sharedFullWidthShortcut) return _sharedFullWidthShortcut.boolValue;
     return [_defaults objectForKey:FullWidthShortcutKey] == nil || [_defaults boolForKey:FullWidthShortcutKey];
 }
@@ -5916,7 +5923,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
 - (BOOL)removeStoredKeys:(NSArray<NSString *> *)keys
                   fields:(NSDictionary<NSString *, NSArray<NSString *> *> *)fields {
     // 只恢复一个按键分组时不能改变另一个分组的语音绑定，也不能先写出无效组合。
-    if (![keys containsObject:VoiceMacOSHotkeyKey]) {
+    if (!MSIMEEditionIsShurufa() && ![keys containsObject:VoiceMacOSHotkeyKey]) {
         for (NSArray *entry in @[@[ShiftTapShortcutKey,@[@56,@60],@0],
             @[ControlTapShortcutKey,@[@59,@62],@0], @[InputModeShortcutKey,@[@49],@4],
             @[ControlOptionSpaceShortcutKey,@[@49],@3], @[CharacterSetShortcutKey,@[@3],@5],
