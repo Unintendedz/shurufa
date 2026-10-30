@@ -14,7 +14,10 @@ static inline BOOL MSIMEVoiceFunctionKey(unsigned short key) {
     }
 }
 static inline BOOL MSIMEVoiceShortcutValid(id value) {
-    if (![value isKindOfClass:NSDictionary.class] || [value count] != 2) return NO;
+    if (![value isKindOfClass:NSDictionary.class]) return NO;
+    // right_modifiers 可选：modifiers 里必须用右侧键按的位，其余位用左侧键；没有它时左右都算。
+    id right = value[@"right_modifiers"];
+    if ([value count] != (right ? 3 : 2)) return NO;
     id key = value[@"key_code"], mods = value[@"modifiers"];
     if (![key isKindOfClass:NSNumber.class] || ![mods isKindOfClass:NSNumber.class] ||
         CFGetTypeID((__bridge CFTypeRef)key) == CFBooleanGetTypeID() ||
@@ -22,6 +25,8 @@ static inline BOOL MSIMEVoiceShortcutValid(id value) {
     NSInteger code = [key integerValue], flags = [mods integerValue];
     if ([key doubleValue] != code || [mods doubleValue] != flags || code < 0 || code > 126 ||
         flags < 0 || flags > 15 || code == 53 || code == 57 || code == 63) return NO;
+    if (right && (![right isKindOfClass:NSNumber.class] || CFGetTypeID((__bridge CFTypeRef)right) == CFBooleanGetTypeID() ||
+        [right doubleValue] != [right integerValue] || [right integerValue] < 0 || ([right integerValue] & ~flags) != 0)) return NO;
     if (MSIMEVoiceModifierKey(code)) {
         const unsigned own = code == 54 || code == 55 ? 8 : code == 56 || code == 60 ? 4 :
             code == 58 || code == 61 ? 2 : 1;

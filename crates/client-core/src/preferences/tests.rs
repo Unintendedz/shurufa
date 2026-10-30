@@ -8222,7 +8222,8 @@ fn shurufa_defaults_use_textstream_with_polish_and_validate() {
         defaults.voice_input.macos_hotkey,
         Some(MacosVoiceHotkey {
             key_code: 61,
-            modifiers: 0
+            modifiers: 0,
+            right_modifiers: None,
         })
     );
     assert!(
@@ -8250,6 +8251,7 @@ fn macos_voice_hotkeys_migrate_validate_and_round_trip() {
         preferences.voice_input.macos_hotkey = Some(MacosVoiceHotkey {
             key_code,
             modifiers,
+            right_modifiers: None,
         });
         preferences.validate().unwrap();
         let restored: Preferences =
@@ -8261,9 +8263,31 @@ fn macos_voice_hotkeys_migrate_validate_and_round_trip() {
         preferences.voice_input.macos_hotkey = Some(MacosVoiceHotkey {
             key_code,
             modifiers,
+            right_modifiers: None,
         });
         assert!(preferences.validate().is_err());
     }
+    // 右侧 Option + ←：侧别只能是已按修饰键的子集，旧文档没有这个字段时两侧都算。
+    let mut sided = Preferences::default();
+    sided.voice_input.macos_hotkey = Some(MacosVoiceHotkey {
+        key_code: 123,
+        modifiers: 2,
+        right_modifiers: Some(2),
+    });
+    sided.validate().unwrap();
+    let value = serde_json::to_value(&sided).unwrap();
+    assert_eq!(value["voice_input"]["macos_hotkey"]["right_modifiers"], 2);
+    let restored: Preferences = serde_json::from_value(value).unwrap();
+    assert_eq!(restored.voice_input, sided.voice_input);
+    sided.voice_input.macos_hotkey.as_mut().unwrap().right_modifiers = Some(4);
+    assert!(sided.validate().is_err());
+    let unsided: MacosVoiceHotkey =
+        serde_json::from_value(serde_json::json!({"key_code":123,"modifiers":2})).unwrap();
+    assert_eq!(unsided.right_modifiers, None);
+    assert!(serde_json::to_value(&unsided)
+        .unwrap()
+        .get("right_modifiers")
+        .is_none());
     assert!(serde_json::from_value::<VoiceInputPreferences>(
         serde_json::json!({"hotkey_mode":"unknown"})
     )
@@ -8277,6 +8301,7 @@ fn macos_voice_hotkeys_reject_conflicts_in_both_edit_directions() {
     preferences.voice_input.macos_hotkey = Some(MacosVoiceHotkey {
         key_code: 60,
         modifiers: 0,
+        right_modifiers: None,
     });
     assert!(preferences.validate().is_ok());
     preferences.keybindings.switch_language_shift = true;
@@ -8284,6 +8309,7 @@ fn macos_voice_hotkeys_reject_conflicts_in_both_edit_directions() {
     preferences.voice_input.macos_hotkey = Some(MacosVoiceHotkey {
         key_code: 62,
         modifiers: 0,
+        right_modifiers: None,
     });
     assert!(preferences.validate().is_ok());
     preferences.keybindings.switch_language_ctrl = true;
@@ -8291,6 +8317,7 @@ fn macos_voice_hotkeys_reject_conflicts_in_both_edit_directions() {
     preferences.voice_input.macos_hotkey = Some(MacosVoiceHotkey {
         key_code: 49,
         modifiers: 3,
+        right_modifiers: None,
     });
     assert!(preferences.validate().is_err());
     preferences.keybindings.switch_language_ctrl_alt_space = false;
@@ -8298,6 +8325,7 @@ fn macos_voice_hotkeys_reject_conflicts_in_both_edit_directions() {
     preferences.voice_input.macos_hotkey = Some(MacosVoiceHotkey {
         key_code: 100,
         modifiers: 3,
+        right_modifiers: None,
     });
     assert!(preferences.validate().is_ok());
     preferences.keybindings.toggle_punctuation = "Ctrl+Alt+F8".into();
@@ -8324,6 +8352,7 @@ fn shurufa_macos_voice_hotkeys_use_actual_platform_occupancy() {
         preferences.voice_input.macos_hotkey = Some(MacosVoiceHotkey {
             key_code,
             modifiers,
+            right_modifiers: None,
         });
         let saved = store
             .save(0, preferences)
@@ -8337,6 +8366,7 @@ fn shurufa_macos_voice_hotkeys_use_actual_platform_occupancy() {
     full.voice_input.macos_hotkey = Some(MacosVoiceHotkey {
         key_code: 40,
         modifiers: 13,
+        right_modifiers: None,
     });
     assert!(full.validate().is_err());
 }

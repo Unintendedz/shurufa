@@ -21406,6 +21406,7 @@ fn shurufa_macos_voice_hotkey_survives_runtime_validation() {
     preferences.voice_input.macos_hotkey = Some(msime_client_core::preferences::MacosVoiceHotkey {
         key_code: 40,
         modifiers: 13,
+        right_modifiers: None,
     });
     let mut options = empty_host_options(directory.path());
     options["edition"] = json!("shurufa");
@@ -21418,6 +21419,7 @@ fn shurufa_macos_voice_hotkey_survives_runtime_validation() {
     preferences.voice_input.macos_hotkey = Some(msime_client_core::preferences::MacosVoiceHotkey {
         key_code: 8,
         modifiers: 7,
+        right_modifiers: None,
     });
     assert_eq!(update(handle, 2, &preferences)["ok"], false);
     assert_eq!(read(msime_client_destroy(handle))["ok"], true);

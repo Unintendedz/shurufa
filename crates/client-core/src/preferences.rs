@@ -1817,6 +1817,9 @@ pub enum VoiceHotkeyMode {
 pub struct MacosVoiceHotkey {
     pub key_code: u16,
     pub modifiers: u8,
+    /// `modifiers` 中必须用右侧键按下的那几位，其余位必须用左侧键；缺省时左右两侧都算。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right_modifiers: Option<u8>,
 }
 
 impl MacosVoiceHotkey {
@@ -1927,6 +1930,12 @@ impl MacosVoiceHotkey {
 
     fn valid(&self) -> bool {
         if self.key_code > 126 || self.modifiers > 15 || matches!(self.key_code, 53 | 57 | 63) {
+            return false;
+        }
+        if self
+            .right_modifiers
+            .is_some_and(|right| right & !self.modifiers != 0)
+        {
             return false;
         }
         if matches!(self.key_code, 54 | 55 | 56 | 58 | 59 | 60 | 61 | 62) {
@@ -4412,6 +4421,7 @@ impl Preferences {
             preferences.voice_input.macos_hotkey = Some(MacosVoiceHotkey {
                 key_code: 61,
                 modifiers: 0,
+                right_modifiers: None,
             });
             preferences.voice_input.hotkey_mode = VoiceHotkeyMode::Hold;
             preferences.voice_input.hotkey_ctrl_f9 = false;

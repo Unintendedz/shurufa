@@ -784,11 +784,11 @@ static void ShowNotice(NSTextField *label, NSString *message, NSColor *color)
                 ShowNotice(view->_hotkeyNotice, @"Caps Lock 留作中英文切换，不能设为语音快捷键。", NSColor.systemRedColor);
                 view->_pendingModifier = nil;
             } else if (event.type == NSEventTypeKeyDown && !event.isARepeat) {
-                [view acceptRecordedHotkey:@{@"key_code":@(event.keyCode), @"modifiers":@(MSIMEVoiceModifierBits(event.modifierFlags))}];
+                [view acceptRecordedHotkey:MSIMERecordedVoiceShortcut(event.keyCode, MSIMEVoiceModifierBits(event.modifierFlags), event.modifierFlags)];
             } else if (event.type == NSEventTypeFlagsChanged) {
                 unsigned flags = MSIMEVoiceModifierBits(event.modifierFlags);
                 unsigned own = MSIMEVoiceModifierBitForKey(event.keyCode);
-                if (own && (flags & own)) view->_pendingModifier = @{@"key_code":@(event.keyCode), @"modifiers":@(flags & ~own)};
+                if (own && (flags & own)) view->_pendingModifier = MSIMERecordedVoiceShortcut(event.keyCode, flags & ~own, event.modifierFlags);
                 else if (flags == 0 && view->_pendingModifier) [view acceptRecordedHotkey:view->_pendingModifier];
             }
             return nil;

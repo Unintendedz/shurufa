@@ -4,6 +4,12 @@
 #import "../input/ToggleHotkeyEvent.h"
 #import "../settings/KeycapPresentation.h"
 
+// 录制时连同修饰键的左右侧一起记下：按的是右 Option，左 Option 就不会触发。
+static inline NSDictionary *MSIMERecordedVoiceShortcut(unsigned short code, unsigned modifiers, NSEventModifierFlags flags) {
+    if (!modifiers) return @{@"key_code":@(code), @"modifiers":@0};
+    return @{@"key_code":@(code), @"modifiers":@(modifiers), @"right_modifiers":@(MSIMEVoiceRightModifierBits(flags) & modifiers)};
+}
+
 static inline NSString *MSIMEVoiceShortcutTitle(NSDictionary *binding) {
     if (!binding) return @"未设置";
     const unsigned short code = [binding[@"key_code"] unsignedShortValue];
@@ -20,10 +26,13 @@ static inline NSString *MSIMEVoiceShortcutTitle(NSDictionary *binding) {
         @125:@"下方向键", @126:@"上方向键"}[@(code)] ?: [NSString stringWithFormat:@"键码 %u", code];
     NSMutableArray *parts = [NSMutableArray array];
     const unsigned flags = [binding[@"modifiers"] unsignedIntValue];
-    if (flags & 1) [parts addObject:@"Control"];
-    if (flags & 2) [parts addObject:@"Option"];
-    if (flags & 4) [parts addObject:@"Shift"];
-    if (flags & 8) [parts addObject:@"Command"];
+    id right = binding[@"right_modifiers"];
+    for (NSArray *item in @[@[@1,@"Control"],@[@2,@"Option"],@[@4,@"Shift"],@[@8,@"Command"]]) {
+        const unsigned bit = [item[0] unsignedIntValue];
+        if (!(flags & bit)) continue;
+        NSString *side = !right ? @"" : ([right unsignedIntValue] & bit) ? @"右 " : @"左 ";
+        [parts addObject:[side stringByAppendingString:item[1]]];
+    }
     [parts addObject:primary];
     return [parts componentsJoinedByString:@"+"];
 }
@@ -32,8 +41,13 @@ static inline NSView *MSIMEVoiceShortcutKeycaps(NSDictionary *binding) {
     if (!binding) return [NSTextField labelWithString:@"未设置"];
     NSMutableArray<NSView *> *keys = [NSMutableArray array];
     unsigned flags = [binding[@"modifiers"] unsignedIntValue];
-    for (NSArray *item in @[@[@1,@"⌃"],@[@2,@"⌥"],@[@4,@"⇧"],@[@8,@"⌘"]])
-        if (flags & [item[0] unsignedIntValue]) [keys addObject:MSIMEKeycap(item[1])];
+    id right = binding[@"right_modifiers"];
+    for (NSArray *item in @[@[@1,@"⌃"],@[@2,@"⌥"],@[@4,@"⇧"],@[@8,@"⌘"]]) {
+        const unsigned bit = [item[0] unsignedIntValue];
+        if (!(flags & bit)) continue;
+        NSString *side = !right ? nil : ([right unsignedIntValue] & bit) ? @"右" : @"左";
+        [keys addObject:MSIMEKeycap(item[1], side)];
+    }
     NSNumber *code = binding[@"key_code"];
     NSDictionary *symbols = @{@54:@"⌘",@55:@"⌘",@56:@"⇧",@60:@"⇧",@58:@"⌥",@61:@"⌥",@59:@"⌃",@62:@"⌃",
         @123:@"←",@124:@"→",@125:@"↓",@126:@"↑",@49:@"空格",@36:@"↩",@48:@"⇥",@51:@"⌫"};

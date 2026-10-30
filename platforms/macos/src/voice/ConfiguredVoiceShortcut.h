@@ -3,6 +3,7 @@
 #include <IOKit/hidsystem/IOLLEvent.h>
 #import "../core/VoiceShortcutConfig.h"
 #import "VoiceHoldShortcut.h"
+#include <initializer_list>
 
 static inline unsigned MSIMEVoiceModifierBits(NSEventModifierFlags flags) {
     return ((flags & NSEventModifierFlagControl) ? 1 : 0) |
@@ -30,6 +31,25 @@ static inline NSEventModifierFlags MSIMEVoiceModifierGroupSides(unsigned group) 
     return group == 8 ? NX_DEVICELCMDKEYMASK | NX_DEVICERCMDKEYMASK :
         group == 4 ? NX_DEVICELSHIFTKEYMASK | NX_DEVICERSHIFTKEYMASK :
         group == 2 ? NX_DEVICELALTKEYMASK | NX_DEVICERALTKEYMASK : NX_DEVICELCTLKEYMASK | NX_DEVICERCTLKEYMASK;
+}
+
+// 录下的组合里每个修饰键是右侧（right 的对应位）还是左侧；事件里同组两侧都没报时不判断侧别。
+static inline unsigned MSIMEVoiceRightModifierBits(NSEventModifierFlags flags) {
+    return ((flags & NX_DEVICERCTLKEYMASK) ? 1 : 0) | ((flags & NX_DEVICERALTKEYMASK) ? 2 : 0) |
+        ((flags & NX_DEVICERSHIFTKEYMASK) ? 4 : 0) | ((flags & NX_DEVICERCMDKEYMASK) ? 8 : 0);
+}
+static inline bool MSIMEVoiceSidesMatch(NSEventModifierFlags flags, unsigned required, id right) {
+    if (![right isKindOfClass:NSNumber.class]) return true;
+    const unsigned wantRight = [right unsignedIntValue];
+    for (unsigned group : {1u, 2u, 4u, 8u}) {
+        if (!(required & group)) continue;
+        const NSEventModifierFlags sides = MSIMEVoiceModifierGroupSides(group);
+        const NSEventModifierFlags rightSide = sides & (NX_DEVICERCTLKEYMASK | NX_DEVICERALTKEYMASK | NX_DEVICERSHIFTKEYMASK | NX_DEVICERCMDKEYMASK);
+        if (!(flags & sides)) continue;
+        const NSEventModifierFlags expected = (wantRight & group) ? rightSide : sides & ~rightSide;
+        if ((flags & sides) != expected) return false;
+    }
+    return true;
 }
 
 // 明确的按下/松开状态机。切换模式的裸修饰键等松开才开始，组合键不经过计时猜测。
@@ -113,7 +133,7 @@ public:
             required = [options.custom[@"modifiers"] unsignedIntValue];
             const auto primarySide = MSIMEVoiceSideFlag(code);
             const auto primaryGroup = MSIMEVoiceModifierGroupSides(MSIMEVoiceModifierBitForKey(code));
-            match = key == code && (modifier
+            match = key == code && MSIMEVoiceSidesMatch(event.modifierFlags, required, options.custom[@"right_modifiers"]) && (modifier
                 ? type == NSEventTypeFlagsChanged && (sides_ & primaryGroup) == primarySide && modifiers == (required | MSIMEVoiceModifierBitForKey(code))
                 : type == NSEventTypeKeyDown && modifiers == required);
         } else if (type == NSEventTypeKeyDown && options.toggleMatch) {

@@ -89,6 +89,31 @@ int main() {
             assert(shortcut.observe(Event(58, 0, NSEventTypeFlagsChanged, 12.2), config, false).action == Action::None);
             assert(shortcut.observe(Event(123, arrow, NSEventTypeKeyDown, 14), config, false).action == Action::Toggle);
         }
+        // 录的是右 Option+←：左 Option+← 不触发、照常交给应用，右侧才开始和结束。
+        {
+            MSIMEConfiguredVoiceShortcut shortcut;
+            NSDictionary *binding = @{@"key_code":@123, @"modifiers":@2, @"right_modifiers":@2};
+            assert(MSIMEVoiceShortcutValid(binding));
+            assert(!MSIMEVoiceShortcutValid((@{@"key_code":@123, @"modifiers":@2, @"right_modifiers":@4})));
+            assert(!MSIMEVoiceShortcutValid((@{@"key_code":@123, @"modifiers":@2, @"right_modifiers":@YES})));
+            MSIMEConfiguredVoiceShortcut::Options config{binding, @"toggle", false, false, false, false};
+            const auto arrow = NSEventModifierFlagFunction | NSEventModifierFlagNumericPad;
+            const auto left = arrow | NSEventModifierFlagOption | NX_DEVICELALTKEYMASK;
+            const auto right = arrow | NSEventModifierFlagOption | NX_DEVICERALTKEYMASK;
+            const auto ignored = shortcut.observe(Event(123, left, NSEventTypeKeyDown, 40), config, false);
+            assert(!ignored.consumed && ignored.action == Action::None);
+            assert(shortcut.observe(Event(58, 0, NSEventTypeFlagsChanged, 40.1), config, false).action == Action::None);
+            assert(shortcut.observe(Event(123, right, NSEventTypeKeyDown, 41), config, false).action == Action::Toggle);
+            assert(shortcut.observe(Event(61, 0, NSEventTypeFlagsChanged, 41.1), config, true).action == Action::None);
+            const auto leftWhileRecording = shortcut.observe(Event(123, left, NSEventTypeKeyDown, 42), config, true);
+            assert(!leftWhileRecording.consumed && leftWhileRecording.action == Action::None);
+            assert(shortcut.observe(Event(58, 0, NSEventTypeFlagsChanged, 42.1), config, true).action == Action::None);
+            assert(shortcut.observe(Event(123, right, NSEventTypeKeyDown, 43), config, true).action == Action::Toggle);
+            // 旧绑定没有侧别时左右都算。
+            MSIMEConfiguredVoiceShortcut legacy;
+            MSIMEConfiguredVoiceShortcut::Options either{@{@"key_code":@123, @"modifiers":@2}, @"toggle", false, false, false, false};
+            assert(legacy.observe(Event(123, left, NSEventTypeKeyDown, 50), either, false).action == Action::Toggle);
+        }
         // 按住模式先松开修饰键：自动重复的 KeyDown 仍被吞掉，新的一次按下照常开始。
         {
             MSIMEConfiguredVoiceShortcut shortcut;
