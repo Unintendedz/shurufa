@@ -53,4 +53,6 @@ python3 "$root/platforms/macos/scripts/shurufa_installation.py" retire-caches "$
   "$HOME/Library/Application Support/Shurufa Installation Backups/input-source-caches-$(date +%Y%m%d-%H%M%S)"
 # 系统已有实例时 open 会复用它，不直接派生第二个服务器。
 open -g "$destination"
+# 让菜单栏输入法菜单按当前登记重读，不必手动删掉再添加。
+"$executable" --announce-input-source-change
 python3 "$root/platforms/macos/scripts/shurufa_installation.py" verify "$destination"

@@ -81,6 +81,13 @@ int main(int argc, const char *argv[]) {
             for (NSString *mode in modes) std::printf("%s\n", mode.UTF8String);
             return 0;
         }
+        if (argc == 2 && std::strcmp(argv[1], "--announce-input-source-change") == 0) {
+            // 重装时 LaunchServices 先报注销再报登记，菜单栏输入法菜单会把 Shurufa 去掉而不再加回；
+            // 系统设置添加输入法后也是靠这两条通知让菜单重读。这里只通知，不改启用状态、不切输入源。
+            for (NSString *name in @[@"AppleInstalledInputSourcesChangedNotification", @"AppleEnabledInputSourcesChangedNotification"])
+                [NSDistributedNotificationCenter.defaultCenter postNotificationName:name object:nil userInfo:nil deliverImmediately:YES];
+            return 0;
+        }
         if (MSIMEShouldReportInputSourceEnabled(argc, argv)) {
             std::printf("%s\n", MSIMEInputSourceIsEnabled(NSBundle.mainBundle.bundleIdentifier) ? "true" : "false");
             return 0;
