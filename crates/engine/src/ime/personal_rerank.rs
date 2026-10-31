@@ -1,4 +1,6 @@
 //! 首组同音候选的个人上下文重排（core-session.md §7.2，`R/core/personal_context_rerank.cpp`）。
+//!
+//! 首组只收同字数、且选中即用完全部按键的字典候选：不同读音的字典权重不可比，只答前缀的行（如 `gei` 下的 个/ge）混进来会按权重压过完整匹配的 给/gei。
 
 use crate::lattice::personal::{PersonalContext, PersonalNgram};
 use crate::types::WordItem;
@@ -33,12 +35,13 @@ impl PersonalContextRerankOrder {
     }
 }
 
-/// 返回首组同长度字典候选的栈上排序索引；排序未变时返回 `None`，固定首选保持原位。
+/// 返回首组（同字数、选中即用完全部按键的字典候选）的栈上排序索引；首选不满足这一条件、排序未变时返回 `None`，固定首选保持原位。
 pub(crate) fn personal_context_rerank_order(
     candidates: &[WordItem],
     model: &PersonalNgram,
     earlier: Option<&str>,
     previous: &str,
+    completes: &dyn Fn(&WordItem) -> bool,
     is_pinned: &mut dyn FnMut(&str) -> bool,
 ) -> Option<PersonalContextRerankOrder> {
     let first = candidates.first()?;
@@ -51,7 +54,7 @@ pub(crate) fn personal_context_rerank_order(
         return None;
     }
 
-    let group = leading_group_len(candidates);
+    let group = leading_group_len(candidates, completes);
     if group < 2 {
         return None;
     }
@@ -71,13 +74,17 @@ fn personal_probabilities(
     personal
 }
 
-/// 首组与第一行字数相同的连续字典候选，最多 16 行，按 Unicode 码点计数。
-fn leading_group_len(candidates: &[WordItem]) -> usize {
+/// 首组与第一行字数相同、且选中即用完全部按键的连续字典候选，最多 16 行，按 Unicode 码点计数。
+fn leading_group_len(candidates: &[WordItem], completes: &dyn Fn(&WordItem) -> bool) -> usize {
     let characters = candidates[0].word.chars().count();
     candidates
         .iter()
         .take(MAX_GROUP)
-        .take_while(|item| item.source.is_dictionary() && item.word.chars().count() == characters)
+        .take_while(|item| {
+            item.source.is_dictionary()
+                && item.word.chars().count() == characters
+                && completes(item)
+        })
         .count()
 }
 
@@ -172,7 +179,14 @@ mod tests {
         candidates[0] = row("乙", 100);
 
         let (ordered, allocations) = allocations::count(|| {
-            personal_context_rerank_order(&candidates, &model, None, "甲", &mut never_pinned())
+            personal_context_rerank_order(
+                &candidates,
+                &model,
+                None,
+                "甲",
+                &|_| true,
+                &mut never_pinned(),
+            )
         });
 
         assert_eq!(ordered, None);
@@ -189,7 +203,14 @@ mod tests {
         let mut reordered = candidates.clone();
 
         let (ordered, allocations) = allocations::count(|| {
-            personal_context_rerank_order(&candidates, &model, None, "甲", &mut never_pinned())
+            personal_context_rerank_order(
+                &candidates,
+                &model,
+                None,
+                "甲",
+                &|_| true,
+                &mut never_pinned(),
+            )
         });
 
         let order = ordered.expect("个人上下文应把最后一个组内候选提到首位");
@@ -209,7 +230,14 @@ mod tests {
         candidates[MAX_GROUP - 1] = row("乙", 1);
 
         let (order, allocations) = allocations::count(|| {
-            personal_context_rerank_order(&candidates, &model, None, "甲", &mut never_pinned())
+            personal_context_rerank_order(
+                &candidates,
+                &model,
+                None,
+                "甲",
+                &|_| true,
+                &mut never_pinned(),
+            )
         });
 
         let order = order.expect("个人上下文应返回组内排序");
@@ -288,15 +316,44 @@ mod tests {
     #[test]
     fn the_group_is_the_leading_same_length_dictionary_run() {
         let mut list = vec![row("甲", 3), row("乙", 2), row("丙丁", 1), row("戊", 1)];
-        assert_eq!(leading_group_len(&list), 2);
+        assert_eq!(leading_group_len(&list, &|_| true), 2);
         list[1].source = CandidateSource::CloudSuggestion;
-        assert_eq!(leading_group_len(&list), 1);
+        assert_eq!(leading_group_len(&list, &|_| true), 1);
         list[1].source = CandidateSource::UserDatabase;
         list[2] = row("丙", 1);
-        assert_eq!(leading_group_len(&list), 4);
+        assert_eq!(leading_group_len(&list, &|_| true), 4);
 
         let long: Vec<WordItem> = (0..20).map(|index| row("字", index)).collect();
-        assert_eq!(leading_group_len(&long), MAX_GROUP);
+        assert_eq!(leading_group_len(&long, &|_| true), MAX_GROUP);
+
+        let list = vec![row("甲", 3), row("乙", 2), row("丙", 1)];
+        assert_eq!(
+            leading_group_len(&list, &|item| item.word.as_ref() != "乙"),
+            1
+        );
+    }
+
+    #[test]
+    fn rows_that_only_answer_a_prefix_do_not_join_the_group() {
+        let mut model = PersonalNgram::default();
+        model.add_pair("我", "给", 32);
+        let candidates = [
+            WordItem::new("gei", "给", 2_939_384, CandidateSource::Database, "gei"),
+            WordItem::new("ge", "个", 14_790_406, CandidateSource::Database, "ge"),
+            WordItem::new("ge", "哥", 14_789_906, CandidateSource::Database, "ge"),
+        ];
+        let completes = |item: &WordItem| item.word.as_ref() == "给";
+        assert_eq!(
+            personal_context_rerank_order(
+                &candidates,
+                &model,
+                None,
+                "我",
+                &completes,
+                &mut never_pinned()
+            ),
+            None
+        );
     }
 }
 

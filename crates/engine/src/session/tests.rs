@@ -4606,6 +4606,27 @@ fn a_short_pause_keeps_the_chain_and_a_long_one_breaks_it() {
 }
 
 #[test]
+fn prefix_rows_do_not_displace_the_whole_key_leader_in_the_personal_context() {
+    let fixture = Fixture::new(
+        "CREATE TABLE tbl_1_g(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+INSERT INTO tbl_1_g VALUES('gei','g','给',100),('ge','g','个',1000);\
+CREATE TABLE tbl_1_w(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+INSERT INTO tbl_1_w VALUES('wo','w','我',100);",
+    );
+    let mut session = fixture.session();
+    let clock = TestClock::install(&mut session);
+    for (code, word) in [("wo", "我"), ("gei", "给"), ("wo", "我")] {
+        type_text(&mut session, code);
+        select_word(&mut session, word);
+        clock.advance(Duration::from_secs(1));
+    }
+    type_text(&mut session, "gei");
+    let list = words(&session);
+    assert!(list.iter().any(|word| word == "个"), "{list:?}");
+    assert_eq!(list.first().map(String::as_str), Some("给"), "{list:?}");
+}
+
+#[test]
 fn the_pause_is_measured_from_the_last_commit() {
     let fixture = Fixture::new(CONTEXT_FIXTURE);
     let mut session = fixture.session();

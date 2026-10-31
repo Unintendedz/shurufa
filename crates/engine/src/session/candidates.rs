@@ -150,6 +150,9 @@ impl InputSession {
                     &model,
                     self.chain.earlier.as_deref(),
                     previous,
+                    &|row: &WordItem| {
+                        self.prefix_active || self.selection_completes_composition(row)
+                    },
                     &mut |leader: &str| {
                         is_pinned_candidate(journal, &context, leader)
                             || (self.frequency.mode != FrequencyAdjustmentMode::Disabled
