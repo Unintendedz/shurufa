@@ -118,8 +118,11 @@ int main(int argc, const char *argv[]) {
                 TISEnableInputSource, TISDisableInputSource);
             return status == noErr ? 0 : 1;
         }
-        if (!MSIMEPrepareShurufaHost()) {
-            std::fprintf(stderr, "Shurufa: cannot prepare bundled input resources\n");
+        NSString *prepareFailure = nil;
+        if (!MSIMEPrepareShurufaHost(&prepareFailure)) {
+            // launchd 启动的实例 stderr 不落盘，同时写统一日志留下痕迹。
+            NSLog(@"Shurufa prepare-host failed: %@", prepareFailure);
+            std::fprintf(stderr, "Shurufa: cannot prepare bundled input resources: %s\n", prepareFailure.UTF8String ?: "");
             return 1;
         }
         for (int index = 1; index < argc; ++index) {

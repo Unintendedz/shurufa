@@ -51,22 +51,35 @@ static inline MSIMERuntimeOptionsRefreshResult MSIMERefreshRuntimeOptions(NSStri
 
 // 原生独立版在首次启动时准备随包词库，始终使用自己的状态目录。
 // 这条路径只读已校验的本地资源，不下载词库，也不导入其他输入法的配置。
-static inline BOOL MSIMEPrepareShurufaHost(void) {
+/// 准备失败时，原因写进 `failure`（非空时），调用方据此报告，不再只得到一个 NO。
+static inline BOOL MSIMEPrepareShurufaHost(NSString **failure = nullptr) {
+    auto fail = [failure](NSString *reason) {
+        if (failure) *failure = reason;
+        return NO;
+    };
     if (!MSIMEEditionIsShurufa()) return YES;
     NSString *resources = [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"EngineResources"];
     NSString *state = MSIMEDefaultClientStateDirectory(NSFileManager.defaultManager).path;
-    if (!resources.isAbsolutePath || !state.isAbsolutePath) return NO;
+    if (!resources.isAbsolutePath || !state.isAbsolutePath) return fail(@"资源或状态目录不是绝对路径");
     NSDictionary *request = @{@"resources": resources, @"state_root": state, @"edition": @"shurufa"};
     NSData *input = [NSJSONSerialization dataWithJSONObject:request options:0 error:nil];
-    if (!input) return NO;
+    if (!input) return fail(@"请求无法编码");
     auto raw = msime::host_api::own_string(msime_client_prepare_host(
         static_cast<const uint8_t *>(input.bytes), input.length));
-    if (!raw) return NO;
+    if (!raw) return fail(@"Host API 没有返回");
     NSData *data = [NSData dataWithBytes:raw.get() length:strlen(raw.get())];
     id response = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-    if (![response isKindOfClass:NSDictionary.class] || response[@"ok"] != (__bridge id)kCFBooleanTrue ||
-        ![response[@"value"] isKindOfClass:NSDictionary.class]) return NO;
+    if (![response isKindOfClass:NSDictionary.class]) return fail(@"Host API 回复无法解析");
+    if (response[@"ok"] != (__bridge id)kCFBooleanTrue) {
+        return fail([response[@"error"] isKindOfClass:NSString.class] ? response[@"error"] : @"Host API 回复无法解析");
+    }
+    if (![response[@"value"] isKindOfClass:NSDictionary.class]) return fail(@"Host API 回复无法解析");
     NSData *options = [NSJSONSerialization dataWithJSONObject:response[@"value"] options:NSJSONWritingPrettyPrinted error:nil];
-    return options && [options writeToFile:[state stringByAppendingPathComponent:@"runtime-options.json"]
-                                   options:NSDataWritingAtomic error:nil];
+    if (!options) return fail(@"准备结果无法编码");
+    NSError *error = nil;
+    if (![options writeToFile:[state stringByAppendingPathComponent:@"runtime-options.json"]
+                      options:NSDataWritingAtomic error:&error]) {
+        return fail([@"写 runtime-options.json 失败：" stringByAppendingString:error.localizedDescription ?: @"未知错误"]);
+    }
+    return YES;
 }
