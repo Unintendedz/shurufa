@@ -14,8 +14,15 @@ export CMAKE_PREFIX_PATH="$(brew --prefix)"
 cargo build -p msime-host-api --locked
 resources="$(cargo run --quiet -p msime-client-core --example install_resources --locked -- target/resources)"
 MSIME_EDITION=shurufa bash platforms/macos/stage-resources.sh "$resources"
+# 工作区有未提交的改动时 bundle 不能声称自己来自某个提交；显式传空值也会清掉缓存里上一次的修订。
+revision="$(git rev-parse HEAD)"
+if [[ -n "$(git status --porcelain)" ]]; then
+  echo "工作区有未提交的改动，bundle 不写源码修订" >&2
+  revision=""
+fi
 cmake -G Ninja -S platforms/macos -B target/macos-isolated \
   -DMSIME_EDITION=shurufa -DMSIME_ENABLE_SPARKLE=OFF \
+  -DMSIME_INPUT_SOURCE_REVISION="$revision" \
   -DMSIME_HOST_LIBRARY="$CARGO_TARGET_DIR/debug/libmsime_host_api.a" \
   -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
   -DCMAKE_OSX_SYSROOT="$SDKROOT" -DCMAKE_PREFIX_PATH="$CMAKE_PREFIX_PATH" \

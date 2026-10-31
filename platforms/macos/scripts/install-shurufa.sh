@@ -40,6 +40,7 @@ registration=$?
 listed=$?
 set -e
 printf 'Installed: %s\nRegistration exit: %s; registry query exit: %s\n' "$destination" "$registration" "$listed"
+printf 'Source revision: %s\n' "$(/usr/libexec/PlistBuddy -c Print:MSIMEInputSourceRevision "$destination/Contents/Info.plist" 2>/dev/null || echo 未记录)"
 if [[ "$listed" -ne 0 ]]; then
   echo "Shurufa 已安装；当前登录会话还未列出新输入源，需要注销并重新登录后在系统设置中添加。" >&2
   exit 2
