@@ -32,6 +32,7 @@
 #import "../voice/VoiceHoldShortcut.h"
 #import "../voice/ConfiguredVoiceShortcut.h"
 #import "../voice/VoiceRecordingMonitor.h"
+#import "../voice/VoiceShortcutTap.h"
 #import "../core/WindowPresentationLog.h"
 #import "../voice/DoubaoVoiceRequest.h"
 #import "../voice/LocalVoiceRequest.h"
@@ -1653,6 +1654,7 @@ static constexpr uint64_t MSIMESessionRecoveryNoticeInterval = 60 * NSEC_PER_SEC
 - (NSDictionary *)serviceSnapshotView;
 - (void)invalidateServiceSnapshots;
 - (void)showCandidatePanel;
+- (void)observeGlobalVoiceShortcutEvent:(NSEvent *)event;
 @end
 
 // 只在主线程记录最后实际提交账号等待页的控制器，不延长输入框的生命周期。
@@ -1662,9 +1664,22 @@ static __weak MSIMEInputController *MSIMEFocusedController;
 // 录音跨焦点持有原控制器，异步识别仍属于同一代次；最终投递另取当前焦点。
 static MSIMEInputController *MSIMEVoiceRecordingOwner;
 static MSIMEVoiceRecordingMonitor MSIMERecordingMonitor;
+static MSIMEVoiceShortcutTap MSIMEShortcutTap;
 // IMK、AppKit 全局监听与录音 tap 共用回执；结束录音重置手势时不清回执。
 struct MSIMEVoiceEventReceipt { NSTimeInterval timestamp = 0; BOOL consumed = NO; };
 static std::unordered_map<uint32_t, MSIMEVoiceEventReceipt> MSIMEVoiceEventReceipts;
+
+// 只在主线程调用。水杉不是当前输入源、也没在录音时不吞任何键。
+static void MSIMERefreshVoiceShortcutTap() {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSDictionary *custom = MSIMEVoiceInputEnabled(defaults) ? MSIMEVoiceCustomShortcut(defaults) : nil;
+    std::optional<MSIMEVoiceShortcutBinding> binding;
+    if (MSIMEFocusedController || MSIMEVoiceRecordingOwner) binding = MSIMEVoiceSwallowBinding(custom);
+    MSIMEShortcutTap.update(binding, ^(NSEvent *event) {
+        MSIMEInputController *target = MSIMEVoiceRecordingOwner ?: MSIMEFocusedController;
+        [target observeGlobalVoiceShortcutEvent:event];
+    });
+}
 
 
 // The full-colour brand mark the floating toolbar and the mode HUD lead with, loaded once. Nil when the bundle has no icon, and the top row then carries no mark.
@@ -4245,6 +4260,11 @@ static const NSTimeInterval kSettledRerankPoll = 1.0 / 60.0;
         name:MSIMETypingStatisticsEnabledChangedNotification object:nil
         suspensionBehavior:NSNotificationSuspensionBehaviorDeliverImmediately];
     _globalVoiceHotkeyMonitor = [NSEvent addGlobalMonitorForEventsMatchingMask:(NSEventMaskKeyDown | NSEventMaskKeyUp) handler:[self globalVoiceHotkeyHandler]];
+    static dispatch_once_t defaultsObserverOnce;
+    dispatch_once(&defaultsObserverOnce, ^{
+        [[NSNotificationCenter defaultCenter] addObserverForName:NSUserDefaultsDidChangeNotification object:nil queue:NSOperationQueue.mainQueue
+            usingBlock:^(NSNotification *note) { (void)note; MSIMERefreshVoiceShortcutTap(); }];
+    });
 }
 - (void)typingStatisticsEnabledChanged:(NSNotification *)notification {
     NSNumber *enabled = [notification.userInfo[@"enabled"] isKindOfClass:NSNumber.class]
@@ -4260,21 +4280,21 @@ static const NSTimeInterval kSettledRerankPoll = 1.0 / 60.0;
 }
 - (void (^)(NSEvent *))globalVoiceHotkeyHandler {
     __weak MSIMEInputController *weakSelf = self;
-    return ^(NSEvent *event) {
-        MSIMEInputController *controller = weakSelf;
-        if (MSIMEEditionIsShurufa() && MSIMEVoiceRecordingOwner && MSIMEVoiceRecordingOwner != controller) return;
-        if (!controller || (!controller->_activeClient && ![controller ownsPersistentVoiceRecording]) || (event.type == NSEventTypeKeyDown && event.isARepeat) ||
-            !MSIMEVoiceInputEnabled(NSUserDefaults.standardUserDefaults)) return;
-        if ([controller usesConfiguredVoiceShortcut]) {
-            [controller handleConfiguredVoiceShortcut:event];
-            return;
-        }
-        if (event.type != NSEventTypeKeyDown || ![controller matchesVoiceToggleHotkey:event]) return;
-        // AppKit delivers event-monitor handlers on the main thread. Handle
-        // this gesture now: another main-queue hop could toggle a new client
-        // or recording after focus or voice state has changed.
-        [controller toggleVoiceInput:nil];
-    };
+    return ^(NSEvent *event) { [weakSelf observeGlobalVoiceShortcutEvent:event]; };
+}
+- (void)observeGlobalVoiceShortcutEvent:(NSEvent *)event {
+    if (MSIMEEditionIsShurufa() && MSIMEVoiceRecordingOwner && MSIMEVoiceRecordingOwner != self) return;
+    if ((!_activeClient && ![self ownsPersistentVoiceRecording]) || (event.type == NSEventTypeKeyDown && event.isARepeat) ||
+        !MSIMEVoiceInputEnabled(NSUserDefaults.standardUserDefaults)) return;
+    if ([self usesConfiguredVoiceShortcut]) {
+        [self handleConfiguredVoiceShortcut:event];
+        return;
+    }
+    if (event.type != NSEventTypeKeyDown || ![self matchesVoiceToggleHotkey:event]) return;
+    // AppKit delivers event-monitor handlers on the main thread. Handle
+    // this gesture now: another main-queue hop could toggle a new client
+    // or recording after focus or voice state has changed.
+    [self toggleVoiceInput:nil];
 }
 - (BOOL)matchesVoiceToggleHotkey:(NSEvent *)event {
     if (MSIMEToggleChordMatches(_appearance.voiceInputToggleChord, event)) return YES;
@@ -4345,7 +4365,7 @@ static const NSTimeInterval kSettledRerankPoll = 1.0 / 60.0;
     }
     return _candidateAnchorValid ? _candidateAnchorCaret : reported;
 }
-- (void)voiceProviderSettingsChanged:(NSNotification *)notification { (void)notification; _preferenceLoadState.reset(); _voicePermissionToken = nil; _voiceHoldShortcut.reset(); _configuredVoiceShortcut.reset(); [self cancelLiveVoiceInput]; [self cancelDoubaoVoiceInput]; [self cancelHTTPVoiceInput]; if (_voiceService.active) [_voiceService cancelWithError:nil]; [_voiceOverlay dismissFailure]; [self persistAppearancePreferences]; }
+- (void)voiceProviderSettingsChanged:(NSNotification *)notification { (void)notification; _preferenceLoadState.reset(); _voicePermissionToken = nil; _voiceHoldShortcut.reset(); _configuredVoiceShortcut.reset(); [self cancelLiveVoiceInput]; [self cancelDoubaoVoiceInput]; [self cancelHTTPVoiceInput]; if (_voiceService.active) [_voiceService cancelWithError:nil]; [_voiceOverlay dismissFailure]; [self persistAppearancePreferences]; MSIMERefreshVoiceShortcutTap(); }
 - (void)translationPreferencesSaved:(NSNotification *)notification {
     _preferenceLoadState.reset();
     [self applySharedToolbarPreferences:notification.userInfo];
@@ -5898,6 +5918,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     else if (_voiceCopiedResult) [_voiceOverlay showCopyResult:_voiceCopiedResult.boolValue];
     _voiceCopiedResult = nil; _voicePreviewText = nil; _voicePolishFallbackNotice = nil;
     MSIMEVoiceRecordingOwner = nil;
+    MSIMERefreshVoiceShortcutTap();
 }
 - (BOOL)ownsLiveVoiceToken:(id)token {
     return token && token == _liveVoiceToken && ([self ownsPersistentVoiceRecording] ||
@@ -5956,7 +5977,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     return token;
 }
 - (void)bindVoiceOverlayActions {
-    if (MSIMEEditionIsShurufa()) { MSIMEVoiceRecordingOwner = self; _voiceCopiedResult = nil; _voicePreviewText = nil; _voicePolishFallbackNotice = nil; }
+    if (MSIMEEditionIsShurufa()) { MSIMEVoiceRecordingOwner = self; MSIMERefreshVoiceShortcutTap(); _voiceCopiedResult = nil; _voicePreviewText = nil; _voicePolishFallbackNotice = nil; }
     __weak MSIMEInputController *weakSelf = self;
     id client = _activeClient;
     MSIMEClientSession *session = _session;
@@ -6428,6 +6449,7 @@ static constexpr NSUInteger MSIMEIdleDictionarySessionLimit = 4;
     [self refreshTypingEffectFullscreen];
     [self requestCloudCandidatesConsentIfNeeded];
     [self commitPendingEmojiForClient:sender];
+    MSIMERefreshVoiceShortcutTap();
 }
 
 - (void)resolveCloudCandidatesConsentWithOptions:(NSDictionary *)options {
@@ -7172,6 +7194,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     [self hideCandidatePanel:"focus_out"];
     _activeClient = nil;
     if (MSIMEFocusedController == self) MSIMEFocusedController = nil;
+    MSIMERefreshVoiceShortcutTap();
     _dictionarySessionLastUse = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     [MSIMEInputController releaseIdleDictionarySessionsKeeping:MSIMEIdleDictionarySessionLimit];
     [super deactivateServer:sender];

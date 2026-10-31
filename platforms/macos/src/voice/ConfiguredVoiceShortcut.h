@@ -38,18 +38,26 @@ static inline unsigned MSIMEVoiceRightModifierBits(NSEventModifierFlags flags) {
     return ((flags & NX_DEVICERCTLKEYMASK) ? 1 : 0) | ((flags & NX_DEVICERALTKEYMASK) ? 2 : 0) |
         ((flags & NX_DEVICERSHIFTKEYMASK) ? 4 : 0) | ((flags & NX_DEVICERCMDKEYMASK) ? 8 : 0);
 }
-static inline bool MSIMEVoiceSidesMatch(NSEventModifierFlags flags, unsigned required, id right) {
-    if (![right isKindOfClass:NSNumber.class]) return true;
-    const unsigned wantRight = [right unsignedIntValue];
+// wantRight 为 -1 表示不分侧别；否则它的每一位对应一个修饰键组是否必须用右侧键。
+static inline bool MSIMEVoiceSidesMatchBits(NSEventModifierFlags flags, unsigned required, int wantRight) {
+    if (wantRight < 0) return true;
     for (unsigned group : {1u, 2u, 4u, 8u}) {
         if (!(required & group)) continue;
         const NSEventModifierFlags sides = MSIMEVoiceModifierGroupSides(group);
         const NSEventModifierFlags rightSide = sides & (NX_DEVICERCTLKEYMASK | NX_DEVICERALTKEYMASK | NX_DEVICERSHIFTKEYMASK | NX_DEVICERCMDKEYMASK);
         if (!(flags & sides)) continue;
-        const NSEventModifierFlags expected = (wantRight & group) ? rightSide : sides & ~rightSide;
+        const NSEventModifierFlags expected = ((unsigned)wantRight & group) ? rightSide : sides & ~rightSide;
         if ((flags & sides) != expected) return false;
     }
     return true;
+}
+static inline bool MSIMEVoiceSidesMatch(NSEventModifierFlags flags, unsigned required, id right) {
+    if (![right isKindOfClass:NSNumber.class]) return true;
+    return MSIMEVoiceSidesMatchBits(flags, required, (int)[right unsignedIntValue]);
+}
+// 非修饰键主键的按下判定；状态机和事件 tap 共用，保证两边认定的是同一个组合。
+static inline bool MSIMEVoiceComboMatches(unsigned short key, NSEventModifierFlags flags, unsigned short code, unsigned required, int wantRight) {
+    return key == code && MSIMEVoiceModifierBits(flags) == required && MSIMEVoiceSidesMatchBits(flags, required, wantRight);
 }
 
 // 明确的按下/松开状态机。切换模式的裸修饰键等松开才开始，组合键不经过计时猜测。
@@ -133,9 +141,13 @@ public:
             required = [options.custom[@"modifiers"] unsignedIntValue];
             const auto primarySide = MSIMEVoiceSideFlag(code);
             const auto primaryGroup = MSIMEVoiceModifierGroupSides(MSIMEVoiceModifierBitForKey(code));
-            match = key == code && MSIMEVoiceSidesMatch(event.modifierFlags, required, options.custom[@"right_modifiers"]) && (modifier
-                ? type == NSEventTypeFlagsChanged && (sides_ & primaryGroup) == primarySide && modifiers == (required | MSIMEVoiceModifierBitForKey(code))
-                : type == NSEventTypeKeyDown && modifiers == required);
+            id right = options.custom[@"right_modifiers"];
+            if (modifier)
+                match = key == code && MSIMEVoiceSidesMatch(event.modifierFlags, required, right) &&
+                    type == NSEventTypeFlagsChanged && (sides_ & primaryGroup) == primarySide && modifiers == (required | MSIMEVoiceModifierBitForKey(code));
+            else
+                match = type == NSEventTypeKeyDown && MSIMEVoiceComboMatches(key, event.modifierFlags, code, required,
+                    [right isKindOfClass:NSNumber.class] ? (int)[right unsignedIntValue] : -1);
         } else if (type == NSEventTypeKeyDown && options.toggleMatch) {
             match = true;
         } else if (type == NSEventTypeFlagsChanged && (sides_ & MSIMEVoiceSideFlag(key))) {
