@@ -7,7 +7,18 @@ NS_ASSUME_NONNULL_BEGIN
 typedef void (^MSIMEVoiceInputResult)(NSDictionary * _Nullable, NSError * _Nullable);
 typedef void (^MSIMEVoiceAudioBuffer)(AVAudioPCMBuffer *);
 typedef void (^MSIMEVoicePCMChunk)(NSData * _Nullable pcm, NSError * _Nullable error);
+// 语音存档的接口。输入法进程启动时把 MSIMEVoiceArchive 交给 MSIMEVoiceInputService.archive；没有设置时（单元测试）不存档。
+@protocol MSIMEVoiceArchiving <NSObject>
+- (nullable NSString *)beginRecordingForApp:(nullable NSString *)app provider:(nullable NSString *)provider;
+// 16 kHz 单声道 f32 PCM，可在采集回调里调用。
+- (void)appendPCM:(NSData *)pcm;
+- (void)endCaptureDiscarding:(BOOL)discard;
+- (void)noteText:(NSString *)text forRecording:(NSString *)identifier;
+- (void)noteFailure:(NSString *)reason forRecording:(NSString *)identifier;
+- (void)noteCancelledRecording:(NSString *)identifier;
+@end
 @interface MSIMEVoiceInputService : NSObject
+@property(class, nonatomic, strong, nullable) id<MSIMEVoiceArchiving> archive;
 - (BOOL)startWithSession:(MSIMEClientSession *)session generation:(uint64_t *)generation error:(NSError **)error;
 - (BOOL)cancelWithError:(NSError **)error;
 - (BOOL)startMicrophoneCapture:(MSIMEVoiceAudioBuffer)handler deviceUID:(NSString * _Nullable)deviceUID error:(NSError **)error;
@@ -33,6 +44,11 @@ typedef void (^MSIMEVoicePCMChunk)(NSData * _Nullable pcm, NSError * _Nullable e
 - (void)requestSpeechPermission:(void (^)(BOOL))completion;
 - (void)applyText:(NSString *)text generation:(uint64_t)generation completion:(MSIMEVoiceInputResult)completion;
 @property(nonatomic, readonly, getter=isActive) BOOL active;
+// 语音存档：下一次开麦时记下的前台应用和识别服务，由宿主在开麦前设置。
+@property(nonatomic, copy, nullable) NSString *archiveApp;
+@property(nonatomic, copy, nullable) NSString *archiveProvider;
+// 本次激活（startWithSession 之后）实际录下的那条存档的 id；还没开麦或存档不可用时为 nil。识别结果和失败按它记。
+@property(nonatomic, readonly, nullable) NSString *archiveRecordingID;
 // Actual admitted capture frames; frozen at stop and reset for each new tap.
 @property(nonatomic, readonly) NSTimeInterval recordedDuration;
 @end

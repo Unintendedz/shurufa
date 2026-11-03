@@ -82,6 +82,7 @@
 #import "../voice/VoiceCuePlayer.h"
 #import "../voice/VoiceAudioMuter.h"
 #import "../voice/VoiceProviderSettings.h"
+#import "../voice/VoiceRecognitionQuery.h"
 #import "../voice/VoiceSettings.h"
 #import "../cloud/CloudCandidateRequest.h"
 #import "../core/CustomTranslationBatch.h"
@@ -4342,6 +4343,7 @@ static const NSTimeInterval kSettledRerankPoll = 1.0 / 60.0;
         if (!result.onRelease) _voiceHoldGeneration = _voiceGeneration;
     } else if (result.action == MSIMEVoiceHoldShortcut::Action::Cancel) {
         _voicePermissionToken = nil;
+        [self noteVoiceArchiveCancelled];
         [self cancelHTTPVoiceInput]; [self cancelDoubaoVoiceInput]; [self cancelLiveVoiceInput];
         if (_voiceService.active) [_voiceService cancelWithError:nil];
     }
@@ -5644,9 +5646,30 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
 - (void)refreshVoiceOverlayScreen {
     if (_voiceOverlay) _voiceOverlay.preferredScreen = [self voiceInputScreen];
 }
+// 只有开麦之后才会发生的失败；权限、凭据、模型缺失在开麦之前就拦下了。
+static BOOL MSIMEVoiceFailureFollowsCapture(MSIMEVoiceFailure failure) {
+    switch (failure) {
+        case MSIMEVoiceFailureCapture: case MSIMEVoiceFailureProvider: case MSIMEVoiceFailureNoSpeech:
+        case MSIMEVoiceFailureTimeout: case MSIMEVoiceFailureSession: return YES;
+        default: return NO;
+    }
+}
+// 存档里记下的失败原因：一句话说明加上识别服务给出的细节。
+static NSString *MSIMEVoiceArchiveFailureReason(MSIMEVoiceFailure failure, NSString *detail) {
+    NSString *reason = failure == MSIMEVoiceFailureCapture ? @"录音失败" : failure == MSIMEVoiceFailureProvider ? @"识别失败" :
+        failure == MSIMEVoiceFailureNoSpeech ? @"未识别到语音" : failure == MSIMEVoiceFailureTimeout ? @"处理超时" : @"语音会话不可用";
+    return detail.length ? [NSString stringWithFormat:@"%@：%@", reason, detail] : reason;
+}
+- (void)noteVoiceArchiveCancelled {
+    if (_voiceService.archiveRecordingID) [MSIMEVoiceInputService.archive noteCancelledRecording:_voiceService.archiveRecordingID];
+}
 - (void)reportVoiceFailure:(MSIMEVoiceFailure)failure { [self reportVoiceFailure:failure detail:nil]; }
 - (void)reportVoiceFailure:(MSIMEVoiceFailure)failure detail:(NSString *)detail {
     const BOOL persistent = MSIMEEditionIsShurufa() && MSIMEVoiceRecordingOwner == self;
+    // 开麦之前的失败（缺权限、缺凭据、缺模型）没有录音，archiveRecordingID 还是上一次激活的，不记。
+    if (_voiceService.archiveRecordingID && MSIMEVoiceFailureFollowsCapture(failure))
+        [MSIMEVoiceInputService.archive noteFailure:MSIMEVoiceArchiveFailureReason(failure, detail)
+                                          forRecording:_voiceService.archiveRecordingID];
     _voicePermissionToken = nil; _voiceHoldShortcut.reset(); _configuredVoiceShortcut.reset();
     [self cancelHTTPVoiceInput]; [self cancelDoubaoVoiceInput]; [self cancelLiveVoiceInput];
     if (_voiceService.active) [_voiceService cancelWithError:nil];
@@ -5992,6 +6015,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
         // A subsequent physical hold release must not toggle pending recognition.
         controller->_voiceHoldShortcut.reset(); controller->_configuredVoiceShortcut.reset();
         if (cancel) {
+            [controller noteVoiceArchiveCancelled];
             [controller cancelHTTPVoiceInput]; [controller cancelDoubaoVoiceInput]; [controller cancelLiveVoiceInput];
         } else if (controller->_httpVoiceProcessing || controller->_doubaoVoiceProcessing || controller->_liveVoiceProcessing) {
             if (!MSIMEEditionIsShurufa()) [controller->_voiceOverlay dismissProcessing];
@@ -6174,13 +6198,14 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
         NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
         // 存着别的平台的录音后端时不再拒绝录音：MSIMEVoiceCaptureDeviceUID 把它当作系统默认设备。
         NSError *error = nil;
+        id client = controller->_activeClient;
+        controller->_voiceService.archiveApp = [client respondsToSelector:@selector(bundleIdentifier)] ? [client bundleIdentifier] : nil;
+        controller->_voiceService.archiveProvider = MSIMEVoiceEffectiveASRProvider([defaults stringForKey:@"MSIMEClientVoiceASRProvider"]);
         if (![controller->_voiceService startWithSession:controller->_session generation:&controller->_voiceGeneration error:&error]) { [controller reportVoiceFailure:MSIMEVoiceFailureSession]; return; }
         [controller->_voiceOverlay setListening:YES];
         NSString *language = [[NSUserDefaults standardUserDefaults] stringForKey:@"MSIMEClientVoiceLanguage"] ?: @"zh-CN";
         NSString *socket = MSIMEVoiceProviderSocket();
-        NSDictionary *query = @{ @"language": language.lowercaseString, @"generation": @(controller->_voiceGeneration), @"stream": @(MSIMEVoiceStreamInlinePreeditEnabled(defaults)), @"asr_provider": MSIMEVoiceEffectiveASRProvider([defaults stringForKey:@"MSIMEClientVoiceASRProvider"]), @"asr_endpoint": [defaults stringForKey:@"MSIMEClientVoiceASREndpoint"] ?: @"", @"asr_model": [defaults stringForKey:@"MSIMEClientVoiceASRModel"] ?: @"", @"asr_model_path": [defaults stringForKey:@"MSIMEClientVoiceASRModelPath"] ?: @"", @"asr_token": [defaults stringForKey:@"MSIMEClientVoiceASRToken"] ?: @"", @"doubao_boosting_table_id": [defaults stringForKey:@"MSIMEClientVoiceDoubaoBoostingTableID"] ?: @"", @"asr_app_key": [defaults stringForKey:@"MSIMEClientVoiceDoubaoAppKey"] ?: @"", @"asr_resource_id": [defaults stringForKey:@"MSIMEClientVoiceDoubaoResourceID"] ?: @"", @"polish_enabled": @([defaults boolForKey:@"MSIMEClientVoicePolish"]), @"polish_prompt_id": [defaults stringForKey:@"MSIMEClientVoicePolishPromptID"] ?: @"cleanup", @"polish_provider": [defaults stringForKey:@"MSIMEClientVoicePolishProvider"] ?: MSIMEVoicePolishDefaultProvider, @"polish_model": [defaults stringForKey:@"MSIMEClientVoicePolishModel"] ?: @"", @"polish_endpoint": [defaults stringForKey:@"MSIMEClientVoicePolishEndpoint"] ?: @"", @"polish_token": [defaults stringForKey:@"MSIMEClientVoicePolishToken"] ?: @"", @"polish_thinking": [defaults stringForKey:@"MSIMEClientVoicePolishThinking"] ?: @"", @"polish_prompt_custom_1": [defaults stringForKey:@"MSIMEClientVoicePolishPromptCustom1"] ?: @"", @"polish_prompt_custom_2": [defaults stringForKey:@"MSIMEClientVoicePolishPromptCustom2"] ?: @"", @"polish_prompt_custom_3": [defaults stringForKey:@"MSIMEClientVoicePolishPromptCustom3"] ?: @"" };
-        query = MSIMEVoiceProviderOptions(query, defaults);
-        if (MSIMEVoiceUsesTextStream(query[@"asr_provider"], socket.length > 0)) query = MSIMEVoiceTextStreamPolishOptions(query, defaults);
+        NSDictionary *query = MSIMEVoiceRecognitionQuery(defaults, controller->_voiceGeneration, socket.length > 0);
         if (socket.length) {
             id token = [controller beginLiveVoiceWithOptions:query socket:socket];
             if (!token) return;
@@ -7827,6 +7852,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         if (!voiceShortcut.onRelease) _voiceHoldGeneration = _voiceGeneration;
     }
     else if (voiceShortcut.action == MSIMEVoiceHoldShortcut::Action::Cancel) {
+        [self noteVoiceArchiveCancelled];
         [self cancelHTTPVoiceInput]; [self cancelDoubaoVoiceInput]; [self cancelLiveVoiceInput];
     }
     if (voiceShortcut.consumed) return YES;
@@ -8595,6 +8621,8 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         transition = contextual;
     }
     NSString *text = transition[@"commit"];
+    if ([text isKindOfClass:NSString.class] && text.length && _voiceService.archiveRecordingID)
+        [MSIMEVoiceInputService.archive noteText:text forRecording:_voiceService.archiveRecordingID];
     if ([self ownsPersistentVoiceRecording] && [text isKindOfClass:NSString.class] && text.length) {
         [self detachVoiceMarkedText];
         MSIMEInputController *destination = [self currentVoiceDestination];

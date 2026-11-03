@@ -14,6 +14,8 @@
 #import "MSIMEClientSession.h"
 #import "../candidate/CandidateSkin.h"
 #import "../voice/VoiceAudioMuter.h"
+#import "../voice/VoiceArchive.h"
+#import "../voice/VoiceInputService.h"
 #include "../core/DiagnosticLog.h"
 #import "../core/InstalledHost.h"
 #import "../settings/ShurufaPreferenceMigration.h"
@@ -223,6 +225,8 @@ int main(int argc, const char *argv[]) {
         // Recover a prior crashed capture before accepting new IMK sessions.
         // A running owner holds the journal lock, so this cannot undo its mute.
         [[[MSIMEVoiceAudioMuter alloc] init] restore];
+        // 每次录音都进加密存档；打开存档时顺带按保留期限清理一次。
+        MSIMEVoiceInputService.archive = [MSIMEVoiceArchive sharedArchive];
         // imklaunchagent 用这个名字找到本 bundle；名字为什么必须是这种形式，见 Info.plist.in。
         NSString *connectionName = NSBundle.mainBundle.infoDictionary[@"InputMethodConnectionName"];
         if (![connectionName isKindOfClass:NSString.class] || connectionName.length == 0) return 1;

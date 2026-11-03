@@ -103,6 +103,19 @@ static inline BOOL MSIMESaveVoiceTokenSlot(NSUserDefaults *defaults, NSString *k
     return YES;
 }
 
+// 语音存档的两个保留期限（整数）。取值规则与 client-core 的 `voice_input.recording_retention_hours`（24 或 72）、
+// `voice_input.history_retention_days`（0 为不限期，至多 36500）一致；不合规的值两个方向都不搬。
+static inline NSDictionary<NSString *, NSString *> *MSIMEVoiceIntegerPreferenceKeys(void) {
+    return @{@"recording_retention_hours": @"MSIMEClientVoiceRecordingRetentionHours",
+             @"history_retention_days": @"MSIMEClientVoiceHistoryRetentionDays"};
+}
+static inline BOOL MSIMEVoiceIntegerPreferenceValid(NSString *field, id value) {
+    if (![value isKindOfClass:NSNumber.class] || CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID() ||
+        CFNumberIsFloatType((__bridge CFNumberRef)value)) return NO;
+    const long long number = [value longLongValue];
+    return [field isEqual:@"recording_retention_hours"] ? (number == 24 || number == 72) : (number >= 0 && number <= 36500);
+}
+
 // Capture the native fallback's valid voice fields when it writes the shared
 // Preferences snapshot. The Tauri settings page remains the primary editor,
 // but the fallback window must not leave a second, silently diverging config
@@ -172,6 +185,10 @@ static inline NSDictionary *MSIMEVoicePreferencesFromDefaults(NSUserDefaults *de
     for (NSString *field in tokenKeys) {
         NSDictionary *slots = MSIMEValidVoiceTokenSlots([defaults objectForKey:tokenKeys[field]]);
         if (slots) voice[field] = slots;
+    }
+    for (NSString *field in MSIMEVoiceIntegerPreferenceKeys()) {
+        id value = [defaults objectForKey:MSIMEVoiceIntegerPreferenceKeys()[field]];
+        if (MSIMEVoiceIntegerPreferenceValid(field, value)) voice[field] = value;
     }
     return [voice copy];
 }
@@ -257,6 +274,14 @@ static inline BOOL MSIMEApplySharedVoicePreferences(id voice, NSUserDefaults *de
         NSString *key = tokenKeys[mapField];
         if (![[defaults objectForKey:key] isEqual:slots]) {
             [defaults setObject:slots forKey:key];
+            changed = YES;
+        }
+    }
+    for (NSString *field in MSIMEVoiceIntegerPreferenceKeys()) {
+        id value = voice[field];
+        NSString *key = MSIMEVoiceIntegerPreferenceKeys()[field];
+        if (MSIMEVoiceIntegerPreferenceValid(field, value) && ![[defaults objectForKey:key] isEqual:value]) {
+            [defaults setObject:value forKey:key];
             changed = YES;
         }
     }

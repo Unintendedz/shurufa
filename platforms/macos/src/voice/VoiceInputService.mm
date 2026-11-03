@@ -23,7 +23,11 @@ static BOOL MSIMEVoiceStrictGeneration(id value, uint64_t *result) {
 namespace {
 struct PCMStreamAdmission { std::mutex mutex; bool live = true; };
 }
-@implementation MSIMEVoiceInputService { __weak MSIMEClientSession *_session; BOOL _active; AVAudioEngine *_audioEngine; SFSpeechRecognizer *_recognizer; SFSpeechAudioBufferRecognitionRequest *_speechRequest; SFSpeechRecognitionTask *_speechTask; id<MSIMEBackendSpeechAnalyzerSession> _analyzer; uint64_t _transcriptionGeneration; MSIMEVoicePCMBuffer *_pcmRecording; std::shared_ptr<PCMStreamAdmission> _pcmStreamLive; std::shared_ptr<msime::voice::CaptureDuration> _captureDuration; NSTimeInterval _recordedDuration; }
+@implementation MSIMEVoiceInputService { __weak MSIMEClientSession *_session; BOOL _active; AVAudioEngine *_audioEngine; SFSpeechRecognizer *_recognizer; SFSpeechAudioBufferRecognitionRequest *_speechRequest; SFSpeechRecognitionTask *_speechTask; id<MSIMEBackendSpeechAnalyzerSession> _analyzer; uint64_t _transcriptionGeneration; MSIMEVoicePCMBuffer *_pcmRecording; std::shared_ptr<PCMStreamAdmission> _pcmStreamLive; std::shared_ptr<msime::voice::CaptureDuration> _captureDuration; NSTimeInterval _recordedDuration; NSString *_archiveRecordingID; BOOL _archiving; }
+static id<MSIMEVoiceArchiving> MSIMEVoiceInputArchive;
++ (id<MSIMEVoiceArchiving>)archive { return MSIMEVoiceInputArchive; }
++ (void)setArchive:(id<MSIMEVoiceArchiving>)archive { MSIMEVoiceInputArchive = archive; }
+- (NSString *)archiveRecordingID { return _archiveRecordingID; }
 - (NSTimeInterval)recordedDuration { return _captureDuration ? _captureDuration->seconds() : _recordedDuration; }
 - (AVAuthorizationStatus)microphoneAuthorizationStatus { return [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio]; }
 - (void)requestMicrophonePermission:(void (^)(BOOL))completion { [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio completionHandler:^(BOOL granted) { dispatch_async(dispatch_get_main_queue(), ^{ completion(granted); }); }]; }
@@ -123,6 +127,11 @@ struct PCMStreamAdmission { std::mutex mutex; bool live = true; };
         _audioEngine = nil;
         return NO;
     }
+    // 每次开麦都存一份 16 kHz 单声道音频，与交给哪个识别服务无关；成功、失败、取消、中断都留着。
+    id<MSIMEVoiceArchiving> archive = MSIMEVoiceInputArchive;
+    NSString *archiveID = [archive beginRecordingForApp:_archiveApp provider:_archiveProvider];
+    MSIMEVoicePCMBuffer *archiveBuffer = archiveID ? [[MSIMEVoicePCMBuffer alloc] initWithSampleLimit:NSUIntegerMax] : nil;
+    if (archiveID) { _archiveRecordingID = archiveID; _archiving = YES; }
     AVAudioFormat *format = [input inputFormatForBus:0];
     NSError *tapError = nil;
     SFSpeechAudioBufferRecognitionRequest *speechRequest = _speechRequest;
@@ -132,6 +141,7 @@ struct PCMStreamAdmission { std::mutex mutex; bool live = true; };
     AVAudioNodeTapBlock capture = ^(AVAudioPCMBuffer *buffer, AVAudioTime *time) {
         (void)time;
         if (!duration->append(buffer.frameLength)) return;
+        if (archiveBuffer && [archiveBuffer append:buffer error:nil]) [archive appendPCM:[archiveBuffer drainWithError:nil] ?: NSData.data];
         [speechRequest appendAudioPCMBuffer:buffer]; [analyzer appendBuffer:buffer]; bufferHandler(buffer);
     };
     // AVAudioInputNode exposes the tap API without an NSError parameter on
@@ -141,14 +151,21 @@ struct PCMStreamAdmission { std::mutex mutex; bool live = true; };
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
     [input installTapOnBus:0 bufferSize:1024 format:format block:capture];
 #pragma clang diagnostic pop
-    if (tapError) { duration->finish(); _captureDuration.reset(); _audioEngine = nil; if (error) *error = tapError; return NO; }
+    if (tapError) { duration->finish(); _captureDuration.reset(); _audioEngine = nil; [self endArchiveDiscarding:YES]; if (error) *error = tapError; return NO; }
     NSError *startError = nil;
-    if (![_audioEngine startAndReturnError:&startError]) { duration->finish(); _captureDuration.reset(); [input removeTapOnBus:0]; _audioEngine = nil; if (error) *error = startError; return NO; }
+    if (![_audioEngine startAndReturnError:&startError]) { duration->finish(); _captureDuration.reset(); [input removeTapOnBus:0]; _audioEngine = nil; [self endArchiveDiscarding:YES]; if (error) *error = startError; return NO; }
     return YES;
+}
+- (void)endArchiveDiscarding:(BOOL)discard {
+    if (!_archiving) return;
+    _archiving = NO;
+    [MSIMEVoiceInputArchive endCaptureDiscarding:discard];
 }
 - (AVAudioEngine *)makeAudioEngine { return [AVAudioEngine new]; }
 - (void)stopMicrophoneCapture {
     if (_captureDuration) { _recordedDuration = _captureDuration->finish(); _captureDuration.reset(); }
+    // 不到 1/4 秒的误触不识别，也不留存档。
+    [self endArchiveDiscarding:msime::voice::short_capture(_recordedDuration)];
     if (!_audioEngine) return;
     [_audioEngine.inputNode removeTapOnBus:0]; [_audioEngine stop]; _audioEngine = nil; [_speechRequest endAudio]; [_analyzer finishAudio];
 }
@@ -187,7 +204,7 @@ struct PCMStreamAdmission { std::mutex mutex; bool live = true; };
     return _speechTask != nil;
 }
 - (void)stopTranscription { ++_transcriptionGeneration; [_speechTask cancel]; _speechTask = nil; _speechRequest = nil; _recognizer = nil; [_analyzer cancel]; _analyzer = nil; }
-- (BOOL)startWithSession:(MSIMEClientSession *)session generation:(uint64_t *)generation error:(NSError **)error { if (_active) return YES; NSDictionary *result = [session startVoiceWithError:error]; if (!result) return NO; uint64_t admittedGeneration = 0; if (!MSIMEVoiceStrictGeneration(result[@"generation"], &admittedGeneration)) return NO; _session = session; _active = YES; if (generation) *generation = admittedGeneration; return YES; }
+- (BOOL)startWithSession:(MSIMEClientSession *)session generation:(uint64_t *)generation error:(NSError **)error { if (_active) return YES; _archiveRecordingID = nil; NSDictionary *result = [session startVoiceWithError:error]; if (!result) return NO; uint64_t admittedGeneration = 0; if (!MSIMEVoiceStrictGeneration(result[@"generation"], &admittedGeneration)) return NO; _session = session; _active = YES; if (generation) *generation = admittedGeneration; return YES; }
 - (BOOL)cancelWithError:(NSError **)error { [self stopPCMStreamDelivery]; [_pcmRecording cancel]; _pcmRecording = nil; if (!_active) { [self stopMicrophoneCapture]; [self stopTranscription]; return YES; } BOOL ok = [_session cancelVoiceWithError:error]; [self stopMicrophoneCapture]; [self stopTranscription]; _active = NO; _session = nil; return ok; }
 - (void)applyText:(NSString *)text generation:(uint64_t)generation completion:(MSIMEVoiceInputResult)completion {
     MSIMEClientSession *session = _session;

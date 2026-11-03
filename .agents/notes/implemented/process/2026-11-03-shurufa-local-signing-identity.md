@@ -13,7 +13,7 @@ Status: implemented
 - 证书由 `platforms/macos/scripts/create-shurufa-signing-identity.sh` 建：用系统自带的 LibreSSL 生成 RSA 2048 密钥和 10 年有效期、`extendedKeyUsage = codeSigning` 的自签名证书，打成 PKCS#12 后用 `security import -T /usr/bin/codesign` 导入，codesign 用私钥不弹窗。钥匙串里已有同名证书时脚本什么也不做。
 - 证书不加信任设置。`codesign` 用不受信任的自签名身份照样能签，`codesign --verify --strict` 也通过；`security find-identity -v` 不列它，这是预期的，不影响签名。
 - 签名身份按 SHA-1 传给 `codesign`，不按名字，避免同名证书并存时报 `ambiguous`。证书名可以用 `SHURUFA_SIGNING_NAME` 覆盖。
-- 找不到证书时退回 ad-hoc 并在 stderr 提示去跑建证书的脚本，不让构建失败。
+- 钥匙串里没有证书（新的 Mac）时 `build-shurufa.sh` 先自己跑建证书的脚本再签名；建不成才退回 ad-hoc 并在 stderr 说明，不让构建失败。
 
 ## Alternatives considered
 

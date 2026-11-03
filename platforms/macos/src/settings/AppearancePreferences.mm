@@ -22,6 +22,7 @@ extern "C" bool msime_macos_uninstall_input_source(const char *bundle_path,
 #import "../core/SupportWindowController.h"
 #import "../core/BoundedFileReader.h"
 #import "../voice/VoiceSettingsEntry.h"
+#import "../voice/VoiceHistoryView.h"
 #import "../core/WindowPresentation.h"
 #include "ShuangpinProfileNames.h"
 #include "../candidate/CandidatePageSize.h"
@@ -759,6 +760,7 @@ typedef NS_ENUM(NSInteger, MSIMESettingsPage) {
     MSIMESettingsPageInputHabits,
     MSIMESettingsPageKeys,
     MSIMESettingsPageVoice,
+    MSIMESettingsPageVoiceHistory,
     MSIMESettingsPageCandidateWindow,
     MSIMESettingsPageSkin,
     MSIMESettingsPageStatusBar,
@@ -1293,6 +1295,7 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     MetasequoiaSkinSettingsView *_skinSettingsView;
     NSView *_skinPageContainer;
     NSView<MSIMEVoiceSettingsForm> *_voiceSettingsView;
+    MSIMEVoiceHistoryView *_voiceHistoryView;
     NSButton *_skinPageSharedEntry;
     NSString *_translationPreferencesDirectory;
     MSIMETranslationSettingsWindow *_translationWindow;
@@ -4911,6 +4914,13 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
         voiceCard,
         voiceContent,
     ]];
+    // 听写历史同样按类名在运行时取：钥匙串和加密存档只链进输入法本体，不进测试程序。
+    _voiceHistoryView = [[NSClassFromString(@"MSIMEVoiceHistoryView") alloc] initWithFrame:NSZeroRect];
+    NSScrollView *voiceHistoryPage = [self page:MSIMESettingsPageVoiceHistory
+                                          title:@"听写历史"
+                                        summary:@"每次语音输入的录音和文字都加密保存在本机，可以回放、复制，或用当前的识别服务重新听写。"
+                                        content:@[_voiceHistoryView ?: (NSView *)MSIMECardWithViews(@[[self settingRow:@"听写历史"
+                                                    control:[NSTextField labelWithString:@"此构建不包含语音存档。"]]], 0.0)]];
     // The dictation form builds its own rows, in a class resolved at runtime so that the keychain and CoreAudio stay out of the test executables. It cannot register them, so the page registers the names it draws and the result lands on the form.
     [self registerSearchKeywords:@[ @"识别方式", @"服务地址", @"API 密钥", @"识别模型", @"本地模型", @"录音设备",
                                     @"识别后整理文本", @"整理模型", @"整理方案", @"整理提示词" ]
@@ -4923,23 +4933,23 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     // named from elsewhere in the file are named rather than numbered, and the assertion at the end
     // of this method fails the moment the two lists stop being the same length.
     _preferencePages = @[
-        schemePage, habitsPage, keysPage, voicePage, candidateWindowPage, skinPage, statusBarPage,
+        schemePage, habitsPage, keysPage, voicePage, voiceHistoryPage, candidateWindowPage, skinPage, statusBarPage,
         dataPage, accountPage, supportPage, aboutPage,
     ];
 
     NSArray<NSString *> *navigationLabels = @[
-        @"输入方案", @"输入习惯", @"按键", @"语音输入", @"候选窗口", @"皮肤", @"状态栏", @"词库", @"账号",
+        @"输入方案", @"输入习惯", @"按键", @"语音输入", @"听写历史", @"候选窗口", @"皮肤", @"状态栏", @"词库", @"账号",
         @"帮助与反馈", @"关于",
     ];
     // Nothing here may be one of the symbols SF Symbols localises into a word. 输入习惯 was textformat, which draws the letters "Aa" in English and the two characters 格式 in Chinese, so the row read 「格式 输入习惯」 — an icon column with prose in it.
     NSArray<NSString *> *navigationSymbols = @[
-        @"keyboard", @"slider.horizontal.3", @"command", @"mic", @"rectangle.on.rectangle", @"paintpalette",
+        @"keyboard", @"slider.horizontal.3", @"command", @"mic", @"clock.arrow.circlepath", @"rectangle.on.rectangle", @"paintpalette",
         @"ellipsis.rectangle", @"book", @"person.crop.circle", @"questionmark.circle", @"info.circle",
     ];
     _pageTitles = navigationLabels;
     // The stable name of each page, parallel to _preferencePages. Both things that have to point at a page from outside this method — the remembered page and -showSettingsPageWithIdentifier: — name it instead of numbering it, because the numbering is the one part of this list that is expected to change. The names are the tails of the shared settings: routes (src/core/DesktopSettingsLauncher.h), so a deep link reads the same whichever settings surface answers it. 输入习惯 is the one page with no such route, because it is the one page the shared surface does not have; it is named for what it holds rather than after 实用功能, which is one of its five cards. Retired names — helpcode, feedback, utilities — resolve to nothing and open the first page, which is where the helpcode controls now are.
     _pageIdentifiers = @[
-        @"input", @"habits", @"shortcuts", @"voice", @"appearance", @"skin", @"floating",
+        @"input", @"habits", @"shortcuts", @"voice", @"voice-history", @"appearance", @"skin", @"floating",
         @"dictionary", @"account", @"help", @"about",
     ];
     // Four runs with nothing but a gap between them announce a grouping without saying what it
@@ -4949,7 +4959,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     NSArray<NSString *> *groupTitles = @[@"打字", @"显示", MSIMEEditionIsShurufa() ? @"数据" : @"数据与账号", @"支持"];
     NSArray<NSArray<NSNumber *> *> *navigationGroups = @[
         @[@(MSIMESettingsPageInputScheme), @(MSIMESettingsPageInputHabits), @(MSIMESettingsPageKeys),
-          @(MSIMESettingsPageVoice)],
+          @(MSIMESettingsPageVoice), @(MSIMESettingsPageVoiceHistory)],
         @[@(MSIMESettingsPageCandidateWindow), @(MSIMESettingsPageSkin), @(MSIMESettingsPageStatusBar)],
         @[@(MSIMESettingsPageDictionary), @(MSIMESettingsPageAccount)],
         @[@(MSIMESettingsPageSupport), @(MSIMESettingsPageAbout)],
@@ -5599,6 +5609,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     if (!_windowHasAppeared) return;
     if (_selectedPageIndex == kSkinPageIndex) [self ensureSkinSettingsView];
     if (_selectedPageIndex == kVoicePageIndex) [_voiceSettingsView reloadSettings];
+    if (_selectedPageIndex == MSIMESettingsPageVoiceHistory) [_voiceHistoryView reloadHistory];
     if (_selectedPageIndex == kAboutPageIndex) [self refreshUpdateControls];
     if (_selectedPageIndex == kAccountPageIndex && MSIMEAccountPaneAttach != nullptr)
         MSIMEAccountPaneAttach(self.window);

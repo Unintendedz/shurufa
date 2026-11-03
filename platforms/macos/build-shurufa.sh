@@ -30,11 +30,16 @@ cmake -G Ninja -S platforms/macos -B target/macos-isolated \
 cmake --build target/macos-isolated --target MSIMEClientInputMethod --parallel "$CARGO_BUILD_JOBS"
 bundle="$root/target/macos-isolated/Shurufa.app"
 # 按本机签名证书的 SHA-1 签名：designated requirement 绑定证书而不是 cdhash，重编后麦克风等授权仍然有效。
-# 没有证书时退回 ad-hoc，每次重编都要重新授权；证书由 scripts/create-shurufa-signing-identity.sh 建。
+# 钥匙串里还没有证书（新的 Mac）时先建一张；建不成才退回 ad-hoc，那样每次重编都要重新授权。
 signing_name="${SHURUFA_SIGNING_NAME:-Shurufa Local Signing}"
-identity="$(security find-certificate -c "$signing_name" -Z 2>/dev/null | awk '/^SHA-1 hash:/{print $3; exit}')"
+find_identity() { security find-certificate -c "$signing_name" -Z 2>/dev/null | awk '/^SHA-1 hash:/{print $3; exit}'; }
+identity="$(find_identity)"
 if [[ -z "$identity" ]]; then
-  echo "钥匙串里没有「$signing_name」，按 ad-hoc 签名；先跑 platforms/macos/scripts/create-shurufa-signing-identity.sh" >&2
+  SHURUFA_SIGNING_NAME="$signing_name" bash platforms/macos/scripts/create-shurufa-signing-identity.sh || true
+  identity="$(find_identity)"
+fi
+if [[ -z "$identity" ]]; then
+  echo "没能在钥匙串里建「$signing_name」，按 ad-hoc 签名" >&2
   identity=-
 fi
 codesign --force --deep --sign "$identity" --entitlements platforms/macos/resources/VoiceInput.entitlements "$bundle"

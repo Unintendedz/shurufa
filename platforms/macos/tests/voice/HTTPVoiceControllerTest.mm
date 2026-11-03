@@ -28,6 +28,10 @@
 @property BOOL failStart;
 @property NSUInteger cancellations;
 @property(copy) void (^failure)(NSError *);
+// 控制器开麦前写下的存档上下文；这个替身不存档，archiveRecordingID 恒为 nil。
+@property(copy) NSString *archiveApp;
+@property(copy) NSString *archiveProvider;
+@property(readonly) NSString *archiveRecordingID;
 - (BOOL)startPCMRecording:(MSIMEVoiceAudioBuffer)handler deviceUID:(NSString *)device failure:(void (^)(NSError *))failure error:(NSError **)error;
 - (NSData *)finishPCMRecordingWithError:(NSError **)error;
 - (BOOL)cancelWithError:(NSError **)error;
