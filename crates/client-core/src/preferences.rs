@@ -2061,6 +2061,20 @@ pub struct VoiceInputPreferences {
     pub doubao_enable_ddc: bool,
     #[serde(default)]
     pub doubao_boosting_table_id: String,
+    /// 语音存档里录音音频的保留小时数，取值 [`RECORDING_RETENTION_HOURS`]，出厂 24。过期只删音频，听写记录按 `history_retention_days`。
+    #[serde(default = "default_recording_retention_hours")]
+    pub recording_retention_hours: u32,
+    /// 听写记录的保留天数，0 表示不限期（出厂值），否则取值 1..=[`MAX_HISTORY_RETENTION_DAYS`]。记录过期时连同它的音频一起删。
+    #[serde(default)]
+    pub history_retention_days: u32,
+}
+
+/// 录音音频可选的保留小时数：24 小时、三天。
+pub const RECORDING_RETENTION_HOURS: [u32; 2] = [24, 72];
+pub const MAX_HISTORY_RETENTION_DAYS: u32 = 36_500;
+
+fn default_recording_retention_hours() -> u32 {
+    24
 }
 
 /// EveryAPI 的识别默认模型以前写成 `openai/whisper-large-v3-turbo`，那是照搬 Apple 预设的名字，EveryAPI 从没有它的渠道（请求返回 503 `model_not_found`）。共享设置页切到 EveryAPI 时会把默认模型写进 `asr_model`，所以选过 EveryAPI 的文档里存的就是这个值。
@@ -2122,6 +2136,8 @@ impl Default for VoiceInputPreferences {
             doubao_enable_punc: true,
             doubao_enable_ddc: source_voice_default(),
             doubao_boosting_table_id: String::new(),
+            recording_retention_hours: default_recording_retention_hours(),
+            history_retention_days: 0,
         }
     }
 }
@@ -4711,6 +4727,8 @@ impl Preferences {
             || !POLISH_PROVIDERS.contains(&self.voice_input.polish_provider.as_str())
             || !valid_model_path(&self.voice_input.asr_model_path)
             || !valid_model_mirror(&self.voice_input.asr_model_mirror)
+            || !RECORDING_RETENTION_HOURS.contains(&self.voice_input.recording_retention_hours)
+            || self.voice_input.history_retention_days > MAX_HISTORY_RETENTION_DAYS
         {
             return Err(PreferencesError::InvalidVoiceInput);
         }

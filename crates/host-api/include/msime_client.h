@@ -667,6 +667,28 @@ char *msime_client_voice_local_model_install(
 char *msime_client_voice_local_model_cancel(const uint8_t *request, size_t length);
 char *msime_client_voice_local_model_remove(const uint8_t *request, size_t length);
 char *msime_client_voice_model_setting_check(const uint8_t *request, size_t length);
+/* 语音存档：每次录音的音频（16 kHz 单声道）与听写记录，用宿主交来的 32 字节密钥以 XChaCha20-Poly1305 加密后存在 directory 下，
+ * 格式见 client-providers 的 voice::archive。进程里只有一个存档、至多一条正在录的录音；append 可在采集队列上调用，其余在主线程。
+ * 返回 JSON 用 msime_client_string_free 释放。错误为 "voice_archive_closed"、"voice_archive_idle"、"voice_archive_invalid_id"、
+ * "voice_archive_not_found"、"voice_archive_corrupt"（密钥不对或文件损坏）、"voice_archive_recording"、"voice_archive_io" 或 "invalid voice archive request"。
+ * open(directory 绝对路径, key 32 字节) -> {opened}，正在录的录音不受影响。
+ * begin {now_ms, app, provider} -> {id}，上一条没停时先替它收尾。append 追加 16 kHz 单声道 f32 样本（一次至多 160000 个），没有正在录的录音时返回 false。
+ * end_capture(now_ms) -> {id|null}。note {kind:"text"|"failure"|"cancelled"|"retranscription", text, id?}，不给 id 时记到最近一次录音；retranscription 必须给 id。
+ * list -> {entries:[{id, started_at_ms, capture_ended_at_ms, audio_ms, app, provider, segments, failure, cancelled, retranscription,
+ *   status:"recording"|"recognized"|"failed"|"cancelled"|"interrupted"|"no_result", has_audio}], unreadable}，新的在前。
+ * audio(id, format 0=WAV/1=f32 PCM) 把解密后的字节交给 callback 一次（缓冲区在回调返回后失效，不落盘）-> {bytes}。
+ * delete(id) -> {deleted}，正在录的那一条不能删。purge {now_ms, recording_retention_hours: 24|72, history_retention_days: 0..36500, 0 为不限期} -> {audio_removed, records_removed}。 */
+typedef void (*msime_client_voice_archive_bytes_callback)(const uint8_t *bytes, size_t length, void *context);
+char *msime_client_voice_archive_open(const uint8_t *directory, size_t directory_length, const uint8_t *key, size_t key_length);
+char *msime_client_voice_archive_begin(const uint8_t *request, size_t length);
+bool msime_client_voice_archive_append(const float *samples, size_t count);
+char *msime_client_voice_archive_end_capture(uint64_t now_ms);
+char *msime_client_voice_archive_note(const uint8_t *request, size_t length);
+char *msime_client_voice_archive_list(void);
+char *msime_client_voice_archive_audio(const uint8_t *id, size_t id_length, uint32_t format,
+                                       msime_client_voice_archive_bytes_callback callback, void *context);
+char *msime_client_voice_archive_delete(const uint8_t *id, size_t id_length);
+char *msime_client_voice_archive_purge(const uint8_t *request, size_t length);
 /* 按需资源包存放在 <state_root>/resource-packs/<id>/；state_root 是 HostOptions 的 preferences_directory（Android: files/bootstrap/state），会话下次取得焦点时读取新发布的包。
  * 包 ID：`japanese`、`language-dictionaries`、`handwriting`、`settled-model`、`grammar-model-wanxiang`、`grammar-model-baguwen`、`grammar-model-baguwen-compact`、`offline-glosses`、`voice-runtime`、`wubi`、`voice-runtime-macos`（锁文件固定了重签的 macOS 运行库之后才有）。请求为 `length` 字节的 JSON（<=16384），响应使用标准封装。`install` 和 `adopt` 是阻塞调用，只能放在工作线程。
  * 错误为 "invalid resource pack request"、"invalid state root"、"invalid source"、"resource_pack_unknown"、"resource_pack_busy"（本进程正在安装或收编该包）或 "local_model_*"。

@@ -5,6 +5,7 @@
 //! [`local_models`] installs the on-device models the `local` provider runs, and [`hotwords`] turns the user dictionary into their hotword list.
 //! [`numbers`] 把不自带 ITN 的模型写出的汉字数字改成数字。
 
+pub mod archive;
 pub mod controller;
 pub mod doubao_frame;
 pub mod hold_key_catalog;

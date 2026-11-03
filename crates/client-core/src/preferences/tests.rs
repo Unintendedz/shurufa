@@ -8416,3 +8416,24 @@ fn shurufa_missing_helpcode_uses_edition_default_without_overwriting_explicit_va
         }
     }
 }
+
+/// 语音存档的保留期限：录音出厂 24 小时、可选三天；听写记录出厂不限期（0）。旧文档缺这两个键时按出厂值读。
+#[test]
+fn voice_archive_retention_defaults_and_validation() {
+    let defaults = Preferences::default();
+    assert_eq!(defaults.voice_input.recording_retention_hours, 24);
+    assert_eq!(defaults.voice_input.history_retention_days, 0);
+    let legacy: VoiceInputPreferences = serde_json::from_value(serde_json::json!({})).unwrap();
+    assert_eq!(legacy.recording_retention_hours, 24);
+    assert_eq!(legacy.history_retention_days, 0);
+
+    let mut preferences = Preferences::default();
+    preferences.voice_input.recording_retention_hours = 72;
+    preferences.voice_input.history_retention_days = 365;
+    assert!(preferences.validate().is_ok());
+    preferences.voice_input.recording_retention_hours = 5;
+    assert!(preferences.validate().is_err());
+    preferences.voice_input.recording_retention_hours = 24;
+    preferences.voice_input.history_retention_days = MAX_HISTORY_RETENTION_DAYS + 1;
+    assert!(preferences.validate().is_err());
+}
