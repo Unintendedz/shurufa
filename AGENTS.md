@@ -2,6 +2,12 @@
 
 给在本仓库工作的编码代理的操作约定。**架构边界、验证流程和各平台的验证覆盖面在 [ARCHITECTURE.md](docs/ARCHITECTURE.md)，贡献流程在 [CONTRIBUTING.md](.github/CONTRIBUTING.md)——先读那两份，这里只写它们没有覆盖的操作细节。**
 
+## 项目定位：Shurufa 是独立项目
+
+- **Shurufa（`Unintendedz/shurufa`）是从水杉输入法（`metasequoiaime/msime`）分出来的独立项目，不跟随上游。** 分叉点是 tag `fork-point/msime-2026-10-27`。上游之后的提交一律不合并、不 cherry-pick、不 rebase 上去，也不要主动报告「上游又多了多少提交」或建议同步；只有维护者点名要某一个上游改动时才去看它。上游在不断加功能，本项目只按维护者自己的需要演进。`upstream` 远端只留作查阅。
+- **主干是 `main`，没有 `develop`，也没有 release 分支。** 短分支或 worktree 做完、验证过后快进合入 `main`，再删掉分支和 worktree。下文「发版」一节以及其他章节里关于 `develop`、`release/<版本号>`、issue/PR 流程和 GitHub Actions 的约定都来自上游，本项目不适用；本仓库的 GitHub Actions 是关着的。
+- Shurufa 输入法本机构建用 `platforms/macos/build-shurufa.sh`，安装用 `platforms/macos/scripts/install-shurufa.sh`（装到 `~/Library/Input Methods/Shurufa.app`），不走下文「本机安装」一节的 `package-release.sh` 整包流程。构建按登录钥匙串里的本机自签名证书「Shurufa Local Signing」签名，签名身份固定，重编重装后麦克风、辅助功能等授权不用重新给；钥匙串里没有这张证书时先跑 `platforms/macos/scripts/create-shurufa-signing-identity.sh`。
+
 ## 改动范围
 
 - 只暂存明确列出的路径，不用 `git add -A`。
