@@ -704,6 +704,7 @@ impl Session {
                 .iter()
                 .map(|item| {
                     // 占位行、网址补全和联系人不交给重排模型；联系人保留本地优先顺序。
+                    // 补全词和前缀区间行回答的是别的键，也不当作回答当前键交给重排模型。
                     !matches!(
                         item.source,
                         CandidateSource::AiPending
@@ -711,6 +712,7 @@ impl Session {
                             | CandidateSource::Contact
                     ) && !input.is_url_completion(item)
                         && input.selection_completes_composition(item)
+                        && input.reading_answers_key(item)
                 })
                 .collect(),
             candidate_list_open: input.candidate_list_open(),

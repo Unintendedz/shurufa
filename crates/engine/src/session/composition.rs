@@ -12,6 +12,7 @@ use crate::pinyin::autocorrect::{
     autocorrect_cut_detail, looks_like_syllable_with_jianpin_tail, AutocorrectCutSegment,
 };
 use crate::pinyin::segment::is_complete_pinyin_input;
+use crate::pinyin::syllables::{is_intact, normalized_syllable};
 use crate::shuangpin::query::{
     detect_active_double_helpcode_length, effective_input_length, is_complete_input,
     raw_length_for_effective_prefix, remove_manual_delimiters,
@@ -322,6 +323,60 @@ impl InputSession {
             return true;
         }
         self.selection_completes_request(self.engine.request(), selected)
+    }
+
+    /// 这一行的词库读音是否就是键入的读音。补全词（读音比键入的长）和前缀区间行（末音节被扩成别的完整音节，如键入 `fa` 得到 `fan`）虽然用完了全部按键，回答的却是别的键，重排器的 `answers_key` 契约要求把它们排除。
+    /// 键入的不完整音节和简拼首字母按前缀匹配，完整音节必须逐字相等；非词库行、纠错、模糊音、带辅码的双拼不做判断，一律视为回答。
+    pub(super) fn reading_answers_key(&self, item: &WordItem) -> bool {
+        if !item.source.is_dictionary()
+            || item.canonical_pinyin.is_empty()
+            || item.fuzzy
+            || !item.corrected_from.is_empty()
+        {
+            return true;
+        }
+        let typed = match item.scheme {
+            SchemeType::Quanpin => item.pinyin.as_ref(),
+            SchemeType::Shuangpin => {
+                let request = self.engine.request();
+                if !request.end_helpcodes.is_empty() || !request.syllable_helpcodes.is_empty() {
+                    return true;
+                }
+                request.normalized_segmentation.as_str()
+            }
+            _ => return true,
+        };
+        let mut typed = typed.split('\'').filter(|piece| !piece.is_empty());
+        let mut reading = item
+            .canonical_pinyin
+            .split('\'')
+            .filter(|piece| !piece.is_empty());
+        loop {
+            match (typed.next(), reading.next()) {
+                (None, None) => return true,
+                (Some(typed), Some(reading)) => {
+                    if !Self::syllable_answers(typed, reading) {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+        }
+    }
+
+    fn syllable_answers(typed: &str, reading: &str) -> bool {
+        let matches = |typed: &str, reading: &str| {
+            if is_intact(typed) {
+                typed.eq_ignore_ascii_case(reading)
+            } else {
+                reading.len() >= typed.len()
+                    && reading.as_bytes()[..typed.len()].eq_ignore_ascii_case(typed.as_bytes())
+            }
+        };
+        if matches(typed, reading) {
+            return true;
+        }
+        typed != reading && matches(&normalized_syllable(typed), &normalized_syllable(reading))
     }
 
     /// 全拼或双拼的这一行是否用完了 `request` 的全部拼写。光标后编辑拿光标前那段的临时请求问同一个问题，所以请求由调用方给。

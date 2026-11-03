@@ -13677,4 +13677,85 @@ INSERT INTO quick_parases VALUES('qq','腾讯',20);"
     assert!(words(&session).contains(&"腾讯".to_owned()));
 }
 
+const ANSWERS_KEY_FIXTURE: &str = "\
+CREATE TABLE tbl_1_z(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+INSERT INTO tbl_1_z VALUES('zhe','z','这',900);\
+CREATE TABLE tbl_1_m(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+INSERT INTO tbl_1_m VALUES('me','m','么',900);\
+CREATE TABLE tbl_1_f(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+INSERT INTO tbl_1_f VALUES('fa','f','发',900);\
+CREATE TABLE tbl_2_z(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+INSERT INTO tbl_2_z VALUES('zhe''me','zm','这么',800);\
+CREATE TABLE tbl_3_z(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+INSERT INTO tbl_3_z VALUES('zhe''me''fan','zmf','这么烦',700);\
+CREATE TABLE tbl_4_z(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+INSERT INTO tbl_4_z VALUES('zhe''me''fa''zhan','zmfz','这么发展',700);\
+CREATE TABLE tbl_6_z(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+INSERT INTO tbl_6_z VALUES('zhe''me''fa''zhan''xia''qu','zmfzxq','这么发展下去',700);";
+
+fn answers_key(session: &Session, word: &str) -> bool {
+    let snapshot = session.snapshot();
+    let index = snapshot
+        .candidates
+        .iter()
+        .position(|item| item.word.as_ref() == word)
+        .unwrap_or_else(|| panic!("{word} is not a candidate of {:?}", words(session)));
+    snapshot.candidate_answers_key[index]
+}
+
+#[test]
+fn completion_and_prefix_range_rows_do_not_answer_the_typed_key() {
+    let fixture = Fixture::new(ANSWERS_KEY_FIXTURE);
+    let mut session = fixture.session();
+    type_text(&mut session, "zhemefa");
+    assert!(answers_key(&session, "这么发"), "{:?}", words(&session));
+    for word in ["这么发展下去", "这么发展", "这么烦"] {
+        assert!(
+            !answers_key(&session, word),
+            "{word} in {:?}",
+            words(&session)
+        );
+    }
+}
+
+#[test]
+fn an_incomplete_final_piece_is_answered_by_its_prefix_range_row() {
+    let fixture = Fixture::new(ANSWERS_KEY_FIXTURE);
+    let mut session = fixture.session();
+    type_text(&mut session, "zhemef");
+    assert!(answers_key(&session, "这么烦"), "{:?}", words(&session));
+}
+
+#[test]
+fn jianpin_and_ambiguous_segmentations_still_answer_the_typed_key() {
+    let fixture = Fixture::new(ANSWERS_KEY_FIXTURE);
+    let mut session = fixture.session();
+    type_text(&mut session, "zmf");
+    assert!(answers_key(&session, "这么烦"), "{:?}", words(&session));
+
+    let fixture = Fixture::new(
+        "CREATE TABLE tbl_1_x(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+INSERT INTO tbl_1_x VALUES('xian','x','先',900);\
+CREATE TABLE tbl_2_x(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+INSERT INTO tbl_2_x VALUES('xi''an','xa','西安',800);",
+    );
+    let mut session = fixture.session();
+    type_text(&mut session, "xian");
+    assert!(answers_key(&session, "先"), "{:?}", words(&session));
+    assert!(answers_key(&session, "西安"), "{:?}", words(&session));
+}
+
+#[test]
+fn shuangpin_prefix_range_rows_do_not_answer_the_typed_key() {
+    let fixture = Fixture::new(ANSWERS_KEY_FIXTURE);
+    let mut session = fixture.session_with(|options| {
+        options.scheme = SchemeType::Shuangpin;
+        options.shuangpin_profile = ShuangpinProfileKind::Xiaohe;
+        options.helpcode = false;
+    });
+    type_text(&mut session, "vemefa");
+    assert!(answers_key(&session, "这么发"), "{:?}", words(&session));
+    assert!(!answers_key(&session, "这么烦"), "{:?}", words(&session));
+}
+
 mod caret_suffix;
