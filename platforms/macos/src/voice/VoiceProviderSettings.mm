@@ -9,6 +9,7 @@
 #import "MSIMEClientSession.h"
 #import "../core/SharedVoicePreferences.h"
 #import "VoiceShortcutPresentation.h"
+#import "VoiceShortcutPermissions.h"
 #include "../../../common/HostApiString.h"
 #include "msime_client.h"
 NSNotificationName const MSIMEVoiceProviderSettingsDidChangeNotification = @"MSIMEClientVoiceProviderSettingsDidChange";
@@ -426,6 +427,9 @@ static NSString *SharedSetting(NSString *key, NSString *fallback)
     NSArray<NSSwitch *> *_builtinHotkeySwitches;
     id _hotkeyMonitor, _hotkeyResignObserver;
     NSDictionary *_pendingModifier;
+    NSTextField *_permissionStatus;
+    NSButton *_grantPermissions;
+    id _permissionKeyObserver;
 }
 
 /// A message on the card it belongs to, or nothing at all. The window has no separate error style — MSIMEDetailLabel is the one quieter line under a row, and what distinguishes a failure from an aside is its colour.
@@ -492,6 +496,14 @@ static void ShowNotice(NSTextField *label, NSString *message, NSColor *color)
     [shortcutRows addObject:MSIMEDetailLabel(@"原有行为（默认）：右 Option 和修饰键组合按住说话；Control+F9 按一下开始、再按一下结束。自定义单个修饰键按住说话，自定义组合键切换。")];
     [shortcutRows addObject:MSIMEDetailLabel(@"按住说话：所有快捷键按住开始、松开结束。切换：按一下开始、再按一下结束；单个修饰键在松开时触发。录音中按 Esc 取消，切换应用会取消录音。")];
     }
+    _permissionStatus = [NSTextField labelWithString:@""];
+    _permissionStatus.accessibilityLabel = @"组合键快捷键所需的系统权限";
+    _grantPermissions = [NSButton buttonWithTitle:@"去授权…" target:self action:@selector(grantShortcutPermissions:)];
+    NSStackView *permissionRow = [NSStackView stackViewWithViews:@[_permissionStatus, _grantPermissions]];
+    permissionRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    permissionRow.spacing = 8;
+    [shortcutRows addObject:MSIMEPreferenceRow(@"系统权限", permissionRow)];
+    [shortcutRows addObject:MSIMEDetailLabel(@"组合键快捷键（如右 Option+←）要在系统层拦住按键，应用才不会先执行它自己的动作（比如按词移动光标），这需要「辅助功能」和「输入监控」两项授权。单个修饰键快捷键不需要。")];
     [shortcutRows addObject:_hotkeyNotice];
     NSBox *shortcutCard = MSIMECardWithViews(shortcutRows, 0);
 
@@ -704,6 +716,34 @@ static void ShowNotice(NSTextField *label, NSString *message, NSColor *color)
         _builtinHotkeySwitches[index].state = value ? [value boolValue] : index < 2;
         _builtinHotkeySwitches[index].enabled = custom == nil;
     }
+    [self reloadPermissionControls];
+}
+- (void)reloadPermissionControls {
+    const auto permissions = MSIMECurrentVoiceShortcutPermissions();
+    _permissionStatus.stringValue = [NSString stringWithFormat:@"辅助功能%@ · 输入监控%@",
+        permissions.accessibility ? @"已授权" : @"未授权", permissions.inputMonitoring ? @"已授权" : @"未授权"];
+    // 只有主键不是修饰键的绑定才需要系统层吞键，缺授权时才标红。
+    NSDictionary *custom = MSIMEVoiceCustomShortcut(NSUserDefaults.standardUserDefaults);
+    const BOOL needed = custom && !MSIMEVoiceModifierKey([custom[@"key_code"] unsignedShortValue]);
+    _permissionStatus.textColor = needed && !permissions.granted() ? NSColor.systemRedColor : NSColor.secondaryLabelColor;
+    _grantPermissions.hidden = permissions.granted();
+}
+- (void)grantShortcutPermissions:(id)sender {
+    (void)sender;
+    const auto permissions = MSIMECurrentVoiceShortcutPermissions();
+    MSIMERequestVoiceShortcutPermissions(permissions);
+    if (NSURL *pane = MSIMEVoiceShortcutPermissionsPane(permissions)) [NSWorkspace.sharedWorkspace openURL:pane];
+}
+// 用户去系统设置打开授权后回到这个窗口时重读状态。
+- (void)viewDidMoveToWindow {
+    [super viewDidMoveToWindow];
+    if (_permissionKeyObserver) [NSNotificationCenter.defaultCenter removeObserver:_permissionKeyObserver];
+    _permissionKeyObserver = nil;
+    if (!self.window) return;
+    __weak MetasequoiaVoiceProviderSettingsView *weakSelf = self;
+    _permissionKeyObserver = [NSNotificationCenter.defaultCenter addObserverForName:NSWindowDidBecomeKeyNotification
+        object:self.window queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *) { [weakSelf reloadPermissionControls]; }];
+    [self reloadPermissionControls];
 }
 - (BOOL)saveHotkeyPatch:(NSDictionary *)patch {
     NSString *directory = MSIMELoadRuntimeOptions()[@"preferences_directory"];

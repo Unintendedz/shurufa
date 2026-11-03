@@ -8,6 +8,7 @@
 #import "../core/VoiceShortcutConfig.h"
 #import "ConfiguredVoiceShortcut.h"
 #import "VoiceTextCommit.h"
+#import "VoiceShortcutPermissions.h"
 
 struct MSIMEVoiceShortcutBinding {
     unsigned short key = 0;
@@ -84,12 +85,13 @@ private:
     }
     bool ensureTap() {
         if (tap_) return true;
-        if (!AXIsProcessTrusted()) {
+        const auto permissions = MSIMECurrentVoiceShortcutPermissions();
+        if (!permissions.granted()) {
             if (!promptRequested_) {
                 promptRequested_ = true;
-                AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)@{(__bridge id)kAXTrustedCheckOptionPrompt: @YES});
+                MSIMERequestVoiceShortcutPermissions(permissions);
             }
-            if (!AXIsProcessTrusted()) return false;
+            if (!MSIMECurrentVoiceShortcutPermissions().granted()) return false;
         }
         const CGEventMask mask = CGEventMaskBit(kCGEventKeyDown) | CGEventMaskBit(kCGEventKeyUp);
         tap_ = CGEventTapCreate(kCGSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionDefault, mask, callback, this);

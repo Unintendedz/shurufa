@@ -28,7 +28,7 @@ IMK 路径对这次按键返回了 YES，但 Chromium 的 `RenderWidgetHostViewC
 
 tap 的 run loop source 挂在专用线程上；回调只读原子状态、做判定、复制事件并 `dispatch_async` 到主线程，never 同步等待主线程，主线程卡住时全系统按键不跟着卡。被系统因超时禁用时，仍武装就在回调线程直接重新启用。
 
-主动 tap 需要「辅助功能」授权。没有授权时 `CGEventTapCreate` 失败，行为退回原来的只靠 IMK 返回值；每个进程只调用一次 `AXIsProcessTrustedWithOptions` 弹出系统授权，之后的刷新在已授权时重试创建。不加浮层提示。
+键盘事件的主动 tap 要两项授权：「辅助功能」（`AXIsProcessTrusted`）和「输入监控」（`CGPreflightListenEventAccess`）。只有辅助功能时 `CGEventTapCreate` 对 KeyDown/KeyUp 返回空，而同一进程里鼠标和 FlagsChanged 的主动 tap 都能建成（2026-11-03 用 lldb 在已安装的进程里实测，macOS 27）。最初只检查辅助功能，装机后 tap 从未建成，右 Option+← 照旧按词左移。判定与请求在 `platforms/macos/src/voice/VoiceShortcutPermissions.h`：缺任何一项时 `ensureTap` 不建 tap，行为退回只靠 IMK 返回值；每个进程只请求一次缺的那几项（`AXIsProcessTrustedWithOptions` 和 `CGRequestListenEventAccess`），之后的刷新在两项都授权后重试创建。不加浮层提示；语音设置的快捷键卡片有「系统权限」一行，显示两项的状态，绑定需要吞键而缺授权时标红，「去授权…」请求缺的授权并打开系统设置里对应的隐私页面，窗口重新成为 key window 时重读。
 
 本篇部分取代[单一语音会话决定](../feature/2026-10-28-shurufa-single-voice-session.md)中「全局只读监听不能吞掉其他应用的快捷键」的取舍：组合键绑定在授权后由系统层吞掉；录音期间的只读监听和它的回调边界保持不变。
 
@@ -43,7 +43,7 @@ tap 的 run loop source 挂在专用线程上；回调只读原子状态、做�
 收益：组合键绑定在原生、Electron/Chromium 和终端里表现一致，按键不会先触发应用动作；左右侧别判定与状态机共用同一函数，不会分叉。
 
 代价：
-- 组合键绑定要求辅助功能授权，未授权时仍有原问题。`build-shurufa.sh` 用本机自签名证书签名，重编不再丢授权（见 [Shurufa 本机构建用固定的自签名证书签名](../process/2026-11-03-shurufa-local-signing-identity.md)）；钥匙串里没有证书而退回 ad-hoc 时，每次重新构建仍会要求重新授权。
+- 组合键绑定要求辅助功能和输入监控两项授权，缺一项时仍有原问题。`build-shurufa.sh` 用本机自签名证书签名，重编不再丢授权（见 [Shurufa 本机构建用固定的自签名证书签名](../process/2026-11-03-shurufa-local-signing-identity.md)）；钥匙串里没有证书而退回 ad-hoc 时，每次重新构建仍会要求重新授权。
 - 武装期间全系统的 KeyDown/KeyUp 都经过一次 tap 回调。回调只做常数时间判定，线程独立。
 - 设置窗口里重录同一组合键时，系统层已经吞掉这次按键，录键框收不到它；重录成别的组合不受影响。
 
