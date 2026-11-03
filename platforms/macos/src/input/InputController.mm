@@ -7876,8 +7876,12 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         return YES;
     }
     const NSEventModifierFlags competing = NSEventModifierFlagCommand | NSEventModifierFlagControl | NSEventModifierFlagOption;
-    if (_doubaoVoiceRequest) [self cancelDoubaoVoiceInput];
-    if (_liveVoiceToken) [self cancelLiveVoiceInput];
+    // Shurufa 的录音不归某次按键所有：方向键、打字和其他组合键照常交给应用，只把实时文字移到浮层，录音只由快捷键和 Esc 结束。
+    if ([self ownsPersistentVoiceRecording]) [self detachVoiceMarkedText];
+    else {
+        if (_doubaoVoiceRequest) [self cancelDoubaoVoiceInput];
+        if (_liveVoiceToken) [self cancelLiveVoiceInput];
+    }
     // 「切换中英文」这一组快捷键（Ctrl+Option+Space、Shift+Space）和中英文切换的修饰键轻点走同一条路：
     // 中日英循环开着时它们一起参与循环，关着时仍是二态切换。
     if (_appearance.controlOptionSpaceShortcut && event.keyCode == 49 &&

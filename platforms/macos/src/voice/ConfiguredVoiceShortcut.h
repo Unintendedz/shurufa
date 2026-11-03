@@ -127,8 +127,9 @@ public:
                 (type == NSEventTypeFlagsChanged && (modifiers != expected_ ||
                     (key != primary_ && (sides_ & MSIMEVoiceSideFlag(key)))))) {
                 cancelled_ = true;
-                // 普通组合键继续传给应用，取消录音而不提交或整理。
-                return {false, (started_ || hold_) && recording && !locked_ ? Action::Cancel : Action::None};
+                // 普通组合键继续传给应用。按住模式下这说明快捷键其实被当作普通修饰键用，取消录音而不提交或整理；
+                // 切换模式的录音已经开始，只结束这次手势，录音只由快捷键和 Esc 结束。
+                return {false, hold_ && recording && !locked_ ? Action::Cancel : Action::None};
             }
             return {key == primary_};
         }

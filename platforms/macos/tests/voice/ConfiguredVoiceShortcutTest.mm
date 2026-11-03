@@ -76,6 +76,20 @@ int main() {
             assert(modifierUp.action == ([mode isEqual:@"hold"] ? Action::Toggle : Action::None));
             assert(shortcut.observe(Event(9, 0, NSEventTypeKeyUp), config, false).consumed);
         }
+        // 切换模式用组合键开始录音后，主键还没松开就按别的键（如 Option+→）只交给应用，不取消录音。
+        {
+            MSIMEConfiguredVoiceShortcut shortcut;
+            MSIMEConfiguredVoiceShortcut::Options config{@{@"key_code":@123, @"modifiers":@2, @"right_modifiers":@2}, @"toggle", false, false, false, false};
+            assert(shortcut.observe(Event(123, option, NSEventTypeKeyDown, 40), config, false).action == Action::Toggle);
+            const auto other = shortcut.observe(Event(124, option, NSEventTypeKeyDown, 41), config, true);
+            assert(!other.consumed && other.action == Action::None);
+            assert(shortcut.observe(Event(123, option, NSEventTypeKeyUp, 42), config, true).action == Action::None);
+            assert(shortcut.observe(Event(61, 0, NSEventTypeFlagsChanged, 43), config, true).action == Action::None);
+            // 之后的普通方向键不是快捷键，再按一次组合键才结束。
+            const auto plain = shortcut.observe(Event(123, 0, NSEventTypeKeyDown, 44), config, true);
+            assert(!plain.consumed && plain.action == Action::None);
+            assert(shortcut.observe(Event(123, option, NSEventTypeKeyDown, 45), config, true).action == Action::Toggle);
+        }
         // IMK 只转发 KeyDown 和 FlagsChanged，从不转发 KeyUp：先松开修饰键后，第二次按下组合键仍要结束录音。
         {
             MSIMEConfiguredVoiceShortcut shortcut;

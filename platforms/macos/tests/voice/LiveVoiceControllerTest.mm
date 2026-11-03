@@ -494,6 +494,38 @@ int main(int argc, char **argv) {
             [defaults setVolatileDomain:voiceArguments forName:NSArgumentDomain];
             puts("PASS duplicate toggle: IMK/tap/KeyUp/final/global do not stop twice or restart");
 
+            // 录音期间方向键、打字、删除和别的组合键照常交给应用，录音不断；只有快捷键和 Esc 结束。
+            for (NSUInteger route = 0; route < 2; ++route) {
+                [owner setValue:origin forKey:@"activeClient"];
+                MSIMEFocusedController = owner;
+                origin.commits = [NSMutableArray array];
+                const NSTimeInterval base = 300 + route * 100;
+                if (route == 0) {
+                    assert([owner handleEvent:event(NSEventTypeKeyDown,123,NSEventModifierFlagOption,base) client:origin]);
+                    // 修饰键还按着、主键 KeyUp 未到时按 Option+→。
+                    [owner handleEvent:event(NSEventTypeKeyDown,124,NSEventModifierFlagOption,base+0.1) client:origin];
+                    assert(source.active);
+                    [owner handleEvent:event(NSEventTypeFlagsChanged,58,0,base+0.2) client:origin];
+                } else {
+                    uint64_t generation = 0;
+                    assert([source startWithSession:session generation:&generation error:nil]);
+                    [owner setValue:@(generation) forKey:@"voiceGeneration"];
+                    assert(([owner startDoubaoVoiceInputWithOptions:@{@"asr_provider":@"textstream",@"stream":@YES}]));
+                    owner.streamFixture.result(@"synthetic textstream before keys", NO, nil);
+                }
+                assert(source.active);
+                for (NSNumber *code in @[@123, @124, @125, @126, @0, @51, @36]) {
+                    [owner handleEvent:event(NSEventTypeKeyDown,code.unsignedShortValue,0,base+1+code.doubleValue/1000) client:origin];
+                    assert(source.active && MSIMEVoiceRecordingOwner == owner);
+                }
+                [owner handleEvent:event(NSEventTypeKeyDown,124,NSEventModifierFlagOption,base+2) client:origin];
+                [owner handleEvent:event(NSEventTypeKeyDown,0,NSEventModifierFlagCommand,base+3) client:origin];
+                assert(source.active && MSIMEVoiceRecordingOwner == owner && !origin.commits.count);
+                assert([owner handleEvent:event(NSEventTypeKeyDown,53,0,base+4) client:origin]);
+                assert(!source.active && !MSIMEVoiceRecordingOwner && !origin.commits.count);
+            }
+            puts("PASS persistent: arrows, typing and other chords keep recording; Esc cancels");
+
             // TextStream 使用实际工厂分支，替身只替换模型与麦克风。
             for (NSUInteger action = 0; action < 3; ++action) {
                 [owner setValue:origin forKey:@"activeClient"];
