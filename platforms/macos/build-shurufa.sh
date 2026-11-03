@@ -29,6 +29,14 @@ cmake -G Ninja -S platforms/macos -B target/macos-isolated \
   -DPython3_EXECUTABLE="$(brew --prefix python@3.14)/bin/python3.14"
 cmake --build target/macos-isolated --target MSIMEClientInputMethod --parallel "$CARGO_BUILD_JOBS"
 bundle="$root/target/macos-isolated/Shurufa.app"
-codesign --force --deep --sign - --entitlements platforms/macos/resources/VoiceInput.entitlements "$bundle"
+# 按本机签名证书的 SHA-1 签名：designated requirement 绑定证书而不是 cdhash，重编后麦克风等授权仍然有效。
+# 没有证书时退回 ad-hoc，每次重编都要重新授权；证书由 scripts/create-shurufa-signing-identity.sh 建。
+signing_name="${SHURUFA_SIGNING_NAME:-Shurufa Local Signing}"
+identity="$(security find-certificate -c "$signing_name" -Z 2>/dev/null | awk '/^SHA-1 hash:/{print $3; exit}')"
+if [[ -z "$identity" ]]; then
+  echo "钥匙串里没有「$signing_name」，按 ad-hoc 签名；先跑 platforms/macos/scripts/create-shurufa-signing-identity.sh" >&2
+  identity=-
+fi
+codesign --force --deep --sign "$identity" --entitlements platforms/macos/resources/VoiceInput.entitlements "$bundle"
 codesign --verify --deep --strict "$bundle"
 printf 'Built: %s\n' "$bundle"
