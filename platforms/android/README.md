@@ -85,7 +85,7 @@ Java/Kotlin 宿主按 `java/app/msime/android/<feature>/` 分为 `account`、`ca
 
 `NativeClient` 提供 Java/Kotlin 到共享运行时的 JNI 传输。UTF-8 字节数组保留非 BMP 字符，避免 JNI modified UTF-8 损坏候选或资源路径。JNI 负责释放 C API 响应；上层解析 ok/value，负责会话线程和生命周期。
 
-`MSIMEInputService` 提供实际 InputMethodService 源码、系统 manifest 和输入法元数据；最小 Android 28，编译目标 35。软键盘、硬件 ASCII 键、候选点击和翻页调用同一 JNI；Engine 提交与剩余编辑串通过 `EditorBridge` 按顺序映射到 InputConnection。宿主不实现输入算法或分页规则。密码和非文本字段直接输入，不创建 Engine；带 `TYPE_TEXT_FLAG_NO_SUGGESTIONS` 的文本框（Chrome 地址栏、关了自动纠错的聊天框和网页输入框）照常组字；IME_FLAG_NO_PERSONALIZED_LEARNING 关闭当前会话学习。宿主不记录输入；联网只发生在 [PRIVACY.md](../../PRIVACY.md) 列出的场景（云联想与 AI、账号与同步、匿名使用统计、更新检查、按需下载资源包与模型等），各自的触发条件、目的地和开关以那里为准。
+`MSIMEInputService` 提供实际 InputMethodService 源码、系统 manifest 和输入法元数据；最小 Android 28，编译目标 35。软键盘、硬件 ASCII 键、候选点击和翻页调用同一 JNI；Engine 提交与剩余编辑串通过 `EditorBridge` 按顺序映射到 InputConnection。宿主不实现输入算法或分页规则。密码和非文本字段直接输入，不创建 Engine；带 `TYPE_TEXT_FLAG_NO_SUGGESTIONS` 的文本框（Chrome 地址栏、关了自动纠错的聊天框和网页输入框）照常组字；IME_FLAG_NO_PERSONALIZED_LEARNING 关闭当前会话学习。宿主不记录输入；联网只发生在这些场景：云联想与 AI、账号与同步、匿名使用统计、更新检查、按需下载资源包与模型等。
 
 外接硬件键盘的退格、左右方向、Home、End 和 Forward Delete 通过 `HardwareKeyPolicy` 映射到共享 Engine 的 0/4/5/6/7/8 命令；组字或候选状态由 Engine 处理，空闲时返回给编辑器。Ctrl/Alt/Meta 组合键仍交给系统快捷键，不把宿主命令抢走。这样 Android 的物理键盘不会复制一套编辑状态机，也不会把前删错误地当成普通退格。
 
@@ -164,7 +164,7 @@ Java/Kotlin 宿主按 `java/app/msime/android/<feature>/` 分为 `account`、`ca
 
 剪贴板历史的拒绝理由按 Apple `ClipboardHistoryStore.Failure` 分开命名：空白文本、单条超过 10,000 字或 40,000 字节、以及 200 条全部固定各有自己的提示，最后一条明确要求先取消固定或删除一条；Android 没有 iOS 的粘贴授权提示，空白文案相应去掉该从句。全部固定是独立的 `ClipboardHistory.FullException`，与读不出或写不回历史文件的普通 `IllegalStateException` 分开，避免把用户指向错误的动作。面板状态行同时说明点按插入以及在「管理」中固定或删除。理由分类与文案由无 Android 依赖的 `ClipboardHistoryPolicy` 提供并在 JVM 回归中验证。
 
-「更多工具 → 拍照识字」提供原生拍照面板。配套 OCR 模块 `msime-ocr-v1.apk`（ONNX Runtime 加 PP-OCRv6 tiny，带 arm64-v8a 与 x86_64 两套原生库）发布在本仓库的 `ocr-module-android-v1` Release，用户下载后在拍照识字设置里经系统文件选择器导入；主进程按 `resources/ocr-module-android.lock.json` 固定的完整摘要校验后封为只读，输入法进程每次加载前重新校验，不能选择任意 APK 启用。基础包不包含 OCR 依赖，不自动下载模块；Google Play 渠道拒绝外部可执行模块。相机权限、图片生命周期与遥测边界见 [PRIVACY.md](../../PRIVACY.md#android-拍照识字可选模块手动导入)。
+「更多工具 → 拍照识字」提供原生拍照面板。配套 OCR 模块 `msime-ocr-v1.apk`（ONNX Runtime 加 PP-OCRv6 tiny，带 arm64-v8a 与 x86_64 两套原生库）发布在本仓库的 `ocr-module-android-v1` Release，用户下载后在拍照识字设置里经系统文件选择器导入；主进程按 `resources/ocr-module-android.lock.json` 固定的完整摘要校验后封为只读，输入法进程每次加载前重新校验，不能选择任意 APK 启用。基础包不包含 OCR 依赖，不自动下载模块；Google Play 渠道拒绝外部可执行模块。
 
 设备专项 `bash platforms/android/tests/device/ocr-product-smoke.sh <serial>` 只接受专用 x86_64 API 28/35 AVD，构建当次模块并生成临时固定摘要锁，然后构建原生产品进行离线导入、只读加载、拍照及编辑器验收，退出时恢复正式锁。相机输入先由 `java -Djava.awt.headless=true platforms/android/tests/device/fixtures/OcrCameraImage.java <绝对图片路径>` 生成，再用 `MSIME_ANDROID_CAMERA_IMAGE=<绝对图片路径> bash platforms/android/tests/device/start-emulator.sh <28或35>` 启动新 AVD；已有活跃 AVD 会拒绝该参数，避免静默忽略夹具。专项不发布模块，成功也不代表许可、分发或真机验收完成。
 

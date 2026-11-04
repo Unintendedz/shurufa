@@ -1,187 +1,50 @@
 # 变更记录
 
-本文件记录共享客户端的公开变更。平台细节以对应平台 README 及 [实施记录](implementation.md) 为准。
+Shurufa 从水杉输入法 tag `fork-point/msime-2026-10-27` 分出来之后的改动，按 `git log` 整理。没有版本号，也不发版：`main` 上的最新提交就是我在用的那一版。更早的历史是水杉的，见上游仓库。
 
-## [Unreleased]
+## 2026-11-04
 
-首个版本的完整变更集。共享 Rust 层、六个平台宿主（Android / iOS / macOS / Linux / Windows / HarmonyOS）和共享设置界面均已实现，尚未正式发版。
+- 全拼、双拼打完拼音按 Tab，按第一个字的笔顺筛候选：`h` 横、`s` 竖、`p` 撇、`n` 或 `d` 点、`z` 折，`x` 代表任意一笔。也认部件的拼音首字母，比如口是 `k`、亻是 `r`、艹是 `c`。Backspace 逐个删掉筛选字母。包里因此带上了笔画词库，设置页有开关。
+- 全拼里打小写 `v` 进入计算与数字：`v1+2*3` 出结果和算式，`v123` 出中文大小写数字和大写金额，`v2026.11.4` 出几种日期写法，`v3jin'g` 做单位换算。`v` 后面直接跟字母时和原来一样当拼音打。
+- README 改写成个人 fork 的说明；删掉上游的 README 译文、贡献指南、行为准则、安全策略、issue/PR 模板、赞助配置、Dependabot、全部 GitHub Actions 工作流、隐私说明和代码签名策略。
 
-### 新增
+## 2026-11-03
 
-#### 共享层与宿主接口
+- 每次录音都写进本机的加密存档，设置页新增「听写历史」，可以设保留期限。密钥第一次录音时生成在登录钥匙串里，只在这台机器上有效。
+- 录音期间的普通按键不再打断录音。
+- 语音组合键在系统层吞掉时补上输入监控授权，设置页显示各项权限的状态。
+- 补全词和前缀区间的候选不再当作已经打完的回答交给重排。
+- 构建改用钥匙串里固定的本机自签名证书「Shurufa Local Signing」签名，重编重装后麦克风、辅助功能、输入监控的授权不用重新给。
 
-- Windows、macOS、Linux 的现有韩语方案新增可选[罗马字布局](korean-romaja.md)，两套式保持默认。罗马字参考文镜码表，用 `x` 输入初声 ㅇ，Shift 加 `g/d/b/j/s` 输入紧音，退格删除一个未上屏的拉丁按键；保留单音节汉字转换和半角标点。布局变更在组字结束后生效，移动端仍使用两套式。
+## 2026-10-30 — 10-31
 
-- 不依赖 Tauri、React 或任何平台宿主的 Rust 共享层，覆盖偏好设置、资源安装与校验、输入运行时、账号与云服务、语音、翻译、皮肤、社区资源、剪贴板、个人词库、打字统计和候选释义。
-- 输入引擎 `crates/engine`（`msime-engine`）是纯 Rust 实现，由 C++ MSIME-Engine 移植而来，输入算法、组合状态和学习数据归它管理，共享层只做编排；已有的用户词库日志、个人词库与学习数据按原格式读写，无需迁移。
-- 版本化 C ABI（`crates/host-api`）作为所有原生宿主的唯一入口，以 `cdylib`/`staticlib`/`rlib` 三种形态提供，覆盖会话生命周期、候选与代次选择、词库快照、云词典、云剪贴板、系统字体目录、翻译提供方、语音提供方与打字统计。
-- 输入运行时统一处理焦点、候选翻页、代次选择与全半角转换，并接入固定版本的整句重排模型。
-- macOS 与 Windows 各有一层宿主支持 crate：macOS 提供面板会话、云剪贴板与云词典桥接；Windows 提供语音控制器、语音上屏策略与 Windows Ink 手写。桌面 shell 禁用 `unsafe`，平台 API 调用集中在这两个 crate 里做安全封装。
-- Rust workspace 统一 GPL-3.0-only、`edition 2021` 与 `unsafe_code = "deny"`，工具链由 `rust-toolchain.toml` 钉死。
-- 韩语（Dubeolsik）方案可以把正在组字的那一个音节转换成汉字：宿主接口新增 `MSIME_CONVERT_HANJA`（16），打开后候选是该音节的汉字，按 libhangul 表的顺序排列、不重排，有训音（훈음）的附在注释里；选择后提交汉字，Esc 和退格只关闭列表、保留音节，输入字母关闭列表并继续组字，标点、失焦和结束组字提交的是韩文。已经上屏的音节和词级转换不在本次范围内。汉字表由 `msime-dict-build hanja` 从 libhangul 的 `data/hanja/hanja.txt`（BSD-3-Clause，固定提交）生成，只收单音节，编进引擎；它的 BSD-3-Clause 声明随六个平台的安装包一起分发，位置见[第三方组件清单](third-party.md#编译进共享库的数据)。汉字选择不学习，候选没有置顶、固定排位和删除菜单。
-- 汉字候选的显示：主行只显示汉字，训音（훈음）不再跟在汉字后面占一整格，而是画在候选下方的小字释义行，不受「显示译文」和英文释义开关影响；macOS、Windows、Android、iOS 与 HarmonyOS 横排都为这一行预留高度，打开列表时候选窗不再变高。IBus 与 Fcitx5 的候选只有一行，训音放在译文的位置（IBus 用译文颜色，Fcitx5 用斜体）。训音只用于显示，Ctrl+Enter 等「上屏译文」的操作不会提交它。汉字候选同时开放候选释义与译文：共享的翻译查询不再跳过韩语，释义查询在原文查不到时按简体字再查一次（`韓` 按 `韩` 查），繁体输出下的中文候选同样受益；随包的英文释义表只收二到六字的词，单个汉字的英文释义需要在线翻译、自定义或学习到的条目，其他语言的离线释义可以命中单字。
-- 网址输入模式（默认开启，没有设置开关）：全拼、双拼、五笔组字中原文恰好是 `www` 时按 `.`，`http`、`https` 时按 `:`，`ftp` 时按 `.` 或 `:`，就切换到网址输入，后续按键原样作为半角 ASCII 网址输入，不再转成中文；五笔码长只有 4，在 `http` 后按 `s` 就直接进入。网址里能输入字母（保留大小写）、数字和 `-._~:/?#[]@!$&'()*+,;=%^`，最长 512 个字符；`"` `<` `>` `\` `{` `}` `|` 和反引号不属于网址，按下时先上屏网址再按标点处理。模式的第一行候选是整段网址，空格或回车上屏网址，全角模式下网址仍是半角，Esc 取消；退格删掉触发键（以及五笔进入用的 `s`）后回到原来的组字，误触发时还能选回原来的字（如五笔 `www` 的「众」）。网址不进英文词库也不参与学习，计入打字统计。宿主接口 View.local_mode 新增 `url`，网址模式和触发键经 `spelling_symbols` 发布；Linux（IBus / Fcitx5，候选标注「网址」）、HarmonyOS（硬件键盘与触屏符号键）、Windows（TSF 键击缓冲最长 64 个字符，超出部分输入不进去）、Android 实体键盘与 iOS 符号面板已适配。
-- 网址补全：全拼、双拼、五笔组字原文只有 ASCII 字母和数字时按 `@` 进入网址模式写邮箱，候选在整段网址之后列出常用邮箱后缀（与 Android 邮箱输入框同一份 20 个，按已打的域名缩小，选中上屏整个邮箱）；组字原文是 `ht`、`htt`、`http`、`https`、`ww`、`www`、`ft`、`ftp` 时候选里有 `https://`、`http://`、`www.`、`ftp://`，选中后以它进入网址模式接着打；网址以 `www.` 开头或含 `://`、正在打主机名时给出 `.com` `.cn` `.net` `.org` `.com.cn`，选中后留在网址模式。网址模式里数字仍是输入，补全要点选或用方向键选；空格、回车和失焦上屏的仍是打的网址。退格删掉末尾的 `@` 回到原来的组字。
-- 打拼音出符号（符号混输，默认开启）：全拼、双拼和九宫格整段打出一个符号的名称时，候选里紧跟名称那个词给出符号，例如 `zhengfu` 得 ±、`pingmi` 得 ㎡ m²、`gamma` 得 γ Γ、全拼首字母 `ssd`（摄氏度）得 ℃。符号表约 250 个名称，覆盖数学、单位、希腊字母、形状与记号、标点与括号，编进引擎，不依赖词库版本。只认完整的名称，不按前缀；符号不占首位，空格不会直接上屏符号；单音节名称（派 π、度 °）和两个字母的首字母简拼最早排第 4 位。选中符号即整段上屏，不学习、不调频，不能置顶、固定排位或删除。共享偏好新增 `mixed_input.symbols`，各平台都有开关：共享设置页、Windows 与 macOS 原生设置、iOS 候选设置里的「符号混输」，Android 表达页的「候选带符号」，IBus 的「符号候选」和 Fcitx5 的「混合符号」。可见变化：升级后完整打出符号名称时候选会多一两行，名称是常用词时排在后面的词往后挪，不需要可以关掉。兼容性：开关保持开启时不写入偏好文档，旧版本照常读取；关掉后文档里出现 `"symbols": false`，尚未升级的旧版本宿主（例如更新后尚未重启的输入法进程，或经同步共用同一份文档的另一台设备）会因不认识这个键而整份加载失败，需要一并升级。
-- 数学符号与希腊字母扩充：打拼音出符号的表增加约 85 个名称。标点名称也能打出符号：`douhao` 得 ， ,、`juhao` 得 。 .、`xiegang` 得 ／ /、`aite` 得 @，括号、引号等补上 ASCII 写法。希腊字母 24 个都能打出：三个字母且拆不成拼音的拉丁名称 `phi` `psi` `rho` `tau` 直接出 φ ψ ρ τ，缪 μ、纽 ν、柔 ρ、套 τ、斐 φ、凯 χ 按单字读音给出（与派、度相同，只跟在那个字后面、最早排第 4 位）；`pi` `mu` `nu` `xi` `chi` `eta` 本身是拼音，不在普通打字里出。数学方面新增梯度 ∇、当且仅当 ⇔、包含于 ⊆、实数集 ℝ 等集合、逻辑、微积分和分数名称，以及拉丁名称 `nabla` ∇、`aleph` ℵ。符号模式（Shift+S，触屏 26 键先按 Shift 再按 S）新增按 LaTeX 命令名查符号，六个平台都能用、不必启用插件：数据就是官方短语表「LaTeX 符号」的 `symbols.tsv`（约 370 条，`sum` ∑、`leq` ≤、`subseteq` ⊆、`rightarrow` → ⇒、`mathbbr` ℝ、`pi` π Π），只认完整命令名，排在分组之前；打出的命令名同时是希腊字母名时，正文用的 φ、ε 排在 LaTeX 字形 ϕ、ϵ 之前。两张表的源数据移到词库仓 msime-dictionary 的 `sources/symbols/`，本仓由 `resources/symbol-tables.lock.json` 固定并同步副本，编译不联网。
-- 新增识别服务阿里云百炼（`bailian`，#6017）：整句识别，录完一次上传，默认 `https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions` 与模型 `qwen3-asr-flash`，录音作为 `input_audio` 的 Base64 数据 URL 放进 Chat Completions 请求，单次上传上限约 218 秒（百炼限制音频含编码不超过 10 MB）。`MobileVoiceProviderConfiguration` 与 `msime_client_mobile_voice_configuration` 新增请求格式字段（`multipart`、`chat_audio`、`doubao_websocket`、`local`），各宿主按它挑请求构造，不再按 provider 名字判断。暂不支持百炼的实时流式识别。
-- 宿主可以把账号会话的存储交给 Rust 以外的地方（#8201）：新 C ABI `msime_client_session_store_register` 收下宿主的 `load`、`save`、`remove`、`lock`、`unlock`、`release` 回调（`msime_client_session_store`，版本 1），钥匙串、App Group、AndroidKeyStore 的读写原语留在平台，编解码、两种会话布局、合法性校验和刷新时的加锁顺序都在 client-services 的 `account::host_storage`；`msime_client_session_store_unregister` 注销。注册以后，`msime_client_account`、`msime_client_community`、`msime_client_account_cloud_clipboard` 和 `msime_client_account_access_token` 用 `session_store` 代替 `directory` 即走宿主的存储，带 `directory` 的请求与以前完全相同，Windows 和 Linux 不受影响；注册时可以传服务端「我的设备」认得出的 `client_agent`（`msime-<平台>/<版本> (...)`），不传时仍发 `MSIME/Android`。`msime_client_account` 新增 `ensure_anonymous` 操作，按目录或注入的存储注册本机匿名账号，失败时返回账号错误码。ABI 版本仍是 3。各平台还没有改调这些接口。
-- 云词库面板和 iOS 账号设置映射下沉到 host-api 与 client-services（#8201）：新 C ABI `msime_client_cloud_dictionary` 处理账号云词库的列表、目录、增删改、导入导出、候选调频和固定排位，以及完整快照的下载预览、「应用到本机」、备份与恢复，会话来源与 `msime_client_account` 相同（`directory` 或 `session_store`），预览和中转文件放在宿主给的 `snapshot_directory`；整份快照可能有 512 MiB，C 上的备份与恢复改走文件路径（`snapshot_export_file`、`snapshot_restore_preview_file`、`snapshot_restore_file`），文本版的三个操作不论参数是否合法都报 `snapshot_unavailable`；`snapshot_export_file` 的保存位置的上级目录不存在时在下载之前就报 `account_invalid`，复制中途被杀时留在保存位置旁边的 `.msime-export-*` 在下次往同一个目录导出时删掉。分发与完整快照的实现从 Tauri 搬到 host-api 的 `cloud_dictionary::account`、`cloud_dictionary::full_backup` 和 `cloud_dictionary::snapshot_files`，Windows 设置应用和 Tauri iOS、Android 改调它们，行为不变。iOS 键盘设置的形状 `IosKeyboardPreferences` 搬到 client-core 的 `ios_keyboard`，账号设置文档与它之间的映射搬到 client-services 的 `account::ios_settings`；新 C ABI `msime_client_account_ios_settings_export`（必须带服务端字段表，按它过滤）和 `msime_client_account_ios_settings_apply`（`plan` 算出要写回 App Group 的值，`commit` 写共享偏好）不经会话，失败时返回错误码。各平台还没有改调这些接口。
-- `msime_client_account` 补齐平台各自重写过的账号接口（#8201）：新增 `chat`、`chat_models`、`translate`（`/v1/translate`）、`phrases_load`/`phrases_save`（`/v1/users/me/phrases`）、`sessions_list`/`session_revoke`（我的设备）、`data_summary`/`data_export`/`data_delete`（云端数据）、`feedback`（`/v1/feedback`，multipart，截图走文件路径）、`diagnostics_upload` 以及绑定上传账号的 `diagnostics_state`、`diagnostics_regenerate_token`、`diagnostics_delete`。请求按服务端规则在本地完整校验，超过服务端整包上限的请求本地报 `account_too_large`；新操作的失败另有 `account_recent_login_required`、`account_not_found`、`account_identity_changed`，并在服务端给了 `Retry-After` 时带 `retry_after_seconds`，已有操作的错误码不变。释义、反馈和诊断上传登录账号优先、没有登录时用本机匿名账号。规则与传输在 client-services 的 `account::{translate, phrases, devices, user_data, feedback}` 和 `diagnostics::upload`（新的 `AccountFailure` 带状态码、服务端错误码和重试秒数），client-services 的 `time` 依赖开了 `parsing`，不新增 crate。新 C ABI `msime_client_account_gloss` 是释义的 sans-IO 一半，给按键路径上自己发 HTTP 的宿主组请求体、解读响应。
-- `msime_client_community` 新增键盘皮肤社区（`keyboard_skin_list`、`detail`、`download`、`install`、`rate`、`publish`、`set_category`、`unpublish`），与移动端 Tauri 的命令相同；`keyboard_skin_install` 与 `msime_client_community_skin_install` 共用「先试用、再入库、入库失败就结束试用」的同一个函数。新 C ABI `msime_client_ai_skin_generate`、`msime_client_ai_skin_cancel` 和 `msime_client_ai_skin_job` 导出 AI 键盘皮肤的整条生成、取消和单个插画任务；生成的进度回调改在调用线程上依次调用，Tauri 移动端收到 `ai-skin-progress` 的线程随之改变，事件内容不变。取消登记表 `AiSkinRequests` 与对话的两种返回形状下沉到 client-services，Tauri 改为再导出。
-- 多分类自动云同步的编排收进 Rust（#8201）：新 C ABI `msime_client_cloud_sync` 按 `status`、`sign_out`、`set_enabled`、`mark_dirty`、`run`、`commit`、`import_legacy` 分发，同步设置、Android 的自定义键盘皮肤库、无编码常用语和个人词库，会话来源与 `msime_client_account` 相同。状态是 `state_directory/cloud-sync/state.json`（版本 2，flock 保护，键盘扩展和 `:ime` 进程经 `mark_dirty` 打标记），每次调用按会话的用户 id 对齐，同一账号重新登录保留进度；一轮开始时写下租约，提交时比较并交换，同时只跑一轮，过期的提交报 `stale_run`；游标、清标记和基线只在提交时推进，要宿主写的值（iOS 的键盘设置、Android 的按键反馈和本地设置、皮肤库、要认领的示例常用语）写完以后宿主调 `commit`。规则上与两端原来不同：设置按键三方合并、常用语按正文三方合并（删掉的不再复活，合并后冲突的 id 换新），云端被清空时先问用户、「使用云端」遇到空云端不清空本机，尊重 `Retry-After`（最多按 24 小时记，时钟往回拨以后远在将来的退避不再挡，手动同步最多被挡 24 小时），宿主给的自定义键盘皮肤库不是 JSON 数组时上传保留云端原有的皮肤库，常用语超过 500 条或 256 KiB 时这一类报错而不截断；词库合并要等云端的每个词都进了本机才算完成并上传（排着、导入不了或被失败请求挡住时分别报 `dictionary_merge_pending`、`dictionary_merge_rejected`、`dictionary_merge_blocked`，游标不推进），下载的快照等激活时不上传也不再下载或合并，没激活就结束时下一轮改按合并处理；写入因修订号冲突重读时读到被清空的云端也先问用户，不拿旧基线合并而删掉本机的常用语和设置；云端快照里的删除记录按 (kind, code, word) 而不是 id 匹配，云词库面板改过的词不再在合并时被当成删掉（Android 的 `SyncApi.snapshotWords` 按 id 匹配）；本机选着账号装不下的方案（粤拼、注音、越南文、藏文、笔画）、或者鸿蒙本机是 14 键时，这两项不上传，上传后把合并结果写回本机、下载别的设备的设置时也保留本机的值，不再被云端留着的旧方案和旧布局改回去（Android、鸿蒙、iOS 的映射和 Windows「设置同步」的应用同样如此）。两端原来的同步状态用 `import_legacy` 导入，只导入一次：导入过、或者用户调过 `set_enabled` 以后不再导入，退出、换账号也不重新开放，宿主每次启动都带着旧状态调用也不会把用户关掉的同步改回打开。纯决策、状态文件和单轮状态机在 client-services 的 `account::cloud_sync`，驱动在 host-api 的 `cloud_sync`；`AccountApi` 加了几个带状态码和 `Retry-After` 的同步用方法（默认转调原来的方法）和 `BackendAccountSession::authenticated_as`。各平台还没有改调这个接口。
-- `msime_client_account` 能完成 Windows 以外各宿主的 Apple 和 Google 登录（#8201）：宿主只负责弹系统的登录界面或浏览器，challenge、nonce、校验和换会话都在 Rust。新增 `apple_challenge`/`apple_login`（iOS、macOS 的 `ASAuthorizationAppleIDProvider`，nonce 与 `state` 绑定）、`google_challenge`/`google_token_login`（不带回跳地址的 Google ID token 流程，给 iOS 的 GoogleSignIn 和 Android 的 Credential Manager）、`google_challenge {target}`/`google_code_login`（鸿蒙自己监听回环端口时的授权码流程，授权链接先按回跳地址校验）以及 `apple_web_start`/`apple_web_login`（Android 的 Apple 网页登录：Rust 生成 PKCE verifier、只发它的 S256 摘要，`POST /v1/auth/apple/web` 与 `/v1/auth/apple/web/login`），目录和注入的会话存储都能用。会话层新增 `BackendAccountSession::{apple_challenge, google_id_token_challenge, google_loopback_challenge, sign_in_google_id_token, apple_web_start, sign_in_apple_web}`，`AccountApi` 新增默认返回不可用的 `apple_web_challenge` 与 `apple_web_login`；`/v1/auth/challenges` 的传输检查放行不带目标的 Google（服务端的 ID token 流程），账号页的 `request_code` 仍然拒绝它。已有操作和错误码不变，只支持登录，不支持把 Apple、Google 绑定到已登录账号。各平台还没有改调这些接口。
-- `msime_client_account_cloud_clipboard` 补上平台账号路径本来就有的置顶、保留期和清空（#8201）：新增动作 `pin {id, pinned}`（`PUT /v1/users/me/clipboard/{id}/pin`）、`set_retention {days}`（`PUT /v1/users/me/clipboard/retention`，0、1、7、30）和 `clear`（`DELETE /v1/users/me/clipboard`，开关不变），结果形状与自建中继的同名动作相同（`{}`、`{retention_days}`、`{}`）。`AccountApi` 新增 `pin_clipboard` 和 `set_clipboard_retention`（默认 `account_unavailable`），`BackendAccountSession` 新增同名方法；条目编号和天数不合规时不联网。共享面板和 Linux provider 用的 `validate_request` 不变，桌面 Tauri 仍只把这三个动作交给中继，iOS、Android 的 Tauri 外壳仍然拒绝它们。头文件补全了这个入口接受的全部动作（含 `devices`、`approve`、`reject`、`remove`、`reset`）和各自的结果形状，`msime_client_relay_cloud_clipboard` 的注释和 `docs/cloud-clipboard-relay.md` 也改为两个 C 入口接受同样的十二个动作。
-- 鸿蒙的账号设置映射下沉到 client-services（#8201）：`AccountPreferencePlan.ts` 里 `platform.harmony.*` 的导出、应用与合并搬到 `account::harmony_settings`，读写的是共享偏好，与 Android 共用 `settings_sync` 的同一套触屏映射，只是命名空间不同；全拼 14 键不上传、鸿蒙不提供的全局主题按 `system` 上传，与鸿蒙原来一致。新 C ABI `msime_client_account_harmony_settings_export`（必须带服务端字段表，按它过滤）和 `msime_client_account_harmony_settings_apply`（按修订号写回共享偏好，按键反馈交还宿主写）不经会话，失败时返回错误码；云端取值本机不认识或超出范围时只跳过那一个键，而不是像鸿蒙原来那样拒绝整份文档。`msime_client_cloud_sync` 的 `host_inputs` 新增 `harmony`，为真时设置按鸿蒙映射。client-core 的版本过滤把 `platform.harmony.keyboard_layout` 当作随方案同步的布局。各平台还没有改调这些接口。
-- `msime_client_account` 补上只有 Android 实现过的两个服务端接口（#8201）：`download_link {platform}`（`POST /v1/users/me/download-link`，「其他平台下载」的「发送链接」，服务端把下载页链接发到账号已验证的邮箱，返回打码后的 `sent_to`；没有已验证邮箱时是新错误码 `account_no_verified_email`，只用登录账号）和 `voice_contribution`（`POST /v1/voice/contributions`，multipart，音频是 WAV 的 base64，最多 2 MiB；按服务端的 RIFF 规则校验，`duration_ms` 由 Rust 从 WAV 算出、必须在 1–60000 毫秒，宿主不再声明；登录账号优先、没有登录时用本机匿名账号）。规则与传输在 client-services 的 `account::{download_link, voice_contribution}`，`AccountApi` 新增默认返回 `account_unavailable` 的 `download_link` 和 `voice_contribution`，`BackendAccountSession` 新增 `download_link`；已有操作和错误码不变。各平台还没有改调这些接口。
-- #8201 的新接口分得出断网、限流多久和需要最近登录：`AccountFailure` 新增 `network_failure`，请求发出去以后没拿到响应（连不上、DNS 或 TLS 失败、超时、连接在响应头之前断开）时新操作报新错误码 `account_network`，服务端回了 5xx 仍是 `account_unavailable`；`msime_client_account` 的 `chat`、`chat_models` 和 `msime_client_ai_skin_generate`、`msime_client_ai_skin_job` 改为返回带 `retry_after_seconds` 的账号错误码（AI 皮肤的任务不存在是 `account_not_found`），新增注销账号的 `account_delete`，需要最近登录时报 `account_recent_login_required` 并保留本地会话。`AccountApi` 新增默认转调原方法的 `chat_models_detailed`、`chat_detailed` 和 `delete_account_detailed`，`BackendAccountSession` 新增 `chat_models_detailed` 和 `delete_account_detailed`，`chat_checked` 改走带细节的路径；`AiSkinApi` 的方法改为返回 `AccountFailure`，`BackendAiSkinService` 新增 `generate_detailed`（失败是新的 `AiSkinFailure`），任务的三个方法也改返回它。已有的 `delete`、Tauri 的 `account_chat`、`account_chat_models` 和 `ai_skin_generate` 用的 `chat`、`chat_models`、`generate` 把同一次失败收窄回 `AccountError`，错误码不变；断网时已有操作仍是 `account_unavailable`，云同步的失败记录也不变。各平台还没有改调这些接口。
-- #8201 的社区键盘皮肤、举报、AI 皮肤和对话在没有登录时用本机匿名账号，语音贡献只用匿名账号：`msime_client_community` 的 `keyboard_skin_download`、`keyboard_skin_install`、`report`，`msime_client_ai_skin_generate`、`msime_client_ai_skin_job`，以及 `msime_client_account` 的 `chat`、`chat_models` 改为登录账号优先、没有登录时用同一 `directory` 或 `session_store` 里的匿名会话（与 `translate`、`feedback` 相同的 `with_shared_access_token`），两个都没有时错误码与以前相同（`community_unauthorized`、`account_unauthorized`）；Windows 设置窗口的举报因此在未登录时也能用匿名账号提交。`voice_contribution` 不再用登录账号，样本挂在这台设备的匿名账号下；`data_delete` 的 `voice` 分区同时删掉匿名账号名下的样本，匿名会话不是 10 分钟内建立的时候用保存的匿名身份重新登录一次再删（顺序和这一步失败时的处理见下一条）。client-services 新增 `BackendCommunitySkinService::download_with_anonymous`、`BackendCommunityReportService::report_with_anonymous`、`BackendAiSkinService::with_anonymous`、`BackendAccountSession::voice_contribution`、`prepare_chat`、`delete_anonymous_voice_samples` 和 `AnonymousIdentitySource`；原来的 `download`、`report`、`BackendAiSkinService::new` 不变，所以共享应用（Tauri）的社区举报、键盘皮肤下载和 AI 皮肤仍只用登录账号。`AnonymousSessionStorage` 遇到还不存在的账号目录时当作没有匿名会话（以前是 `account_storage`），按目录调用的 `translate`、`feedback` 和 `msime_client_account_access_token` 在这种情况下因此报 `account_unauthorized`。各平台还没有改调这些接口。
-- #8201 的匿名账号语音样本在注销、删除和汇总里都算上（决定 12 的后续 2–4）：`msime_client_account` 的 `delete` 和 `account_delete` 注销成功以后再删一次这台设备匿名账号名下的语音样本，尽力而为，这一步失败不撤销、也不让注销失败，value 从 `null` 改为 `{voice_samples}`（`{ok:true}` 或 `{ok:false,error,retry_after_seconds?}`）；新操作 `voice_delete` 不要求登录，只删匿名账号的样本，给从没登录过的用户和要重试的宿主；`data_summary` 再用匿名账号取一次 `GET /v1/users/me/data`，把它的 `voice` 分区合进汇总，新字段 `anonymous_voice` 是 `included`、`none` 或 `unknown`（这一次没成功时汇总照样返回；本机还留着匿名身份、只是会话已经过期清掉时也是 `unknown`，因为名下可能还有样本，只有身份和会话都没有才是 `none`）；`data_delete` 含 `voice` 时改为先删登录账号的分区、再删匿名账号的样本，登录账号需要最近登录等失败时不再白耗一次按地址每天限额的匿名重新登录，匿名这一步失败时操作仍然成功、失败在 `voice_samples` 里（以前整个操作以这一步的码失败、登录账号的分区不动），含 `voice` 时 value 是 `{voice_samples}`。新 C ABI `msime_client_ensure_anonymous_account_with_agent` 收 `{directory, client_agent?}`，与 `msime_client_ensure_anonymous_account` 相同，只是 Windows Server 注册匿名账号时可以自报 User-Agent（决定 1），失败是账号错误码；旧入口不变。#8201 的新操作只在请求真的没拿到响应时报 `account_network`（`request_detailed` 和反馈、语音贡献、导出、流式对话自己的 `send()` 都一样）：reqwest 在本地建不出请求是 `account_invalid`，重定向被拒是 `account_unavailable`。各平台还没有改调这些接口。
-- #8201 的对话可以流式显示和取消：新 C ABI `msime_client_account_chat_stream` 以 `stream: true` 请求 `/v1/chat/completions`，请求、预检和会话选择与 `msime_client_account` 的 `chat` 相同（登录账号优先、没有登录时用本机匿名账号），回复每到一段非空增量就在调用线程上交给宿主的 `on_delta` 回调（UTF-8 字节，不会拆开一个字符），成功时返回整段 `{content}`；宿主给的 `request_id` 可以经新的 `msime_client_account_chat_cancel` 从任何线程或回调里取消，调用随即以 `account_cancelled` 返回，同一个 id 正在进行时是新错误码 `account_busy`。取消先于 Rust 登记这个 id 到达时（宿主刚发起调用）也不会丢：`msime_client_account_chat_cancel` 和 `msime_client_ai_skin_cancel` 记下最近 64 个当时没有在进行的 id，同一个 id 随后开始时立即以取消结束；最近结束的 256 个 id 的取消（请求结束以后才到的）不记，不会把先到的挤掉。所以 `request_id` 不要再用：结束过的 id 再拿来开始时，登记之前到的取消不起作用。开始输出前的失败与 `chat` 相同（限流带 `retry_after_seconds`），服务端的上游失败事件是 `account_unavailable`，没等到 `[DONE]` 就断开是 `account_network`；不认识 `stream` 的旧后端（400 `invalid_chat_request`）退回非流式请求。SSE 的解析、上限（回复 16 KiB、整条流 4 MiB、一行 1 MiB）和取消在 client-services 的 `account::chat_stream`，`AccountApi` 新增 `chat_stream_detailed`（默认实现转调非流式的 `chat_detailed`），已有的 `chat` 不变。
-- #8201 的账号能添加登录方式（决定 9，Android 的「添加登录方式」）：`msime_client_account` 的 `request_code`（只能是 `email`）、`login`、`google_challenge`（不带 `target` 的 ID token 流程）、`google_token_login`、`apple_web_start` 和 `apple_web_login` 新增可选的 `purpose`，取 `login`（缺省，行为不变）或 `link`。`link` 只用登录会话，带着它的令牌请求 `POST /v1/auth/challenges`、`/v1/auth/login`、`/v1/auth/apple/web` 和 `/v1/auth/apple/web/login`（`purpose:"link"`），没有登录时是 `account_unauthorized`、不联网；完成后服务端为同一个账号签发的新会话在刷新锁里替换本地的登录会话，期间本地退出、换号或重新登录时是 `account_cancelled`、新会话不写入。失败按 #8201 新操作的规则带细节：会话不是 10 分钟内登录的是 `account_recent_login_required`，已经绑在别的账号上是 `account_conflict`，限流带 `retry_after_seconds`，断网是 `account_network`。client-services 新增 `BackendAccountSession::link_request_code`、`link_google_id_token_challenge`、`link_apple_web_start`、`link_email`、`link_google_id_token`、`link_apple_web`，`AccountApi` 新增 `link_challenge`、`link_login`、`apple_web_link_challenge`、`apple_web_link_login`（默认 `account_unavailable`）。Apple 原生登录、Google 回环和 Windows 的 `google_login` 不能绑定，带了 `purpose` 是 `account_invalid`；为此 `google_login` 和 `google_cancel` 不再接受 `operation` 之外的字段（以前多带的字段被忽略，`google_login` 会照样做一次普通登录），现在的 Windows 设置窗口只发 `operation`，不受影响。
-- #8201 的目录模式可以自报 User-Agent（决定 1）：`msime_client_account` 和 `msime_client_account_chat_stream` 带 `directory` 的请求新增可选的 `client_agent`，形状与注入存储的 `client_agent` 相同（`msime-<平台>/<版本> (<设备>; <系统>; edition=<id>)`，不合法是 `account_invalid`），这次调用的请求（包括登录、绑定和匿名账号的注册）都以它发出，服务端「我的设备」据此显示 Windows、Linux 的平台和设备，不再显示成 android；不给时与以前一样发 `MSIME/Android`。会话对象按目录和 `client_agent` 缓存，同一个 User-Agent 在进程里共用一个 HTTP 客户端；与 `session_store` 一起给是 `account_invalid`。client-services 的 `ensure_anonymous_account_with` 改为公开，可以用调用方给的客户端注册匿名账号。client-services 新增只给测试用的 `test-support` 特性，打开后 `BackendAccountClient::loopback_with_agent` 对其他 crate 公开（host-api 的测试经它核对线上的 User-Agent），产品构建不启用。其余入口（`msime_client_community`、`msime_client_account_access_token` 等）的目录模式不变。
-- #8201 的云同步在云端被清空后多一个选择「关闭同步，保留本机」（决定 8）：`msime_client_cloud_sync` 的 `run` 收 `choice:"disable"`（只能和 `trigger:"choice"` 一起给），只回答 `needs_choice` 的 `cloud_cleared`。它不联网、不跑一轮，也不读写本机的设置、常用语和词库，只在状态锁里关掉这台设备的同步，返回新的 `outcome:"disabled"`；不等节流、`Retry-After` 和另一轮（在跑的那一轮因此提交不了），不记成 `pending_choice`，记着的选择一起丢掉；清空标记和游标留着，用户以后重新打开同步时第一轮照样先问。没有分类在等清空的选择（包括首次同步的提示）时是 `skipped`、`not_cloud_cleared`，状态不变。状态 S（`status`、`peek` 都有）新增 `disabled_on_cloud_cleared`，状态行在这时是「云端数据已被清空，已关闭同步，本机数据没有改动」；等待选择时的状态行改为「云端数据已被清空，请选择合并、使用云端或关闭同步」。已有的 `merge`、`use_cloud` 和其余操作不变。
-- #8201 的 iOS 账号设置映射总是应用 `input.wubi_schema`（决定 10）：`msime_client_account_ios_settings_apply`、`msime_client_cloud_sync` 的 iOS 映射和 Tauri iOS 的 `account_preferences_apply` 共用的 `IosPreferencePlan` 在云端文档有这个键时总是写共享偏好的五笔版本，不再只在 `input.schema` 是 `wubi` 时写，与 Android、桌面和鸿蒙的映射相同；不认识的取值与其余的键一样拒绝整份文档（`account_invalid`），没有这个键时保留本机的五笔版本。
-- #8201 的鸿蒙可以直接用目录模式的账号会话（迁移计划 P1–P3）：目录模式读 `account-session.json` 时也认鸿蒙 ArkTS 桥接以前写的扁平布局 `{access_token, refresh_token, token_type, expires_at(毫秒), user}`，只读，`expires_in` 按剩余时长四舍五入补出、至少 1（访问令牌已经过期的会话照样能刷新），第一次认证请求前补上 `session_id` 并写成 Native；鸿蒙上 `account-session.json` 和 `cloud-clipboard-keystore` 带属组读写位也照样读（`@ohos.file.fs` 没有 chmod），与 `anonymous-session.json` 相同，其他用户位和其他平台的规则不变。`msime_client_account` 新增只在目录模式可用的 `session_adopt {path?, item: account|anonymous, from: settings|keyboard}` → `{outcome: adopted|unchanged|cleared, local_unreadable?: true}`，给设置应用与键盘两个沙箱之间的会话镜像：整个决定在 `account-refresh.lock` 里做、不联网；两种 `item` 只看 `user.id` 和 `expires_at`、不看 `session_id`：同一个 `user.id` 时 `expires_at` 更晚的胜，两个方向都一样，相同时不动（后签发的会话一定过期得更晚，所以刷新过的那份胜过刷新前的、同一个账号重新登录的胜过上一次登录的，升级前旧版 ArkTS 已经在一边轮换过、另一边还停在用过的令牌时也不会把用过的那枚留下或换回来而被服务端按重放吊销）；换号时键盘导入设置应用的（`from:"settings"`）直接替换，设置应用导入键盘的（`from:"keyboard"`）不动，退出和换号不会被键盘的旧副本撤销；本地没有会话或读不了时登录会话与换号相同，匿名会话两个方向都采用（用户没打开过设置应用就先启用键盘时，设置应用第一次启动接过键盘注册的匿名账号，不再注册第二个）；本地读不了而没有采用时 `outcome` 仍是 `unchanged`，另带 `local_unreadable: true`，表示这个结论取决于本地此刻读不读得了，宿主不能把同一份发布物记成不用再试（client-services 的 `SessionAdoptOutcome` 为此多一个 `LocalUnreadable`）；发布方没有会话时只有登录会话的 `from:"settings"` 在锁里清掉本地会话，匿名会话一律不清（匿名账号没有退出登录，清掉只会逼着重新注册、用掉每个 IP 每天 5 次的注册额度）。`session_adopt` 另收可选的 `identity_path`（只能与 `item:"anonymous"` 一起给）：给了时匿名账号的身份跟着匿名会话走，结果是 `adopted` 时在同一把锁里把 `anonymous-account.json` 换成发布方的身份，发布方没有身份而换了账号时删掉本地身份，同一个 `user.id` 时不动，会话和身份始终属于同一个匿名账号；发布方的身份读不了或不合法时是 `account_storage`、本地不动；不给时身份不动，与以前相同。client-services 新增 `BackendAccountSession::adopt_anonymous_session_with_identity`、`read_published_anonymous_identity` 和 `PublishedAnonymousIdentity`。读发布的会话和身份文件时，鸿蒙上要求文件属主是本进程的有效 uid、不看所在目录的属主（发布目录在 data-group 共享目录下），其他用户位照样拒收；其他平台与本目录的文件相同，属主与所在目录相同。采用的会话与刚读到的本地会话或内存里那份不是同一次登录时总会推进会话代次，同一个对象上进行中的登录回来时以 `account_cancelled` 结束，不会把采用的换号盖掉。目录模式的匿名注册（`ensure_anonymous_account`）改在 `account-refresh.lock` 里保存会话，并且只在身份仍是登录时用的那一份时保存：登录在路上时 `session_adopt` 已经连同身份换成另一个匿名账号（或删掉了身份）时，不再把这一次登录的会话写上去，本机已有匿名会话时照常成功。
-- #8201 的鸿蒙、iOS 和 macOS 宿主迁到 Rust 之前补上的四处接口（迁移计划 P4–P7）：`msime_client_account` 新增 `preferences_put {document, revision, user_id?}`，整份替换云端设置文档（`PUT /v1/users/me/preferences`），按 `revision` 比较并交换，与服务端一样只在云端修订号仍是它时写入、写入后加 1，冲突是 `account_conflict`、不重试；失败按 #8201 新操作的规则带细节（`account_network`、`retry_after_seconds`），请求体超过 1 MiB 在本地报 `account_too_large`；给了 `user_id` 时只写这个账号，会话已退出、换号或请求期间重新登录时是 `account_cancelled`。偏好字段表（client-services 的 `AccountPreferenceSchema`）反序列化时另外接受 `preferences_schema` 交给宿主的 camelCase（`maximumBytes`、`updateMode`、`revisionRequired`），宿主把它原样交给 `msime_client_account_settings_export`、`msime_client_account_settings_apply` 和 iOS、鸿蒙的设置导出与应用时不再因为缺 `maximum_bytes` 被拒，序列化仍是服务端的 snake_case。`msime_client_account_cloud_clipboard` 新增可选的 `device_name`，端到端加密登记本机时用它（鸿蒙的 `marketName`），规则与自建中继路径相同：不给或不能用（空白、超过 256 字节、含控制字符）时仍是计算机名或平台名；client-services 里经端到端加密驱动的七个云剪贴板方法（列表、上传和设备管理）和 `msime_host_api::cloud_clipboard::account_request` 因此多一个 `device_name: Option<&str>` 参数，Tauri 传 `None`，行为不变。`msime_client_cloud_dictionary` 新增 `export_file {kind, format, path}` → `{path, filename, bytes}`：与文本版 `export` 相同的请求，正文最多 384 MiB，不放进内存和响应，边下载边写进 `snapshot_directory` 里的 `export-*.tsv` 并按块校验 UTF-8 和 NUL，通过以后才经保存位置旁边的 `.msime-export-*` 换入，预检和残留清理与 `snapshot_export_file` 相同；`snapshot_directory` 第一次用到时也清掉上次留下的 `export-*.tsv`。已有的操作和入口不变。
-- #8201 的各宿主迁到 Rust 之前补上的三处接口（迁移计划 P8、P9、P11）：`msime_client_account` 的 `translate` 和 `msime_client_account_gloss` 的 `parse` 把规范化后超过 4096 字节的一项释义置为 `null`，同一批里其余的照常返回，结果可以直接交给 `msime_client_apply_translations`（它只要有一条超过 4096 字节就整批拒绝）；单项超过服务端 65536 字节的上限仍是 `account_unavailable`。`providers` 的返回值多一个 `apple_web`，是服务端 `GET /v1/auth/providers` 的 Apple 网页登录开关，给没有 Apple 原生登录的 Android 用；Tauri 桌面和 iOS 的 `account_providers` 也带上它，共享账号页不读。新 C ABI `msime_client_client_agent` 拼出宿主自报的 User-Agent：请求 `{platform, version, device?, system?, edition}`，Value 是 `msime-<platform>/<version> (<device>; <system>; edition=<edition>)`，总能通过 `client_agent` 的校验；`platform` 不是六个平台之一是 `account_invalid`，其余各段只清洗（去掉首尾空白、控制字符、非可打印 ASCII 和 `(`、`)`、`;`，最多 64 个字符，为空时用 `unknown` 或 `full`），`version` 只保留服务端版本号认的 `[0-9A-Za-z.+_-]`、最多 32 个、为空时用 `0`。规则在 client-services 的 `account::client_agent`，与 Android 原来的 `BackendAccount.loginUserAgent` 相同（版本号除外），用例在 `shared/contracts/client-agent/cases.json`。
-- #8201 的 Android 快照激活队列可以交给 Rust（迁移计划 P13）：`msime_client_snapshot_queue` 新增 `import_android_v1 {directory}` → `{imported, state}`，在 `state.lock` 的 flock 里把旧版 Java `DictionarySnapshotQueue` 的 `state.bin`（`DataOutputStream` 格式）就地转成 `state.json`，沿用同名的 `<id>.ndjson`、不复制；先原子写好 `state.json` 并对目录 fsync 再删 `state.bin`，中途中断时下一次接着做；已经有 `state.json` 时以它为准，只补删留下的 `state.bin`；目录里已经没有 `state.bin` 时不取锁、直接返回 `imported:false`，所以转换过以后经它读状态不会排在正持锁的激活后面；目录不存在时不创建；`state.bin` 读不懂是 `snapshot_invalid`，两份文件都不动。其余会改队列的操作（`state`、`enqueue`、`cancel`、`process`，以及经同一队列的云词库「应用到本机」和云同步）持锁时也先做同样的转换，只读的读取在还没转换时直接解码 `state.bin`，所以 `:ime` 进程先用到队列也不会把旧队列当成空的覆盖掉。只有 Android 的队列目录里会有 `state.bin`，其他平台行为不变。client-base 的 `file_lock::PrivateDirectory` 新增 `sync_all`（Unix 上对目录 fsync，其他平台什么也不做）。Java 队列里账号是 `local-backup`（`LOCAL_RESTORE_OWNER`，本地备份恢复排的）的请求在 Rust 队列里也不属于任何账号：`process` 不带 `account_id` 时照样认领和激活，登录了别的账号也不取消，与 Java 的 `owned` 相同；其余请求不带 `account_id` 时照旧留到下一次。
-- 桌面三个平台新增 `msime candidates <按键>`（Windows 是 `msime-mcp.exe candidates`）：按用户现在的方案、设置和词库输出一串拼音或按键会给出的候选 JSON，`|` 标出光标，不给按键时从 stdin 逐行读，供不改源码测试输入引擎的程序使用；默认关闭，在「维护与诊断」→「命令行工具」打开「命令行查询候选」（`diagnostic_log.command_line_candidates`），每种失败有自己的退出码，见 [命令行查询候选](command-line-candidates.md)（#9663）。
+- 语音快捷键区分左右修饰键。
+- 语音组合键在系统层吞掉，不再先触发前台应用里的快捷动作。
+- 个人上下文重排不再让前缀候选压过整词。
+- 安装后通知菜单栏重读输入源；构建时把源码修订写进 bundle；准备宿主失败时报出具体原因。
 
-#### 共享设置界面
+## 2026-10-29：收窄成「系统拼音 + 语音」
 
-- `packages/ui` 提供跨平台共享的 React 设置页，桌面、Android、iOS 与 HarmonyOS 宿主共用同一份实现，包含首页、账号、AI 对话、社区、打字统计、外观、输入、辅助码、快捷键、词库、皮肤、语音、屏幕键盘、手写、实用功能、AI 辅助、悬浮工具栏、帮助、关于与反馈等页面，并带移动端底部 tab 映射。
-- 桌面 shell（Tauri）提供跨平台命令层，并按 Windows / macOS / Linux / Android / iOS 分目录接入各自的账号、凭据、数据目录、输入源与音频能力。
-- HarmonyOS 宿主消费同一份设置页的单文件构建产物，由 `platforms/harmony/stage-settings.sh` 在每次打 HAP 前从 `packages/ui` 构建、不提交进仓库，`entry/hvigorfile.ts` 在它缺失时拒绝打包。
-- 外观页新增「候选窗」分组，集中设置候选主题、候选字体预设（默认 / 宋体 / 黑体 / 楷体 / 圆体）、整体大小、不透明度、背景 / 焦点高亮 / 文字 / 序号四种颜色和圆角大小。共享偏好新增 `candidate_scale_percent`（50–200%，字号与窗口几何一并缩放）、`candidate_opacity_percent`（50–100%，只作用于卡片底色、边框和皮肤背景图，文字保持不透明）和 `candidate_corner_radius`（0–32pt，优先于皮肤包的 `corner_radius_dip`）；宿主能力新增 `candidate_window_scale`、`candidate_window_opacity`、`candidate_corner_radius` 三个开关，Windows 与 macOS 全部支持，Linux（Fcitx5）只支持圆角，HarmonyOS 2in1 支持圆角与不透明度，iOS 与 Android 不提供。可见变化：设置了焦点高亮颜色后，选中候选的文字改为按该底色明暗自动取黑或白（序号随之取同色半透明），不再沿用强调色。兼容性：三项保持默认时不写入偏好文档，旧版本照常读取；一旦调整过其中任一项，尚未升级的旧版本宿主（例如更新后尚未重启的输入法进程，或经同步共用同一份文档的另一台设备）会因不认识这些键而整份加载失败，需要一并升级。
-- 词库导入支持搜狗细胞词库（`.scel`）：client-services 的 `dictionary::scel` 把用户自己选的文件转成标准文本（只取词和拼音，权重统一为默认值 10000，读不出的词条按词序计入「跳过」，不完整或损坏的文件整份拒绝），再走现有的文本导入。共享设置页（macOS、Linux、鸿蒙 2in1 和 Tauri 移动壳）的拼音词库多一项「搜狗细胞词库 .scel（仅导入）」，经新 C ABI `msime_client_dictionary_scel_text` 转换，鸿蒙 2in1 和 Tauri 移动壳一次导入只收 64 KiB 文本、只看 1000 行，所以只导入词库开头的一部分（移动壳的个人词库队列另有 128 条上限）并提示文件过长；Android 和鸿蒙手机的命名词库按 base64 经 `bytes_base64` 导入，文件不超过 8 MiB；iOS 原生 App 的「导入个人词库 → 词库文件」也能选它，受队列上限一次最多导入 128 个词。讯飞没有可核实的二进制格式，它导出的纯词表仍用「汉字自动注音」导入。
+- 以 macOS 的输入源为唯一权威：不再自己切换中英文，英文交给系统 ABC，Caps Lock 交还系统。
+- 只保留一个语音快捷键，去掉 Shift/Control 轻点、各种切换组合键和维护快捷键。
+- 关掉快捷模式、临时英文、日期、Unicode、快捷短语、Emoji、颜文字、超级简拼、命令、提及、拆字、符号模式、混合候选、配对标点和智能标点，设置页里的对应入口一并移除。保留基本中文标点、简繁、全角。
+- 方向键移动候选，数字和空格选词，中括号和减号、等号翻页，滚轮浏览，这些固定可用。
+- 默认关掉辅助码，去掉候选窗上的中英状态标记。
+- 语音默认只在浮层里预览实时文字；录音条改成一行。
+- 整理：明确关闭整理时以它为准，补全整理接口地址，失败时提示已回退原文；不再把口述改写成列表。
+- TextStream 不再把用户词库当作识别上下文。
+- 切换输入源时，组字中的字母原样上屏。
+- 安装：重装只登记新包、不再先停用输入源；刷新沙盒应用的输入源缓存；父输入源声明简体中文。
 
-#### macOS
+## 2026-10-28：Shurufa 成形
 
-- InputMethodKit 输入法宿主，支持候选面板（定位、分页、悬停、行宽适配、释义布局）、内置与外部皮肤包、候选释义与翻译、云联想、悬浮工具栏、中英模式 HUD、双拼键位提示、屏幕键盘、手写、表情与符号面板、剪贴板历史面板。
-- 语音输入覆盖豆包 WSS 与 HTTP 提供方、波形面板、录音设备选择、系统静音与恢复、润色和提示音；macOS 另可选用系统识别，音频不出设备。
-- 词库安装、运行时挂载、快照与云词典，账号与云剪贴板，打字统计、诊断日志、成对标点、智能标点空格、五笔上屏策略与辅助码。
-- 韩语组字时按 Option+Return（或小键盘 Enter）把正在组合的音节转换成汉字；只有单独的辅音或元音时这个键被吞掉，不上屏也不换行。
-- Sparkle 自动更新；`platforms/macos/scripts/install.sh` 完成重签名、原子替换与失败回滚，`platforms/macos/scripts/check_input_source.swift` 核查输入源注册。
-- 首次安装窗口：本机从未装过输入法时，设置应用先以一个小的安装窗口打开（图标、名称、「立即安装」），点击后按钮变成进度条，装好后「进入设置」恢复设置页窗口；已装过的机器不出现这个窗口，启动时照旧静默刷新。
-- 本机匿名账号的会话不会再因并发刷新被吊销：此前同一份 `anonymous-session.json` 有两个会话对象（候选释义等共用的 `BackendAnonymousAccount.session` 和账号窗口默认另建的一个），刷新都不加锁，可能先后用同一枚已轮换的刷新令牌去刷新，服务端随后吊销整个匿名会话。现在账号窗口沿用同一个会话对象，刷新时持 App Group 下的 `backend-account-refresh.lock`（与 iOS 相同，跨进程也互斥），并每次重新读存储。Swift 改写会话（刷新、更新资料）时也不再丢掉 Rust 写下的 `email` 和 `avatar_url`。
+- 新增 `shurufa` 版本：独立的 bundle 标识、输入源和数据目录；自己的名字、图标和菜单图标，关于页不再指向上游。
+- 新装默认关掉外围功能，强制关掉使用统计和云联想。
+- 语音默认使用本地流式识别 TextStream（Qwen3-ASR + MLX），默认开启大模型整理，可以从整理服务拉取模型列表；可以从 OpenLess 一键导入整理配置。
+- 可以录制语音快捷键，统一按住说话和切换两种触发方式；跨窗口录音时最终文本只投递一次，失败时有提示或落到剪贴板；语音上屏沿用引擎的简繁输出规则。
+- 增加 Shurufa 的构建、安装和 bundle 审计脚本；安装后核实只有一个 Shurufa 服务，安装备份移出可卸载的数据目录。
 
-#### Windows
+## 2026-10-27
 
-- TSF 进程内 DLL 与进程外服务分列为两个目标，另有守护进程与运行时准备工具；命名管道 IPC 分主通道、辅助通道与诊断通道三种角色，并校验客户端 PID、登录会话与 TokenUser SID。
-- 基于 Direct2D/DirectWrite 的候选窗口、候选浮出窗口、托盘菜单与悬浮工具栏，皮肤、调色板、字体、阴影、滚轮翻页与卡片尺寸各有独立策略。
-- 云候选、AI 候选与翻译各自独立工作线程；语音覆盖豆包 ASR、语音热键、提示音、系统静音、波形浮层与独立的语音控制器端点；剪贴板历史落 SQLite。
-- 语音识别服务可选「Windows 系统识别」：用 Windows 自带的 SAPI 听写在本机识别，不需要 API Key、不用下载模型，音频不出设备，边说边出字；识别语言跟随语音设置（默认 zh-CN），这台电脑没装该语言的语音识别时在开始录音前提示去「语言和区域」安装。未在真机核实。
-- 设置热重载、首次运行引导、焦点路由、繁简转换、打字统计与维护热键。
-- `platforms/windows/build-cross.sh` 提供 MinGW 交叉构建，`run-tests-wine.sh` 在 Wine 下运行交叉产物的全部套件；`Build-Client.ps1` 提供 Windows 上的 MSVC 全量构建并对产物做 PE 架构门禁。
-- 韩语组字时按汉字键（VK_HANJA），或单独轻按一下右 Ctrl，把正在组字的音节转换成汉字；右 Ctrl 只在有音节组字时这样解释，优先于「单击 Ctrl 切换语言」。TIP 与 Server 两个会话按同一份按键规则跟随汉字列表。韩国键盘的汉字键能否在 zh-CN 配置下送到，未在真机核实。
-- 托盘菜单与 macOS 输入菜单对齐：新增「英文候选模式」（Ctrl+Shift+E）、「繁体输出」和「云剪贴板…」；「输入方案」和「主题」改为各占一行、点开换页，主题可以在托盘里直接切换；标点被锁定时「中文标点」不可用。云剪贴板从托盘打开时带着用户正在用的编辑器，条目能直接输入回去，焦点在密码框里时拒绝打开。卡片打开时可以用方向键、回车和 Esc 操作。
-- 候选窗、悬浮工具栏和托盘卡片提供 UI Automation 元素树，讲述人、NVDA 等读屏软件能读出其中的项目、执行其中的操作。未在真机核实。
-- 任务栏的输入指示器按方案显示一个字（中、双、五、日、한、粤、注、越、藏、笔，英文为 英，Caps Lock 开着时为大写图标），与 macOS 输入菜单的模式图标对应；悬浮工具栏的语言按钮同样显示 双、五。候选释义的「显示读音」在 Windows 上也给日文释义标罗马音，读音由系统的微软日语输入法（IFELanguage）在本机生成，没装日语输入法时只读纯假名的释义。Ctrl+Shift+Win+K 在共享应用不在时与工具栏、托盘一样打开系统屏幕键盘。图标尺寸、IFELanguage 的分词和没装日语输入法时的表现未在真机核实。
-- 设置应用的云词库在 Windows 上可用：个人词条、完整词库目录、候选调频与固定排位、导入导出都经登录的账号完成，「完整云词库备份」可以保存和恢复，「应用到本机」下载并校验云端快照后，请输入法短暂放开会话再替换本机词库。账号页新增词包与回复模板（浏览、收藏、评分、举报、发布，以及把词包导入云端或本机词库；桌面没有「高情商回复」键盘，回复模板不能存进键盘）和设置同步（只同步输入方案、繁简、双拼和五笔版本、学习、调频和标点）。账号会话改存到 `%LOCALAPPDATA%\MSIME\account`，与输入法注册本机匿名账号的目录相同，旧位置的会话在启动时自动搬过来；新的 host C ABI `msime_client_account_access_token` 让输入法取登录账号（没有登录时是匿名账号）的令牌。「应用到本机」的激活和大词库的准备耗时未在真机上验证。
-- Inno Setup 安装器注册 32/64 位 TIP、分离配置与词库、升级不覆盖用户配置，并随包携带 `LICENSE.txt` 与第三方通知；`Package-SimplySign.ps1` 编排双架构构建、载荷签名、安装器编译与安装器签名。
-- 原生设置窗口的「词库」页补上「导入词库文件」：标准 TSV、Windows TSV、Rime、汉字自动注音和搜狗细胞词库（`.scel`，仅拼音），文本文件按 UTF-8 BOM、UTF-16 BOM、严格 UTF-8、GB18030 的顺序解码，经 `msime_client_settings_dictionary` 分批导入，结果按共享页的措辞说明跳过的行；此前这个窗口不能从文件导入词库。
-
-#### Linux
-
-- IBus 与 Fcitx5 是并列的两个系统入口，链接同一份宿主 ABI；Fcitx5 插件按 Fcitx5Core 版本启用原生候选 Action 与自定义输入法信息。
-- 候选调色板、Fcitx 主题、字体策略、滚轮翻页、候选动作（固定、取消固定、删除）、翻译策略、成对标点与双拼方案名；九键、九键歧义拼音、本地输入模式、数字选词、小键盘标点映射、繁简与日文转换、辅助码、模糊音、默认开启且不在设置页或输入法菜单显示的全拼纠错、全角半角、智能标点空格与退格长按。
-- 模式徽章与语音波形浮层各自提供 X11 与 Wayland（layer-shell）后端，缺少依赖时退回面板文字。
-- 在线候选（含 AI 与翻译）、语音、剪贴板、手写、表情、词库、云词典与云剪贴板各有独立的 provider 入口；在线候选与语音配套 socket 激活的 systemd 用户单元，剪贴板配套常驻用户单元。云词典与云剪贴板目前只有请求入口，仓库没有附带应答它们的 provider 服务，Fcitx5 菜单里的云剪贴板条目需要用户自备 provider；设置窗口里的云剪贴板直接使用已登录账号。桌面入口提供九个 Desktop Action。
-- `msime-linux-setup` 按随装的词库锁校验或取回词库、准备用户状态目录，并按当前运行的是 fcitx5 还是 ibus 说明下一步；缺少运行时配置时图形设置页会直接进入同一套首次配置流程。卸载时先停用并禁用 setup 启用过的用户单元。
-- 升级后由宿主在建立会话前比对词库锁代次，原子替换运行时配置中的资源与词库路径。
-- IBus 与 Fcitx5 在韩语组字时按 `Hangul_Hanja` 或单独的 F9 把正在组合的音节转换成汉字，与 ibus-hangul、fcitx5-hangul 的默认键一致；Ctrl+F9 仍是语音开关。
-- CPack 提供 TGZ 与 DEB 打包，Debian 包声明 IBus、Python 与（启用时）Fcitx5 依赖，并随包携带许可证与平台 README。
-
-#### Android
-
-- 独立进程运行的 IME 服务，26 键与符号层、全拼九键、日语九键、四套双拼与微软双拼分词键、86 五笔、手写（ML Kit Digital Ink）以及 AI 回复键盘。
-- 候选条与展开面板支持跨代次选择，候选长按提供优先、固定与删除；离线英文释义、在线候选翻译、云联想与 AI 联想（组字停顿后单次请求）。
-- 剪贴板历史、云剪贴板、表情浏览器、符号面板、本地输入模式、AI 润色、语音输入、打字统计、内置与自定义皮肤库、社区皮肤与词库资源。
-- 账号会话经 Keystore 加密落盘，支持 Google 登录；硬件键盘按共享命令表映射，含数字行选词与模式快捷键；大屏居中外框与无障碍键盘尺寸调整。
-- `check-host.sh` 把 Android 侧与共享 ABI 的命令编号、键位映射和禁止复制的表格做成契约守卫，并编译运行 JVM 冒烟套件；设备套件覆盖候选、键盘、设置、统计与手写。
-- 韩语组字时候选栏标题行出现「漢」按钮，把正在组字的音节转换成汉字；硬件键盘上单独的 F9 和单独轻按一下右 Ctrl 效果相同。
-- 接实体键盘组字时按 Ctrl+Enter 上屏高亮候选的译文，与桌面端和鸿蒙一致（#7079）：只有一个义项直接上屏；有几个义项时候选行换成义项页，1–9 选第几项，空格或回车上屏高亮项，方向键移动，Esc 关页保留组字；没有译文或释义关着时按键被吃掉，拼音不上屏、回车也不交给应用。本地模式、日语、韩语和不带释义的方案（粤拼、注音、越南语、藏文、笔画）以及没有组字时保持原来的行为。
-- 屏幕键盘组字时长按「确认」（回车键）同样上屏高亮候选的译文（#6792）：一个义项直接上屏，几个打开义项页点选；能用时回车键右上角标「译」。没有译文时长按照常确认组字。
-- 两条打包路径：原生 IME APK 与 Tauri 设置合包，各自的用途与同名产物冲突写在平台 README 中。
-- 原生宿主与键盘按 Android 改版设计稿重做：设置应用改为单一回退栈的详情页导航，新增皮肤（含 AI 设计皮肤）、键盘、输入、表达、AI、手写、语音、词库、常用语、隐私、设备、开发者等页，统计页、社区页（皮肤 / 词库 / 短语）与「我的」页重排；应用主题带随季节变化的水杉四季；登录支持 Apple、Google 与邮箱验证码，并可在设备间同步设置、词库、常用语与皮肤。
-- 键盘新增 123 与 #+= 符号层、按键角标与下滑输入、空格长按语音与滑动移光标、功能面板与常用语面板、行内高度调整、单手模式、隐私模式和按键动画与音效包；表情、符号、剪贴板面板改为与键区同高，不再盖满屏幕。
-- 共享层为 Android 新增常用语、命名词库、诊断包与设置同步映射的 C ABI，开发者选项可导出诊断包或生成限时的远程诊断快照。
-- 候选翻译可以接用户自己的翻译服务（#7078）：「设置 → 输入 → 翻译 → 翻译服务」里选小牛翻译、腾讯云机器翻译或自定义接口（DeepLX 兼容服务，或用自己密钥的 DeepL 官方 API），与桌面、iOS 同一组共享偏好；请求和解析都走共享层，选路与共享层一致，所选服务凭据不全时不联网也不改用别的服务。自定义接口只接受 https 或本机回环的 http。离线释义仍然优先，在线译文补离线没有的行；单词仍限 40 字。
-
-#### iOS
-
-- 主 App 与键盘扩展共享 App Group 与设置实现，另有独立的豆包传输框架 target。
-- 键盘扩展提供候选栏与展开候选面板、方案与布局选择、皮肤选择、符号面板、表情与颜文字、剪贴板、日语九宫、手写、云候选、候选翻译、词库快照后台线程、英文建议与大写策略、空格移光标与标点上下文，并适配不同形态设备。
-- 主 App 提供引导、账号、社区皮肤画廊与自定义编辑器、AI 生成皮肤、云词典、个人词典、云剪贴板、AI 对话、平板分栏以及各设置页。
-- 语音走豆包 WebSocket 传输与协调器，配合录音与 PCM 提取。
-- 韩语组字时候选行末尾出现「漢」按钮，把正在组字的音节转换成汉字（键盘扩展收不到硬件键，只有这个按钮）。
-- Xcode 工程由 XcodeGen 从 `project.yml` 生成，`project.yml` 是工程配置的唯一权威来源；单元测试分键盘、服务、共享与传输四个 target，另有 UI 测试 target。
-
-#### HarmonyOS
-
-- 完整的 ArkTS 输入法宿主：`InputMethodExtensionAbility` 负责面板创建、光标跟随、选区与文本变更回调、HUD 面板、悬浮工具栏与硬件键路由；模块清单声明输入法类型并覆盖手机、平板与 2in1。
-- NAPI 边界导出会话、候选管理、翻译、云与 AI 联想、语音、皮肤库、社区资源、个人词库与打字统计等能力。
-- 手写走 Core Vision Kit 文本识别，语音覆盖系统离线识别、HTTP ASR 与豆包流式，配提示音与录音设备选择。
-- 候选翻译、离线英文释义与补全、AI 润色、AI 对话、设置同步、具名皮肤库、社区皮肤与词库、AI 生成皮肤、个人词库文件导入、全拼与日语九键、无障碍标签、2in1 硬件键盘、悬浮工具栏与输入模式 HUD。
-- 韩语组字时组字行末尾出现「漢」按钮，把正在组字的音节转换成汉字；硬件键盘上韩文键盘的汉字键（Lang2）或单独的 F9 效果相同，2in1 的候选窗不画这个按钮。尚未在设备上验证。
-- 平台无对应 API 的能力（应用图标切换、主动拉起键盘、表情与剪贴板独立窗口）在平台 README 中逐条记录了查证结果与替代做法。
-- 华为账号登录替换 Google 登录：设置应用经 Account Kit 拿华为账号的 ID Token，经 `msime_client_account` 新增的 `huawei_challenge`、`huawei_login` 交给服务端，服务端按 UnionID 认人；登录面板和 2in1 登录卡片在服务端开着 `huawei` 时显示「华为账号登录」，同样要先勾选同意。鸿蒙上默认不再给出「使用 Google 登录」（中国大陆连不上 Google），回环实现保留。尚未在设备上用真实华为账号验证。
-
-#### 本地语音识别
-
-- 语音服务 `local` 改为基于 sherpa-onnx 的设备端识别，六个平台共用同一份模型目录与设置页。运行时 sherpa-onnx v1.13.8 按平台由 `resources/voice-runtime.lock.json` 固定 SHA-256，`scripts/fetch_voice_runtime.py` 校验后取回，宿主在首次识别时动态加载，缺少运行时的包照常启动、只把本地识别标为不可用。
-- 模型目录 `resources/local-asr-models.json` 提供四个模型：默认的中英流式 X-ASR（边说边出字，自带标点），同一模型的离线导出「中英整句」（`x-asr-zh-en-offline`，`offline_transducer`：经 Silero VAD 分段、每段 beam 16 解码，说话时不逐字出字；本仓库评测上混合错误率 FLEURS 6.97% 对流式 7.18%，ASCEND 13.61% 对 13.95%），支持中英日韩粤的 SenseVoice-Small，以及仅桌面提供、约 1 GB 的 Fun-ASR-Nano。模型不随包分发，在设置页按需下载，逐文件校验长度与 SHA-256，完整就位后才写入 `msime-model.json`，下载可取消，也可配置 HTTPS 镜像（`voice_input.asr_model_mirror`）。
-- 用户词库里自己添加的拼音词条作为热词：X-ASR 与 Fun-ASR-Nano 原生使用，SenseVoice 在识别后按拼音做近音替换（`client-providers::voice::hotwords`，含 zh/z、n/l、an/ang 等模糊对）。
-- `voice_input.asr_model_path` 接受已安装的模型目录，Unix、Windows 盘符、UNC 等绝对路径写法在任何系统上都能通过校验，同一份偏好文件跨平台读取不再被拒。
-- 宿主接口新增 `msime_client_voice_hotwords`、`msime_client_voice_hotword_correct`、`msime_client_voice_local_models`、`msime_client_voice_local_model_install`、`msime_client_voice_local_model_cancel` 与 `msime_client_voice_local_model_remove`。
-- `msime-voice-local` 辅助进程通过标准输入输出上的 JSON 行协议识别，macOS 与 Linux 的输入法进程由它加载模型，自身不常驻数百 MB 的模型；空闲 120 秒释放模型，空闲 10 分钟退出。协议见 `shared/voice/README.md`，许可证见[第三方组件清单](third-party.md)。
-- 模型可以不联网安装：用户自己下载目录里列出的压缩包（和附加的 `silero_vad.onnx`），在设置页「从文件导入」选中它们即可，文件按长度和 SHA-256 对应、不看文件名，校验、解压与发布和下载完全相同。`msime_client_voice_local_model_install` 的请求新增可选的 `files`（本地文件的绝对路径），`msime_client_voice_local_models` 的每个模型新增 `import_files`（需要的文件名、上游下载地址和大小），新增错误码 `local_model_import_missing`。macOS、Windows、Linux、iOS 与 HarmonyOS 的设置页提供导入按钮和每个文件的上游下载链接；Android 原生设置页还没有模型管理入口，本次不涉及。只接受内置目录里的模型。
-- 识别全程不联网，只有下载模型时访问 GitHub Releases 或所配置的镜像，见[网络请求与数据流向](../PRIVACY.md)。
-- 各平台接入：Windows 在 `msime-client-server` 内边录边识别，浮窗与豆包一样显示实时文本；macOS 输入法经辅助进程识别；Linux 由用户级语音服务调用辅助进程，本地识别不再要求保存任何云端凭据，安装模型时顺带启用语音服务；Android 与 HarmonyOS（arm64）在应用内识别，HarmonyOS 设置页可下载与删除模型；iOS 主应用内识别（键盘扩展受内存上限所限不加载模型）。HarmonyOS 的 armeabi-v7a 包没有本地识别。
-- 系统识别：macOS 26 与 iOS 26 起使用 SpeechAnalyzer，更早的系统在支持时要求 SFSpeechRecognizer 设备端识别；HarmonyOS 的 Core Speech Kit 改为写音频模式（`recognitionMode: 0`），识别器只听输入法写入的音频，末尾不足一帧的音频补静音后写入。
-- 修正 macOS CMake 用 `FORCE` 覆盖用户缓存变量的问题。
-- 流式 X-ASR 结束时补的静音从 0.6 秒加到 1.2 秒：原来经常丢掉最后一两个字（「是星期三」只出「是星期」）。识别结果里中文后的半角句末标点改成全角，英文句子之间补空格。
-- X-ASR 的原生热词此前从未生效：它的 token 表里每个汉字都是带词首标记的独立词（`▁写`），按目录原来写的 `cjkchar+bpe` 编码时 sherpa-onnx 找不到汉字 token，整份热词被丢弃。目录改为 `bpe`，识别器按 token 表判断建模单位、把热词的字隔开再交给 sherpa-onnx，已安装的模型不必重装。
-- 目录条目新增 `model_type`，宿主据此直接创建识别器，sherpa-onnx 不再为读 encoder 的元数据多建一次推理会话。
-- Android 与 HarmonyOS 的触屏录音不再在用户还在说话时自行结束：经 VAD 分段的模型只在一段说完后才出文字，原来「1.5 秒没有新文字就结束」会截断连续说话超过 1.5 秒的后半句，现在改看 VAD 是否在说话。
-- iOS、Android 与 HarmonyOS 上，不自带反向文本规整的模型（两个 X-ASR）在最终文本里把汉字数字改写成数字（二零零二年 → 2002年、百分之五十七 → 57%、下午三点十分 → 下午3点10分），一个、十分有趣、三四线这类词不动；宿主接口新增 `msime_client_voice_normalize_numbers`；Windows、macOS 与 Linux 宿主还没有调用它。规则在 `client-providers::voice::numbers`，宁可少改：只在百分数、年份、完整日期、时刻、带单位的小数、带位的整数和三位以上数字串这些确定是数的场合改写。
-- Android 与 HarmonyOS 支持按住空格说话：长按空格开始录音，松手结束并出结果，上滑到「松开取消」后松手取消。iOS 键盘扩展不能录音，长按空格仍是打开语音面板、转交主应用识别。
-- `scripts/voice_eval.py` 用公开测试集（FLEURS 普通话、ASCEND 中英混说）按混合错误率评测已安装的本地模型，基线记在 `resources/eval/voice-baseline.json`：数字规整让 FLEURS 上默认流式模型的混合错误率从 7.18% 降到 5.25%。
-
-#### 账号、云服务与联网行为
-
-- 账号、云词典、云剪贴板与社区资源统一走 `https://api.msime.app`，凭据存放在各平台的系统密钥库。
-- 跨设备剪贴板（#2451）：Android、iOS、HarmonyOS 键盘的剪贴板面板新增「云端」栏，点选即上屏；本地剪贴板历史可以「发到云剪贴板」（三个手机键盘、共享设置页与 macOS 原生面板）。macOS 输入法菜单新增「云剪贴板…」。Windows、Linux 与从设置窗口打开的 macOS 云剪贴板改为直接使用已登录账号，此前 Windows 上每个请求都返回不可用；Fcitx5 改读服务端返回的 `items` 字段。不自动读取或上传系统剪贴板，细节见[云剪贴板](../PRIVACY.md#云剪贴板需要登录或自建中继)。
-- Android 原生安装包的候选翻译改用已登录账号的令牌：此前它读取的是 Tauri 合包才写入的会话存储，原生包登录后仍一直使用匿名账号。合包照旧使用其 Rust 会话的令牌。
-- 新装时没有任何功能会把输入内容发出设备（#3817）：云联想把正在组的拼音发给 Google 输入工具，六个平台新装默认关闭，Windows、Linux 与 macOS 在首次使用时询问且默认选项是不启用，已存配置升级沿用原值；语音识别、语音润色、AI 联想默认凭据为空，不填就不发请求；候选翻译在所有平台新装时都不联网，要在设置里选择一个翻译服务才发请求。
-- 在线候选释义走水杉账号（`https://api.msime.app/v1/translate`）改为显式选择：新增偏好 `translation_account`（所有平台新装及恢复默认时都为 `false`；配置文件里缺这个字段按 `false` 读，未选时不写入配置文件），只有在翻译服务里选了「水杉账号」、候选翻译开着、且没有启用你自己的小牛、自定义或凭据可用的腾讯服务时，macOS、iOS、Android 才把当前页的中文候选词发给它。此前这三个平台在没有配置自己的服务时会默认走这条路径。升级影响：没选过翻译服务的用户，包括已登录账号的用户，升级后都不再收到在线释义，要重新在设置里选择「水杉账号」或填入自己的服务；在此之前，非英语目标语言没有释义，英文释义只来自离线词典，iOS 上非英语的释义行（主语言和第二语言都算）会收起。细节见[网络请求与数据流向](../PRIVACY.md#候选翻译默认不联网)。
-- 六个平台均在安装后首次启动时注册本机匿名水杉账号：Linux 在 `postinst` / `msime-linux-setup`，Windows 在 Server 首次以 `--production` 启动时，macOS 在输入法首次激活时，iOS 与 Android 在应用首次打开时，HarmonyOS 在应用或键盘首次启动时。只发送本机随机生成的标识与口令，不含输入内容，失败时下次启动重试。Windows 与 HarmonyOS 经新的 host C ABI `msime_client_ensure_anonymous_account`，由共享层 `client-services` 实现，与其他平台使用相同的文件名与协议。
-- 六个平台均在启动时上报一次安装事件；Android、iOS、macOS、Linux、Windows 还会在崩溃时上报（HarmonyOS 暂无崩溃上报）。字段、去重与离线重试行为按平台不同，逐条见[网络请求与数据流向](../PRIVACY.md)，那里同时记录发送内容、目的地、代码位置和关闭方式。
-- 按需下载的资源包扩展到三个桌面平台：Windows 和 macOS 的安装包不再内置桌面神经联想模型（约 25 MB），打开「桌面神经联想」时由设置应用下载，Linux 在安装布局里没有它时同样下载；Windows 只在系统没有中文 Windows Ink 识别器时才下载手写模型，Ink 可用时手写面板照常识别、不等下载；我们自己发布的 Linux deb/rpm 不再带手写模型，第一次打开手写面板时下载，发行版仓库的包继续内置。下载失败时资源包行和手写面板都提供「设置下载镜像」。已下载的资源包只在文件字节（名字、SHA-256、长度）变了时才算过期：此前每次发布新的词库版本，即使日文词典没变也会因下载地址变化被当成过期而停用。细节见[资源与更新下载](../PRIVACY.md#资源与更新下载)。
-- 共享层的 AI 键盘皮肤在生产服务端上又能生成插画了（#8201）：msime-cloud 在 2026-10-01 给 `POST /v1/skins/jobs` 的 202 响应加了 `expires_at`，失败任务的 `GET` 也一直带 `reason`，而 client-services 解析任务响应时拒绝未知字段，此后每次创建插画任务都解析失败、生成报 `account_unavailable`，Tauri iOS 与 Android 的 AI 皮肤同受影响。任务响应现在不拒绝未知字段，成功任务里的 `artwork` 也一样，并解析 `expires_at`（按 RFC 3339 校验）和 `reason`（最多 256 字节、不含控制字符，否则丢掉该字段）。
-
-#### 工程与文档
-
-- 输入引擎从取回并打 overlay 的 C++ 归档改为仓库内的 Rust crate：`engine-lock.json`、`scripts/fetch_engine.py`、`scripts/relock_engine.py`、全部 `scripts/apply_engine_*.py` 与 `scripts/engine-overlays/`、每周重锁与自动合并的两个工作流、`crates/engine-bridge` 及其 Boost／fmt／spdlog 构建依赖一并删除，构建不再需要 C++ 工具链或 `vendor/MSIME-Engine`。行为基准从 C++ 参考实现录制在 `crates/engine/tests/golden/`，录制方法见 `tools/engine-golden/README.md`；平台仍用的 IPC 契约头文件、辅助码表与 miniaudio 改为随仓库提交（`shared/contracts/`、`resources/helpcodes/`、`platforms/windows/third_party/miniaudio/`）。Google 整句解码器及其 `dict_pinyin.dat`、Whisper 本地文件识别随之去掉。
-- `resources/*.lock.json` 固定随包词库与模型的 URL、长度与 SHA-256。
-- `scripts/verify-local.sh` 提供本地统一验证，分快速门禁与完整两档；长期失败集中记在 `scripts/known-failures.txt`，每条附完整取证记录，比对只对不在清单里的失败名报错。
-- 静态与契约门禁以独立脚本形式进入本地验证，覆盖配置键覆盖率、界面动作覆盖率、源码清单与设置页产物一致性。
-- 整句转换评测与重排延迟测量各有固定数据集与基线文件，可在本地复跑。
-- Git 钩子提供亚秒级的 `pre-commit` 检查（冲突标记、Rust 与前端格式），`pre-merge-commit` 与 `pre-push` 运行快速验证。
-- 前端接入 Oxlint 与 Oxfmt，与 Rust 侧 clippy／rustfmt 对应；`packages/ui/src/upstream` 与 `apps/desktop/src-tauri/gen` 保持上游原样。
-- 文档：[架构说明](ARCHITECTURE.md)、[实施记录](implementation.md)、[网络请求与数据流向](../PRIVACY.md)、[第三方组件清单](third-party.md)、[开源发布清单](open-source-release.md)、贡献指南、安全策略、行为准则（Contributor Covenant 2.1）以及问题与拉取请求模板。
-
-### 验证
-
-- 共享 Rust/C++ 边界、资源校验、配置冲突与宿主接口由 workspace 测试覆盖，入口是 `bash scripts/verify-local.sh`。
-- 六个平台各有自己的测试套件与构建入口，命令和范围记录在对应平台 README：macOS 与 Linux 走 CTest，Windows 在本机边界构建与 Wine 下运行交叉产物，Android 分 JVM 冒烟与设备套件，iOS 走 Xcode 测试 scheme，HarmonyOS 走 ArkTS 逻辑测试与 HAP 打包。
-- GitHub Actions 在 Pull Request 上运行质量、依赖审查与仓库契约检查，macOS 与 iOS 有独立工作流，Android、Linux、HarmonyOS 与 Windows 由 Native Platform CI 在对应平台或共享层有改动时触发；CodeQL 每日扫描。
-
-### 发布说明
-
-- 源码使用 GPL-3.0-only；第三方依赖、固定 Engine 归档、词库、模型和平台 SDK 仍须遵守各自许可证与通知要求。
-- 提交前请执行 `bash scripts/verify-local.sh --quick`，并按 [开源发布清单](open-source-release.md) 检查敏感文件、来源与通知文件。
-- 六个平台各有独立的发布工作流，手动触发并按各自的 `platforms/<平台>/version.txt` 取版本号。
-
-[Unreleased]: https://github.com/metasequoiaime/msime/compare/develop...HEAD
+- 收入 TextStream 本地流式识别的工作进程，随包安装运行环境。
+- 原生输入法 bundle 可以不带 Sparkle 构建。
