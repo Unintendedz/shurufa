@@ -446,7 +446,8 @@ fn apply_shurufa_input_policy(preferences: &mut Preferences, edition: &Edition) 
         super_jianpin: false,
         temporary_english: false,
         temporary_japanese: false,
-        expression: false,
+        // 计算与数字固定开着，只从全拼的小写 `v` 进入（`local_expression_lowercase_entry`）；Shift+V 随总开关关掉。
+        expression: true,
         command: false,
         mention: false,
         mention_places: false,
@@ -2283,6 +2284,7 @@ impl HostOptions {
             local_url: edition.id != "shurufa",
             local_temporary_japanese: self.preferences.local_modes.temporary_japanese,
             local_expression: self.preferences.local_modes.expression,
+            local_expression_lowercase_entry: edition.id == "shurufa",
             local_command: self.preferences.local_modes.command,
             local_mention: self.preferences.local_modes.mention,
             local_chaizi: chaizi_enabled(&self.preferences.local_modes),

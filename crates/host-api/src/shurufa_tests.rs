@@ -167,10 +167,10 @@ fn removed_input_modes_stay_unreachable_after_legacy_preferences_and_updates() {
             assert!(
                 !session.options.local_date_time_inline && !session.options.local_date_time_menu
             );
+            assert!(!session.options.local_command && !session.options.local_mention);
             assert!(
-                !session.options.local_command
-                    && !session.options.local_mention
-                    && !session.options.local_expression
+                session.options.local_expression
+                    && session.options.local_expression_lowercase_entry
             );
             assert!(!session.options.mixed_english && !session.options.quick_phrase_candidates);
             assert!(!session.applied.smart_punctuation && !session.applied.word_character.enabled);
@@ -181,6 +181,10 @@ fn removed_input_modes_stay_unreachable_after_legacy_preferences_and_updates() {
             let transition = value(msime_client_character(handle, *key, true));
             assert_eq!(transition["view"]["local_mode"], "none");
         }
+        // 计算只从小写 `v` 进入。
+        let view = type_keys(handle, "v1+2");
+        assert_eq!(view["local_mode"], "expression");
+        assert_eq!(view["candidates"][0]["text"], "3");
         let view = type_keys(handle, "www");
         assert!(!view["candidates"]
             .as_array()
