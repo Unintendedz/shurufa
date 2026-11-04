@@ -21,6 +21,7 @@
 
 ## 工具链
 
+- **跑 `scripts/verify-local.sh` 前让 `python3` 指向 3.11 以上。** 本机 PATH 里的 `python3` 是 CommandLineTools 的 3.9，契约脚本用到 `tomllib`、`X | None` 注解，`test-editions.py` 还会在 3.9 上报假的 `Non-UTF-8 code`，一次 `--quick` 能冒出三十来个与改动无关的失败。做法是建一个临时目录放 `python3 -> $(brew --prefix python@3.14)/bin/python3.14` 的软链接，跑时把它放在 PATH 最前面；剩下的失败才是要看的。
 - **Xcode 27 的模拟器界面是 `/Applications/Xcode.app/Contents/Applications/DeviceHub.app`，`Simulator.app` 已经不存在了。** `open -a Simulator` 和 `open -b com.apple.iphonesimulator` 都会失败，而 `xcrun simctl` 的 boot、install、launch、screenshot 全都照常工作——于是很容易把「窗口没出现」误判成「模拟器没起来」。设备真实状态以 `xcrun simctl list devices` 为准，要看画面才需要开 DeviceHub。
 
 ## 本机安装
