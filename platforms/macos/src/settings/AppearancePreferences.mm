@@ -393,6 +393,8 @@ static NSString *const WubiMixedPinyinKey = @"MSIMEClientWubiMixedPinyin";
 static NSString *const WubiZWildcardKey = @"MSIMEClientWubiZWildcard";
 /// `wubi_fifth_code_top_commit`：完整四码后再敲字母时上屏首选。缺省开，与来源出厂 `wubi_fifth_code_top_commit = true` 一致。
 static NSString *const WubiFifthCodeTopCommitKey = @"MSIMEClientWubiFifthCodeTopCommit";
+/// `tab_stroke_filter`：全拼、双拼组字时按 Tab，再按笔顺筛候选的第一个字。缺省开，与共享偏好的默认值一致；只有 Shurufa 的设置页给出这个开关。
+static NSString *const TabStrokeFilterKey = @"MSIMEClientTabStrokeFilter";
 /// `sentence_association` 里这个窗口提供开关的两项。`word_lattice` 与 `neural_keyboard` 由别的界面读写，合并时原样保留。
 static NSString *const SentenceAssociationNeuralDesktopKey = @"MSIMEClientSentenceAssociationNeuralDesktop";
 static NSString *const SentenceAssociationShowNextOnDuplicateKey = @"MSIMEClientSentenceAssociationShowNextOnDuplicate";
@@ -468,6 +470,7 @@ static NSDictionary<NSString *, NSString *> *SharedOverrideProperties() {
         WubiKey : @"sharedWubiAutoCommitUnique",
         WubiZWildcardKey : @"sharedWubiZWildcard",
         WubiFifthCodeTopCommitKey : @"sharedWubiFifthCodeTopCommit",
+        TabStrokeFilterKey : @"sharedTabStrokeFilter",
         SentenceAssociationNeuralDesktopKey : @"sharedSentenceAssociationNeuralDesktop",
         SentenceAssociationShowNextOnDuplicateKey : @"sharedSentenceAssociationShowNextOnDuplicate",
         LocalModesKey : @"sharedLocalModes",
@@ -544,6 +547,7 @@ static NSDictionary<NSString *, NSString *> *SharedOverrideProperties() {
 - (BOOL)removeStoredKeys:(NSArray<NSString *> *)keys fields:(NSDictionary<NSString *, NSArray<NSString *> *> *)fields;
 @property(nonatomic) BOOL wubiZWildcard;
 @property(nonatomic) BOOL wubiFifthCodeTopCommit;
+@property(nonatomic) BOOL tabStrokeFilter;
 @property(nonatomic) BOOL sentenceAssociationNeuralDesktop;
 @property(nonatomic) BOOL sentenceAssociationShowNextOnDuplicate;
 @end
@@ -574,6 +578,7 @@ static NSDictionary<NSString *, MSIMESettingProbe> *SettingProbes() {
             WubiMixedPinyinKey : ^id(MSIMEAppearancePreferences *p) { return @(p.wubiMixedPinyinEnabled); },
             WubiZWildcardKey : ^id(MSIMEAppearancePreferences *p) { return @(p.wubiZWildcard); },
             WubiFifthCodeTopCommitKey : ^id(MSIMEAppearancePreferences *p) { return @(p.wubiFifthCodeTopCommit); },
+            TabStrokeFilterKey : ^id(MSIMEAppearancePreferences *p) { return @(p.tabStrokeFilter); },
             SentenceAssociationNeuralDesktopKey : ^id(MSIMEAppearancePreferences *p) { return @(p.sentenceAssociationNeuralDesktop); },
             SentenceAssociationShowNextOnDuplicateKey : ^id(MSIMEAppearancePreferences *p) { return @(p.sentenceAssociationShowNextOnDuplicate); },
             QuanpinHelpcodeKey : ^id(MSIMEAppearancePreferences *p) { return @(p.quanpinHelpcodeEnabled); },
@@ -1163,9 +1168,9 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     NSNumber *_sharedFullWidthInput;
     NSNumber *_sharedCloudCandidates;
     NSSwitch *_cloudCandidatesToggle;
-    NSNumber *_sharedWubiZWildcard, *_sharedWubiFifthCodeTopCommit;
+    NSNumber *_sharedWubiZWildcard, *_sharedWubiFifthCodeTopCommit, *_sharedTabStrokeFilter;
     NSNumber *_sharedSentenceAssociationNeuralDesktop, *_sharedSentenceAssociationShowNextOnDuplicate;
-    NSSwitch *_wubiZWildcardToggle, *_wubiFifthCodeTopCommitToggle;
+    NSSwitch *_wubiZWildcardToggle, *_wubiFifthCodeTopCommitToggle, *_tabStrokeFilterToggle;
     NSSwitch *_sentenceNeuralDesktopToggle, *_sentenceShowNextOnDuplicateToggle;
     NSNumber *_sharedCandidateTranslations;
     NSSwitch *_candidateTranslationsToggle;
@@ -1511,6 +1516,7 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     merged[@"wubi_auto_commit_unique"] = @(self.wubiAutoCommitUnique);
     merged[@"wubi_z_wildcard"] = @(self.wubiZWildcard);
     merged[@"wubi_fifth_code_top_commit"] = @(self.wubiFifthCodeTopCommit);
+    merged[@"tab_stroke_filter"] = @(self.tabStrokeFilter);
     NSMutableDictionary *qh = [merged[@"quanpin_helpcode"] mutableCopy] ?: [NSMutableDictionary dictionary];
     qh[@"enabled"] = @(self.quanpinHelpcodeEnabled);
     merged[@"quanpin_helpcode"] = qh;
@@ -2215,6 +2221,15 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     [_defaults setBool:value forKey:WubiZWildcardKey];
     [self preferencesChanged];
 }
+- (BOOL)tabStrokeFilter {
+    if (_sharedTabStrokeFilter) return _sharedTabStrokeFilter.boolValue;
+    return [_defaults objectForKey:TabStrokeFilterKey] == nil ? YES : [_defaults boolForKey:TabStrokeFilterKey];
+}
+- (void)setTabStrokeFilter:(BOOL)value {
+    _sharedTabStrokeFilter = nil;
+    [_defaults setBool:value forKey:TabStrokeFilterKey];
+    [self preferencesChanged];
+}
 - (BOOL)wubiFifthCodeTopCommit {
     if (_sharedWubiFifthCodeTopCommit) return _sharedWubiFifthCodeTopCommit.boolValue;
     return [_defaults objectForKey:WubiFifthCodeTopCommitKey] == nil ? YES : [_defaults boolForKey:WubiFifthCodeTopCommitKey];
@@ -2374,6 +2389,8 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     id wubiAutoCommitUnique = preferences[@"wubi_auto_commit_unique"];
     id wubiZWildcard = preferences[@"wubi_z_wildcard"];
     id wubiFifthCodeTopCommit = preferences[@"wubi_fifth_code_top_commit"];
+    // 共享文档开着时不写这个键：缺键时回到本机的值，本机也没存过就是开。
+    id tabStrokeFilter = preferences[@"tab_stroke_filter"];
     id wubiProfile = preferences[@"wubi_profile"];
     if (MSIMEEditionOffersScheme(scheme)) _sharedInputScheme = [scheme copy];
     id lastChinese = preferences[@"last_chinese_scheme"];
@@ -2394,6 +2411,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     if ([@[@"wubi86", @"wubi98"] containsObject:wubiProfile]) _sharedWubiProfile = [wubiProfile copy];
     if (LocalModeBoolean(wubiZWildcard)) _sharedWubiZWildcard = wubiZWildcard;
     if (LocalModeBoolean(wubiFifthCodeTopCommit)) _sharedWubiFifthCodeTopCommit = wubiFifthCodeTopCommit;
+    _sharedTabStrokeFilter = LocalModeBoolean(tabStrokeFilter) ? tabStrokeFilter : nil;
     id sentenceAssociation = preferences[@"sentence_association"];
     if ([sentenceAssociation isKindOfClass:NSDictionary.class]) {
         NSString *neuralKey = MSIMEEditionIsShurufa() ? @"neural_keyboard" : @"neural_desktop";
@@ -3551,6 +3569,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     _wubiToggle.state = self.wubiAutoCommitUnique ? NSControlStateValueOn : NSControlStateValueOff;
     _wubiMixedPinyinToggle.state = self.wubiMixedPinyinEnabled ? NSControlStateValueOn : NSControlStateValueOff;
     _wubiZWildcardToggle.state = self.wubiZWildcard ? NSControlStateValueOn : NSControlStateValueOff;
+    _tabStrokeFilterToggle.state = self.tabStrokeFilter ? NSControlStateValueOn : NSControlStateValueOff;
     _wubiFifthCodeTopCommitToggle.state = self.wubiFifthCodeTopCommit ? NSControlStateValueOn : NSControlStateValueOff;
     _sentenceNeuralDesktopToggle.state = self.sentenceAssociationNeuralDesktop ? NSControlStateValueOn : NSControlStateValueOff;
     _sentenceShowNextOnDuplicateToggle.state =
@@ -4158,6 +4177,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     _candidateTranslationsToggle = MSIMESettingSwitch(self, @selector(candidateTranslationsChanged:), @"显示候选释义");
     _candidateEnglishGlossToggle = MSIMESettingSwitch(self, @selector(candidateEnglishGlossChanged:), @"显示离线英文释义");
     _quanpinHelpcodeToggle = MSIMESettingSwitch(self, @selector(quanpinHelpcodeChanged:), @"启用全拼辅助码");
+    _tabStrokeFilterToggle = MSIMESettingSwitch(self, @selector(tabStrokeFilterChanged:), @"Tab 笔画筛选");
     _shuangpinHelpcodeToggle = MSIMESettingSwitch(self, @selector(shuangpinHelpcodeChanged:), @"启用双拼辅助码");
     _helpcodeSchemaButtons = [NSMutableDictionary dictionary];
     _helpcodeDisplayToggles = [NSMutableDictionary dictionary];
@@ -4269,6 +4289,13 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     // and with no effect until you come back and pick 双拼 — and puts the 五笔 options on a page of
     // their own reached by a link, with a 返回键盘输入 button to get out. That is a web flow inside
     // a sidebar window: the sidebar stays on the scheme page while the content is somewhere else.
+    // Tab 笔画筛选排在全拼选项最前；双拼同样生效（开着 Tab 手动辅助码时 Tab 归辅助码），开关只放这一处。只有 Shurufa 带笔画词库（版本表 features.tab_stroke_filter）。
+    if (MSIMEEditionIsShurufa())
+        [quanpinHelpcodeRows insertObject:[self settingRow:@"Tab 笔画筛选"
+                                                    detail:@"打完拼音按 Tab，再按笔顺筛候选的第一个字：h 横、s 竖、p 撇、n 点、z 折，x 代表任意一笔；Backspace 删一笔。"
+                                                   control:_tabStrokeFilterToggle
+                                                       aka:@[@"笔画筛选", @"笔顺"]]
+                                  atIndex:0];
     _quanpinCard = MSIMECardWithViews(quanpinHelpcodeRows, 0.0);
     _quanpinCard.accessibilityLabel = @"全拼选项卡片";
     NSMutableArray<NSView *> *shuangpinRows = [NSMutableArray arrayWithObjects:
@@ -4307,7 +4334,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
         [self sectionHeader:@"中文输入方案"
                        keys:@[SchemeKey, ShuangpinProfileKey, ShuangpinPreeditKey, KeymapKey, WubiKey, WubiProfileKey,
                               WubiMixedPinyinKey, WubiZWildcardKey, WubiFifthCodeTopCommitKey, HelpcodeOptionsKey,
-                              QuanpinHelpcodeKey, ShuangpinHelpcodeKey]],
+                              QuanpinHelpcodeKey, ShuangpinHelpcodeKey, TabStrokeFilterKey]],
         schemeCard, _quanpinCard, _shuangpinCard, _wubiCard,
     ]];
 
@@ -5467,6 +5494,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
 - (void)wubiChanged:(NSSwitch *)sender { self.wubiAutoCommitUnique = sender.state == NSControlStateValueOn; }
 - (void)wubiMixedPinyinChanged:(NSSwitch *)sender { self.wubiMixedPinyinEnabled = sender.state == NSControlStateValueOn; }
 - (void)wubiZWildcardChanged:(NSSwitch *)sender { self.wubiZWildcard = sender.state == NSControlStateValueOn; }
+- (void)tabStrokeFilterChanged:(NSSwitch *)sender { self.tabStrokeFilter = sender.state == NSControlStateValueOn; }
 - (void)wubiFifthCodeTopCommitChanged:(NSSwitch *)sender {
     self.wubiFifthCodeTopCommit = sender.state == NSControlStateValueOn;
 }

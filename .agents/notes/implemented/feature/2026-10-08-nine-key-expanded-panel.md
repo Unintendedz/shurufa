@@ -27,7 +27,7 @@ Status: implemented
   - 部分上屏（选了只覆盖前几个数字的候选）之后，剩下的锁定记录作废，因为数字位置变了。
 - 新增 `msime_client_set_nine_key_filter(session, single_character, strokes, length)`，经 input-runtime 的 `Action::SetNineKeyFilter` 走与按键相同的 dispatch。
   - `single_character` 只留单字。
-  - `strokes` 是 `hspnz` 组成的笔顺前缀，比较候选的第一个字：从 `msime-stroke.db` 按键前缀做一次区间查询，取出全部单字放进集合，换前缀时才重查。
+  - `strokes` 是 `hspnz` 组成的笔顺前缀，比较候选的第一个字：从 `msime-stroke.db` 按键前缀做一次区间查询，取出全部单字放进集合，换前缀时才重查。这个查询在 `stroke::characters_with_stroke_prefix`，全拼、双拼的 [Tab 笔画筛选](2026-11-04-tab-stroke-filter.md) 用的是同一个。
   - 筛选在截断到 128 条之前做，否则排在后面的单字会被截掉；英文词在有筛选或首字母时不列。
   - 当前状态由 `View.nine_key_single_character` 和 `View.nine_key_strokes` 给出，组字结束时清空。
   - 宿主没有笔画字典时报 `LANGUAGE_DICTIONARY_UNAVAILABLE`，筛选不变。
