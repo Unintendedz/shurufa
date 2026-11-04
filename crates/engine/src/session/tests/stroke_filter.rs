@@ -1,4 +1,4 @@
-//! Tab 笔画筛选（`SessionOptions::tab_stroke_filter`）：Tab 进入，`hspnzx` 按第一个字的笔顺筛候选，Backspace 逐笔退回再退出，选词和编辑原文结束筛选。词库和笔顺都是合成的。
+//! Tab 笔画筛选（`SessionOptions::tab_stroke_filter`）：Tab 进入，`hspnzx` 按第一个字的笔顺、其他字母按部件拼音首字母筛候选，Backspace 逐笔退回再退出，选词和编辑原文结束筛选。词库和笔顺都是合成的。
 
 use super::*;
 
@@ -46,7 +46,7 @@ fn tab_enters_the_filter_and_strokes_narrow_by_the_first_character() {
     assert!(session.snapshot().spelling_symbols.contains('\t'));
     assert!(tab(&mut session));
     let snapshot = session.snapshot();
-    assert_eq!(snapshot.preedit, "dajia 笔：");
+    assert_eq!(snapshot.preedit, "dajia｜");
     assert_eq!(snapshot.editing_text, "dajia");
     assert_eq!(snapshot.caret_position, 5);
     assert_eq!(words(&session), all);
@@ -55,18 +55,18 @@ fn tab_enters_the_filter_and_strokes_narrow_by_the_first_character() {
     assert_eq!(words(&session), all);
     type_text(&mut session, "s");
     assert_eq!(words(&session), ["打架", "打"]);
-    assert_eq!(session.snapshot().preedit, "dajia 笔：一丨");
+    assert_eq!(session.snapshot().preedit, "dajia｜hs");
     assert_eq!(session.snapshot().editing_text, "dajia");
-    // 筛不出东西的一笔不收，别的字母和 Tab 也不进组字。
-    for key in [b'n', b'a', b'J', b'\t'] {
+    // 筛不出东西的字母不收，大写字母和 Tab 也不进组字。
+    for key in *b"naJ\t" {
         assert!(session.character(key, false).handled);
         assert_eq!(words(&session), ["打架", "打"]);
-        assert_eq!(session.snapshot().preedit, "dajia 笔：一丨");
+        assert_eq!(session.snapshot().preedit, "dajia｜hs");
     }
     // `x` 是任意一笔。
     type_text(&mut session, "x");
     assert_eq!(words(&session), ["打架", "打"]);
-    assert_eq!(session.snapshot().preedit, "dajia 笔：一丨＊");
+    assert_eq!(session.snapshot().preedit, "dajia｜hsx");
     assert!(session.snapshot().spelling_symbols.contains('\t'));
 }
 
@@ -79,10 +79,10 @@ fn backspace_removes_strokes_then_leaves_the_filter_then_edits_the_pinyin() {
     assert!(tab(&mut session));
     type_text(&mut session, "hs");
     assert!(session.command(Command::Backspace).handled);
-    assert_eq!(session.snapshot().preedit, "dajia 笔：一");
+    assert_eq!(session.snapshot().preedit, "dajia｜h");
     assert_eq!(words(&session), all);
     assert!(session.command(Command::Backspace).handled);
-    assert_eq!(session.snapshot().preedit, "dajia 笔：");
+    assert_eq!(session.snapshot().preedit, "dajia｜");
     assert!(session.command(Command::Backspace).handled);
     assert_eq!(session.snapshot().preedit, "dajia");
     assert_eq!(words(&session), all);
@@ -249,4 +249,50 @@ fn a_row_found_by_strokes_is_learned_at_its_real_rank() {
     // 调频按它在整张列表里的第三名算，前移一位；按筛选后的第一名算就不会动。
     type_text(&mut session, "da");
     assert_eq!(words(&session), ["大", "达", "打"]);
+}
+
+/// `ma` 的候选：妈（女、马）、吗 和 嘛（都是口、马/麻）、码（石、马）和独体的 马。部件来自编进引擎的拆字表。
+const MA_FIXTURE: &str = "CREATE TABLE tbl_1_m(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+INSERT INTO tbl_1_m VALUES('ma','m','妈',1000),('ma','m','吗',900),('ma','m','马',800),('ma','m','嘛',700),('ma','m','码',600);";
+
+#[test]
+fn letters_match_the_initials_of_the_components() {
+    let fixture = Fixture::new(MA_FIXTURE);
+    let mut session = filter_session(&fixture);
+    type_text(&mut session, "ma");
+    assert_eq!(words(&session), ["妈", "吗", "马", "嘛", "码"]);
+    assert!(tab(&mut session));
+    // 口 读 kou。
+    type_text(&mut session, "k");
+    assert_eq!(words(&session), ["吗", "嘛"]);
+    assert_eq!(session.snapshot().preedit, "ma｜k");
+    type_text(&mut session, "m");
+    assert_eq!(words(&session), ["吗", "嘛"]);
+    // 两个口的 骂 不在候选里，`kk` 筛不出东西，不收。
+    type_text(&mut session, "k");
+    assert_eq!(session.snapshot().preedit, "ma｜km");
+    session.command(Command::Backspace);
+    session.command(Command::Backspace);
+    // 女 读 nv：`n` 也是点，笔画库里这几个字都没有笔顺，只按部件留下 妈。
+    type_text(&mut session, "n");
+    assert_eq!(words(&session), ["妈"]);
+    session.command(Command::Backspace);
+    // 石 读 shi，`s` 同时是竖；`d`（点）同样读部件，码 还有 dan 的拆法。
+    type_text(&mut session, "s");
+    assert_eq!(words(&session), ["码"]);
+    session.command(Command::Backspace);
+    type_text(&mut session, "d");
+    assert_eq!(words(&session), ["码"]);
+}
+
+#[test]
+fn d_is_the_dot_stroke_like_n() {
+    let fixture = Fixture::new(DAJIA_FIXTURE);
+    let mut session = filter_session(&fixture);
+    type_text(&mut session, "dajia");
+    assert!(tab(&mut session));
+    // 大 的笔顺是 `hpn`：`hpd` 一样找到它。
+    type_text(&mut session, "hpd");
+    assert_eq!(words(&session), ["大家", "大"]);
+    assert_eq!(session.snapshot().preedit, "dajia｜hpd");
 }

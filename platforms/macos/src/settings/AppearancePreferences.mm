@@ -4292,9 +4292,9 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     // Tab 笔画筛选排在全拼选项最前；双拼同样生效（开着 Tab 手动辅助码时 Tab 归辅助码），开关只放这一处。只有 Shurufa 带笔画词库（版本表 features.tab_stroke_filter）。
     if (MSIMEEditionIsShurufa())
         [quanpinHelpcodeRows insertObject:[self settingRow:@"Tab 笔画筛选"
-                                                    detail:@"打完拼音按 Tab，再按笔顺筛候选的第一个字：h 横、s 竖、p 撇、n 点、z 折，x 代表任意一笔；Backspace 删一笔。"
+                                                    detail:@"打完拼音按 Tab，再按第一个字的笔顺或部件筛候选：笔顺是 h 横、s 竖、p 撇、n 或 d 点、z 折，x 代表任意一笔；部件打拼音首字母，比如口是 k、亻是 r、艹是 c；Backspace 删一个字母。"
                                                    control:_tabStrokeFilterToggle
-                                                       aka:@[@"笔画筛选", @"笔顺"]]
+                                                       aka:@[@"笔画筛选", @"笔顺", @"部首筛选", @"拆分筛选"]]
                                   atIndex:0];
     _quanpinCard = MSIMECardWithViews(quanpinHelpcodeRows, 0.0);
     _quanpinCard.accessibilityLabel = @"全拼选项卡片";

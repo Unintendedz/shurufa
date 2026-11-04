@@ -8,6 +8,7 @@
 //! 第一次查询时为两张表各建一份行首偏移表，之后二分查找，不为每个键分配字符串。网页引擎不编入这两张表（它关掉了全部本地模式），查询总是空的。
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use crate::shuangpin::query::normalize_input;
@@ -114,6 +115,40 @@ fn binary_search(len: usize, compare: impl Fn(usize) -> Ordering) -> Option<usiz
         }
     }
     None
+}
+
+/// 每个字各种拆法的部件首字母串，`kou'zhi` 的 嚏 是 `kz`；第一次用到时从 `chaizi.tsv` 建一次。
+fn component_initials() -> &'static HashMap<char, Vec<Box<str>>> {
+    static INITIALS: OnceLock<HashMap<char, Vec<Box<str>>>> = OnceLock::new();
+    INITIALS.get_or_init(|| {
+        let table = keys();
+        let mut initials: HashMap<char, Vec<Box<str>>> = HashMap::new();
+        for index in 0..table.len() {
+            let Some((key, characters)) = table.line(index).split_once('\t') else {
+                continue;
+            };
+            let code: Box<str> = key
+                .split('\'')
+                .filter_map(|syllable| syllable.chars().next())
+                .collect::<String>()
+                .into();
+            for character in characters.chars() {
+                let codes = initials.entry(character).or_default();
+                if !codes.contains(&code) {
+                    codes.push(code.clone());
+                }
+            }
+        }
+        initials
+    })
+}
+
+/// `character` 有一种拆法，各部件拼音的首字母依次以 `code` 开头：嚏（口、疐）是 `k`、`kz`，河（三点水读 san 或 shui、可）是 `s`、`sk`，只比每个部件的首字母。表里没有拆法的字（口、马这样的独体字）一律不算。Tab 笔画筛选按它比部件。
+pub fn components_start_with(character: char, code: &str) -> bool {
+    !code.is_empty()
+        && component_initials()
+            .get(&character)
+            .is_some_and(|codes| codes.iter().any(|initials| initials.starts_with(code)))
 }
 
 /// 拆字行的注释：这个字的读音（Unihan `kMandarin` 的第一个值，带调）。不在表里或没有读音的字为空。
@@ -368,6 +403,22 @@ mod tests {
             allocations, 1,
             "无命中拆字查询只应为去分隔符后的输入分配一次：{allocations}"
         );
+    }
+
+    /// Tab 笔画筛选比部件用的首字母：每种拆法都算，只比开头，独体字和空码都不算。
+    #[test]
+    fn components_start_with_matches_any_decomposition_by_initials() {
+        assert!(components_start_with('嚏', "k"));
+        assert!(components_start_with('嚏', "kz"));
+        assert!(!components_start_with('嚏', "z"));
+        assert!(!components_start_with('嚏', "kzz"));
+        // 河 的三点水有 san、shui 两种读法，两种拆法首字母相同。
+        assert!(components_start_with('河', "sk"));
+        // 僻 拆成 人、辟 时 辟 读 bi 或 pi。
+        assert!(components_start_with('僻', "rb"));
+        assert!(components_start_with('僻', "rp"));
+        assert!(!components_start_with('口', "k"));
+        assert!(!components_start_with('嚏', ""));
     }
 
     #[test]
