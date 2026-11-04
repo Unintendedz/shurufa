@@ -4,7 +4,7 @@
 
 Shurufa 是我自己用的 macOS 中文输入法，结合了[水杉输入法](https://github.com/metasequoiaime/msime)和 [OpenLess](https://github.com/Open-Less/openless)：打字的部分来自水杉，语音输入的体验和本地流式识别的做法来自 OpenLess。
 
-**这只是一个个人 fork 的项目，它只适合我的 Mac。**
+**这只是一个个人 fork 的项目，它只适合我自己的设备（目前只在 Mac 上用）。**
 
 ## 为什么要 fork
 

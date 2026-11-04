@@ -1,6 +1,6 @@
 # AGENTS.md
 
-给在本仓库工作的编码代理的操作约定。**架构边界、验证流程和各平台的验证覆盖面在 [ARCHITECTURE.md](docs/ARCHITECTURE.md)，贡献流程在 [CONTRIBUTING.md](.github/CONTRIBUTING.md)——先读那两份，这里只写它们没有覆盖的操作细节。**
+给在本仓库工作的编码代理的操作约定。**架构边界、验证流程和各平台的验证覆盖面在 [ARCHITECTURE.md](docs/ARCHITECTURE.md)——先读那一份，这里只写它没有覆盖的操作细节。** 本仓库不接外部 PR，上游的贡献指南、行为准则、安全策略和 issue/PR 模板已经删掉，其中仍然有用的开发流程并进了下文「改动范围」。
 
 ## 项目定位：Shurufa 是独立项目
 
@@ -15,6 +15,8 @@
 - 不复制相邻仓库的未提交内容；上游来源以远端实际默认分支和固定提交为准。
 - **「把功能对齐某个平台」不等于「把默认值改成那个平台的出厂值」。** 对齐的验收标准是**能力可达**：字段存在、有宿主读、设置页有控件、行为能按用户选择生效。出厂默认值属于产品决策，会改变现有用户的手感，必须单独授权。做对齐任务时若发现默认值与参考平台不同，**只记录不改**，把差异表写进决策笔记（参考平台出厂值、本仓现值、为什么这次不动）。2026-10-22 一次「补齐 Windows 对齐」的 PR 顺手把 `helpcode.enabled`、`emoji`、`kaomoji`、`navigation.left_right` 等 7 个默认值翻成 Windows 出厂值，被维护者当场指出越界：这些翻转会静默改变所有 macOS 老用户的输入手感，且没有单独评审。
 - 日志、测试和提交中不得包含真实输入、凭据或私人资料，测试数据使用合成值。
+- Rust 改动跑相关测试、`cargo fmt` 和 `cargo clippy`；前端改动跑类型检查和构建；原生宿主改动在可用平台上跑对应验证。目录或命名整理要同步更新构建文件、测试路径和文档引用。提交前跑 `scripts/verify-local.sh --quick`，并检查 `git diff --check`。
+- 新增文本契约检查时写成 `scripts/test-<name>.py` 即可：`scripts/run-checks.sh` 自动发现并执行 `scripts/` 下每一个 `test-*.py`，阶段名取自文件名，不用登记。检查缺少需要的工具链或输入（pnpm、参考仓库、Android SDK、交叉编译器等）时打印一行 `skipped: <原因>` 并以 0 退出，不要失败。确实不能无参运行的检查，在 `run-checks.sh` 的 `special_checks` 里写成 `名字=负责执行它的脚本`（没有门禁执行的，写成说明如何手动运行它的文档）；`contract check registry` 阶段会在该脚本没有调用它、该文档没有提到它或脚本不存在时失败。
 - CI 会在 Pull Request 上运行，提交前仍先跑本地 quick 门禁。发布 workflow 一律手动触发，不要在任务没有明确要求发布时去碰它们。
 - **改了文件读写、目录遍历、权限或安卓资源（drawable、主题、布局），合并前在安卓模拟器上跑过再说「验证过」。** macOS 上的单测和 CI 的编译、lint 都碰不到 Android 的限制：应用对 `/data` 只有搜索权限、SELinux 禁止应用建硬链接、Android 9 的 `GradientDrawable` 读不到带主题属性的径向渐变半径。0.3.0 带着这三个问题发出去（词库准备失败、匿名账号写不进、Android 9 一打开就崩溃），编译、lint 和 JVM 测试全绿。本机做法：`bash platforms/android/tests/device/start-emulator.sh 28`（35 同理），`MSIME_ANDROID_TEST_SERIAL=emulator-5566 bash platforms/android/tests/device/build-core-test.sh` 编出 client-base、client-core、client-providers 和 client-services 的单测，经 cargo runner `run-core-test.sh` 在设备上整套运行，再用 `smoke.sh emulator-5566 --core` 装包验收（API 35 不带 `--core`）。CI 的 `android-device.yml` 在合进 develop 后和发版前跑同样的两步，PR 上不跑，所以 PR 上要靠本机跑过。
 - **不要把 Tauri 生成的工程当成某个平台的产品去启动、调试或验收。** 每个平台的产品本体都是 `platforms/<os>` 下的原生宿主，Tauri/React 只是公共组件，而且不是每个宿主都承载它：共享 React 设置页只在 macOS、Linux（Tauri 设置应用）和 HarmonyOS（ArkWeb 加载的 rawfile，不经过 Tauri）上作为设置界面出现，Windows 的原生宿主只拉起 Tauri 的共享面板，iOS App 与 Android 发布 APK 两者都不含（见 docs/ARCHITECTURE.md 的「设置界面按平台归属」）。装机、启动和设备验收一律针对原生宿主；`apps/desktop` 的目录名和 Tauri 生成工程里自带的 bundle id 都不构成例外。

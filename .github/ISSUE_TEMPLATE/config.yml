@@ -1,5 +1,0 @@
-blank_issues_enabled: true
-contact_links:
-  - name: 安全漏洞
-    url: https://github.com/metasequoiaime/msime/security/advisories/new
-    about: 发现可能泄露密码、输入内容等的安全问题，请通过这里私下报告，不要公开提交。

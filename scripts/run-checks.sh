@@ -16,7 +16,7 @@ else
   run_checks_standalone=0
 fi
 
-# Every scripts/test-*.py is a contract check, and the loop at the end of this section runs each one without it being named anywhere: a check is wired the moment its file exists. The hand-kept list this replaced had already forgotten one (test-clipboard-capture-bounds.py sat in scripts/ unrun). A check that cannot run bare - it needs arguments, a lock, or is run by another gate - is named in special_checks instead, paired with the script that runs it (or, for the Playwright pair no gate runs, the document that says how to), and the registry phase fails when that script does not invoke it or the document does not mention it. Because nothing opts a check in, a new one has to skip cleanly and exit 0 when its toolchain or input is missing; .github/CONTRIBUTING.md says so for contributors.
+# scripts/ 下每一个 test-*.py 都是一项契约检查，本节末尾的循环逐个运行它们，不需要在任何地方登记：文件一存在，检查就接上了。被它取代的手写清单曾经漏掉过一个（test-clipboard-capture-bounds.py 放在 scripts/ 里一直没跑）。不能无参运行的检查（需要参数、需要加锁，或由别的门禁负责执行）改在 special_checks 里登记，配上负责运行它的脚本（没有门禁运行的那对 Playwright 检查，配上说明如何运行的文档）；该脚本没有调用它、该文档没有提到它时，registry 阶段失败。因为检查不用登记就会被执行，新检查在缺少工具链或输入时必须干净地跳过并以 0 退出，AGENTS.md 也写明了这一点。
 #
 # Why the discovered checks exist, keyed by the part of the file name after test-:
 #
