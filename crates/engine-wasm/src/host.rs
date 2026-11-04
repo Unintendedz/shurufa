@@ -1330,6 +1330,7 @@ fn session_options(scheme: Scheme, paths: RuntimePaths) -> SessionOptions {
         url: true,
         temporary_japanese: false,
         expression: false,
+        expression_lowercase_entry: false,
         command: false,
         mention: false,
         chaizi: false,

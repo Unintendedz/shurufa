@@ -75,6 +75,7 @@ fn options(root: &Path) -> EngineOptions {
         local_url: true,
         local_temporary_japanese: true,
         local_expression: false,
+        local_expression_lowercase_entry: false,
         local_command: false,
         local_mention: false,
         local_chaizi: false,

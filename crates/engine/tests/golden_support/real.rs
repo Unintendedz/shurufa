@@ -193,6 +193,7 @@ pub fn product_options(options: &mut SessionOptions) {
         url: true,
         temporary_japanese: true,
         expression: false,
+        expression_lowercase_entry: false,
         command: false,
         mention: false,
         chaizi: false,

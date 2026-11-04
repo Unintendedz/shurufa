@@ -410,7 +410,8 @@ impl InputSession {
             } else {
                 None
             }
-            .or_else(|| self.local_mode_for_symbol(value));
+            .or_else(|| self.local_mode_for_symbol(value))
+            .or_else(|| self.local_mode_for_lowercase_v(value));
             if let Some(mode) = entry {
                 return KeyResult::handled().with_diagnostic(self.enter_local_mode(mode, value));
             }
@@ -603,10 +604,11 @@ impl InputSession {
             LocalInputMode::None => return KeyResult::unhandled(),
         };
         if !accepted {
-            // 空入口还没有模式内容，拒绝的第二枚大写留在同一组字，避免把 UV 拆开上屏。
-            if value.is_ascii_uppercase()
-                && self.local_preedit.len() == 1
-                && self.local_preedit.as_bytes()[0].is_ascii_uppercase()
+            // 空入口还没有模式内容，拒绝的第二枚大写留在同一组字，避免把 UV 拆开上屏。小写 `v` 入口后紧跟字母同理：用户打的是以 v 开头的字母串，`v` 和这枚字母一起转回普通组字。
+            let entry = self.local_preedit.as_bytes();
+            if entry.len() == 1
+                && ((value.is_ascii_uppercase() && entry[0].is_ascii_uppercase())
+                    || (letter && entry[0] == b'v'))
                 && matches!(self.scheme(), SchemeType::Quanpin | SchemeType::Shuangpin)
             {
                 let mut raw = self.local_preedit.clone();
@@ -2113,6 +2115,16 @@ impl InputSession {
             self.scheme().opens_local_modes()
         };
         (enabled && scheme_opens).then_some(mode)
+    }
+
+    /// 全拼没有组字时的小写 `v`：`V` 模式和小写入口都开着时进入 `V` 模式。双拼的 `v` 是声母或韵母，五笔的 `v` 是编码，都不在此列。
+    fn local_mode_for_lowercase_v(&self, value: u8) -> Option<LocalInputMode> {
+        let options = self.local_mode_options;
+        (value == b'v'
+            && options.expression
+            && options.expression_lowercase_entry
+            && self.scheme() == SchemeType::Quanpin)
+            .then_some(LocalInputMode::Expression)
     }
 
     /// 没有组字时，`/` 和 `@` 只在支持本地表入口且启用中文标点时打开模式；英文标点下它们是字面字符。

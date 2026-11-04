@@ -141,6 +141,8 @@ pub struct EngineOptions {
     pub local_temporary_japanese: bool,
     /// `V`: calculator, Chinese numerals and dates.
     pub local_expression: bool,
+    /// 全拼的小写 `v` 也进入 `V` 模式（`LocalModeOptions::expression_lowercase_entry`）。独立宿主固定打开，不增加用户偏好项。
+    pub local_expression_lowercase_entry: bool,
     /// `/`: built-in commands and `command_table`.
     pub local_command: bool,
     /// `@`: `mention_entries`.
@@ -284,6 +286,7 @@ pub fn prepare_options_for(
         local_url: true,
         local_temporary_japanese: true,
         local_expression: false,
+        local_expression_lowercase_entry: false,
         local_command: false,
         local_mention: false,
         local_chaizi: false,
@@ -433,6 +436,7 @@ pub fn session_options(options: &EngineOptions) -> Result<SessionOptions> {
         url: options.local_url,
         temporary_japanese: options.local_temporary_japanese,
         expression: options.local_expression,
+        expression_lowercase_entry: options.local_expression_lowercase_entry,
         command: options.local_command,
         mention: options.local_mention,
         chaizi: options.local_chaizi,

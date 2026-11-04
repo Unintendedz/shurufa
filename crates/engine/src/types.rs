@@ -1374,6 +1374,8 @@ pub struct LocalModeOptions {
     pub url: bool,
     pub temporary_japanese: bool,
     pub expression: bool,
+    /// 全拼没有组字时，小写 `v` 同样进入 `V` 模式（搜狗拼音的入口：全拼没有以 v 开头的音节）。依附 `expression`，不经过 `shift_letter_entry`；默认关，由宿主打开。
+    pub expression_lowercase_entry: bool,
     pub command: bool,
     pub mention: bool,
     /// `C`：拆字反查。
@@ -1399,6 +1401,7 @@ impl Default for LocalModeOptions {
             url: true,
             temporary_japanese: true,
             expression: false,
+            expression_lowercase_entry: false,
             command: false,
             mention: false,
             chaizi: false,

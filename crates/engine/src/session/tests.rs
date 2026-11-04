@@ -8413,6 +8413,97 @@ fn expression_mode_needs_a_pinyin_scheme_and_an_empty_composition() {
     assert_eq!(session.snapshot().local_mode, LocalInputMode::QuickPhrase);
 }
 
+fn lowercase_v_session(fixture: &Fixture, lowercase_entry: bool) -> Session {
+    let mut session = fixture.session_with(|options| {
+        options.local_modes.expression = true;
+        options.local_modes.expression_lowercase_entry = lowercase_entry;
+        // 独立版关掉了全部 Shift+字母入口，小写 `v` 不经过这个总开关。
+        options.local_modes.shift_letter_entry = false;
+    });
+    TestClock::install(&mut session);
+    session
+}
+
+#[test]
+fn lowercase_v_opens_the_expression_mode_in_quanpin() {
+    let fixture = Fixture::new(QUANPIN_FIXTURE);
+    let mut session = lowercase_v_session(&fixture, true);
+    assert!(session.character(b'v', false).handled);
+    let snapshot = session.snapshot();
+    assert_eq!(snapshot.local_mode, LocalInputMode::Expression);
+    assert_eq!(snapshot.preedit, "v");
+    assert_eq!(words(&session), ["v"]);
+    type_text(&mut session, "12*3");
+    assert_eq!(session.snapshot().preedit, "v12*3");
+    assert_eq!(words(&session), ["36", "12*3=36", "叁拾陆元整"]);
+    assert_eq!(session.select(2).commit.as_deref(), Some("叁拾陆元整"));
+    assert_eq!(session.snapshot().local_mode, LocalInputMode::None);
+
+    // 写到一半的算式按回车原样上屏，入口字母照用户打的小写。
+    session.character(b'v', false);
+    type_text(&mut session, "12*");
+    assert_eq!(words(&session), ["v12*"]);
+    assert_eq!(
+        session.command(Command::CommitRaw).commit.as_deref(),
+        Some("v12*")
+    );
+
+    // 只有 `v` 时空格上屏 `v`，和原来一样。
+    session.character(b'v', false);
+    assert_eq!(session.select(0).commit.as_deref(), Some("v"));
+
+    // Shift+字母总开关关着，Shift+V 仍是大写字母。
+    session.character(b'V', true);
+    assert_eq!(session.snapshot().local_mode, LocalInputMode::None);
+}
+
+#[test]
+fn a_letter_after_lowercase_v_types_the_letters_as_before() {
+    let fixture = Fixture::new(QUANPIN_FIXTURE);
+    for text in ["vi", "vs", "vV", "video"] {
+        let mut entry = lowercase_v_session(&fixture, true);
+        let mut plain = lowercase_v_session(&fixture, false);
+        for byte in text.bytes() {
+            let shift = byte.is_ascii_uppercase();
+            let (a, b) = (entry.character(byte, shift), plain.character(byte, shift));
+            assert_eq!((a.handled, a.commit), (b.handled, b.commit), "{text:?}");
+        }
+        let (a, b) = (entry.snapshot(), plain.snapshot());
+        assert_eq!(a.local_mode, LocalInputMode::None, "{text:?}");
+        assert_eq!(a.preedit, b.preedit, "{text:?}");
+        assert_eq!(words(&entry), words(&plain), "{text:?}");
+    }
+}
+
+#[test]
+fn lowercase_v_needs_quanpin_an_empty_composition_and_both_switches() {
+    let fixture = Fixture::new(QUANPIN_FIXTURE);
+    // 组字里的 v 是 ü。
+    let mut session = lowercase_v_session(&fixture, true);
+    type_text(&mut session, "lv");
+    assert_eq!(session.snapshot().local_mode, LocalInputMode::None);
+
+    let mut off = lowercase_v_session(&fixture, false);
+    off.character(b'v', false);
+    assert_eq!(off.snapshot().local_mode, LocalInputMode::None);
+
+    let mut expression_off = fixture.session_with(|options| {
+        options.local_modes.expression_lowercase_entry = true;
+    });
+    expression_off.character(b'v', false);
+    assert_eq!(expression_off.snapshot().local_mode, LocalInputMode::None);
+
+    // 双拼的 v 是声母（小鹤 zh）。
+    let mut shuangpin = fixture.session_with(|options| {
+        options.scheme = SchemeType::Shuangpin;
+        options.shuangpin_profile = ShuangpinProfileKind::Xiaohe;
+        options.local_modes.expression = true;
+        options.local_modes.expression_lowercase_entry = true;
+    });
+    shuangpin.character(b'v', false);
+    assert_eq!(shuangpin.snapshot().local_mode, LocalInputMode::None);
+}
+
 #[test]
 fn slash_opens_the_command_list_and_letters_filter_it() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
