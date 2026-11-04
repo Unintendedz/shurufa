@@ -1849,6 +1849,11 @@ fn single_character_only_reaches_engine_after_composition() {
 }
 
 fn caret_edit_host(root: &std::path::Path, preferences: Preferences) -> u64 {
+    caret_edit_host_with(root, preferences, json!({}))
+}
+
+/// `caret_edit_host` 的词库，`extra` 里的键并进 HostOptions。
+fn caret_edit_host_with(root: &std::path::Path, preferences: Preferences, extra: Value) -> u64 {
     let path = |name| {
         let path = root.join(name);
         std::fs::create_dir_all(&path).unwrap();
@@ -1878,10 +1883,60 @@ fn caret_edit_host(root: &std::path::Path, preferences: Preferences) -> u64 {
             .unwrap();
     }
     bundle_wubi_table(&resources);
-    let options = json!({ "api_version": 1, "resources": resources, "user_data": path("user"), "cache": path("cache"), "dictionaries": dictionaries, "preferences": preferences }).to_string();
+    let mut options = json!({ "api_version": 1, "resources": resources, "user_data": path("user"), "cache": path("cache"), "dictionaries": dictionaries, "preferences": preferences });
+    for (key, value) in extra.as_object().unwrap() {
+        options[key] = value.clone();
+    }
+    let options = options.to_string();
     let created = read(unsafe { msime_client_create(options.as_ptr(), options.len()) });
     assert_eq!(created["ok"], true);
     created["value"]["session"].as_u64().unwrap()
+}
+
+/// Tab 笔画筛选只在 macOS 交给 Engine，而且要有笔画词库：那时组字的视图在 `spelling_symbols` 里带 Tab，宿主据此把 Tab 交给会话。偏好关掉后等组字结束重建 Engine，Tab 回到宿主。
+#[test]
+fn tab_stroke_filter_reaches_the_engine_on_macos_with_a_stroke_dictionary() {
+    let dir = tempfile::tempdir().unwrap();
+    let languages = dir.path().join("language-dictionaries");
+    std::fs::create_dir_all(&languages).unwrap();
+    std::fs::write(languages.join("msime-stroke.db"), b"synthetic").unwrap();
+    let mut preferences = chinese_preferences();
+    assert!(preferences.tab_stroke_filter);
+    let handle = caret_edit_host_with(
+        dir.path(),
+        preferences.clone(),
+        json!({ "language_dictionaries": languages }),
+    );
+    read(msime_client_focus(handle, true));
+    let tab_in = |view: &Value| {
+        view["spelling_symbols"]
+            .as_str()
+            .unwrap_or("")
+            .contains('\t')
+    };
+    let composing = read(msime_client_character(handle, b'w', false))["value"]["view"].clone();
+    assert_eq!(tab_in(&composing), cfg!(target_os = "macos"), "{composing}");
+    SESSIONS.with(|sessions| {
+        assert_eq!(
+            sessions.borrow()[&handle].options.tab_stroke_filter,
+            cfg!(target_os = "macos")
+        );
+    });
+
+    preferences.tab_stroke_filter = false;
+    assert_eq!(update(handle, 1, &preferences)["value"]["deferred"], true);
+    read(msime_client_command(handle, 3));
+    let off = read(msime_client_character(handle, b'w', false))["value"]["view"].clone();
+    assert!(!tab_in(&off), "{off}");
+    read(msime_client_destroy(handle));
+
+    // 没有笔画词库时偏好开着也不归会话。
+    let bare = tempfile::tempdir().unwrap();
+    let handle = caret_edit_host(bare.path(), chinese_preferences());
+    read(msime_client_focus(handle, true));
+    let view = read(msime_client_character(handle, b'w', false))["value"]["view"].clone();
+    assert!(!tab_in(&view), "{view}");
+    read(msime_client_destroy(handle));
 }
 
 /// 打完 `wohaoxianchihuoguo`，左移 9 次停在 `wohaoxian|chihuoguo`，返回此时的视图。

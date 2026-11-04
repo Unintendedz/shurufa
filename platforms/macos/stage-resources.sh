@@ -92,10 +92,15 @@ languages_source=${4:-$repo_root/target/language-dictionaries}
 languages_destination="$repo_root/target/macos/language-dictionaries"
 rm -rf "$languages_destination"
 staged_languages=()
+# full 暂存找得到的全部词库；其他版本只暂存版本表 language_dictionaries 列出的那几套（Shurufa 只带 Tab 笔画筛选用的 msime-stroke.db）。
+edition_languages=$(python3 -I -c 'import json, sys; print("\n".join(next(edition["language_dictionaries"] for edition in json.load(open(sys.argv[1]))["editions"] if edition["id"] == sys.argv[2])))' "$repo_root/shared/contracts/editions.json" "$edition")
 for pair in msime-cantonese.db:msime-rime_cantonese_LICENSE.txt msime-zhuyin.db:msime-libchewing_data_LICENSE.txt msime-stroke.db:msime-rime_stroke_LICENSE.txt; do
   database=${pair%%:*}
   license=${pair#*:}
   [ -f "$languages_source/$database" ] || continue
+  if [ "$edition" != full ] && ! grep -Fxq "$database" <<< "$edition_languages"; then
+    continue
+  fi
   if [ ! -f "$languages_source/$license" ]; then
     echo "$languages_source/$database has no $license beside it; refusing to ship the data without its licence" >&2
     exit 1

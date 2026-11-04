@@ -90,7 +90,7 @@
           "description": "本版本是否提供这些可选功能。",
           "type": "object",
           "additionalProperties": false,
-          "required": ["temporary_japanese", "neural_keyboard", "offline_glosses", "handwriting"],
+          "required": ["temporary_japanese", "neural_keyboard", "offline_glosses", "handwriting", "tab_stroke_filter"],
           "properties": {
             "temporary_japanese": {
               "description": "临时日文。为 true 时 resources.components 必须包含 japanese。",
@@ -107,11 +107,15 @@
             "handwriting": {
               "description": "手写输入。手写模型（桌面的 Zinnia handwriting-zh_CN.model、Android 的 ML Kit zh-Hani-CN）只认汉字，所以必须等于本版本是否提供中文方案；为 false 的版本不打包、不下载手写模型，也不提供手写面板和它的设置。",
               "type": "boolean"
+            },
+            "tab_stroke_filter": {
+              "description": "Tab 笔画筛选：全拼、双拼组字时按 Tab，再按笔顺（h 横 s 竖 p 撇 n 点 z 折）筛候选的第一个字。笔顺来自 msime-stroke.db，所以为 true 时 language_dictionaries 必须列出它，input_schemes 必须含 quanpin 或 shuangpin；目前只有 macOS 宿主兑现它。",
+              "type": "boolean"
             }
           }
         },
         "language_dictionaries": {
-          "description": "本版本需要的语言词库，取值是 resources/language-dictionaries.lock.json 里的条目名。含 cantonese 方案的版本必须列出 msime-cantonese.db，含 zhuyin 的必须列出 msime-zhuyin.db，含 stroke 的必须列出 msime-stroke.db，不需要的不能列。",
+          "description": "本版本需要的语言词库，取值是 resources/language-dictionaries.lock.json 里的条目名。含 cantonese 方案的版本必须列出 msime-cantonese.db，含 zhuyin 的必须列出 msime-zhuyin.db，含 stroke 的或 features.tab_stroke_filter 为 true 的必须列出 msime-stroke.db，不需要的不能列。",
           "type": "array",
           "uniqueItems": true,
           "items": { "type": "string" }

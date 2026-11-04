@@ -13,6 +13,8 @@ export CMAKE_OSX_DEPLOYMENT_TARGET=13.0
 export CMAKE_PREFIX_PATH="$(brew --prefix)"
 cargo build -p msime-host-api --locked
 resources="$(cargo run --quiet -p msime-client-core --example install_resources --locked -- target/resources)"
+# Tab 笔画筛选要 msime-stroke.db：按 resources/language-dictionaries.lock.json 下载并校验，已有且一致时不动。
+"$(brew --prefix python@3.14)/bin/python3.14" scripts/fetch_language_dictionaries.py
 MSIME_EDITION=shurufa bash platforms/macos/stage-resources.sh "$resources"
 # 工作区有未提交的改动时 bundle 不能声称自己来自某个提交；显式传空值也会清掉缓存里上一次的修订。
 revision="$(git rev-parse HEAD)"

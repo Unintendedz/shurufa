@@ -1530,6 +1530,9 @@ pub struct Preferences {
     /// 移动光标后编辑光标后的部分（桌面宿主）：全拼、双拼的组字光标停在中间时，光标前的原文固定为当前的最佳转换，候选改为光标后那段的候选，首选是整句。默认关；关着时不写进文档，没有这个键的旧文档和旧版本都读作关。手机宿主不读它（host-api 只在桌面交给 Engine）。
     #[serde(default, skip_serializing_if = "is_false")]
     pub caret_edit_suffix: bool,
+    /// Tab 笔画筛选：全拼、双拼组字时按 Tab，再按笔顺（`h` 横 `s` 竖 `p` 撇 `n` 点 `z` 折，`x` 任意一笔）筛候选的第一个字。默认开；开着时不写进文档，没有这个键的旧文档读作开。只有版本表 `features.tab_stroke_filter` 为真的 macOS 宿主把它交给 Engine，而且要有 `msime-stroke.db`。
+    #[serde(default = "enabled_by_default", skip_serializing_if = "is_true")]
+    pub tab_stroke_filter: bool,
     pub candidate_page_size: u8,
     /// macOS 横排候选的数量模式；竖排和其他宿主保留原有分页。
     #[serde(default)]
@@ -3838,6 +3841,7 @@ impl Default for Preferences {
             korean: KoreanPreferences::default(),
             single_character_only: false,
             caret_edit_suffix: false,
+            tab_stroke_filter: true,
             candidate_page_size: 6,
             number_row_selection: true,
             candidate_font_size: default_candidate_font_size(),

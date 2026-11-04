@@ -366,6 +366,13 @@ fn caret_edit_suffix_applies(preferences: &Preferences) -> bool {
     CARET_EDIT_SUFFIX_HOST && preferences.caret_edit_suffix
 }
 
+/// Tab 笔画筛选只在 macOS 宿主上交给 Engine：只有它按快照的 `spelling_symbols` 把 Tab 交给会话。版本表不提供这项功能（`features.tab_stroke_filter`）的版本一律按关。
+const TAB_STROKE_FILTER_HOST: bool = cfg!(target_os = "macos");
+
+fn tab_stroke_filter_applies(preferences: &Preferences, edition: &Edition) -> bool {
+    TAB_STROKE_FILTER_HOST && edition.features.tab_stroke_filter && preferences.tab_stroke_filter
+}
+
 fn multilingual_languages_for(
     preferences: &Preferences,
     edition: &Edition,
@@ -857,6 +864,7 @@ impl HostSession {
                 == Some(TouchKeyboardScheme::CantoneseShuangpin);
         options.single_character_only = preferences.single_character_only;
         options.caret_edit_suffix = caret_edit_suffix_applies(&preferences);
+        options.tab_stroke_filter = tab_stroke_filter_applies(&preferences, self.edition);
         options.learning = preferences.learning;
         options.next_word_prediction =
             preferences.next_word_prediction && cfg!(target_os = "android");
@@ -2234,6 +2242,7 @@ impl HostOptions {
                     == Some(TouchKeyboardScheme::CantoneseShuangpin),
             single_character_only: self.preferences.single_character_only,
             caret_edit_suffix: caret_edit_suffix_applies(&self.preferences),
+            tab_stroke_filter: tab_stroke_filter_applies(&self.preferences, edition),
             learning: self.preferences.learning,
             learn_english_on_enter: self.preferences.enter_learns_english_word,
             next_word_prediction: self.preferences.next_word_prediction

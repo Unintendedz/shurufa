@@ -414,6 +414,36 @@ fn caret_edit_suffix_defaults_off_and_persists_when_enabled() {
         .is_none());
 }
 
+/// Tab 笔画筛选默认开：开着时不写进文档，缺这个键的旧文档读作开，关掉后存下来、读回来仍是关。
+#[test]
+fn tab_stroke_filter_defaults_on_and_persists_when_disabled() {
+    let defaults = Preferences::default();
+    assert!(defaults.tab_stroke_filter);
+    let legacy = serde_json::to_value(&defaults).unwrap();
+    assert!(legacy.get("tab_stroke_filter").is_none());
+    assert!(
+        serde_json::from_value::<Preferences>(legacy.clone())
+            .unwrap()
+            .tab_stroke_filter
+    );
+    let mut malformed = legacy;
+    malformed["tab_stroke_filter"] = "false".into();
+    assert!(serde_json::from_value::<Preferences>(malformed).is_err());
+
+    let directory = tempfile::tempdir().unwrap();
+    let store = PreferencesStore::new(directory.path());
+    let disabled = Preferences {
+        tab_stroke_filter: false,
+        ..defaults
+    };
+    let saved = store.save(0, disabled).unwrap();
+    assert!(!store.load().unwrap().preferences.tab_stroke_filter);
+    assert_eq!(
+        serde_json::to_value(&saved.preferences).unwrap()["tab_stroke_filter"],
+        false
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn stale_sweep_does_not_follow_a_replaced_directory() {
@@ -8279,7 +8309,12 @@ fn macos_voice_hotkeys_migrate_validate_and_round_trip() {
     assert_eq!(value["voice_input"]["macos_hotkey"]["right_modifiers"], 2);
     let restored: Preferences = serde_json::from_value(value).unwrap();
     assert_eq!(restored.voice_input, sided.voice_input);
-    sided.voice_input.macos_hotkey.as_mut().unwrap().right_modifiers = Some(4);
+    sided
+        .voice_input
+        .macos_hotkey
+        .as_mut()
+        .unwrap()
+        .right_modifiers = Some(4);
     assert!(sided.validate().is_err());
     let unsided: MacosVoiceHotkey =
         serde_json::from_value(serde_json::json!({"key_code":123,"modifiers":2})).unwrap();

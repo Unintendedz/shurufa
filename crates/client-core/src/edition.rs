@@ -214,6 +214,8 @@ pub struct EditionFeatures {
     pub offline_glosses: bool,
     /// 手写输入。桌面的 Zinnia 模型（`handwriting-zh_CN.model`）和 Android 的 ML Kit 模型（`zh-Hani-CN`）都只认汉字，所以同样只有提供中文方案的版本有；为 false 的版本不打包、不下载手写模型，也不提供手写面板、手写入口和手写设置页。
     pub handwriting: bool,
+    /// Tab 笔画筛选：全拼、双拼组字时按 Tab，再按笔顺筛候选的第一个字。笔顺来自 `msime-stroke.db`，所以为 true 的版本在 `language_dictionaries` 里列出它（`scripts/test-editions.py` 检查）。只有 macOS 宿主兑现，host-api 在别的宿主上不交给 Engine。
+    pub tab_stroke_filter: bool,
 }
 
 #[derive(Deserialize)]
@@ -635,6 +637,7 @@ mod tests {
                 neural_keyboard: true,
                 offline_glosses: true,
                 handwriting: true,
+                tab_stroke_filter: true,
             }
         );
         assert_eq!(full.display_name.zh_hans, "水杉输入法");
@@ -702,6 +705,7 @@ mod tests {
                     neural_keyboard: false,
                     offline_glosses: false,
                     handwriting: false,
+                    tab_stroke_filter: false,
                 },
                 "{id}"
             );
@@ -748,6 +752,25 @@ mod tests {
                 "{}",
                 edition.id
             );
+        }
+    }
+
+    /// Tab 笔画筛选读 `msime-stroke.db`：提供它的版本都列出这个词库，而且都有全拼或双拼。
+    #[test]
+    fn tab_stroke_filter_ships_the_stroke_dictionary() {
+        let offering: Vec<_> = Edition::all()
+            .iter()
+            .filter(|edition| edition.features.tab_stroke_filter)
+            .map(|edition| edition.id.as_str())
+            .collect();
+        assert_eq!(offering, ["full", "shurufa"]);
+        for id in offering {
+            let edition = Edition::by_id(id).unwrap();
+            assert!(edition
+                .language_dictionaries
+                .iter()
+                .any(|name| name == "msime-stroke.db"));
+            assert!(edition.offers(InputScheme::Quanpin) || edition.offers(InputScheme::Shuangpin));
         }
     }
 

@@ -42,6 +42,8 @@ RUST_ONLY: dict[str, set[str]] = {
         "next_word_prediction",
         # 词库 WebDAV 同步（#9880）的核心先合入，各平台的设置界面随之后的平台 PR 接入。
         "dictionary_sync_webdav",
+        # Tab 笔画筛选只在 Shurufa 的 macOS 原生设置页提供，Shurufa 不承载 React 设置页。
+        "tab_stroke_filter",
 
     },
     "KeybindingPreferences": set(),
@@ -49,6 +51,9 @@ RUST_ONLY: dict[str, set[str]] = {
         # Shurufa 不承载 React 设置页；这两项由 macOS 原生语音表单录制、保存和读取。
         "hotkey_mode",
         "macos_hotkey",
+        # 听写历史的两个保留期限同样只在 Shurufa 的 macOS 原生语音设置页编辑。
+        "history_retention_days",
+        "recording_retention_hours",
     },
     "TouchToolbarPreferences": {
         # 撤销与重做仅在 Android 原生工具栏设置页提供入口，其他宿主保留共享字段，React 设置页不显示。
