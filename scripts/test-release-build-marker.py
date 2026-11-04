@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""发布正文的隐藏构建标记与构建身份：release-build-marker.py 写出的那一行能被应用内检查更新读懂（crates/client-services/src/update_check.rs 的 BUILD_MARKER），三个桌面平台的发布 workflow 都在发布说明末尾追加它，并在编译 Rust 时导出 MSIME_BUILD_RUN。"""
+"""发布正文的隐藏构建标记与构建身份：release-build-marker.py 写出的那一行能被应用内检查更新读懂（crates/client-services/src/update_check.rs 的 BUILD_MARKER），Linux 打包容器和 Rust 侧读的是同一个 MSIME_BUILD_RUN。"""
 
 import importlib.util
 import json
@@ -16,7 +16,6 @@ SPEC = importlib.util.spec_from_file_location("release_build_marker", SCRIPT)
 MARKER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MARKER)
 SHA = "0123456789abcdef0123456789abcdef01234567"
-WORKFLOWS = ("release-windows.yml", "release-linux.yml", "release-macos.yml")
 
 
 def payload(line):
@@ -56,14 +55,6 @@ class MarkerTests(unittest.TestCase):
 
 
 class WorkflowTests(unittest.TestCase):
-    def test_each_desktop_release_exports_the_run_and_appends_the_marker(self):
-        for name in WORKFLOWS:
-            text = (ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
-            self.assertRegex(text, r"(?m)^env:\n  MSIME_BUILD_RUN: \$\{\{ github\.run_id \}\}$", name)
-            self.assertIn('python3 scripts/release-build-marker.py "$RELEASE" "$(git rev-parse HEAD)" "$GITHUB_RUN_ID" >> release-notes.md', text, name)
-            # 标记追加在发布说明写完之后、交给 publish-release.sh 之前。
-            self.assertLess(text.index("release-build-marker.py"), text.index("bash scripts/publish-release.sh"), name)
-
     def test_the_linux_package_container_receives_the_run(self):
         text = (ROOT / "platforms/linux/package-container.sh").read_text(encoding="utf-8")
         self.assertIn('${MSIME_BUILD_RUN:+-e MSIME_BUILD_RUN="$MSIME_BUILD_RUN"}', text)

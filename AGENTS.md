@@ -5,7 +5,7 @@
 ## 项目定位：Shurufa 是独立项目
 
 - **Shurufa（`Unintendedz/shurufa`）是从水杉输入法（`metasequoiaime/msime`）分出来的独立项目，不跟随上游。** 分叉点是 tag `fork-point/msime-2026-10-27`。上游之后的提交一律不合并、不 cherry-pick、不 rebase 上去，也不要主动报告「上游又多了多少提交」或建议同步；只有维护者点名要某一个上游改动时才去看它。上游在不断加功能，本项目只按维护者自己的需要演进。`upstream` 远端只留作查阅。
-- **主干是 `main`，没有 `develop`，也没有 release 分支。** 短分支或 worktree 做完、验证过后快进合入 `main`，再删掉分支和 worktree。下文「发版」一节以及其他章节里关于 `develop`、`release/<版本号>`、issue/PR 流程和 GitHub Actions 的约定都来自上游，本项目不适用；本仓库的 GitHub Actions 是关着的。
+- **主干是 `main`，没有 `develop`，也没有 release 分支。** 短分支或 worktree 做完、验证过后快进合入 `main`，再删掉分支和 worktree。下文「发版」一节以及其他章节里关于 `develop`、`release/<版本号>`、issue/PR 流程和 GitHub Actions 的约定都来自上游，本项目不适用；本仓库没有 GitHub Actions 工作流（`.github/` 整个删掉了），验证全靠本地门禁。
 - Shurufa 输入法本机构建用 `platforms/macos/build-shurufa.sh`，安装用 `platforms/macos/scripts/install-shurufa.sh`（装到 `~/Library/Input Methods/Shurufa.app`），不走下文「本机安装」一节的 `package-release.sh` 整包流程。构建按登录钥匙串里的本机自签名证书「Shurufa Local Signing」签名，签名身份固定，重编重装后麦克风、辅助功能、输入监控等授权不用重新给；钥匙串里没有这张证书（新的 Mac）时 `build-shurufa.sh` 会自己跑 `platforms/macos/scripts/create-shurufa-signing-identity.sh` 建一张。语音存档的密钥同样在第一次录音时自动生成在登录钥匙串里（`dev.shurufa.voice-archive`），只在本机有效，换 Mac 后历史从空开始。
 
 ## 改动范围
@@ -17,7 +17,6 @@
 - 日志、测试和提交中不得包含真实输入、凭据或私人资料，测试数据使用合成值。
 - Rust 改动跑相关测试、`cargo fmt` 和 `cargo clippy`；前端改动跑类型检查和构建；原生宿主改动在可用平台上跑对应验证。目录或命名整理要同步更新构建文件、测试路径和文档引用。提交前跑 `scripts/verify-local.sh --quick`，并检查 `git diff --check`。
 - 新增文本契约检查时写成 `scripts/test-<name>.py` 即可：`scripts/run-checks.sh` 自动发现并执行 `scripts/` 下每一个 `test-*.py`，阶段名取自文件名，不用登记。检查缺少需要的工具链或输入（pnpm、参考仓库、Android SDK、交叉编译器等）时打印一行 `skipped: <原因>` 并以 0 退出，不要失败。确实不能无参运行的检查，在 `run-checks.sh` 的 `special_checks` 里写成 `名字=负责执行它的脚本`（没有门禁执行的，写成说明如何手动运行它的文档）；`contract check registry` 阶段会在该脚本没有调用它、该文档没有提到它或脚本不存在时失败。
-- CI 会在 Pull Request 上运行，提交前仍先跑本地 quick 门禁。发布 workflow 一律手动触发，不要在任务没有明确要求发布时去碰它们。
 - **改了文件读写、目录遍历、权限或安卓资源（drawable、主题、布局），合并前在安卓模拟器上跑过再说「验证过」。** macOS 上的单测和 CI 的编译、lint 都碰不到 Android 的限制：应用对 `/data` 只有搜索权限、SELinux 禁止应用建硬链接、Android 9 的 `GradientDrawable` 读不到带主题属性的径向渐变半径。0.3.0 带着这三个问题发出去（词库准备失败、匿名账号写不进、Android 9 一打开就崩溃），编译、lint 和 JVM 测试全绿。本机做法：`bash platforms/android/tests/device/start-emulator.sh 28`（35 同理），`MSIME_ANDROID_TEST_SERIAL=emulator-5566 bash platforms/android/tests/device/build-core-test.sh` 编出 client-base、client-core、client-providers 和 client-services 的单测，经 cargo runner `run-core-test.sh` 在设备上整套运行，再用 `smoke.sh emulator-5566 --core` 装包验收（API 35 不带 `--core`）。CI 的 `android-device.yml` 在合进 develop 后和发版前跑同样的两步，PR 上不跑，所以 PR 上要靠本机跑过。
 - **不要把 Tauri 生成的工程当成某个平台的产品去启动、调试或验收。** 每个平台的产品本体都是 `platforms/<os>` 下的原生宿主，Tauri/React 只是公共组件，而且不是每个宿主都承载它：共享 React 设置页只在 macOS、Linux（Tauri 设置应用）和 HarmonyOS（ArkWeb 加载的 rawfile，不经过 Tauri）上作为设置界面出现，Windows 的原生宿主只拉起 Tauri 的共享面板，iOS App 与 Android 发布 APK 两者都不含（见 docs/ARCHITECTURE.md 的「设置界面按平台归属」）。装机、启动和设备验收一律针对原生宿主；`apps/desktop` 的目录名和 Tauri 生成工程里自带的 bundle id 都不构成例外。
 

@@ -216,8 +216,6 @@ scope_classify() {
       resources/components/* | resources/editions/* | resources/opencc.lock.json | scripts/fetch_opencc.py | scripts/download_retry.py | scripts/editions.py)
       echo all ;;
     crates/engine-wasm/*) echo wasm ;;
-    # No platform phase reads .github: the contract checks that parse release workflows always run, and the workflow lint below is the only phase it reaches.
-    .github/*) echo workflows ;;
     platforms/windows/* | scripts/test-windows-*.py) echo windows; echo named ;;
     crates/host-windows/*) echo windows desktop ;;
     crates/host-macos/*) echo macos desktop ;;
@@ -391,20 +389,6 @@ fi
 # The contract checks themselves: the registry phase and every other scripts/test-*.py, discovered by file name. Sourced rather than run so the output and this script's failure count stay as they were; the contracts workflow runs the same file on its own. It has to stay after the three inline special phases just above.
 # shellcheck source=scripts/run-checks.sh
 . scripts/run-checks.sh
-
-# The quality workflow runs actionlint on every pull request, so a workflow-only change used to be verified here by every platform phase and by nothing that reads YAML. Same tool and the same shellcheck severity as that workflow; skipped where actionlint is not installed.
-note "workflows: actionlint"
-if ! scoped workflows; then
-  :
-elif command -v actionlint >/dev/null 2>&1; then
-  if SHELLCHECK_OPTS=--severity=warning actionlint -no-color; then
-    echo "actionlint: workflows are valid"
-  else
-    fail "actionlint"
-  fi
-else
-  echo "skipped: actionlint not installed (the quality workflow runs it in CI)"
-fi
 
 note "agent notes"
 # 笔记本身是散文，但树结构、头块格式和归档封印都可机械校验，烂掉的笔记会让约定静默腐化。

@@ -159,19 +159,6 @@ class ReleaseSigning(unittest.TestCase):
             with self.subTest(omitted=omitted), self.assertRaises(ValueError):
                 SIGNING.validate_hap(self.hap(omitted=omitted), "0.2.0")
 
-    def test_public_release_uses_signed_outputs(self):
-        workflow = (ROOT / ".github/workflows/release-harmony.yml").read_text()
-        publish = workflow.split("name: Publish independent HarmonyOS release", 1)[1]
-        self.assertIn('steps.signing.outputs.hap', publish)
-        self.assertNotIn('steps.hap.outputs.path', publish)
-        self.assertIn('"$HAP" "$SUMS"', publish)
-        self.assertIn('appgallery-msime-harmony-', workflow)
-        self.assertNotIn("find platforms/harmony -type f -name '*.hap'", workflow)
-        locate = workflow.split("name: Locate the packaged HAP", 1)[1].split("- id: signing", 1)[0]
-        self.assertIn("compress_harmony_hap.py", locate)
-        self.assertIn('echo "path=$hap" >> "$GITHUB_OUTPUT"', locate)
-        self.assertIn("UNSIGNED_HAP: ${{ steps.hap.outputs.path }}", workflow)
-
     def test_market_packer_preserves_hap_signature(self):
         source = (ROOT / "platforms/harmony/sign-release.py").read_text()
         self.assertIn('"--replace-pack-info", "false"', source)

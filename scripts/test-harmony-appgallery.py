@@ -261,38 +261,6 @@ class AppGalleryTests(unittest.TestCase):
                 self.client(replies).upload(self.path)
             self.assertEqual(len(self.transport.calls), 2)
 
-    def test_workflow_defaults_and_signing_gates(self):
-        workflow = (ROOT / ".github/workflows/release-harmony.yml").read_text()
-        self.assertIn("options: [none, upload, public-test]", workflow)
-        self.assertIn("default: none, type: string", workflow)
-        self.assertEqual(workflow.count("if: ${{ (inputs.publish || inputs.sign || inputs.appgallery != 'none') && !inputs.test_package_id }}"), 5)
-        self.assertLess(workflow.index("--check-only --mode"), workflow.index("Build the HarmonyOS settings page"))
-        self.assertLess(workflow.index("name: appgallery-msime-harmony"), workflow.index("id: appgallery"))
-        self.assertIn('--package-id "$TEST_PACKAGE_ID"', workflow)
-        self.assertIn('"$PUBLISH" == false && -z "$SOURCE_RELEASE"', workflow)
-        self.assertIn("if: ${{ !inputs.source_release && !inputs.test_package_id }}", workflow)
-
-    def test_workflow_input_validation_runs_before_expensive_steps(self):
-        workflow = (ROOT / ".github/workflows/release-harmony.yml").read_text()
-        block = workflow.split("      - id: version\n", 1)[1].split("      - name:", 1)[0]
-        script = block.split("        run: |\n", 1)[1]
-        script = "\n".join(line[10:] for line in script.splitlines())
-        defaults = {"REQUESTED": "0.2.1", "SOURCE_RELEASE": "", "SIGN": "false", "PUBLISH": "false",
-                    "APPGALLERY": "none", "TEST_VERSION_ID": "", "TEST_PACKAGE_ID": "",
-                    "GITHUB_REF_NAME": "develop", "GITHUB_OUTPUT": str(Path(self.temp.name) / "output")}
-        cases = [({}, True), ({"APPGALLERY": "unknown"}, False),
-                 ({"TEST_VERSION_ID": "draft-1"}, False), ({"TEST_PACKAGE_ID": "pkg-1"}, False),
-                 ({"APPGALLERY": "upload", "SOURCE_RELEASE": "harmony-v0.2.1-beta"}, True),
-                 ({"APPGALLERY": "upload", "TEST_PACKAGE_ID": "pkg-1"}, True),
-                 ({"APPGALLERY": "public-test", "TEST_VERSION_ID": "draft-1", "TEST_PACKAGE_ID": "pkg-1"}, True),
-                 ({"APPGALLERY": "upload", "TEST_PACKAGE_ID": "pkg-1", "PUBLISH": "true"}, False),
-                 ({"APPGALLERY": "upload", "SOURCE_RELEASE": "harmony-v9.9.9-beta"}, False)]
-        for changes, success in cases:
-            with self.subTest(changes=changes):
-                result = subprocess.run(["bash", "-e", "-c", script], env={**defaults, **changes},
-                                        cwd=ROOT, capture_output=True)
-                self.assertEqual(result.returncode == 0, success)
-
     def test_real_transport_streams_bytes_and_refuses_redirects(self):
         received = []
 

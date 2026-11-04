@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """winget、Scoop 与 Chocolatey 的包定义必须描述发布里实际发出的那个安装包。
 
-platforms/windows/packaging/ 下是由 platforms/windows/packaging/render.py 按 windows-v 发布填写的模板。它们重复了安装包的一些事实（AppId 以及由它得到的卸载键、发布者、显示名、架构、权限级别、文件名和静默参数），这些事实的来源是 platforms/windows/installer/msime_setup.iss、editions.iss、版本表 shared/contracts/editions.json 与 release-windows.yml；本检查让两边保持一致，用固定输入渲染全部模板，并在不联网的情况下用一份录制的发布走一遍 render.py 的 GitHub 路径；render.py 拒绝没有有效 Authenticode 签名的安装包，这里核对每条路径都经过签名检查，且包定义只在单独手动触发的工作流里渲染。
+platforms/windows/packaging/ 下是由 platforms/windows/packaging/render.py 按 windows-v 发布填写的模板。它们重复了安装包的一些事实（AppId 以及由它得到的卸载键、发布者、显示名、架构、权限级别、文件名和静默参数），这些事实的来源是 platforms/windows/installer/msime_setup.iss、editions.iss与版本表 shared/contracts/editions.json；本检查让两边保持一致，用固定输入渲染全部模板，并在不联网的情况下用一份录制的发布走一遍 render.py 的 GitHub 路径；render.py 拒绝没有有效 Authenticode 签名的安装包，这里核对每条路径都经过签名检查，且包定义只在单独手动触发的工作流里渲染。
 
 不带参数时只用标准库。加 `--schema-dir DIR` 时还按官方 schema 校验渲染结果，需要 PyYAML、jsonschema 和 lxml；DIR 里要有 microsoft/winget-cli schemas/JSON/manifests/v1.12.0 的 manifest.{version,installer,defaultLocale,locale}.1.12.0.json、Scoop 的 schema.json，以及 chocolatey/NuGet.Client src/NuGet.Core/NuGet.Packaging/compiler/resources 的 nuspec.xsd（它的 targetNamespace 是占位符「{0}」，本检查会填上）。下载命令见 platforms/windows/packaging/README.md。
 """
@@ -28,8 +28,6 @@ SETUP = ROOT / "platforms/windows/installer/msime_setup.iss"
 EDITIONS_ISS = ROOT / "platforms/windows/installer/editions.iss"
 EDITIONS = ROOT / "shared/contracts/editions.json"
 SMOKE = ROOT / "platforms/windows/installer/tests/install-smoke.ps1"
-WORKFLOW = ROOT / ".github/workflows/release-windows.yml"
-DEFINITIONS_WORKFLOW = ROOT / ".github/workflows/package-definitions-windows.yml"
 NUSPEC_NS = "http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd"
 SILENT = ("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
 
@@ -104,11 +102,6 @@ def check_installer_facts(render) -> None:
     check(full_defines.get("MyEditionInstallerBaseName") == full["installer_base_name"], "editions.iss full MyEditionInstallerBaseName differs from the edition table")
     check(render.installer_name("1.2.3") == f"{full['installer_base_name']}_v1.2.3.exe", "render.installer_name does not follow the full edition's installer_base_name")
 
-    workflow = WORKFLOW.read_text(encoding="utf-8")
-    # A release from main is tagged windows-vX.Y.Z; one from develop or another branch carries -beta or -alpha and is a prerelease, which the package definitions are not rendered from.
-    check('tag="windows-v${RELEASE}"' in workflow and "{'main' {''}" in workflow, "release-windows.yml no longer tags a release from main windows-v${VERSION}; render.TAG_PREFIX follows it")
-    check('"dist/$name.sha256"' in workflow, "release-windows.yml no longer uploads <installer>.sha256; render.py reads it")
-    check("'^\\d+\\.\\d+\\.\\d+$'" in workflow and render.VERSION_PATTERN.pattern == r"^\d+\.\d+\.\d+$", "release versions are no longer MAJOR.MINOR.PATCH in both release-windows.yml and render.py")
 
     # 各包都以 /VERYSILENT /SUPPRESSMSGBOXES 运行安装包，拒绝数据目录时弹普通 MsgBox 会让静默安装（尤其是看不见对话框的 SYSTEM 托管部署）一直挂着；只有 SuppressibleMsgBox 会被压掉，NextButtonClick 返回 False 后静默安装随即退出。
     next_click = re.search(r"(?ms)^function NextButtonClick\(.*?^end;", setup)
@@ -151,18 +144,6 @@ def check_installer_facts(render) -> None:
     for script in (PACKAGING / "chocolatey/tools").glob("*.ps1"):
         check(script.read_bytes().isascii(), f"{script.name} is not ASCII")
 
-
-def check_workflows() -> None:
-    """包定义不在 release-windows.yml 里渲染：那里发布的是未签名的安装包，签名的那份由维护者事后替换上去。单独的工作流按标签渲染，签名检查由 render.py 做。"""
-    release = WORKFLOW.read_text(encoding="utf-8")
-    check("packaging/render.py" not in release, "release-windows.yml renders package definitions right after publishing the unsigned CI installer")
-    check(DEFINITIONS_WORKFLOW.is_file(), f"{DEFINITIONS_WORKFLOW.relative_to(ROOT)} is missing")
-    if DEFINITIONS_WORKFLOW.is_file():
-        definitions = DEFINITIONS_WORKFLOW.read_text(encoding="utf-8")
-        check(re.search(r"(?m)^on:\n  workflow_dispatch:", definitions) is not None and "\n  release:" not in definitions and "\n  push:" not in definitions, "package-definitions-windows.yml must only run when dispatched by hand, after the signed installer is on the release")
-        check('render.py --tag "windows-v$env:VERSION"' in definitions, "package-definitions-windows.yml no longer renders from the published release with --tag")
-        check(re.search(r"(?m)^    runs-on: (?:windows-\d{4}|depot-windows-\d{4}(?:-\d+)?)$", definitions) is not None, "package-definitions-windows.yml must run on Windows, where Get-AuthenticodeSignature checks the signature")
-        check("--skip" not in definitions and "--no-" not in definitions, "package-definitions-windows.yml passes a flag that weakens render.py's checks")
 
 
 def check_render(render, output: pathlib.Path) -> list[pathlib.Path]:
@@ -346,7 +327,6 @@ def main() -> int:
 
     render = load_render()
     check_installer_facts(render)
-    check_workflows()
     check_github_path(render)
     with tempfile.TemporaryDirectory(prefix="msime-packaging-") as output:
         written = check_render(render, pathlib.Path(output))

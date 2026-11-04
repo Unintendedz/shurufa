@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The repository's text contracts: every scripts/test-*.py except the special checks named below, plus the registry phase that keeps that list honest.
 #
-# Two callers. verify-local.sh sources this after its inline special phases, so the output there is unchanged and failures land in its own `failed`. The contracts workflow (.github/workflows/contracts.yml) runs it on its own on an ubuntu runner, which is why every check found here has to skip cleanly and exit 0 when the tool or input it needs is absent.
+# verify-local.sh 在它自己的几个内联特殊阶段之后 source 这个文件，所以那里的输出不变，失败记进它自己的 `failed`。也可以单独运行；每项检查在缺少所需工具或输入时都要干净地跳过并以 0 退出，这样任何机器上都能直接跑。
 #
 # Run on its own it needs nothing beyond the checkout and exits non-zero when any check fails.
 
