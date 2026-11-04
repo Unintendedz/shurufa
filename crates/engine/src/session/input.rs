@@ -344,11 +344,9 @@ impl InputSession {
         // 任何实际字符输入都会使“退格撤销最近引号”失效；否则引号后输入一段拼音再退格，可能误撤销更早的引号。
         self.punctuation.clear_quote_undo();
         self.exit_date_time_menu();
-        if let Some(result) = self.stroke_filter_character(value) {
-            return result;
-        }
         let result = self
-            .helpcode_character(value)
+            .stroke_filter_character(value)
+            .or_else(|| self.helpcode_character(value))
             .unwrap_or_else(|| self.dispatch_character(value, shift_only));
         // #7616：交还给宿主的大写字母让这一串开了头，直到下一枚不是大写字母的键为止。
         self.uppercase_passthrough = value.is_ascii_uppercase() && !result.handled;
