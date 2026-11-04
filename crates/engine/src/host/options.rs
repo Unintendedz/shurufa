@@ -175,6 +175,8 @@ pub struct EngineOptions {
     pub single_character_only: bool,
     /// 移动光标后编辑光标后的部分（`SessionOptions::caret_edit_suffix`）。
     pub caret_edit_suffix: bool,
+    /// Tab 笔画筛选（`SessionOptions::tab_stroke_filter`）。
+    pub tab_stroke_filter: bool,
     /// 0 Telex, 1 VNI (`vietnamese::InputMethod`).
     pub vietnamese_input_method: u8,
     /// 0 modern (hoà), 1 classic (hòa) (`vietnamese::ToneStyle`).
@@ -233,6 +235,7 @@ pub fn prepare_options_for(
         force_cantonese_shuangpin: false,
         single_character_only: false,
         caret_edit_suffix: false,
+        tab_stroke_filter: false,
         learning: false,
         learn_english_on_enter: true,
         next_word_prediction: false,
@@ -352,6 +355,7 @@ pub fn session_options(options: &EngineOptions) -> Result<SessionOptions> {
     session.force_cantonese_shuangpin = options.force_cantonese_shuangpin;
     session.single_character_only = options.single_character_only;
     session.caret_edit_suffix = options.caret_edit_suffix;
+    session.tab_stroke_filter = options.tab_stroke_filter;
     session.vietnamese_input_method = vietnamese_input_method;
     session.vietnamese_tone_style = vietnamese_tone_style;
     session.korean_layout = korean_layout;

@@ -73,6 +73,8 @@ pub struct SessionOptions {
     pub single_character_only: bool,
     /// 移动光标后编辑光标后的部分（默认关）：全拼、双拼的组字光标停在中间时，光标前的原文固定为它当前的最佳转换，候选是光标后那段原文的候选，首选前面接上固定的部分；选中一条只消耗它的音节，固定部分和已选部分一起留到组字结束。规则见 `session/caret_edit.rs`。
     pub caret_edit_suffix: bool,
+    /// Tab 笔画筛选（默认关）：全拼、双拼组字时按 Tab，之后的 `hspnz` 是横竖撇点折、`x` 是任意一笔，候选只留第一个字的笔顺以这几笔开头的那些；双拼开着 Tab 手动辅助码时 Tab 归辅助码。要 `stroke_dictionary` 指着 `msime-stroke.db`，没有它时 Tab 不归会话。规则见 `session/stroke_filter.rs`。
+    pub tab_stroke_filter: bool,
     pub fuzzy_pinyin: FuzzyPinyinOptions,
     pub frequency: FrequencyAdjustmentOptions,
     pub local_modes: LocalModeOptions,
@@ -144,6 +146,7 @@ impl SessionOptions {
             first_page_rows: DEFAULT_FIRST_PAGE_ROWS,
             single_character_only: false,
             caret_edit_suffix: false,
+            tab_stroke_filter: false,
             fuzzy_pinyin: FuzzyPinyinOptions::default(),
             frequency: FrequencyAdjustmentOptions::default(),
             local_modes: LocalModeOptions::default(),

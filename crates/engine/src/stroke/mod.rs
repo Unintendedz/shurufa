@@ -4,7 +4,28 @@
 
 pub mod scheme;
 
+use std::collections::HashSet;
+
+use crate::error::Result;
+use crate::language_dictionary::LanguageDictionary;
+
 pub use scheme::{StrokeCandidate, StrokeScheme};
+
+/// `msime-stroke.db` 里笔顺以 `strokes` 开头的单字，`x` 匹配任意一笔。九宫格的笔画筛选和全拼、双拼的 Tab 笔画筛选都拿候选的第一个字来比。
+pub(crate) fn characters_with_stroke_prefix(
+    dictionary: &LanguageDictionary,
+    strokes: &str,
+) -> Result<HashSet<char>> {
+    let texts = dictionary.texts_matching_key_prefix(strokes, char::from(WILDCARD))?;
+    Ok(texts
+        .iter()
+        .filter_map(|text| {
+            let mut characters = text.chars();
+            let first = characters.next()?;
+            characters.next().is_none().then_some(first)
+        })
+        .collect())
+}
 
 /// 五种笔画的键，按横竖撇点折的顺序。
 pub const STROKES: &str = "hspnz";

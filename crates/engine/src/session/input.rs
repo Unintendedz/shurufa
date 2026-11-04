@@ -11,6 +11,7 @@ use super::clock::Clock;
 use super::conversion::ConversionEdit;
 use super::online::OnlineRequestGuard;
 use super::options::SessionOptions;
+use super::stroke_filter::StrokeFilter;
 use crate::assets;
 use crate::cantonese;
 use crate::diagnostics;
@@ -138,6 +139,13 @@ pub(super) struct InputSession {
     pub conversion: Option<ConversionEdit>,
     /// 「📅日期」页：选中混输里的入口后，候选窗换成这一组的全部格式（`EnterDateTimeCandidatePage`）。组字和 `mixed_candidates` 原样留着，任何非选词键把 `candidates()` 视图还回去。
     pub date_time_menu_page: Option<Vec<WordItem>>,
+    /// Tab 笔画筛选开着（`SessionOptions::tab_stroke_filter`）。
+    pub tab_stroke_filter: bool,
+    /// `msime-stroke.db` 的位置（`SessionOptions::stroke_dictionary`），空表示没有；筛选第一次用到时才打开（`stroke_dictionary`）。
+    pub stroke_dictionary_path: PathBuf,
+    pub stroke_dictionary: Option<crate::language_dictionary::LanguageDictionary>,
+    /// 进行中的 Tab 笔画筛选，见 `stroke_filter.rs`。
+    pub stroke_filter: Option<StrokeFilter>,
 }
 
 impl InputSession {
@@ -250,6 +258,10 @@ impl InputSession {
             single_character_only: options.single_character_only,
             canonical_phrase_engine: None,
             conversion: None,
+            tab_stroke_filter: options.tab_stroke_filter,
+            stroke_dictionary_path: options.stroke_dictionary.clone(),
+            stroke_dictionary: None,
+            stroke_filter: None,
             journal_path: journal,
             paths,
         };
@@ -332,6 +344,9 @@ impl InputSession {
         // 任何实际字符输入都会使“退格撤销最近引号”失效；否则引号后输入一段拼音再退格，可能误撤销更早的引号。
         self.punctuation.clear_quote_undo();
         self.exit_date_time_menu();
+        if let Some(result) = self.stroke_filter_character(value) {
+            return result;
+        }
         let result = self
             .helpcode_character(value)
             .unwrap_or_else(|| self.dispatch_character(value, shift_only));
@@ -945,6 +960,9 @@ impl InputSession {
         if command != Command::CommitCandidate {
             self.exit_date_time_menu();
         }
+        if let Some(result) = self.stroke_filter_command(command) {
+            return result;
+        }
         if let Some(result) = self.helpcode_command(command) {
             return result;
         }
@@ -1377,7 +1395,7 @@ impl InputSession {
     pub fn spelling_symbols(&self) -> String {
         let mut symbols = self.base_spelling_symbols();
         symbols.extend(self.literal_spelling_symbols());
-        if self.shuangpin_helpcode_marker(b'\t').is_some() {
+        if self.shuangpin_helpcode_marker(b'\t').is_some() || self.stroke_filter_takes_tab() {
             symbols.push('\t');
         }
         symbols
@@ -1673,6 +1691,7 @@ impl InputSession {
     /// Clears caret, phrase progress, pending sequence, local mode, dedicated preedit and caches; returns from temporary Japanese.
     pub fn reset_composition(&mut self) {
         self.date_time_menu_page = None;
+        self.stroke_filter = None;
         self.helpcode_entry = None;
         self.caret = None;
         self.conversion = None;
@@ -1870,7 +1889,7 @@ impl InputSession {
     /// `IsMidSentenceHelpcodeMarkerKey` 与 `IsEndHelpcodeMarkerKey` 的对应物：这个键是不是
     /// 辅助码触发键、记进串里的标记字符是什么。`None` 表示不是触发键，走普通路径。
     /// `;` 先让给 `ing` 韵母（`accepts_semicolon_final_at`），两侧判断顺序一致。
-    fn shuangpin_helpcode_marker(&self, value: u8) -> Option<u8> {
+    pub(super) fn shuangpin_helpcode_marker(&self, value: u8) -> Option<u8> {
         use crate::shuangpin::mid_sentence;
         if !matches!(value, b'`' | b';' | b'/' | b'\t')
             || self.scheme() != SchemeType::Shuangpin

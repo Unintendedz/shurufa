@@ -174,6 +174,8 @@ impl InputSession {
 
     /// 选中第 `index` 条并上屏或推进组字。光标后编辑生效时先交给它（`commit_caret_edit`）。
     pub(super) fn commit(&mut self, index: usize) -> KeyResult {
+        // 选中一行就结束笔画筛选：剩下的拼写（如果有）照常出候选。
+        self.stroke_filter = None;
         if self.caret_edit.active && self.conversion.is_none() && self.date_time_menu_page.is_none()
         {
             if let Some(result) = self.commit_caret_edit(index) {

@@ -331,6 +331,7 @@ fn local_mode_resource_gates_preserve_unrelated_modes() {
         force_cantonese_shuangpin: false,
         single_character_only: false,
         caret_edit_suffix: false,
+        tab_stroke_filter: false,
         learning: false,
         learn_english_on_enter: true,
         next_word_prediction: false,

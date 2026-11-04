@@ -2073,17 +2073,7 @@ impl NineKeySession {
         if self.stroke.is_none() {
             self.stroke = language_dictionary::open_read_only(&self.stroke_dictionary).ok();
         }
-        let texts = self.stroke.as_ref()?.texts_with_key_prefix(strokes).ok()?;
-        Some(
-            texts
-                .iter()
-                .filter_map(|text| {
-                    let mut characters = text.chars();
-                    let first = characters.next()?;
-                    characters.next().is_none().then_some(first)
-                })
-                .collect(),
-        )
+        stroke::characters_with_stroke_prefix(self.stroke.as_ref()?, strokes).ok()
     }
 
     /// 读音行：首行的拼音截到它覆盖的那几个键，后面接上没覆盖的键码和切分，例如 `94'26` 上的 西安 是 `xi'an`，`942` 上的 遗产 是 `yi'c`。首行不是从拼音读出来的（英文词、emoji、日期时间行）或者没有首行时为空；14 键的首行是英文词时是这个词覆盖已打键数的那段小写字母，一键一个字母，没有歧义。

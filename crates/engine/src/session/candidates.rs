@@ -93,8 +93,13 @@ impl InputSession {
         }
     }
 
-    /// 前缀或引擎候选经过个人上下文重排，再混入英文、表情、颜文字并应用固定位置。
+    /// 前缀或引擎候选经过个人上下文重排，再混入英文、表情、颜文字并应用固定位置，最后按进行中的 Tab 笔画筛选收窄（`apply_stroke_filter`）。
     pub(super) fn update_mixed_candidates(&mut self) {
+        self.merge_mixed_candidates();
+        self.apply_stroke_filter();
+    }
+
+    fn merge_mixed_candidates(&mut self) {
         self.multilingual_conversion = None;
         if self.update_literal_candidates() {
             return;

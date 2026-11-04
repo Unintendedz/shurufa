@@ -19,6 +19,7 @@ mod online;
 pub mod options;
 mod plugin_commands;
 mod prediction;
+mod stroke_filter;
 #[cfg(test)]
 mod tests;
 
@@ -661,7 +662,7 @@ impl Session {
         // 宿主显示全拼分词；参考回放的底层快照仍保留原文。
         let segmented_preedit = (segmented_quanpin && input.scheme() == SchemeType::Quanpin)
             || (!self.shuangpin_preedit_uses_raw && input.scheme() == SchemeType::Shuangpin);
-        let preedit = if segmented_preedit
+        let mut preedit = if segmented_preedit
             && input.local_mode == LocalInputMode::None
             && !input.dedicated_english
         {
@@ -669,6 +670,10 @@ impl Session {
         } else {
             input.preedit()
         };
+        // Tab 笔画筛选的笔画只画在预编辑里，`editing_text` 和光标仍是拼音原文。
+        if let Some(strokes) = input.stroke_filter_preedit() {
+            preedit.push_str(&strokes);
+        }
         SessionSnapshot {
             prediction: false,
             scheme: input.scheme(),

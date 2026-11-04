@@ -238,6 +238,30 @@ impl LanguageDictionary {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// 键以 `pattern` 开头的全部词条的文字，`wildcard` 匹配任意一个非空格字符；不分先后、可能重复。没有通配符时就是 [`Self::texts_with_key_prefix`]。首个通配符前的字面前缀限制扫描范围，通配符打头时整表按 GLOB 过滤。
+    pub fn texts_matching_key_prefix(&self, pattern: &str, wildcard: char) -> Result<Vec<String>> {
+        if !pattern.contains(wildcard) {
+            return self.texts_with_key_prefix(pattern);
+        }
+        let glob = glob_pattern(pattern, wildcard, true);
+        let literal = pattern.split(wildcard).next().unwrap_or_default();
+        let texts = match completion_upper_bound(literal) {
+            Some(upper) => self
+                .connection
+                .prepare_cached(
+                    "SELECT text FROM entries WHERE key >= ?1 AND key < ?2 AND key GLOB ?3",
+                )?
+                .query_map((literal, upper, glob), |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?,
+            None => self
+                .connection
+                .prepare_cached("SELECT text FROM entries WHERE key GLOB ?1")?
+                .query_map((glob,), |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?,
+        };
+        Ok(texts)
+    }
+
     /// 匹配 `pattern` 的词条，`wildcard` 匹配任意非空格字符，其他字符按字面匹配。补全只匹配键前缀且余下部分不能有音节边界；精确匹配整个键。按权重降序、文字升序返回至多 `limit` 条。首个通配符前的字面前缀限制扫描范围，只有开头通配符需要整表过滤。
     pub fn lookup_pattern(
         &self,
@@ -798,6 +822,23 @@ mod tests {
         assert!(rows.is_empty());
         assert_eq!(capacity, 0);
         assert!(texts("hx", true, 0).1.is_empty());
+
+        // 笔画筛选取的是前缀匹配的全部文字，不排序、不限量、不管键里有没有空格。
+        let prefixed = |pattern: &str| {
+            let mut texts = dictionary.texts_matching_key_prefix(pattern, 'x').unwrap();
+            texts.sort();
+            texts
+        };
+        assert_eq!(prefixed("hs"), ["十", "十十", "土"]);
+        assert_eq!(prefixed("hs"), {
+            let mut plain = dictionary.texts_with_key_prefix("hs").unwrap();
+            plain.sort();
+            plain
+        });
+        assert_eq!(prefixed("hxh"), ["三", "土"]);
+        assert_eq!(prefixed("xh"), ["三", "上", "二"]);
+        assert_eq!(prefixed("a*"), ["星"]);
+        assert!(prefixed("a?").is_empty());
     }
 
     #[test]

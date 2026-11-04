@@ -13759,3 +13759,4 @@ fn shuangpin_prefix_range_rows_do_not_answer_the_typed_key() {
 }
 
 mod caret_suffix;
+mod stroke_filter;
