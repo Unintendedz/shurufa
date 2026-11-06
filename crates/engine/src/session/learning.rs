@@ -849,6 +849,47 @@ mod tests {
         );
     }
 
+    /// 手动置顶的词只让给下一次手动置顶：自动调频选中别的候选，最多挪到它后面一位，不论模式和触发次数。
+    #[test]
+    fn automatic_learning_never_displaces_a_manual_pin() {
+        for mode in [
+            FrequencyAdjustmentMode::Promote,
+            FrequencyAdjustmentMode::Pin,
+            FrequencyAdjustmentMode::Halve,
+            FrequencyAdjustmentMode::Linear,
+        ] {
+            let fixture = Fixture::new(&FQ, &[]);
+            let options = frequency(mode, 1, 5);
+            let mut session = fixture.session(|o| o.frequency = options);
+            type_text(&mut session, "ni");
+            let pinned = words(&session)
+                .iter()
+                .position(|word| word == "丙")
+                .unwrap();
+            assert!(session.pin(pinned).handled);
+            cancel(&mut session);
+            // 选到紧挨在置顶词后面之后再选也不动，不会把权重写到置顶词上面。
+            for _ in 0..6 {
+                type_text(&mut session, "ni");
+                select_word(&mut session, "己");
+            }
+            type_text(&mut session, "ni");
+            assert_eq!(words(&session)[..2], ["丙", "己"], "{mode:?}");
+            cancel(&mut session);
+
+            // 再手动置顶另一个词才换掉原来的置顶。
+            type_text(&mut session, "ni");
+            let index = words(&session)
+                .iter()
+                .position(|word| word == "己")
+                .unwrap();
+            assert!(session.pin(index).handled);
+            cancel(&mut session);
+            type_text(&mut session, "ni");
+            assert_eq!(words(&session)[0], "己", "{mode:?}");
+        }
+    }
+
     /// F5 and F6 (test_input_session.cpp:1174-1202): shuangpin learns under the canonical quanpin key, wubi under its code.
     #[test]
     fn shuangpin_and_wubi_persist_their_picks() {

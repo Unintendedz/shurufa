@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use rusqlite::params;
+use rusqlite::{params, Connection, OptionalExtension};
 
 use super::journal::{open_journal, UNSTORABLE_ENTRY};
 use crate::error::{EngineError, Result};
@@ -210,6 +210,14 @@ pub fn record_pinned_candidate(user_db: &Path, context: &str, value: &str) -> Re
         )?
         .execute(params![context, value])?;
     Ok(())
+}
+
+/// 这个上下文里手动置顶的词；调频在已经打开的日志连接上查，不另开连接。
+pub(crate) fn pinned_value(journal: &Connection, context: &str) -> Result<Option<String>> {
+    Ok(journal
+        .prepare_cached("SELECT value FROM pinned_candidates WHERE context_key=?1")?
+        .query_row(params![context], |row| row.get(0))
+        .optional()?)
 }
 
 /// Never creates the journal (J:682-694).

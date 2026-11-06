@@ -8,7 +8,7 @@ use super::journal::{
     open_dictionary_for_writing, open_journal, pinyin_segments, pinyin_table, write_upsert,
     MISSING_ROW, UNSTORABLE_ENTRY,
 };
-use super::positions::is_fixed;
+use super::positions::{is_fixed, pinned_value};
 use crate::error::{EngineError, Result};
 use crate::types::{
     CandidateSource, FrequencyAdjustmentMode, FrequencyAdjustmentOptions, PersonalDictionaryKind,
@@ -474,7 +474,22 @@ pub fn adjust_candidate_ranking(request: &RankingRequest<'_>) -> Result<bool> {
         transaction.commit()?;
         return Ok(false);
     }
-    let target = ranking_target(rank, request.mode, request.linear_step, request.force_top);
+    let mut target = ranking_target(rank, request.mode, request.linear_step, request.force_top);
+    // 手动置顶（`pinned_candidates`）只让给下一次手动置顶：自动调频选中别的候选，最多挪到置顶词后面一位，已经紧挨着就不再动。
+    if !request.force_top && request.kind == PersonalDictionaryKind::Pinyin {
+        if let Some(pinned) = pinned_value(&transaction, request.context_key)?.and_then(|value| {
+            database_candidates[..rank]
+                .iter()
+                .position(|item| item.word == value)
+        }) {
+            target = target.max(pinned + 1);
+        }
+        if target >= rank {
+            reset_selection(&transaction, request)?;
+            transaction.commit()?;
+            return Ok(false);
+        }
+    }
     let mut main = open_dictionary_for_writing(request.main_db)?;
     let main_transaction = main.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let weights: Vec<i64> = database_candidates.iter().map(|item| item.weight).collect();
