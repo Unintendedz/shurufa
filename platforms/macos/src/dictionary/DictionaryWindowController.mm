@@ -45,6 +45,106 @@ static NSDictionary *MSIMEQuiescedDictionaryRequest(NSDictionary *request, NSErr
     return result;
 }
 
+// 文本词库文件的上限，与共享设置页的 `MAX_DICTIONARY_FILE_BYTES` 相同；`msime_client_settings_dictionary` 再把它分批送进词库。
+static const NSUInteger MSIMEDictionaryTextFileLimit = 32 * 1024 * 1024;
+// 细胞词库的上限，与 client-services `dictionary::scel::MAX_SCEL_BYTES` 相同。
+static const NSUInteger MSIMEDictionaryScelFileLimit = 8 * 1024 * 1024;
+
+// 设置页错误码的说明，措辞照共享设置页的 `dictionary-errors.ts`；不认得的码返回 nil，由调用方给通用的一句。
+static NSString *MSIMEDictionaryErrorText(NSString *code, NSString *kind) {
+    static NSDictionary<NSString *, NSString *> *texts;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        texts = @{
+            @"dictionary_busy": @"词库正在被输入法占用，请关闭正在使用输入法的程序后重试。",
+            @"dictionary_import_rejected": @"词库拒绝了这次写入，请检查编码与词是否匹配。",
+            @"dictionary_too_large": @"词库文件过大：文本文件不能超过 32 MB、细胞词库不能超过 8 MB，单行不能超过 60 KB，请拆分后再导入。",
+            @"dictionary_pinyin_unavailable": @"拼音表不可用，无法校验这条词的读音。",
+            @"dictionary_unavailable": @"无法打开用户词库，请检查输入法是否正在运行。",
+            @"dictionary_invalid_word": @"词条内容为空、过长或含控制字符，或权重超出 1 到 100000000 的范围。",
+            @"dictionary_scel_unsupported": @"这个文件不是能识别的搜狗细胞词库（.scel）。",
+            @"dictionary_scel_malformed": @"细胞词库文件不完整或已损坏，请重新下载后再导入。",
+            @"dictionary_scel_empty": @"细胞词库里没有词条。",
+            @"dictionary_scel_invalid": @"细胞词库读取失败，请重新选择文件。",
+        };
+    });
+    if ([code isEqualToString:@"dictionary_invalid_entry"])
+        return [kind isEqualToString:@"pinyin"] ? @"拼音必须由完整音节组成，音节数需与汉字数一致，例如“你好”填 nihao 或 ni'hao。" : @"词条不符合词库规则，请检查编码与词条后再保存。";
+    return code ? texts[code] : nil;
+}
+
+static NSString *MSIMEDictionaryKindLabel(NSString *kind) {
+    NSDictionary<NSString *, NSString *> *labels = @{ @"pinyin": @"拼音词库", @"wubi": @"86 五笔词库", @"wubi98": @"98 五笔词库", @"quick_phrase": @"快捷短语", @"english": @"英文词库" };
+    return labels[kind] ?: @"词库";
+}
+
+// 导入完成的提示，措辞照共享设置页的 `describeImportResult`；`source` 是放在最前面的来源说明。
+static NSString *MSIMEDescribeImport(NSString *label, NSDictionary *result, NSString *source) {
+    NSMutableString *message = [NSMutableString stringWithFormat:@"%@%@导入完成，共 %lu 条。", source, label, (unsigned long)[result[@"applied"] unsignedIntegerValue]];
+    const NSUInteger failed = [result[@"failed"] unsignedIntegerValue];
+    if (failed) {
+        NSMutableArray<NSString *> *lines = [NSMutableArray array];
+        BOOL rejected = NO;
+        for (NSDictionary *failure in [result[@"first_failures"] isKindOfClass:NSArray.class] ? result[@"first_failures"] : @[]) {
+            if (![failure isKindOfClass:NSDictionary.class]) continue;
+            if ([failure[@"line"] isKindOfClass:NSNumber.class]) [lines addObject:[failure[@"line"] stringValue]];
+            rejected = rejected || [failure[@"issue"] isEqual:@"rejected"];
+        }
+        [message appendString:lines.count ? [NSString stringWithFormat:@"跳过 %lu 行，首先出现在第 %@ 行。", (unsigned long)failed, [lines componentsJoinedByString:@"、"]]
+                                          : [NSString stringWithFormat:@"跳过 %lu 行。", (unsigned long)failed]];
+        if (rejected) [message appendString:@"其中部分行的编码与词不匹配，例如简拼、或音节数与汉字数不一致。"];
+    }
+    if (MSIMEStrictBoolean(result[@"truncated"])) [message appendString:@"文件过长，仅导入了前一部分。"];
+    if (MSIMEStrictBoolean(result[@"swapped"])) [message appendString:@"该文件的两列与所选格式相反，已按文件本身的顺序读取。"];
+    return message;
+}
+
+// 读一个词库文件并整份导入，返回给窗口的一句话。细胞词库（选了这个格式、扩展名是 .scel，或文件头是细胞词库的魔数）先经 `msime_client_dictionary_scel_text` 转成标准文本；之后与文本文件一样，以一次 import 交给 `msime_client_settings_dictionary_announced`，由它分批送进词库、放开输入会话并合成一份报告。不在主线程调用。
+static NSString *MSIMEImportDictionaryFile(NSURL *url, NSString *kind, NSString *format, NSDictionary *options) {
+    NSString *label = MSIMEDictionaryKindLabel(kind);
+    NSError *error = nil;
+    NSData *data = MSIMEReadFileUpTo(url, MSIMEDictionaryTextFileLimit, &error);
+    if (!data || data.length == 0) return @"文件需为不超过 32 MB 的 UTF-8 文本或 8 MB 的搜狗细胞词库。";
+    // 只看前 4 字节：版本不对的细胞词库也交给转换器去说「版本不支持」，而不是当成文本读出乱码。文本文件不会以 NUL 开头。
+    static const uint8_t scelMagic[4] = {0x40, 0x15, 0x00, 0x00};
+    const BOOL scelBytes = data.length >= sizeof scelMagic && memcmp(data.bytes, scelMagic, sizeof scelMagic) == 0;
+    const BOOL scel = scelBytes || [format isEqualToString:@"scel"] || [url.pathExtension.lowercaseString isEqualToString:@"scel"];
+    NSString *text = nil;
+    NSString *source = @"";
+    NSString *textFormat = format;
+    if (scel) {
+        if (![kind isEqualToString:@"pinyin"]) return @"搜狗细胞词库只能导入拼音词库，请先把词库切换到拼音。";
+        if (data.length > MSIMEDictionaryScelFileLimit) return @"细胞词库不能超过 8 MB。";
+        NSDictionary *converted = [MSIMEClientSession scelText:data error:&error];
+        if (!converted) return MSIMEDictionaryErrorText(error.localizedDescription, kind) ?: @"细胞词库读取失败，请重新选择文件。";
+        text = [converted[@"text"] isKindOfClass:NSString.class] ? converted[@"text"] : nil;
+        if (!text) return @"细胞词库读取失败，请重新选择文件。";
+        NSString *name = [converted[@"name"] isKindOfClass:NSString.class] ? converted[@"name"] : @"";
+        const NSUInteger entries = [converted[@"entries"] isKindOfClass:NSNumber.class] ? [converted[@"entries"] unsignedIntegerValue] : 0;
+        source = name.length ? [NSString stringWithFormat:@"已读取搜狗细胞词库「%@」的 %lu 个词条。", name, (unsigned long)entries]
+                             : [NSString stringWithFormat:@"已读取搜狗细胞词库的 %lu 个词条。", (unsigned long)entries];
+        textFormat = @"standard";
+    } else {
+        text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        if (!text || [text rangeOfString:@"\0"].location != NSNotFound) return @"文件需为不超过 32 MB 的 UTF-8 文本或 8 MB 的搜狗细胞词库。";
+    }
+    NSDictionary *request = @{ @"options": options, @"action": @{ @"operation": @"import", @"kind": kind, @"format": textFormat, @"text": text, @"request_id": [@"ui-import-" stringByAppendingString:NSUUID.UUID.UUIDString] } };
+    NSDictionary *result = [MSIMEClientSession settingsDictionaryRequest:request announce:^{
+        // 租约已经写好：叫醒本进程里持有会话的控制器，它们看到租约就放手。
+        void (^post)(void) = ^{
+            [NSNotificationCenter.defaultCenter postNotificationName:MSIMEEditionNotificationName(@"MSIMEDictionaryMaintenanceWillBeginNotification") object:nil];
+        };
+        if (NSThread.isMainThread) post();
+        else dispatch_sync(dispatch_get_main_queue(), post);
+    } error:&error];
+    if (!result) {
+        NSString *reason = MSIMEDictionaryErrorText(error.localizedDescription, kind);
+        return reason ? [NSString stringWithFormat:@"%@导入失败：%@", label, reason] : [NSString stringWithFormat:@"%@导入失败，请检查文本格式。", label];
+    }
+    NSString *message = MSIMEDescribeImport(label, result, source);
+    return scel ? [message stringByAppendingString:@"搜狗细胞词库的整理成果属于原作者，导入的词只供你在本机使用，不能发布到社区。"] : message;
+}
+
 @interface MSIMEDictionaryWindowController () <NSTableViewDataSource, NSTableViewDelegate>
 @property(nonatomic, copy) NSDictionary *options;
 @property(nonatomic, strong) NSTableView *table;
@@ -86,7 +186,7 @@ static NSDictionary *MSIMEQuiescedDictionaryRequest(NSDictionary *request, NSErr
     _kind.target = self;
     _kind.action = @selector(dictionaryKindChanged:);
     _format = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-    for (NSArray<NSString *> *item in @[@[@"词在前（标准 TSV）", @"standard"], @[@"编码在前（Windows TSV）", @"windows"], @[@"Rime userdb / dict.yaml", @"rime"], @[@"汉字自动注音（仅导入）", @"hans"]]) {
+    for (NSArray<NSString *> *item in @[@[@"词在前（标准 TSV）", @"standard"], @[@"编码在前（Windows TSV）", @"windows"], @[@"Rime userdb / dict.yaml", @"rime"], @[@"汉字自动注音（仅导入）", @"hans"], @[@"搜狗细胞词库 .scel（仅导入）", @"scel"]]) {
         [_format addItemWithTitle:item[0]];
         _format.lastItem.representedObject = item[1];
     }
@@ -269,42 +369,24 @@ static NSDictionary *MSIMEQuiescedDictionaryRequest(NSDictionary *request, NSErr
     NSOpenPanel *panel = [NSOpenPanel openPanel];
     panel.allowsMultipleSelection = NO;
     panel.canChooseDirectories = NO;
-    panel.allowedContentTypes = @[UTTypePlainText, UTTypeTabSeparatedText, UTTypeYAML];
+    NSMutableArray<UTType *> *types = [NSMutableArray arrayWithObjects:UTTypePlainText, UTTypeTabSeparatedText, UTTypeYAML, nil];
+    UTType *scelType = [UTType typeWithFilenameExtension:@"scel"];
+    if (scelType) [types addObject:scelType];
+    panel.allowedContentTypes = types;
     __weak MSIMEDictionaryWindowController *weakSelf = self;
     [panel beginWithCompletionHandler:^(NSModalResponse response) {
         if (response != NSModalResponseOK || !panel.URL) return;
         MSIMEDictionaryWindowController *controller = weakSelf;
         if (!controller) return;
         NSURL *sourceURL = [panel.URL copy];
-        NSError *error = nil;
-        NSData *data = MSIMEReadFileUpTo(sourceURL, 65536, &error);
-        if (!data || data.length == 0 || data.length > 65536) {
-            [controller showMessage:@"文件需为不超过 64 KiB 的 UTF-8 文本。"];
-            return;
-        }
-        NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-        if (!text || [text rangeOfString:@"\0"].location != NSNotFound) {
-            [controller showMessage:@"文件需为不超过 64 KiB 的 UTF-8 文本。"];
-            return;
-        }
         NSUInteger mutationGeneration = controller.refreshGeneration;
         NSUInteger mutationOffset = controller.offset;
         NSString *mutationKind = [[controller selectedKind] copy];
+        NSString *selectedFormat = [[controller selectedFormat] copy];
         NSDictionary *options = [controller.options copy];
-        NSDictionary *request = @{ @"options": options, @"action": @{ @"operation": @"import", @"kind": mutationKind, @"format": [controller selectedFormat], @"text": text, @"request_id": NSUUID.UUID.UUIDString } };
+        [controller showMessage:@"正在导入…"];
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-            NSError *requestError = nil;
-            NSDictionary *result = MSIMEQuiescedDictionaryRequest(request, &requestError);
-            NSString *message = nil;
-            if (!result) message = requestError.localizedDescription ?: @"词典导入失败";
-            else {
-                NSUInteger applied = [result[@"applied"] unsignedIntegerValue];
-                NSUInteger failed = [result[@"failed"] unsignedIntegerValue];
-                BOOL truncated = MSIMEStrictBoolean(result[@"truncated"]);
-                message = failed || truncated
-                    ? [NSString stringWithFormat:@"已导入 %lu 个词条，跳过 %lu 个无效条目%@。", (unsigned long)applied, (unsigned long)failed, truncated ? @"（达到上限）" : @""]
-                    : [NSString stringWithFormat:@"已导入 %lu 个词条。", (unsigned long)applied];
-            }
+            NSString *message = MSIMEImportDictionaryFile(sourceURL, mutationKind, selectedFormat, options);
             dispatch_async(dispatch_get_main_queue(), ^{
                 MSIMEDictionaryWindowController *current = weakSelf;
                 if (!current || ![current isCurrentDictionaryMutation:mutationGeneration kind:mutationKind offset:mutationOffset]) return;
@@ -317,7 +399,7 @@ static NSDictionary *MSIMEQuiescedDictionaryRequest(NSDictionary *request, NSErr
     (void)sender;
     if (self.runtimeError) { [self showMessage:self.runtimeError]; return; }
     NSString *format = [self selectedFormat];
-    if ([format isEqualToString:@"hans"] || [format isEqualToString:@"rime"]) {
+    if ([format isEqualToString:@"hans"] || [format isEqualToString:@"rime"] || [format isEqualToString:@"scel"]) {
         [self showMessage:@"当前格式仅支持导入，请选择「词在前」或「编码在前」。"];
         return;
     }

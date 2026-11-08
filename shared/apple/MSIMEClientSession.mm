@@ -366,6 +366,26 @@ static NSDictionary *decode(char *response, NSError **error) {
     if (!data || data.length > 65536) { setError(error, @"词典请求过大"); return nil; }
     return decode(msime_client_dictionary(static_cast<const uint8_t *>(data.bytes), data.length), error);
 }
+static void MSIMEInvokeAnnounce(void *context) {
+    ((__bridge void (^)(void))context)();
+}
++ (NSDictionary *)settingsDictionaryRequest:(NSDictionary<NSString *, id> *)request
+                                   announce:(void (^)(void))announce
+                                      error:(NSError **)error {
+    if (![NSJSONSerialization isValidJSONObject:request]) { setError(error, @"词典请求格式错误"); return nil; }
+    NSData *data = [NSJSONSerialization dataWithJSONObject:request options:0 error:error];
+    if (!data) return nil;
+    void (^block)(void) = [announce copy];
+    return decode(msime_client_settings_dictionary_announced(static_cast<const uint8_t *>(data.bytes), data.length,
+        block ? MSIMEInvokeAnnounce : nullptr, (__bridge void *)block), error);
+}
++ (NSDictionary *)scelText:(NSData *)bytes error:(NSError **)error {
+    if (![bytes isKindOfClass:NSData.class]) { setError(error, @"dictionary_scel_invalid"); return nil; }
+    NSData *data = [NSJSONSerialization dataWithJSONObject:@{ @"bytes_base64": [bytes base64EncodedStringWithOptions:0] }
+                                                   options:0 error:error];
+    if (!data) return nil;
+    return decode(msime_client_dictionary_scel_text(static_cast<const uint8_t *>(data.bytes), data.length), error);
+}
 + (NSDictionary *)handwritingProviderRequest:(NSDictionary<NSString *, id> *)request error:(NSError **)error {
     if (![request isKindOfClass:NSDictionary.class] || ![NSJSONSerialization isValidJSONObject:request]) { setError(error, @"手写请求格式错误"); return nil; }
     NSString *socketPath = request[@"socket_path"];

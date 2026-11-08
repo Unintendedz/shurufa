@@ -183,6 +183,12 @@ FOUNDATION_EXPORT NSNotificationName const MSIMEClientSessionDidReplaceSnapshotN
                                             error:(NSError **)error;
 /// Management is separate from live sessions; call only after all sessions are closed.
 + (nullable NSDictionary<NSString *, id> *)dictionaryRequest:(NSDictionary<NSString *, id> *)request error:(NSError **)error;
+/// 设置页的词库请求（`msime_client_settings_dictionary_announced`）：写操作先让输入宿主放开词库，整份文件的导入分批送出、合成一份报告，拒绝时 error 的描述是设置页的错误码（`dictionary_busy` 等）。维护租约第一次立起来时在调用线程上执行一次 `announce`。会阻塞，不要在主线程调用。
++ (nullable NSDictionary<NSString *, id> *)settingsDictionaryRequest:(NSDictionary<NSString *, id> *)request
+                                                             announce:(nullable void (^)(void))announce
+                                                                error:(NSError **)error;
+/// 搜狗细胞词库转成标准 TSV 文本（`msime_client_dictionary_scel_text`），回答 `{name, category, entries, text}`；拒绝时 error 的描述是 `dictionary_scel_*` 或 `dictionary_too_large`。
++ (nullable NSDictionary<NSString *, id> *)scelText:(NSData *)bytes error:(NSError **)error;
 + (nullable NSDictionary<NSString *, id> *)handwritingProviderRequest:(NSDictionary<NSString *, id> *)request error:(NSError **)error;
 + (NSDictionary<NSString *, id> *)handwritingProviderRequest:(NSDictionary<NSString *, id> *)request;
 + (NSDictionary<NSString *, id> *)emojiCatalogRequest:(NSDictionary<NSString *, id> *)request;
