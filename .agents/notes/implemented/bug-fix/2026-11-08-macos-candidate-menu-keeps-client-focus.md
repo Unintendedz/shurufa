@@ -37,4 +37,4 @@ Status: implemented
 - 外观是自己画的：菜单材质的 `NSVisualEffectView`、圆角 10、行高 24、选中行用系统强调色，颜色模式跟 `ApplyMetasequoiaMenuTheme` 给 NSMenu 设的 appearance 一致；和系统菜单在细节上（字距、动画）不完全一样。
 - NSMenu 跟踪期间主线程处在事件跟踪模式，异步到达的候选更新会被推迟；现在主线程照常运行，候选在菜单开着时重画就会收起菜单，免得留下点了没反应的项。
 - 测试：`candidate-pointer-menu` 断言菜单窗口和子菜单窗口都不能成为 key、带非激活样式、层级与锚点、子菜单的开合与高亮、分隔线和不可用项不派发、左右键松开派发并收起、贴屏幕右下角时翻转后留在可见区域。`shortcut` 断言候选窗收到右键和 Control 点按时开的是这个菜单、层级为候选窗加一、没有上屏，Esc 关菜单且不向会话发命令、候选窗仍在。
-- 未验证：自动化测试不经过 WindowServer，证明不了真实客户端不再失焦；装机后需要在 Zen 里右键候选，确认候选窗留着、菜单项生效，统一日志里不再出现 `StealKeyFocusReturningID`。`shortcut` 在这次改动之前就在第 14451 行（自定义取色器的边框色）断言失败，与本改动无关；本地验证时临时跳过那一行跑完了全套。
+- 真机验收：自动化测试不经过 WindowServer，证明不了真实客户端不再失焦，所以装机后由维护者在 Zen 里右键候选，确认候选窗留着、菜单项生效；同一时段 WindowServer 日志里的 `key thief updated` 只有通知中心、Surge、Alfred 和 TextInputMenuAgent，没有 Shurufa。`shortcut` 在这次改动之前就在第 14451 行（自定义取色器的边框色）断言失败，与本改动无关；本地验证时临时跳过那一行跑完了全套。
