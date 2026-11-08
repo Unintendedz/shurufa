@@ -35,7 +35,7 @@ Status: implemented
 - Android：沿用早已接好的来源，二进制文件的上限改为 8 MiB。
 - iOS 原生 App：「词库文件」的格式多一项，选它时类型锁定为拼音；只把转出文本的前 1001 行（且不超过解析器一次收的 64 KiB）交给解析器，解析器一次只看 1000 行，多一行它才报告「文件过长」；词长的词库不到 1001 行就到 64 KiB，按字节截掉时由 App 补上「文件过长」。
 - Windows 原生设置：「词库」页「本地词库管理」组补上「导入词库文件」（文本格式和细胞词库），规则与文案在 `platforms/windows/settings/LexiconImportModel.h`。
-- macOS 进程内的原生词库窗口：Shurufa 不带共享设置应用（`MSIMEOpenDesktopRouteWithContext` 对它直接走后备），这个窗口就是它唯一的词库管理入口，所以也接上。格式多一项「搜狗细胞词库 .scel（仅导入）」，按所选格式、`.scel` 扩展名或文件头前 4 字节认出细胞词库，经 `MSIMEClientSession scelText:` 转成标准文本；之后文本文件和细胞词库都以一次 `import` 交给 `msime_client_settings_dictionary_announced`，由 `settings_dictionary::request` 分批送进词库、合成一份报告，文本文件的上限也随之从 64 KiB 放宽到与共享页相同的 32 MB。这个窗口在输入法进程里，失去焦点的控制器没有每秒一次的偏好定时器，只靠租约等不到它们放手，所以新的 C 入口在租约第一次立起来时回调宿主，窗口借它在主线程上发本进程的 `MSIMEDictionaryMaintenanceWillBeginNotification`。整份导入期间输入会话一直放开，本机实测约 3 毫秒一个词，6.8 万词约要 3 分多钟，这段时间里打不了字。
+- macOS 进程内的原生词库窗口：Shurufa 不带共享设置应用（`MSIMEOpenDesktopRouteWithContext` 对它直接走后备），这个窗口就是它唯一的词库管理入口，所以也接上。格式多一项「搜狗细胞词库 .scel（仅导入）」，按所选格式、`.scel` 扩展名或文件头前 4 字节认出细胞词库，经 `MSIMEClientSession scelText:` 转成标准文本；之后文本文件和细胞词库都以一次 `import` 交给 `msime_client_settings_dictionary_announced`，由 `settings_dictionary::request` 分批送进词库、合成一份报告，文本文件的上限也随之从 64 KiB 放宽到与共享页相同的 32 MB。这个窗口在输入法进程里，失去焦点的控制器没有每秒一次的偏好定时器，只靠租约等不到它们放手，所以新的 C 入口在租约第一次立起来时回调宿主，窗口借它在主线程上发本进程的 `MSIMEDictionaryMaintenanceWillBeginNotification`。整份导入期间输入会话一直放开，这段时间里打不了字：本机把 4 个官方词库（6.8 万词）经同一个 C 入口依次导入真实词库，用了约 7 分半钟，而且词库越大每个词越慢（前 2 万词约 3 毫秒一个，「成语俗语」的 4.7 万词用了 6 分钟）。
 - 不接：云词库面板、MCP 的 `import_dictionary_words`。
 
 ### 落盘格式
