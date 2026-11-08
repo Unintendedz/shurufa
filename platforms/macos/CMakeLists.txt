@@ -433,6 +433,13 @@ if(MSIME_EDITION STREQUAL "shurufa")
   file(GLOB MSIME_SHURUFA_LANGUAGE_FILES CONFIGURE_DEPENDS "${MSIME_SHURUFA_LANGUAGES}/*")
   target_sources(MSIMEClientInputMethod PRIVATE ${MSIME_SHURUFA_LANGUAGE_FILES})
   set_source_files_properties(${MSIME_SHURUFA_LANGUAGE_FILES} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/language-dictionaries")
+  # 「停顿后精排」（sentence_association.neural_desktop）的模型：host-api 的 settled_model_beside 在 EngineResources 旁边的 settled-model 里找它。
+  set(MSIME_SHURUFA_SETTLED_MODEL "${CMAKE_CURRENT_SOURCE_DIR}/../../target/macos/settled-model/sentence-model-desktop.safetensors")
+  if(NOT EXISTS "${MSIME_SHURUFA_SETTLED_MODEL}")
+    message(FATAL_ERROR "Stage the settled-rerank model (scripts/fetch_settled_model.py, then stage-resources.sh) before configuring the Shurufa bundle")
+  endif()
+  target_sources(MSIMEClientInputMethod PRIVATE "${MSIME_SHURUFA_SETTLED_MODEL}")
+  set_source_files_properties("${MSIME_SHURUFA_SETTLED_MODEL}" PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/settled-model")
 endif()
 # 本地流式识别（TextStream）：输入法 spawn Contents/Resources/textstream/shurufa-textstream，它在自身目录里找 worker；install-runtime.sh 随包，由设置窗口调用，把 Python 运行环境和模型装进用户的 Application Support。
 set(MSIME_TEXTSTREAM_FILES shurufa-textstream textstream_worker.py install-runtime.sh requirements.lock LICENSE-TextStream)

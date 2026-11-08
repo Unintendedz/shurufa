@@ -34,6 +34,11 @@ assert not (contents / "MacOS/msime-voice-local").exists()
 model = contents / "Resources/EngineResources/sentence-model.safetensors"
 assert model.stat().st_size == 4486280
 assert hashlib.sha256(model.read_bytes()).hexdigest() == "86ac529510cb3b4968a5e6ade83ec8080f5b34a0a681e75c362accbbd387d1c1"
+# 「停顿后精排」的模型随包，与 resources/settled-model.lock.json 固定的那份逐字节相同。
+settled_lock = json.loads((Path(__file__).resolve().parents[3] / "resources/settled-model.lock.json").read_text(encoding="utf-8"))["artifacts"][0]
+settled = contents / "Resources/settled-model" / settled_lock["name"]
+assert settled.stat().st_size == settled_lock["size"]
+assert hashlib.sha256(settled.read_bytes()).hexdigest() == settled_lock["sha256"]
 identity = json.loads(subprocess.check_output([str(executable), "--describe-host"], text=True))
 assert identity["bundle_id"] == identifier
 assert identity["preferences_domain"] == identifier
@@ -43,5 +48,6 @@ assert identity["dictionary_notification"].endswith(".shurufa")
 assert identity["statistics_notification"].endswith(".shurufa")
 assert identity["voice_helper"] == "shurufa-voice-local"
 print(json.dumps({"bundle": str(bundle), "modes": modes, "identity": identity,
-    "architecture": "arm64", "sparkle": False, "neural_model_bytes": model.stat().st_size},
+    "architecture": "arm64", "sparkle": False, "neural_model_bytes": model.stat().st_size,
+    "settled_model_bytes": settled.stat().st_size},
     ensure_ascii=False, indent=2))

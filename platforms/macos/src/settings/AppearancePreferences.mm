@@ -398,6 +398,8 @@ static NSString *const TabStrokeFilterKey = @"MSIMEClientTabStrokeFilter";
 /// `sentence_association` 里这个窗口提供开关的两项。`word_lattice` 与 `neural_keyboard` 由别的界面读写，合并时原样保留。
 static NSString *const SentenceAssociationNeuralDesktopKey = @"MSIMEClientSentenceAssociationNeuralDesktop";
 static NSString *const SentenceAssociationShowNextOnDuplicateKey = @"MSIMEClientSentenceAssociationShowNextOnDuplicate";
+/// Shurufa 的「停顿后精排」：`sentence_association.neural_desktop`，停止输入后由随包的 25 MB 模型（`Contents/Resources/settled-model`）再排一次整句。其他版本由上面那个开关写这一项，不用这个键。缺省关，与版本出厂值一致。
+static NSString *const SentenceAssociationSettledRerankKey = @"MSIMEClientSentenceAssociationSettledRerank";
 static NSString *const InputModeShortcutKey = @"MSIMEClientInputModeShortcut";
 static NSString *const ShiftTapShortcutKey = @"MSIMEClientShiftTapShortcut";
 static NSString *const ControlTapShortcutKey = @"MSIMEClientControlTapShortcut";
@@ -473,6 +475,7 @@ static NSDictionary<NSString *, NSString *> *SharedOverrideProperties() {
         TabStrokeFilterKey : @"sharedTabStrokeFilter",
         SentenceAssociationNeuralDesktopKey : @"sharedSentenceAssociationNeuralDesktop",
         SentenceAssociationShowNextOnDuplicateKey : @"sharedSentenceAssociationShowNextOnDuplicate",
+        SentenceAssociationSettledRerankKey : @"sharedSentenceAssociationSettledRerank",
         LocalModesKey : @"sharedLocalModes",
         FontKey : @"sharedFontSize",
         FontFamilyKey : @"sharedFontFamily",
@@ -550,6 +553,7 @@ static NSDictionary<NSString *, NSString *> *SharedOverrideProperties() {
 @property(nonatomic) BOOL tabStrokeFilter;
 @property(nonatomic) BOOL sentenceAssociationNeuralDesktop;
 @property(nonatomic) BOOL sentenceAssociationShowNextOnDuplicate;
+@property(nonatomic) BOOL sentenceAssociationSettledRerank;
 @end
 
 /// What one stored key currently reads as, asked of the accessors rather than of the stored entry.
@@ -581,6 +585,7 @@ static NSDictionary<NSString *, MSIMESettingProbe> *SettingProbes() {
             TabStrokeFilterKey : ^id(MSIMEAppearancePreferences *p) { return @(p.tabStrokeFilter); },
             SentenceAssociationNeuralDesktopKey : ^id(MSIMEAppearancePreferences *p) { return @(p.sentenceAssociationNeuralDesktop); },
             SentenceAssociationShowNextOnDuplicateKey : ^id(MSIMEAppearancePreferences *p) { return @(p.sentenceAssociationShowNextOnDuplicate); },
+            SentenceAssociationSettledRerankKey : ^id(MSIMEAppearancePreferences *p) { return @(p.sentenceAssociationSettledRerank); },
             QuanpinHelpcodeKey : ^id(MSIMEAppearancePreferences *p) { return @(p.quanpinHelpcodeEnabled); },
             ShuangpinHelpcodeKey : ^id(MSIMEAppearancePreferences *p) { return @(p.shuangpinHelpcodeEnabled); },
             HelpcodeOptionsKey : ^id(MSIMEAppearancePreferences *p) {
@@ -1170,8 +1175,9 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     NSSwitch *_cloudCandidatesToggle;
     NSNumber *_sharedWubiZWildcard, *_sharedWubiFifthCodeTopCommit, *_sharedTabStrokeFilter;
     NSNumber *_sharedSentenceAssociationNeuralDesktop, *_sharedSentenceAssociationShowNextOnDuplicate;
+    NSNumber *_sharedSentenceAssociationSettledRerank;
     NSSwitch *_wubiZWildcardToggle, *_wubiFifthCodeTopCommitToggle, *_tabStrokeFilterToggle;
-    NSSwitch *_sentenceNeuralDesktopToggle, *_sentenceShowNextOnDuplicateToggle;
+    NSSwitch *_sentenceNeuralDesktopToggle, *_sentenceShowNextOnDuplicateToggle, *_sentenceSettledRerankToggle;
     NSNumber *_sharedCandidateTranslations;
     NSSwitch *_candidateTranslationsToggle;
     NSNumber *_sharedCandidateEnglishGloss;
@@ -1660,6 +1666,9 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     if (_sharedInputPreferencesApplied || _sharedSentenceAssociationShowNextOnDuplicate != nil ||
         [_defaults objectForKey:SentenceAssociationShowNextOnDuplicateKey] != nil)
         sentence[@"show_next_on_duplicate"] = @(self.sentenceAssociationShowNextOnDuplicate);
+    if (MSIMEEditionIsShurufa() && (_sharedInputPreferencesApplied || _sharedSentenceAssociationSettledRerank != nil ||
+        [_defaults objectForKey:SentenceAssociationSettledRerankKey] != nil))
+        sentence[@"neural_desktop"] = @(self.sentenceAssociationSettledRerank);
     if (sentence.count) merged[@"sentence_association"] = sentence;
     NSDictionary *stored = [_defaults dictionaryForKey:LocalModesKey];
     NSMutableDictionary *modes = [merged[@"local_modes"] mutableCopy] ?: [NSMutableDictionary dictionary];
@@ -2259,6 +2268,16 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     [_defaults setBool:value forKey:SentenceAssociationShowNextOnDuplicateKey];
     [self preferencesChanged];
 }
+- (BOOL)sentenceAssociationSettledRerank {
+    if (!MSIMEEditionIsShurufa()) return NO;
+    if (_sharedSentenceAssociationSettledRerank) return _sharedSentenceAssociationSettledRerank.boolValue;
+    return [_defaults boolForKey:SentenceAssociationSettledRerankKey];
+}
+- (void)setSentenceAssociationSettledRerank:(BOOL)value {
+    _sharedSentenceAssociationSettledRerank = nil;
+    [_defaults setBool:value forKey:SentenceAssociationSettledRerankKey];
+    [self preferencesChanged];
+}
 - (MSIMEInlinePreeditStyle)inlinePreeditStyle {
     NSString *value = _sharedInlinePreeditStyle ?: @"raw";
     if ([value isEqual:@"raw"]) return MSIMEInlinePreeditStyleRaw;
@@ -2419,6 +2438,8 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
             _sharedSentenceAssociationNeuralDesktop = sentenceAssociation[neuralKey];
         if (LocalModeBoolean(sentenceAssociation[@"show_next_on_duplicate"]))
             _sharedSentenceAssociationShowNextOnDuplicate = sentenceAssociation[@"show_next_on_duplicate"];
+        if (MSIMEEditionIsShurufa() && LocalModeBoolean(sentenceAssociation[@"neural_desktop"]))
+            _sharedSentenceAssociationSettledRerank = sentenceAssociation[@"neural_desktop"];
     }
     id inlinePreedit = preferences[@"tsf_preedit_style"];
     if ([@[@"raw", @"pinyin", @"empty"] containsObject:inlinePreedit]) _sharedInlinePreeditStyle = [inlinePreedit copy];
@@ -3574,6 +3595,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     _sentenceNeuralDesktopToggle.state = self.sentenceAssociationNeuralDesktop ? NSControlStateValueOn : NSControlStateValueOff;
     _sentenceShowNextOnDuplicateToggle.state =
         self.sentenceAssociationShowNextOnDuplicate ? NSControlStateValueOn : NSControlStateValueOff;
+    _sentenceSettledRerankToggle.state = self.sentenceAssociationSettledRerank ? NSControlStateValueOn : NSControlStateValueOff;
     _punctuationToggle.state = self.chinesePunctuation ? NSControlStateValueOn : NSControlStateValueOff;
     _smartPunctuationToggle.state = self.smartPunctuation ? NSControlStateValueOn : NSControlStateValueOff;
     _smartPunctuationRepeatToggle.state = self.smartPunctuationRepeatToChinese ? NSControlStateValueOn : NSControlStateValueOff;
@@ -4116,6 +4138,8 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
         MSIMESettingSwitch(self, @selector(sentenceNeuralDesktopChanged:), MSIMEEditionIsShurufa() ? @"本地神经排序" : @"桌面神经联想");
     _sentenceShowNextOnDuplicateToggle =
         MSIMESettingSwitch(self, @selector(sentenceShowNextOnDuplicateChanged:), @"去重后补充次选");
+    _sentenceSettledRerankToggle =
+        MSIMESettingSwitch(self, @selector(sentenceSettledRerankChanged:), @"停顿后精排");
     _punctuationToggle = MSIMESettingSwitch(self, @selector(punctuationChanged:), @"中文标点");
     _smartPunctuationToggle = MSIMESettingSwitch(self, @selector(smartPunctuationChanged:), @"智能标点");
     _smartPunctuationRepeatToggle = MSIMESettingSwitch(self, @selector(smartPunctuationRepeatChanged:), @"重复标点转中文");
@@ -4612,7 +4636,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     NSButton *translationButton = [NSButton buttonWithTitle:@"配置候选翻译…" target:self action:@selector(showTranslationSettings:)];
     NSButton *dictionaryButton = [NSButton buttonWithTitle:@"打开词库管理…" target:self action:@selector(showDictionary:)];
     dictionaryButton.accessibilityLabel = @"打开本机词库管理";
-    NSBox *cloudCard = MSIMECardWithViews(@[
+    NSMutableArray<NSView *> *cloudRows = [NSMutableArray arrayWithArray:@[
         // Where the query goes is drawn under the switch rather than folded into its name or hidden
         // in a tooltip: it is the one switch here that sends what is being typed off the machine.
         [self settingRow:@"启用云候选"
@@ -4628,8 +4652,14 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
         [self settingRow:@"去重后补充次选"
                   detail:@"模型排第一的整句与已有候选重复时，改显示它排名最高的下一条不同结果。"
                  control:_sentenceShowNextOnDuplicateToggle],
-        [self settingRow:@"翻译服务与目标语言" control:translationButton aka:@[@"候选翻译"]],
-    ], 0.0);
+    ]];
+    // 只有 Shurufa 把上面那个开关用在按键路径的小模型上，停顿后那一遍要单独的开关；其他版本上面那个开关就是它。
+    if (MSIMEEditionIsShurufa())
+        [cloudRows addObject:[self settingRow:@"停顿后精排"
+                                       detail:@"停止输入片刻后，用更大的本地神经模型（25 MB）再排一次整句候选。"
+                                      control:_sentenceSettledRerankToggle]];
+    [cloudRows addObject:[self settingRow:@"翻译服务与目标语言" control:translationButton aka:@[@"候选翻译"]]];
+    NSBox *cloudCard = MSIMECardWithViews(cloudRows, 0.0);
     cloudCard.accessibilityLabel = @"云端与智能候选卡片";
     NSBox *dictionaryCard = MSIMECardWithViews(@[
         [self settingRow:@"本机用户词库" control:dictionaryButton aka:@[@"自造词", @"用户词"]],
@@ -4648,7 +4678,8 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
         [self sectionHeader:@"本机词库" keys:@[]], dictionaryCard,
         [self sectionHeader:@"云端与智能候选"
                        keys:@[CloudCandidatesKey, CandidateTranslationsKey, CandidateEnglishGlossKey,
-                              SentenceAssociationNeuralDesktopKey, SentenceAssociationShowNextOnDuplicateKey]],
+                              SentenceAssociationNeuralDesktopKey, SentenceAssociationShowNextOnDuplicateKey,
+                              SentenceAssociationSettledRerankKey]],
         cloudCard,
     ]];
 
@@ -5503,6 +5534,9 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
 }
 - (void)sentenceShowNextOnDuplicateChanged:(NSSwitch *)sender {
     self.sentenceAssociationShowNextOnDuplicate = sender.state == NSControlStateValueOn;
+}
+- (void)sentenceSettledRerankChanged:(NSSwitch *)sender {
+    self.sentenceAssociationSettledRerank = sender.state == NSControlStateValueOn;
 }
 - (void)punctuationChanged:(NSSwitch *)sender { self.chinesePunctuation = sender.state == NSControlStateValueOn; }
 - (void)smartPunctuationChanged:(NSSwitch *)sender {
