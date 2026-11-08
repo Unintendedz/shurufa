@@ -14604,6 +14604,26 @@ int main(int argc, char **argv) {
         NSEvent *rightClick = [NSEvent mouseEventWithType:NSEventTypeRightMouseDown location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0 context:nil eventNumber:1 clickCount:1 pressure:1];
         NSMenu *candidateMenu = [clickCandidate menuForEvent:rightClick];
         assert([clickCandidate menuForEvent:rightClick] == candidateMenu);
+        // 右键和 Control 点按在候选窗这一层截下，开成不抢键盘焦点的菜单，不交给 AppKit 弹 NSMenu（NSMenu 会让 Zen 之类的客户端失焦并结束组字）。
+        {
+            const NSPoint rowCenter = [clickCandidate convertPoint:NSMakePoint(NSMidX(clickCandidate.bounds), NSMidY(clickCandidate.bounds)) toView:nil];
+            const NSUInteger clientCommits = client.insertions.count;
+            for (NSNumber *control in @[@NO, @YES]) {
+                NSEvent *contextClick = [NSEvent mouseEventWithType:control.boolValue ? NSEventTypeLeftMouseDown : NSEventTypeRightMouseDown
+                    location:rowCenter modifierFlags:control.boolValue ? NSEventModifierFlagControl : 0 timestamp:0
+                    windowNumber:layoutPanel.windowNumber context:nil eventNumber:1 clickCount:1 pressure:1];
+                [layoutPanel sendEvent:contextClick];
+                MSIMEPointerMenu *pointerMenu = [controller valueForKey:@"candidatePointerMenu"];
+                assert(pointerMenu.visible && pointerMenu.windows.count == 1);
+                assert(!pointerMenu.windows[0].canBecomeKeyWindow && pointerMenu.windows[0].level == layoutPanel.level + 1);
+                assert(layoutPanel.requestedVisible && client.insertions.count == clientCommits);
+                // Esc 只关菜单，不取消组字。
+                NSEvent *escape = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0 context:nil characters:@"\x1b" charactersIgnoringModifiers:@"\x1b" isARepeat:NO keyCode:53];
+                const NSUInteger commands = session.calls.count;
+                assert([controller handleEvent:escape client:client]);
+                assert(!pointerMenu.visible && session.calls.count == commands && layoutPanel.requestedVisible);
+            }
+        }
         // AppKit 把右键菜单开在来源窗口层级加一，候选窗开着菜单时必须留在原层级。降回弹出菜单层级会让候选窗和菜单一起掉到截图遮罩下面（#7326）。
         layoutPanel.level = MSIMECandidateWindowLevel();
         id<NSMenuDelegate> candidateMenuDelegate = candidateMenu.delegate;

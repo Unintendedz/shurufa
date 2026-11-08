@@ -230,6 +230,10 @@ static CGPathRef MSIMECreateCandidateCornerPath(NSRect rect, std::array<double, 
 @property(nonatomic) BOOL selectionFillDetached;
 // 右键才构建操作菜单，普通输入不创建菜单树。
 @property(nonatomic, copy) NSMenu *(^candidateMenuProvider)(void);
+// 有它时右键（和 Control 点按）不经 NSMenu 弹出，而是把菜单交给它画成不抢键盘焦点的菜单，见 CandidatePointerMenu.h。
+@property(nonatomic, copy) void (^candidateMenuPresenter)(NSMenu *menu, NSEvent *event);
+// 菜单交给了呈现块时返回 YES，调用方不再把这次点按交给 AppKit。
+- (BOOL)presentCandidateMenuForEvent:(NSEvent *)event;
 @end
 @implementation MSIMECandidateButton
 {
@@ -239,6 +243,18 @@ static CGPathRef MSIMECreateCandidateCornerPath(NSRect rect, std::array<double, 
 {
     if (self.candidateMenuProvider) return self.candidateMenuProvider();
     return [super menuForEvent:event];
+}
+- (BOOL)presentCandidateMenuForEvent:(NSEvent *)event
+{
+    if (!self.candidateMenuPresenter) return NO;
+    NSMenu *menu = [self menuForEvent:event];
+    if (!menu) return NO;
+    self.candidateMenuPresenter(menu, event);
+    return YES;
+}
+- (void)rightMouseDown:(NSEvent *)event
+{
+    if (![self presentCandidateMenuForEvent:event]) [super rightMouseDown:event];
 }
 - (BOOL)acceptsFirstResponder
 {

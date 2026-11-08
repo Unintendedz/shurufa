@@ -21,7 +21,7 @@ Status: implemented
 
 ## 候选右键菜单
 
-候选的右键菜单不需要特殊处理。AppKit 用 `popUpContextMenu:withEvent:forView:` 开菜单时，把菜单窗口放在来源窗口层级加一：在本机用一个无边框、不激活的 `NSPanel` 实测，面板在 `kCGCursorWindowLevelKey - 100`（`CGWindowListCopyWindowInfo` 报 layer 2147483530）时，菜单开在 2147483531，仍在候选窗之上。
+候选的右键菜单开在候选窗层级加一。当初它还是 AppKit 用 `popUpContextMenu:withEvent:forView:` 开的 NSMenu，AppKit 自己把菜单窗口放在来源窗口层级加一：在本机用一个无边框、不激活的 `NSPanel` 实测，面板在 `kCGCursorWindowLevelKey - 100`（`CGWindowListCopyWindowInfo` 报 layer 2147483530）时，菜单开在 2147483531，仍在候选窗之上。现在菜单改成了输入法自己画的不抢焦点的面板（见[候选右键菜单不抢键盘焦点](2026-11-08-macos-candidate-menu-keeps-client-focus.md)），层级由 `presentCandidateMenu:event:` 显式取 `_panel.level + 1`，规则不变。
 
 第一版曾给顶层菜单设代理，`menuWillOpen:` 把候选窗降回 `NSPopUpMenuWindowLevel`，以为菜单固定开在弹出菜单层级、会被候选窗盖住。这个前提不成立：实测降下来以后面板在 101，菜单跟着开在 102，两者一起落到截图遮罩下面，报告者在 PixPin 里右键候选时会看不见候选窗，也看不见已经接管鼠标的菜单。评审指出后撤掉了代理，候选窗全程留在 `MSIMECandidateWindowLevel()`。
 

@@ -46,6 +46,7 @@
 #include "../settings/PreferenceLoadState.h"
 #include "../settings/PreferenceSnapshotMerge.h"
 #import "../candidate/CandidateChrome.h"
+#import "../candidate/CandidatePointerMenu.h"
 #import "../candidate/CandidatePager.h"
 #import "../candidate/CandidateExpandToggle.h"
 #import "../candidate/CandidateMotion.h"
@@ -1389,6 +1390,18 @@ static NSString *MSIMEFullWidthSmartMark(unichar character, BOOL fullWidth) {
 }
 - (BOOL)canBecomeKeyWindow { return NO; }
 - (BOOL)canBecomeMainWindow { return NO; }
+// Control 点按在 AppKit 里不一定走到视图的 mouseDown:，右键也可能先被窗口处理，所以在窗口这一层就把候选行的菜单点按截下，交给不抢焦点的菜单。
+- (void)sendEvent:(NSEvent *)event {
+    const BOOL contextClick = event.type == NSEventTypeRightMouseDown ||
+        (event.type == NSEventTypeLeftMouseDown && (event.modifierFlags & NSEventModifierFlagControl));
+    NSView *frameView = self.contentView.superview;
+    if (contextClick && frameView) {
+        NSView *hit = [self.contentView hitTest:[frameView convertPoint:event.locationInWindow fromView:nil]];
+        while (hit && ![hit isKindOfClass:MSIMECandidateButton.class]) hit = hit.superview;
+        if (hit && [(MSIMECandidateButton *)hit presentCandidateMenuForEvent:event]) return;
+    }
+    [super sendEvent:event];
+}
 - (void)resetWheelAccumulator { _wheelAccumulator = 0.0; }
 - (void)orderOut:(id)sender {
     _wheelAccumulator = 0.0;
@@ -1763,6 +1776,8 @@ static NSImage *MSIMECandidateLogoImage() {
     // Whether the client may still hold marked text this controller's compositions wrote; see MSIMEApplyTransitionTrackingMarkedText. Wrongly YES costs one redundant clear, wrongly NO leaves a composition stranded in the document, so anything that might mark text sets it.
     BOOL _clientHasMarkedText;
     NSObject *_candidateMenuToken;
+    // 候选右键菜单；它不抢客户端的键盘焦点，见 CandidatePointerMenu.h。
+    MSIMEPointerMenu *_candidatePointerMenu;
     NSPanel *_panel;
     NSRect _candidateAnchorCaret;
     BOOL _candidateAnchorValid;
@@ -7598,6 +7613,11 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         if (queueMs >= 8.0) msime_macos_diagnostic_writef("[key-latency] stage=queue type=%s elapsed_ms=%.3f", label, queueMs);
     }
     _smartPunctuationShadowWritten = NO;
+    // 候选菜单不拿键盘焦点，按键照常来到这里：任何按键都先收起菜单，Esc 和系统菜单一样只关菜单。
+    if (event.type == NSEventTypeKeyDown && _candidatePointerMenu.visible) {
+        [_candidatePointerMenu dismiss];
+        if (event.keyCode == 53) return YES;
+    }
     if (event.type == NSEventTypeKeyDown && sender) {
         [self ensureAppearance];
         if (_appearance.floatingToolbarEnabled)
@@ -9330,6 +9350,7 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
 
 // 候选窗同步显隐：_panel.isVisible 立即是新状态，键盘和指针路由从不等动画。皮肤包写了的动效只加在图层上，见 MSIMECandidateMotion。
 - (void)hideCandidatePanel:(const char *)reason {
+    [_candidatePointerMenu dismiss];
     _candidateTransitionFrames = nil;
     [self stopCandidateFrameAnimation];
     if (msime_macos_diagnostic_enabled() && _panel.isVisible) msime_macos_diagnostic_writef("candidate hide reason=%s", reason);
@@ -10190,6 +10211,8 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     // 先记下看到的位置再停动画：停下会取消顶部对齐，窗口还在半途时旧内容会整体上下错开。
     [self stopCandidateFrameAnimation];
     NSDictionary *previousRenderedView = _renderedCandidateView;
+    // 换了 token，开着的菜单里每一项都已失效，收起它而不是留着点了没反应的菜单。
+    [_candidatePointerMenu dismiss];
     _candidateMenuToken = [NSObject new];
     [self updateKeymapPanel];
     // 展开的候选网格开着时画网格；它对不上当前视图或画不出来时收起，落到下面画普通的一页。
@@ -10981,6 +11004,16 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
         if (!row.menu) row.menu = [controller menuForCandidate:candidate];
         return row.menu;
     };
+    button.candidateMenuPresenter = ^(NSMenu *menu, NSEvent *event) {
+        [weakSelf presentCandidateMenu:menu event:event];
+    };
+}
+
+// NSMenu 会把键盘焦点从客户端窗口抢到输入法进程，Gecko 类客户端随即结束组字；这里换成不抢焦点的菜单，开在候选窗之上。
+- (void)presentCandidateMenu:(NSMenu *)menu event:(NSEvent *)event {
+    if (!_panel.isVisible || !event.window) return;
+    if (!_candidatePointerMenu) _candidatePointerMenu = [MSIMEPointerMenu new];
+    [_candidatePointerMenu popUpMenu:menu atScreenPoint:[event.window convertPointToScreen:event.locationInWindow] level:_panel.level + 1];
 }
 
 - (NSMenu *)menuForCandidate:(NSDictionary *)candidate {

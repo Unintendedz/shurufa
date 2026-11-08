@@ -1315,6 +1315,11 @@ add_executable(candidate-hover-test tests/candidate/CandidateHoverTest.mm src/ca
 target_compile_options(candidate-hover-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(candidate-hover-test PRIVATE "-framework AppKit" "-framework QuartzCore" "-framework ImageIO")
 add_test(NAME candidate-hover COMMAND candidate-hover-test)
+# 候选右键菜单画成不能成为 key 的非激活面板：窗口属性、子菜单、点按派发和贴边翻转。
+add_executable(candidate-pointer-menu-test tests/candidate/CandidatePointerMenuTest.mm)
+target_compile_options(candidate-pointer-menu-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(candidate-pointer-menu-test PRIVATE "-framework AppKit")
+add_test(NAME candidate-pointer-menu COMMAND candidate-pointer-menu-test)
 
 add_executable(settings-glass-test tests/settings/SettingsGlassTest.mm)
 target_compile_options(settings-glass-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
