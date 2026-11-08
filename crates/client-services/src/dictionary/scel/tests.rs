@@ -57,7 +57,10 @@ impl ScelBuilder {
             table.extend(utf16(syllable));
         }
         let table_end = PINYIN_TABLE_OFFSET + 4 + table.len();
-        let mut bytes = vec![0u8; table_end.max(ENTRIES_OFFSET)];
+        // 词条区的起点跟着版本走；版本不认得时按 `DCS` 的布局拼。
+        let entries_offset =
+            layout(&self.magic[4..]).map_or(ENTRIES_OFFSET, |layout| layout.entries);
+        let mut bytes = vec![0u8; table_end.max(entries_offset)];
         bytes[..12].copy_from_slice(&self.magic);
         let entries: usize = self.groups.iter().map(|group| group.words.len()).sum();
         put_u32(
@@ -375,7 +378,7 @@ fn scel_refuses_out_of_range_structure() {
     assert_eq!(decode(&overrun.build()).unwrap_err(), ScelError::Malformed);
 
     let mut version = ScelBuilder::sample();
-    version.magic[4] = b'E';
+    version.magic[4] = b'F';
     assert_eq!(
         decode(&version.build()).unwrap_err(),
         ScelError::Unsupported
@@ -388,6 +391,30 @@ fn scel_refuses_out_of_range_structure() {
         decode(&vec![0; MAX_SCEL_BYTES + 1]).unwrap_err(),
         ScelError::TooLarge
     );
+}
+
+/// `ECS` 版：拼音表在音节之后有单个大写字母的条目，词条区从 `0x26C4` 起。字母条目原样进读音；同样的表放进 `DCS` 版就是损坏。
+#[test]
+fn scel_reads_the_ecs_layout_with_capital_letter_syllables() {
+    let mut builder = ScelBuilder::new(vec![group(&[0, 1], &["测试"]), group(&[6, 5], &["A好"])]);
+    builder.magic[4] = b'E';
+    builder.table.push((6, "A".to_owned()));
+    let bytes = builder.build();
+    assert_eq!(
+        &bytes[ECS_ENTRIES_OFFSET..ECS_ENTRIES_OFFSET + 2],
+        &1u16.to_le_bytes()
+    );
+    let decoded = decode(&bytes).unwrap();
+    assert_eq!(decoded.text, "测试\tce'shi\nA好\tA'hao\n");
+    assert_eq!(decoded.entries, 2);
+
+    builder.magic[4] = b'D';
+    assert_eq!(decode(&builder.build()).unwrap_err(), ScelError::Malformed);
+    // 大写字母只能单独成一条。
+    let mut word = ScelBuilder::sample();
+    word.magic[4] = b'E';
+    word.table[0].1 = "Ce".to_owned();
+    assert_eq!(decode(&word.build()).unwrap_err(), ScelError::Malformed);
 }
 
 /// 文件不大、输出却很大的形状：一组 6 万个单字词共用一条 64 个音节的读音，每个词在文件里只占 6 字节，在文本里却要 300 多字节。

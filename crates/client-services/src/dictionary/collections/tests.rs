@@ -1250,7 +1250,7 @@ fn collections_import_maps_scel_refusals_to_stable_codes() {
         "unsupported_format"
     );
     let mut version = ScelBuilder::sample();
-    version.magic[4] = b'E';
+    version.magic[4] = b'F';
     assert_eq!(
         code("scel", None, Some(base64(&version.build()))),
         "unsupported_format"

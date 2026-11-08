@@ -2,7 +2,7 @@
 //!
 //! 上限、去重、权重、分批和导入报告都沿用文本导入，这里只负责读二进制格式。第 k 行就是文件里的第 k 个词，所以下游报告里的「第 N 行」就是「第 N 个词」。读不出读音的词输出成 `词<TAB>`，读不出词的输出成 `<TAB>读音`：这两种行在所有下游路径（桌面分批、iOS 预览、命名词库）上都必定失败，并以同一套计数和行号报出来，不用每个宿主各自把解析器的跳过数并进导入报告。
 //!
-//! 布局（小端，绝对偏移）按搜狗官方分类词库核对过：`0x000` 是 12 字节魔数，`0x120` 是读音组数，`0x124` 是词数，`0x130` 和 `0x338` 是 UTF-16LE 的词库名和类别，`0x1540` 是本文件自己的拼音表，`0x2628` 起是词条区。每组先是本组词数、读音字节长度和音节序号，再是本组每个词的字节长度、UTF-16LE 词、扩展长度和扩展字节。扩展字段的前 4 字节是词在库里的序号，不是词频，所以不读它。决策与证据见 `.agents/notes/implemented/feature/2026-10-13-scel-import.md`。
+//! 布局（小端，绝对偏移）按搜狗官方分类词库核对过：`0x000` 是 12 字节魔数，`0x120` 是读音组数，`0x124` 是词数，`0x130` 和 `0x338` 是 UTF-16LE 的词库名和类别，`0x1540` 是本文件自己的拼音表，之后是词条区：`DCS` 版从 `0x2628` 起，`ECS` 版的拼音表在 413 个音节之后多了 26 个大写字母（给「A货」这类带字母的词用），词条区因此后移到 `0x26C4`。每组先是本组词数、读音字节长度和音节序号，再是本组每个词的字节长度、UTF-16LE 词、扩展长度和扩展字节。扩展字段的前 4 字节是词在库里的序号，不是词频，所以不读它。决策与证据见 `.agents/notes/implemented/feature/2026-10-13-scel-import.md`。
 //!
 //! 文件是不可信输入：全部用 `get` 和 checked 运算读取，任何越界或不一致都整份拒绝，不做部分导入，也不信任文件里声明的数量去预分配。
 #![deny(clippy::indexing_slicing)]
@@ -18,15 +18,19 @@ pub const MAX_SCEL_TEXT_BYTES: usize = super::collections::MAX_IMPORT_TEXT_BYTES
 
 /// 前 4 字节：不是它就不是细胞词库。
 const MAGIC: [u8; 4] = [0x40, 0x15, 0x00, 0x00];
-/// 接下来 8 字节：已核实的版本。其他版本（例如社区资料提到的第 5 字节为 `E` 的变体）没有样本，按不支持拒绝，不去猜结构。
-const VERSION: [u8; 8] = *b"DCS\x01\x01\x00\x00\x00";
+/// 接下来 8 字节：已核实的两个版本。其他版本没有样本，按不支持拒绝，不去猜结构。
+const VERSION_DCS: [u8; 8] = *b"DCS\x01\x01\x00\x00\x00";
+const VERSION_ECS: [u8; 8] = *b"ECS\x01\x01\x00\x00\x00";
 const GROUP_COUNT_OFFSET: usize = 0x120;
 const ENTRY_COUNT_OFFSET: usize = 0x124;
 const NAME_OFFSET: usize = 0x130;
 const CATEGORY_OFFSET: usize = 0x338;
 const LABEL_BYTES: usize = 520;
 const PINYIN_TABLE_OFFSET: usize = 0x1540;
+/// `DCS` 版词条区的起点。
 const ENTRIES_OFFSET: usize = 0x2628;
+/// `ECS` 版词条区的起点：拼音表多出的 26 条大写字母各占 6 字节，正好把它从 `0x2628` 推到这里。
+const ECS_ENTRIES_OFFSET: usize = 0x26C4;
 /// 拼音表条数的上限；搜狗的表是 413 条。
 const MAX_PINYIN_TABLE: u32 = 512;
 /// 一个音节最多 6 个字母（`chuang`），即 12 字节 UTF-16。
@@ -74,6 +78,29 @@ pub enum ScelError {
     Empty,
 }
 
+/// 一个已核实版本的布局：词条区从哪里开始，拼音表里能不能有单个大写字母的条目。
+#[derive(Clone, Copy)]
+struct Layout {
+    entries: usize,
+    letters: bool,
+}
+
+fn layout(version: &[u8]) -> Option<Layout> {
+    if version == VERSION_DCS {
+        Some(Layout {
+            entries: ENTRIES_OFFSET,
+            letters: false,
+        })
+    } else if version == VERSION_ECS {
+        Some(Layout {
+            entries: ECS_ENTRIES_OFFSET,
+            letters: true,
+        })
+    } else {
+        None
+    }
+}
+
 /// 读一个细胞词库，转成标准 TSV 文本。
 pub fn decode(bytes: &[u8]) -> Result<ScelText, ScelError> {
     if bytes.len() > MAX_SCEL_BYTES {
@@ -82,21 +109,20 @@ pub fn decode(bytes: &[u8]) -> Result<ScelText, ScelError> {
     if bytes.get(..MAGIC.len()) != Some(&MAGIC[..]) {
         return Err(ScelError::NotScel);
     }
-    match bytes.get(MAGIC.len()..MAGIC.len() + VERSION.len()) {
+    let layout = match bytes.get(MAGIC.len()..MAGIC.len() + VERSION_DCS.len()) {
         None => return Err(ScelError::Malformed),
-        Some(version) if version != VERSION => return Err(ScelError::Unsupported),
-        Some(_) => {}
-    }
-    if bytes.len() < ENTRIES_OFFSET + 4 {
+        Some(version) => layout(version).ok_or(ScelError::Unsupported)?,
+    };
+    if bytes.len() < layout.entries + 4 {
         return Err(ScelError::Malformed);
     }
-    let syllables = pinyin_table(bytes)?;
+    let syllables = pinyin_table(bytes, layout)?;
 
     let groups = u32_at(bytes, GROUP_COUNT_OFFSET)? as usize;
     if groups == 0 {
         return Err(ScelError::Empty);
     }
-    let remaining = bytes.len() - ENTRIES_OFFSET;
+    let remaining = bytes.len() - layout.entries;
     if groups > remaining / MIN_GROUP_BYTES {
         return Err(ScelError::Malformed);
     }
@@ -107,7 +133,7 @@ pub fn decode(bytes: &[u8]) -> Result<ScelText, ScelError> {
     let mut entries = 0usize;
     let mut reading = String::with_capacity(MAX_READING_BYTES * 4);
 
-    let mut reader = Reader::new(bytes, ENTRIES_OFFSET);
+    let mut reader = Reader::new(bytes, layout.entries);
     for _ in 0..groups {
         let words = reader.u16()?;
         if words == 0 {
@@ -147,15 +173,15 @@ pub fn decode(bytes: &[u8]) -> Result<ScelText, ScelError> {
     })
 }
 
-/// 本文件自己的拼音表：不同文件的表顺序不同（同一批官方词库里就有两种），不能内置一张。表坏了整份文件的读音都不可信，所以任何一条不合规都整份拒绝。
-fn pinyin_table(bytes: &[u8]) -> Result<Vec<String>, ScelError> {
+/// 本文件自己的拼音表：不同文件的表顺序不同（同一批官方词库里就有两种），不能内置一张。表坏了整份文件的读音都不可信，所以任何一条不合规都整份拒绝。条目是小写音节；`ECS` 版另有单个大写字母的条目，原样写进读音，由下游按拼音规则决定收不收。
+fn pinyin_table(bytes: &[u8], layout: Layout) -> Result<Vec<String>, ScelError> {
     let count = u32_at(bytes, PINYIN_TABLE_OFFSET)?;
     if !(1..=MAX_PINYIN_TABLE).contains(&count) {
         return Err(ScelError::Malformed);
     }
     let count = count as usize;
     // 表必须在词条区之前结束，所以只在这一段里读。
-    let table = bytes.get(..ENTRIES_OFFSET).ok_or(ScelError::Malformed)?;
+    let table = bytes.get(..layout.entries).ok_or(ScelError::Malformed)?;
     let mut reader = Reader::new(table, PINYIN_TABLE_OFFSET + 4);
     let mut syllables = vec![String::new(); count];
     for _ in 0..count {
@@ -172,7 +198,8 @@ fn pinyin_table(bytes: &[u8]) -> Result<Vec<String>, ScelError> {
         for unit in units.chunks_exact(2) {
             let unit = u16_from(unit)?;
             let letter = u8::try_from(unit).map_err(|_| ScelError::Malformed)?;
-            if !letter.is_ascii_lowercase() {
+            let capital = layout.letters && length == 2 && letter.is_ascii_uppercase();
+            if !letter.is_ascii_lowercase() && !capital {
                 return Err(ScelError::Malformed);
             }
             slot.push(char::from(letter));
