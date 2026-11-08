@@ -288,6 +288,10 @@ char *msime_client_dictionary(const uint8_t *request, size_t length);
  * dictionary_invalid_word or storage. {operation:"reset"} restores the bundled dictionaries
  * and clears all learned data, returning {reset:true}. Blocks: call off the UI thread. */
 char *msime_client_settings_dictionary(const uint8_t *request, size_t length);
+/* 与 msime_client_settings_dictionary 相同；输入宿主的维护租约第一次立起来时，在调用线程上调用一次 announce(context)，
+ * 让同一进程里持有会话的输入控制器当场放手（macOS 输入法自己的原生词库窗口用）。announce 可以为 NULL。 */
+char *msime_client_settings_dictionary_announced(const uint8_t *request, size_t length,
+                                                 void (*announce)(void *context), void *context);
 /* Smart punctuation follow-up gestures. The host holds the snapshots: they belong
  * to its editor, not to Engine, and a session rebuilt while the keyboard was away
  * must not carry a gesture across the gap. The switches that gate them live in the

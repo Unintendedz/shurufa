@@ -419,6 +419,22 @@ pub unsafe extern "C" fn msime_client_settings_dictionary(
     request: *const u8,
     length: usize,
 ) -> *mut c_char {
+    // SAFETY: the caller upholds the contract above; a missing callback is never called.
+    unsafe {
+        msime_client_settings_dictionary_announced(request, length, None, std::ptr::null_mut())
+    }
+}
+
+/// 与 [`msime_client_settings_dictionary`] 相同，只是租约第一次立起来时在调用线程上调用一次 `announce(context)`。macOS 输入法进程里的原生词库窗口借它当场叫醒同一进程里持有会话的控制器：失去焦点的控制器没有每秒一次的定时器，只看租约等不到它们放手。
+/// # Safety
+/// `request` must point to `length` readable bytes. Null is rejected. `announce`, when present, must be safe to call with `context` from the calling thread while this call runs.
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_settings_dictionary_announced(
+    request: *const u8,
+    length: usize,
+    announce: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
+    context: *mut std::ffi::c_void,
+) -> *mut c_char {
     response(|| {
         if request.is_null() || length > SETTINGS_DICTIONARY_REQUEST_LIMIT {
             return Err("dictionary_too_large".into());
@@ -431,7 +447,13 @@ pub unsafe extern "C" fn msime_client_settings_dictionary(
         else {
             return Err("storage".into());
         };
-        crate::settings_dictionary::request(options, action, || {}).map_err(|code| code.to_owned())
+        crate::settings_dictionary::request(options, action, || {
+            if let Some(announce) = announce {
+                // SAFETY: guaranteed by the caller contract above.
+                unsafe { announce(context) };
+            }
+        })
+        .map_err(|code| code.to_owned())
     })
 }
 

@@ -20261,6 +20261,54 @@ fn personal_dictionary_sync_leaves_busy_imports_pending() {
     assert_eq!(applied["value"]["failed_count"], 0, "{applied}");
 }
 
+/// macOS 原生词库窗口的路径：会话占着词库时，租约一立起来就回调一次 `announce`，回调里放掉会话，导入随即完成。
+#[test]
+fn settings_dictionary_announces_once_when_a_session_holds_the_dictionaries() {
+    struct Holder<T> {
+        session: Option<T>,
+        calls: usize,
+    }
+    unsafe extern "C" fn release<T>(context: *mut std::ffi::c_void) {
+        // SAFETY: 下面传进来的就是这个 `Holder<T>`，调用期间没有别的引用。
+        let holder = unsafe { &mut *context.cast::<Holder<T>>() };
+        holder.calls += 1;
+        holder.session = None;
+    }
+    fn callback<T>(_: &Holder<T>) -> unsafe extern "C" fn(*mut std::ffi::c_void) {
+        release::<T>
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let options = host_options_with_main_dictionary(directory.path());
+    let session = DictionaryAccess::try_session(
+        &directory.path().join("user"),
+        &directory.path().join("dictionaries"),
+    )
+    .unwrap()
+    .unwrap();
+    let mut holder = Holder {
+        session: Some(session),
+        calls: 0,
+    };
+    let request = serde_json::to_vec(&json!({
+        "options": options,
+        "action": {"operation": "import", "kind": "pinyin", "format": "standard",
+                   "text": "拟蒿\tni'hao\n", "request_id": "ui-import-announced"},
+    }))
+    .unwrap();
+    let announce = callback(&holder);
+    let reply = read(unsafe {
+        crate::dictionary::msime_client_settings_dictionary_announced(
+            request.as_ptr(),
+            request.len(),
+            Some(announce),
+            std::ptr::from_mut(&mut holder).cast(),
+        )
+    });
+    assert_eq!(reply["value"]["applied"], 1, "{reply}");
+    assert_eq!(holder.calls, 1);
+    assert!(holder.session.is_none());
+}
+
 /// 合成词表在一次有界同步后完整生效，第六项进入九键候选。
 #[test]
 fn imported_words_in_one_batch_reach_nine_key_candidates() {
