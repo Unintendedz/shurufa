@@ -689,68 +689,6 @@ static NSArray<NSDictionary *> *MSIMESessionTranslations(NSArray<NSDictionary *>
     return session;
 }
 
-// Candidate pinning is a macOS presentation preference. The Engine's ranking is
-// shared by every host, while a user who always wants one word first expects that
-// choice to stay local to this input method. Keep an ordered list per code so
-// multiple pinned words retain the order in which they were pinned.
-static NSString *const MSIMEPinnedCandidatesPreferenceKey = @"MSIMEClientPinnedCandidates";
-
-static NSString *MSIMECandidatePinCode(NSDictionary *view) {
-    NSString *code = [view[@"preedit"] isKindOfClass:NSString.class] ? view[@"preedit"] : nil;
-    if (code.length == 0 && [view[@"editing_text"] isKindOfClass:NSString.class]) code = view[@"editing_text"];
-    return code.length > 0 ? code : @"";
-}
-
-static NSArray<NSString *> *MSIMEPinnedWords(NSString *code) {
-    if (code.length == 0) return @[];
-    NSDictionary *all = [NSUserDefaults.standardUserDefaults dictionaryForKey:MSIMEPinnedCandidatesPreferenceKey];
-    NSArray *words = [all[code] isKindOfClass:NSArray.class] ? all[code] : @[];
-    NSMutableArray<NSString *> *valid = [NSMutableArray arrayWithCapacity:words.count];
-    for (id word in words) {
-        if (![word isKindOfClass:NSString.class]) continue;
-        NSString *string = (NSString *)word;
-        if (string.length > 0 && ![valid containsObject:string]) [valid addObject:string];
-    }
-    return valid;
-}
-
-static BOOL MSIMECandidateIsPinned(NSString *code, NSString *word) {
-    return code.length > 0 && word.length > 0 && [MSIMEPinnedWords(code) containsObject:word];
-}
-
-static void MSIMETogglePinnedCandidate(NSString *code, NSString *word) {
-    if (code.length == 0 || word.length == 0) return;
-    NSDictionary *stored = [NSUserDefaults.standardUserDefaults dictionaryForKey:MSIMEPinnedCandidatesPreferenceKey];
-    NSMutableDictionary *all = [stored isKindOfClass:NSDictionary.class] ? [stored mutableCopy] : [NSMutableDictionary dictionary];
-    NSMutableArray<NSString *> *words = [MSIMEPinnedWords(code) mutableCopy] ?: [NSMutableArray array];
-    NSUInteger existing = [words indexOfObject:word];
-    if (existing != NSNotFound) [words removeObjectAtIndex:existing];
-    else [words insertObject:word atIndex:0];
-    if (words.count > 0) all[code] = words;
-    else [all removeObjectForKey:code];
-    [NSUserDefaults.standardUserDefaults setObject:all forKey:MSIMEPinnedCandidatesPreferenceKey];
-}
-
-static NSArray<NSDictionary *> *MSIMEReorderedPinnedCandidates(NSArray *candidates, NSString *code) {
-    if (![candidates isKindOfClass:NSArray.class] || candidates.count == 0 || code.length == 0) return candidates ?: @[];
-    NSArray<NSString *> *pinned = MSIMEPinnedWords(code);
-    if (pinned.count == 0) return candidates;
-    NSMutableArray<NSDictionary *> *remaining = [candidates mutableCopy];
-    NSMutableArray<NSDictionary *> *ordered = [NSMutableArray arrayWithCapacity:candidates.count];
-    for (NSString *word in pinned) {
-        for (NSInteger index = (NSInteger)remaining.count - 1; index >= 0; --index) {
-            NSDictionary *candidate = remaining[(NSUInteger)index];
-            if ([candidate isKindOfClass:NSDictionary.class] && [candidate[@"text"] isEqual:word]) {
-                [ordered addObject:candidate];
-                [remaining removeObjectAtIndex:(NSUInteger)index];
-                break;
-            }
-        }
-    }
-    [ordered addObjectsFromArray:remaining];
-    return ordered;
-}
-
 static NSString *MSIMECandidateTranslationColumn(NSDictionary *candidate, NSInteger column) {
     if (column <= 0) return @"";
     NSArray<NSString *> *parts = [CandidateTranslation(candidate) componentsSeparatedByString:@"\n"];
@@ -1853,7 +1791,7 @@ static NSImage *MSIMECandidateLogoImage() {
     NSArray<NSString *> *_glossSenses;
     NSDictionary *_glossSenseSavedView;
     NSUInteger _glossSenseCursor;
-    // 展开的候选网格（共享偏好 `expand_candidates`，#7307）。打开时经 msime_client_all_candidates 复制当前这一代的全部候选，记下这一代和打开时的组字；选择时按复制时的一代调 msime_client_select_any_candidate。_expandedCandidates 非 nil 就是网格开着，它按显示顺序排（每一行里按本机置顶词重排，和普通候选窗那一页一致），_expandedCursor 是其中高亮的那一个，_expandedFirstRow 是可见的第一行。_expandedSourceView 是网格上一次对照过的视图：视图换了（异步结果、释义到达）就重新对照一次，组字没变时按新的一代重载，变了就收起。
+    // 展开的候选网格（共享偏好 `expand_candidates`，#7307）。打开时经 msime_client_all_candidates 复制当前这一代的全部候选，记下这一代和打开时的组字；选择时按复制时的一代调 msime_client_select_any_candidate。_expandedCandidates 非 nil 就是网格开着，它按 Engine 给的顺序排，和普通候选窗那一页一致，_expandedCursor 是其中高亮的那一个，_expandedFirstRow 是可见的第一行。_expandedSourceView 是网格上一次对照过的视图：视图换了（异步结果、释义到达）就重新对照一次，组字没变时按新的一代重载，变了就收起。
     NSArray<NSDictionary *> *_expandedCandidates;
     // 普通英文只有显式授权后才借用引擎的英文组字；与菜单的专用英文状态分开。
     BOOL _englishOnlineCandidatesEnabled;
@@ -2425,7 +2363,7 @@ static const char *MSIMESmartPunctuationScalarClass(uint32_t scalar) {
 }
 
 - (NSDictionary *)highlightedCandidateForGloss {
-    NSArray *candidates = MSIMEVisibleCandidates(MSIMEReorderedPinnedCandidates(_view[@"candidates"], MSIMECandidatePinCode(_view)));
+    NSArray *candidates = MSIMEVisibleCandidates(_view[@"candidates"]);
     if (![candidates isKindOfClass:NSArray.class]) return nil;
     for (NSDictionary *candidate in candidates)
         if ([candidate isKindOfClass:NSDictionary.class] && MSIMEStrictBoolean(candidate[@"highlighted"])) return candidate;
@@ -2671,7 +2609,7 @@ BOOL MSIMEInputControllerHasUnfinishedInput(void) {
     return MSIMEStrictUnsignedIntegerValue(_view[@"page_count"], &pageCount) && pageCount > 1;
 }
 
-// msime_client_all_candidates 的回答里网格要画的候选：只认当前视图这个会话、这一代、身份合法的条目；每一行（也就是一页）里按本机的置顶词重排，和普通候选窗画那一页时一样。
+// msime_client_all_candidates 的回答里网格要画的候选：只认当前视图这个会话、这一代、身份合法的条目，按 Engine 给的顺序，和普通候选窗画那一页时一样。
 - (NSArray<NSDictionary *> *)expandedCandidatesFromSnapshot:(NSDictionary *)snapshot {
     if (![snapshot isKindOfClass:NSDictionary.class] || ![snapshot[@"candidates"] isKindOfClass:NSArray.class]) return nil;
     if (!MSIMEUnsignedCandidateIdentityValue(snapshot[@"session"]) || !MSIMEUnsignedCandidateIdentityValue(snapshot[@"generation"]) ||
@@ -2679,12 +2617,7 @@ BOOL MSIMEInputControllerHasUnfinishedInput(void) {
     NSMutableArray<NSDictionary *> *valid = [NSMutableArray array];
     for (id entry in (NSArray *)snapshot[@"candidates"])
         if ([entry isKindOfClass:NSDictionary.class] && !MSIMECandidateIsAIPlaceholder(entry) && MSIMECurrentCandidateIdentity(entry[@"id"], _view)) [valid addObject:entry];
-    const NSUInteger columns = MAX((NSUInteger)1, (NSUInteger)_appearance.pageSize);
-    NSString *code = MSIMECandidatePinCode(_view);
-    NSMutableArray<NSDictionary *> *ordered = [NSMutableArray arrayWithCapacity:valid.count];
-    for (NSUInteger start = 0; start < valid.count; start += columns)
-        [ordered addObjectsFromArray:MSIMEReorderedPinnedCandidates([valid subarrayWithRange:NSMakeRange(start, MIN(columns, valid.count - start))], code)];
-    return ordered;
+    return valid;
 }
 
 - (void)discardExpandedCandidates {
@@ -8105,7 +8038,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     const int physicalDigit = msime::mac::CandidateDigitSlotOnPage(msime::mac::PhysicalCandidateDigitSlot(event.keyCode),
         [self usesPresentedCandidatePages] ? MAX((NSUInteger)_appearance.pageSize, _adaptivePageCandidates.count) : _appearance.pageSize);
     NSArray *visibleCandidates = [self usesPresentedCandidatePages] ? _adaptivePageCandidates
-        : MSIMEVisibleCandidates(MSIMEReorderedPinnedCandidates(_view[@"candidates"], MSIMECandidatePinCode(_view)));
+        : MSIMEVisibleCandidates(_view[@"candidates"]);
     const NSEventModifierFlags glossModifiers = event.modifierFlags &
         (NSEventModifierFlagShift | NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagCommand);
     if (_panel.isVisible && physicalDigit >= 0 &&
@@ -8371,7 +8304,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
             [self apply:[_session command:segment error:nil]];
             return YES;
         }
-        NSArray *candidates = MSIMEVisibleCandidates(MSIMEReorderedPinnedCandidates(_view[@"candidates"], MSIMECandidatePinCode(_view)));
+        NSArray *candidates = MSIMEVisibleCandidates(_view[@"candidates"]);
         NSUInteger highlighted = NSNotFound;
         for (NSUInteger index = 0; index < candidates.count; ++index)
             if ([candidates[index] isKindOfClass:NSDictionary.class] && MSIMEStrictBoolean(candidates[index][@"highlighted"])) { highlighted = index; break; }
@@ -9262,7 +9195,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     CGFloat bodyRowGap = 0;
     BOOL headerPager = _appearance.showsCandidatePageNumber;
     id preedit = [_view[@"preedit"] isKindOfClass:NSString.class] ? _view[@"preedit"] : editing;
-    NSArray *candidates = MSIMEVisibleCandidates(MSIMEReorderedPinnedCandidates(_view[@"candidates"], MSIMECandidatePinCode(_view)));
+    NSArray *candidates = MSIMEVisibleCandidates(_view[@"candidates"]);
     if ([candidates isKindOfClass:NSArray.class] && candidates.count) {
         // The same rows the candidate panel lays out, so a card that wraps a long candidate onto several lines is kept clear of in full.
         NSScreen *screen = MSIMECandidateScreen(cursor);
@@ -9681,7 +9614,7 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
                            skin:(const msime::mac::ResolvedSkin &)skin font:(NSFont *)font {
     NSString *word = @"";
     if (skin.decorationCandidate) {
-        NSArray *page = MSIMEVisibleCandidates(MSIMEReorderedPinnedCandidates(_view[@"candidates"], MSIMECandidatePinCode(_view)));
+        NSArray *page = MSIMEVisibleCandidates(_view[@"candidates"]);
         int highlight = -1;
         for (NSUInteger index = 0; index < page.count; ++index)
             if ([page[index] isKindOfClass:NSDictionary.class] && MSIMEStrictBoolean(page[index][@"highlighted"])) {
@@ -10224,7 +10157,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     _expandedViewportHeight = 0;
     if (_appearance.englishMode && !_managedEnglishComposition) { _renderedCandidateView = nil; [self resetCandidateAnchor]; [self hideCandidatePanel:"english_mode"]; return; }
     NSArray *rawCandidates = [_view[@"candidates"] isKindOfClass:NSArray.class] ? _view[@"candidates"] : @[];
-    NSArray *candidates = MSIMEVisibleCandidates(MSIMEReorderedPinnedCandidates(rawCandidates, MSIMECandidatePinCode(_view)));
+    NSArray *candidates = MSIMEVisibleCandidates(rawCandidates);
     // 固定页也按可见行装满：占位只在首屏出现，第一次发现后持续从当前代次的完整快照分页，直到占位被真实结果替换。
     // 所有条目保留原始引擎身份；显示页上报和任意候选选择复用自动适应已有的协议。
     const BOOL hadFilteredPages = _filteredFixedPages;
@@ -10253,7 +10186,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
             _adaptivePageCandidates = candidates = [entries subarrayWithRange:NSMakeRange(start,
                 _adaptivePages.starts[_adaptivePage + 1] - start)];
         } else if (snapshot && entries.count == snapshotRows.count) {
-            candidates = MSIMEVisibleCandidates(MSIMEReorderedPinnedCandidates(_view[@"candidates"], MSIMECandidatePinCode(_view)));
+            candidates = MSIMEVisibleCandidates(_view[@"candidates"]);
         }
     }
     if (![candidates isKindOfClass:NSArray.class] || candidates.count == 0) {
@@ -11019,7 +10952,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
 - (NSMenu *)menuForCandidate:(NSDictionary *)candidate {
     NSDictionary *identifier = candidate[@"id"];
     if (!MSIMECurrentCandidateIdentity(identifier, _view) || !_candidateMenuToken) return nil;
-    // The rows of an opened candidate list (the Korean Hanja table compiled into the Engine) are ones the Engine pins, fixes and removes none of, and the list learns nothing; the local pin below would still reorder the list under the composition. So they get no menu.
+    // 打开的候选列表（编进 Engine 的韩文汉字表）里的行，Engine 不置顶、不固定、不删除，列表也不学习，所以不给菜单。
     if (MSIMECandidateListOpen(_view)) return nil;
     NSString *text = [candidate[@"text"] isKindOfClass:NSString.class] ? candidate[@"text"] : @"";
     NSDictionary *context = @{@"id":[identifier copy], @"text":text, @"render":_candidateMenuToken};
@@ -11033,8 +10966,8 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     NSMenu *menu = [[NSMenu alloc] initWithTitle:@"候选操作"];
     menu.autoenablesItems = NO;
     ApplyMetasequoiaMenuTheme(menu, [self resolvedMenuThemePreferences]);
-    NSString *pinTitle = MSIMECandidateIsPinned(MSIMECandidatePinCode(_view), text) ? @"取消置顶" : @"置顶";
-    [menu addItem:item(pinTitle, 0)];
+    // 置顶只记在 Engine 里（`pinned_candidates`），宿主没有自己的一份可查，和 Linux 一样始终是「置顶」。
+    [menu addItem:item(@"置顶", 0)];
     NSMenuItem *fixed = [[NSMenuItem alloc] initWithTitle:@"固定排位" action:nil keyEquivalent:@""];
     NSMenu *positions = [[NSMenu alloc] initWithTitle:@"固定排位"];
     positions.autoenablesItems = NO;
@@ -11049,7 +10982,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     if ([text isKindOfClass:NSString.class] && [text lengthOfBytesUsingEncoding:NSUTF32LittleEndianStringEncoding] / 4 > 1) {
         NSMenuItem *remove = item(@"删除", 1);
         NSArray *candidates = [self usesPresentedCandidatePages] ? _adaptivePageCandidates
-            : MSIMEVisibleCandidates(MSIMEReorderedPinnedCandidates(_view[@"candidates"], MSIMECandidatePinCode(_view)));
+            : MSIMEVisibleCandidates(_view[@"candidates"]);
         NSUInteger slot = [candidates isKindOfClass:NSArray.class] ? [candidates indexOfObjectIdenticalTo:candidate] : NSNotFound;
         if (slot < 8) {
             remove.keyEquivalent = [NSString stringWithFormat:@"%lu", (unsigned long)slot + 1];
@@ -11080,14 +11013,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     NSError *error = nil;
     NSDictionary *result = nil;
     switch (item.tag) {
-        case 0:
-            result = [_session pinGeneration:generation index:index error:&error];
-            // Older test/session doubles report a successful maintenance action
-            // with a nil transition. An explicit error is the only failure
-            // signal, so keep the local pin in sync in both forms.
-            if (!error && [context[@"text"] isKindOfClass:NSString.class])
-                MSIMETogglePinnedCandidate(MSIMECandidatePinCode(_view), context[@"text"]);
-            break;
+        case 0: result = [_session pinGeneration:generation index:index error:&error]; break;
         case 1: result = [_session removeGeneration:generation index:index error:&error]; break;
         case 2: result = [_session clearPositionGeneration:generation index:index error:&error]; break;
         default:

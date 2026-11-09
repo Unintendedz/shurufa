@@ -47,6 +47,5 @@ Status: implemented
 - Shurufa 的包多了 2.3 MB 的 `msime-stroke.db` 和它的 LGPL-3.0 许可证文本（`rime-stroke-LGPL-3.0.txt` 原本就随包）；第一次构建要联网下载语言词库（三套一起下，约 24 MB，只暂存笔画那套）。
 - 全拼、双拼组字时 Tab 不再翻页、不再打开展开候选，而是进入笔画筛选；关掉偏好就恢复原来的行为。
 - `h`、`s`、`p`、`n`、`z`、`d`、`x` 既是笔画也是部件首字母，两种读法的结果合在一起，第一个字母筛得比只按笔画宽，多打一两个字母才收窄。
-- 预编辑带上筛选码后不再是纯拼音，macOS 按预编辑存的本机候选置顶（`MSIMECandidatePinCode`）在筛选期间对不上原来的拼音，筛选里看不到那份置顶，退出后恢复。
 - Windows、Linux 的 host-api 不把偏好交给 Engine，行为不变。
 - 测试：`crates/engine/src/session/tests/stroke_filter.rs`（进入、筛选、不收空筛、退格、选词、光标、双拼两种情形、学习名次、词库打不开、部件首字母、`d` 当点），`local::chaizi` 的部件首字母匹配，`language_dictionary` 的通配前缀查询，host-api 的偏好到视图，client-core 的偏好默认值与版本表功能位。

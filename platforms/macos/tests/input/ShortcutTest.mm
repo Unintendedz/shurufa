@@ -13939,7 +13939,6 @@ int main(int argc, char **argv) {
             @"candidate_ai_badge_style": @"robot"
         };
         [controller applySharedToolbarPreferences:candidateDisplayDefaults];
-        [NSUserDefaults.standardUserDefaults removeObjectForKey:@"MSIMEClientPinnedCandidates"];
         [controller syncPageSize];
         // 上面逐项点过每页候选的弹出菜单，停在最后一项 10。
         assert(session.requestedPageSize == 10);
@@ -14639,15 +14638,16 @@ int main(int argc, char **argv) {
         assert([candidateMenu itemAtIndex:2].keyEquivalentModifierMask == deleteModifiers);
         NSMenu *positionMenu = [candidateMenu itemAtIndex:1].submenu;
         assert(positionMenu.numberOfItems == 7 && [positionMenu itemAtIndex:5].separatorItem);
+        // 置顶只记在 Engine 里。旧版本在 `MSIMEClientPinnedCandidates` 里另记一份、画的时候把置顶词挪到第一格，高亮却留在 Engine 的首选上；
+        // 学习数据清除后两份对不上，打 you 时第二格的「又」一直亮着、空格上屏的也是它。留着的旧记录不能再改顺序或菜单。
         [NSUserDefaults.standardUserDefaults setObject:@{@"ce'shi": @[@"布局"]} forKey:@"MSIMEClientPinnedCandidates"];
         [controller renderCandidates];
-        // Pinning moves the candidate to the first slot - that is what 置顶 does - while it keeps the Engine
-        // index it had, so selecting it still commits the right word. Reading slot 1 here asserted the
-        // opposite of the feature, and never ran because the suite aborted earlier.
-        MSIMECandidateButton *pinnedCandidate = (id)PageButton(layoutPanel.contentView, 0);
-        assert(pinnedCandidate && [pinnedCandidate.title containsString:@"布局"]);
-        assert([pinnedCandidate.candidateID[@"index"] isEqual:@1]);
-        assert([[[pinnedCandidate menuForEvent:rightClick] itemAtIndex:0].title isEqual:@"取消置顶"]);
+        MSIMECandidateButton *leadingCandidate = (id)PageButton(layoutPanel.contentView, 0);
+        assert(leadingCandidate && [leadingCandidate.title containsString:@"测试"]);
+        assert([leadingCandidate.candidateID[@"index"] isEqual:@0]);
+        MSIMECandidateButton *stalePin = (id)PageButton(layoutPanel.contentView, 1);
+        assert(stalePin && [stalePin.title containsString:@"布局"] && [stalePin.candidateID[@"index"] isEqual:@1]);
+        assert([[[stalePin menuForEvent:rightClick] itemAtIndex:0].title isEqual:@"置顶"]);
         [NSUserDefaults.standardUserDefaults removeObjectForKey:@"MSIMEClientPinnedCandidates"];
         [controller renderCandidates];
         clickCandidate = (id)PageButton(layoutPanel.contentView, 1);
@@ -14664,11 +14664,6 @@ int main(int argc, char **argv) {
             // 右键菜单的每一项和点选一样先报告 MSIME_KEY_POINTER 开新的一轮，再派发。
             assert(([[session.calls subarrayWithRange:NSMakeRange(session.calls.count - 2, 2)] isEqual:@[[NSString stringWithFormat:@"key:%u", MSIME_KEY_POINTER], @"maintenance"]]));
         }
-        // 置顶 is one of the operations above, so the loop leaves 布局 pinned. That reorders every later
-        // render in this function - including the external-skin block, which reads the first button as the
-        // highlighted one - so undo it here rather than at the end. The loop is checking that each menu
-        // item dispatches maintenance, not setting up state for anybody else.
-        [NSUserDefaults.standardUserDefaults removeObjectForKey:@"MSIMEClientPinnedCandidates"];
         [controller renderCandidates];
         // renderCandidates rebuilds the buttons, so everything captured from the previous panel is stale.
         clickCandidate = (id)PageButton(layoutPanel.contentView, 1);
@@ -15757,7 +15752,6 @@ int main(int argc, char **argv) {
         @autoreleasepool { TestKeymap(defaults, appearance); }
         method_setImplementation(fontMethod, originalMonospacedFont);
         assert(missingKeyFontCalls > 0);
-        [NSUserDefaults.standardUserDefaults removeObjectForKey:@"MSIMEClientPinnedCandidates"];
         MSIMERemoveTestPreferenceSuite(defaults, suite);
         MSIMERestoreVoiceHoldKeys(standardDefaults, previousVoiceHoldKeys);
     }

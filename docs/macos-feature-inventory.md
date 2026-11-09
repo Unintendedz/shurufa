@@ -114,7 +114,7 @@ ref=/path/to/MSIME-apple
 | `ActionForSolitaryShift`、`handleSolitaryShiftFlags` | `platforms/macos/src/core/ModifierTap.h`，控制器用 `MSIMEModifierTap` 观察修饰键 |
 | `ClassifyConfiguredControllerKey` | `platforms/macos/src/input/InputControllerPhysicalKeys.h` |
 | `MetasequoiaCandidateKeyOptions`、`MetasequoiaCandidateFollowsCaret` | 共享 `NavigationPreferences` / `candidate_follow_cursor` |
-| `candidatePinToggled` | `platforms/macos/src/input/InputController.mm` 的 `MSIMETogglePinnedCandidate` / `MSIMECandidatePinCode` |
+| `candidatePinToggled` | `platforms/macos/src/input/InputController.mm` 的 `candidateMenuAction:` 经 `pinGeneration:` 交给 Engine 的 `pin_candidate`（2026-11-09 删掉宿主自己的置顶表） |
 | 释义与翻译共 12 个（`LookupCandidateGloss`、`FormatCandidateGloss`、`TakeLeadingSenses`、`FindSenseDelimiter`、`CollapseWhitespace`、`IsAsciiSpace`、`IsHanCodePoint`、`IsEnglishCandidateText`、`NextArmedGlossColumn`、`CandidateGlossRequestForModifiers`、`CandidateSupportsOnlineGloss`、`TranslationQueryForCandidate`、`CandidateTranslationProviderAt`） | `crates/host-api/src/ffi/translation.rs`（所有宿主共用的 C ABI） |
 | `EncodePersonalWord`、`DecodePersonalWord`、`personalEntriesAtOffset`、`ResetMetasequoiaLearnedData(ForCurrentUser)` | `crates/host-api/src/dictionary.rs` |
 | `InstallMetasequoiaDictionary`、`InstallMetasequoiaEnglishDictionary`、`InstallMetasequoiaHelpCodes`、`PrepareMetasequoiaDictionary` | `crates/host-api/src/lib.rs` 的 `prepare_host_configuration` / `refresh_host_options`（资源由 `platforms/macos/stage-resources.sh` 随包，`crates/client-core/src/resources.rs` 校验）、`platforms/macos/src/dictionary/DictionaryInstaller.mm` |
