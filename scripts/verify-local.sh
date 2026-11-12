@@ -1179,6 +1179,13 @@ if [ -n "${MSIME_EVAL_RESOURCES:-}" ] && [ -d "${MSIME_EVAL_RESOURCES:-}" ]; the
       echo "rerank-latency sentences" > "$collected".latency
     fi
     grep -E "with model|over the .*budget:" "$collected".latency.log | sed 's#^ *#  #'
+    # 宿主打开「本地神经排序」时引擎还在词格整句上跑键盘模型，它给出的次选整句会进候选列表。逐键重排要是也去比较它们，每键 p95 会多 6-8ms（.agents/notes/implemented/feature/2026-11-10-keyboard-rerank-sentence-tail.md），这一项单独量。
+    if ! cargo run --release -q -p msime-input-runtime --example rerank_latency --locked -- \
+        --resources "$MSIME_EVAL_RESOURCES" --set resources/eval/sentences-v1.tsv --keyboard-neural \
+        > "$collected".latency-keyboard.log 2>&1; then
+      echo "rerank-latency sentences keyboard-neural" >> "$collected".latency
+    fi
+    grep -E "with model|over the .*budget:" "$collected".latency-keyboard.log | sed 's#^ *#  keyboard-neural #'
     compare "reranker latency" "$collected".latency
   else
     echo "skipped: no sentence-model.safetensors in $MSIME_EVAL_RESOURCES"

@@ -175,6 +175,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut warmup = 5usize;
     let mut limit: Option<usize> = None;
     let mut grid: Option<KeyGrid> = None;
+    let mut keyboard_neural = false;
     let mut index = 0;
     while index < args.len() {
         let take = |index: &mut usize| -> Result<String, String> {
@@ -193,12 +194,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--grid" => grid = Some(grid_keys::parse_grid(&take(&mut index)?)?),
             // `--grid nine` 的旧写法。
             "--nine-key" => grid = Some(KeyGrid::NineKey),
+            // 两臂都打开引擎内的键盘神经联想（宿主「本地神经排序」打开时的样子），量的仍是逐键重排在它之上多花的时间。
+            "--keyboard-neural" => keyboard_neural = true,
             other => return Err(format!("unknown argument: {other}").into()),
         }
         index += 1;
     }
     let resources = resources.ok_or(
-        "usage: rerank_latency --resources <verified-dir> --set <file.tsv> [--resource-lock <file.json>] [--budget-ms 16] [--warmup 5] [--limit N] [--grid nine|fourteen|shuangpin-<profile>]",
+        "usage: rerank_latency --resources <verified-dir> --set <file.tsv> [--resource-lock <file.json>] [--budget-ms 16] [--warmup 5] [--limit N] [--grid nine|fourteen|shuangpin-<profile>] [--keyboard-neural]",
     )?;
     if sets.is_empty() {
         return Err("at least one --set is required".into());
@@ -236,6 +239,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     options.learning = false;
     options.frequency_mode = "disabled".into();
     options.sentence_alternatives = true;
+    options.sentence_association.neural_keyboard = keyboard_neural;
 
     let model_path = resources.join("sentence-model.safetensors");
     let bytes = std::fs::read(&model_path).map_err(|error| {
