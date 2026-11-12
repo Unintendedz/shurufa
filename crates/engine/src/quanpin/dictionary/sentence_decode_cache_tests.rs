@@ -101,6 +101,7 @@ fn cached_duplicate_sentences_do_not_copy_discarded_paths() {
         "fan'ou'er",
         &segments,
         false,
+        None,
     );
     assert!(candidates.len() > 1, "夹具必须覆盖多条缓存路径");
     let before = words(&candidates);
@@ -111,6 +112,7 @@ fn cached_duplicate_sentences_do_not_copy_discarded_paths() {
             "fan'ou'er",
             &segments,
             false,
+            None,
         );
     });
     assert_eq!(words(&candidates), before);

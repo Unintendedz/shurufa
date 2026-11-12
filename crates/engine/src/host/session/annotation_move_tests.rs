@@ -64,6 +64,7 @@ fn frozen_snapshot(session: &Session) -> Result<EngineSnapshot> {
         candidate_corrected: Vec::with_capacity(count),
         candidate_answers_key: Vec::with_capacity(count),
         candidate_static_evidence: Vec::with_capacity(count),
+        candidate_keyboard_runner_up: Vec::with_capacity(count),
         candidate_list_open: value.candidate_list_open,
         conversion: value.conversion,
         conversion_focus_start: value.conversion_focus.0,
@@ -122,6 +123,9 @@ fn frozen_snapshot(session: &Session) -> Result<EngineSnapshot> {
         output
             .candidate_static_evidence
             .push(candidate.static_evidence());
+        output
+            .candidate_keyboard_runner_up
+            .push(candidate.keyboard_runner_up);
         output.candidate_codes.push(candidate.pinyin.into_string());
         output.candidates.push(candidate.word.into_string());
     }

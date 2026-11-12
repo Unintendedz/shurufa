@@ -198,6 +198,7 @@ fn literal_alternative_series_reuses_prefix_rows_across_dense_paths() {
                 path,
                 false,
                 None,
+                None,
             ));
         }
         merge_series_by_coverage(&mut rows, supplemental);
@@ -233,7 +234,7 @@ fn literal_alternative_series_shared_prefixes_keep_the_original_sparse_threshold
     });
     let segments = ["dia", "xi", "an"].map(str::to_owned);
     let control =
-        dictionary.query_series_with_typos("diaxian", "dia'xi'an", &segments, false, None);
+        dictionary.query_series_with_typos("diaxian", "dia'xi'an", &segments, false, None, None);
     assert_eq!(control.len(), 8);
     let mut queried = HashMap::from([("dia".to_owned(), control.len())]);
     let shared = dictionary.query_series_with_typos(
@@ -242,6 +243,7 @@ fn literal_alternative_series_shared_prefixes_keep_the_original_sparse_threshold
         &segments,
         false,
         Some(&mut queried),
+        None,
     );
     assert!(
         shared.is_empty(),

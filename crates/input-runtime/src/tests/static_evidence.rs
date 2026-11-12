@@ -339,3 +339,26 @@ fn large_static_rerank_lists_preserve_fallback_and_key_rules() {
         }
     }
 }
+
+#[test]
+fn keyboard_runner_ups_leave_the_comparison_only_when_the_flags_line_up() {
+    use msime_engine::ordering::ParallelOrderRows;
+    let texts = ["甲".to_owned(), "乙".to_owned()];
+    let sources = [LATTICE_SOURCE; 2];
+    let answers = [true; 2];
+    let corrected = [false; 2];
+    let pick = |runner_ups: &[bool]| {
+        let rows = ParallelOrderRows::new(&texts, &sources, &answers, &corrected)
+            .with_keyboard_runner_ups(runner_ups);
+        rerank_pick(&mut model(), "", 0, false, &rows)
+    };
+    assert_eq!(pick(&[]), Some(1));
+    assert_eq!(pick(&[false, false]), Some(1));
+    // 模型偏爱的乙是键盘模型的次选：不再比较，只剩首行，不动。
+    assert_eq!(pick(&[false, true]), None);
+    // 首行是次选时没有可比较的首行，拒绝重排。
+    assert_eq!(pick(&[true, false]), None);
+    // 长度不符的标记整份作废，按都不是次选处理。
+    assert_eq!(pick(&[true]), Some(1));
+    assert_eq!(pick(&[false, true, true]), Some(1));
+}

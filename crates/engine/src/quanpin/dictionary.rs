@@ -19,8 +19,8 @@ use crate::ime::online_batch::{
 };
 use crate::lattice::decode::{decode_pinned, BigramMemo, PinnedSpan, SentenceNgramTables};
 use crate::lattice::merge::{
-    decode_lattice, decode_lattice_borrowed, merge_decoded, merge_decoded_borrowed,
-    whole_sentence_insert_position, DecodedSentences,
+    decode_lattice, decode_lattice_borrowed, merge_decoded_borrowed_with_runner_ups,
+    merge_decoded_with_runner_ups, whole_sentence_insert_position, DecodedSentences,
 };
 use crate::lattice::neural::{
     shared_sentence_model, NeuralReranker, CONTEXT_CHARACTERS, MAX_RERANK_PATHS,
@@ -853,9 +853,16 @@ impl QuanpinDictionary {
         let alternatives = alternative_segmentations(raw, &segments, &resolution, types);
         let primary_segmentation = resolution.segmentation.as_str();
         let mut result;
+        // 只有主切分留下键盘模型的次选整句：备选切分的次选大多是生造的读法（`da'o'shi'kan` 的「打哦试看」），而它们自己的两条整句已经在列表里。
+        let mut runner_ups = Vec::new();
         if resolution.corrected_input {
             // The corrected reading is the primary key, so selection and weight updates land on the right rows; the literal reading stays behind it as a fallback tail.
-            result = self.query_series(raw, primary_segmentation, &resolution.corrected);
+            result = self.query_primary_series(
+                raw,
+                primary_segmentation,
+                &resolution.corrected,
+                &mut runner_ups,
+            );
             let literal = if segmentation.is_empty() {
                 let literal_segmentation = join_segments(&segments);
                 self.query_series(raw, &literal_segmentation, &segments)
@@ -879,7 +886,8 @@ impl QuanpinDictionary {
                 append_unique_words(&mut result, rows);
             }
         } else {
-            result = self.query_series(raw, primary_segmentation, &segments);
+            result =
+                self.query_primary_series(raw, primary_segmentation, &segments, &mut runner_ups);
             if !alternatives.is_empty() {
                 result = self.merge_alternatives(
                     raw,
@@ -890,6 +898,8 @@ impl QuanpinDictionary {
                 );
             }
         }
+        // 接在所有切分、补全词和单字之后：放在主切分自己的那段末尾时，另一切分的正确读法（`xieshanga` 的「协商啊」）会排到它们后面，被 `runner_up_order` 挪去列表末尾。
+        append_unique_words(&mut result, runner_ups);
         let (cached, projected) = match cold {
             ColdRows::Transfer => {
                 let cached = result.clone();
@@ -968,6 +978,7 @@ impl QuanpinDictionary {
                     path,
                     false,
                     Some(&mut queried_prefixes),
+                    None,
                 );
                 supplemental.extend(rows);
             }
@@ -1046,7 +1057,18 @@ impl QuanpinDictionary {
         segmentation: &str,
         segments: &[String],
     ) -> Vec<WordItem> {
-        self.query_series_with_typos(raw, segmentation, segments, true, None)
+        self.query_series_with_typos(raw, segmentation, segments, true, None, None)
+    }
+
+    /// 主切分的 `query_series`：键盘模型的次选整句交给 `runner_ups`，由调用方接在整张列表末尾。
+    fn query_primary_series(
+        &mut self,
+        raw: &str,
+        segmentation: &str,
+        segments: &[String],
+        runner_ups: &mut Vec<WordItem>,
+    ) -> Vec<WordItem> {
+        self.query_series_with_typos(raw, segmentation, segments, true, None, Some(runner_ups))
     }
 
     fn query_series_with_typos(
@@ -1056,6 +1078,7 @@ impl QuanpinDictionary {
         segments: &[String],
         include_typos: bool,
         mut queried_prefixes: Option<&mut HashMap<String, usize>>,
+        runner_ups: Option<&mut Vec<WordItem>>,
     ) -> Vec<WordItem> {
         if segments.is_empty() {
             return self.query_single_path(raw, segmentation, segments);
@@ -1117,11 +1140,14 @@ impl QuanpinDictionary {
         }
 
         if segments.len() >= 2 && has_only_complete_pinyin_segments(segments) {
-            if include_typos {
-                self.merge_sentences(&mut result, raw, segmentation, segments);
-            } else {
-                self.merge_sentences_with_typos(&mut result, raw, segmentation, segments, false);
-            }
+            self.merge_sentences_with_typos(
+                &mut result,
+                raw,
+                segmentation,
+                segments,
+                include_typos,
+                runner_ups,
+            );
         }
 
         // 跳过的重复行仍计入原路径的稀疏门槛，不能因此额外触发读音回退。
@@ -1159,6 +1185,7 @@ impl QuanpinDictionary {
     }
 
     /// The lattice sentence block and the typo sentence (QD:644-721, overlays.md §1.6.2). Both rank below a dictionary row that already answers the whole key, which is what `whole_sentence_insert_position` computes; inserting at index 0 once turned 百依百顺 into 白一百顺 and 颁布实施 into 版不是是.
+    #[cfg(test)]
     fn merge_sentences(
         &mut self,
         result: &mut Vec<WordItem>,
@@ -1166,7 +1193,7 @@ impl QuanpinDictionary {
         segmentation: &str,
         segments: &[String],
     ) {
-        self.merge_sentences_with_typos(result, raw, segmentation, segments, true);
+        self.merge_sentences_with_typos(result, raw, segmentation, segments, true, None);
     }
 
     fn merge_sentences_with_typos(
@@ -1176,6 +1203,7 @@ impl QuanpinDictionary {
         segmentation: &str,
         segments: &[String],
         include_typos: bool,
+        runner_ups: Option<&mut Vec<WordItem>>,
     ) {
         let association = self.sentence_association.clone();
         let has_collocation =
@@ -1237,7 +1265,7 @@ impl QuanpinDictionary {
             .get_ref(&decode_key)
             .filter(|cached| cached.personal_version == personal_version);
         let typo = if let Some(cached) = cached {
-            merge_decoded_borrowed(
+            merge_decoded_borrowed_with_runner_ups(
                 result,
                 segments,
                 typed,
@@ -1245,6 +1273,7 @@ impl QuanpinDictionary {
                 &mut self.rerankers,
                 &self.rescoring_context,
                 &cached.decoded,
+                runner_ups,
             )
         } else {
             let span_count = lattice_span_count(segments.len(), options.max_phrase_syllables);
@@ -1279,7 +1308,7 @@ impl QuanpinDictionary {
                 );
             }
             decoded.and_then(|decoded| {
-                merge_decoded(
+                merge_decoded_with_runner_ups(
                     result,
                     segments,
                     typed,
@@ -1287,6 +1316,7 @@ impl QuanpinDictionary {
                     &mut self.rerankers,
                     &self.rescoring_context,
                     decoded,
+                    runner_ups,
                 )
             })
         };

@@ -27,6 +27,8 @@ struct TransformEngine {
     withheld: Vec<String>,
     /// 让编码数组比候选少一项，制造平行数组长度不一致。
     short_codes: bool,
+    /// 与 `words` 平行的键盘模型次选标记；长度不符时快照里留空。
+    runner_ups: Vec<bool>,
     /// 模拟读取候选快照失败。
     snapshot_fails: bool,
     /// `select`、`select_edge`、`finish` 收到的引擎下标。
@@ -76,6 +78,11 @@ impl InputEngine for TransformEngine {
             candidate_positions: self.parallel(&self.positions)[..count].to_vec(),
             candidate_corrected: vec![false; count],
             candidate_answers_key: vec![true; count],
+            candidate_keyboard_runner_up: if self.runner_ups.len() == count {
+                self.runner_ups.clone()
+            } else {
+                Vec::new()
+            },
             candidate_list_open: self.candidate_list_open,
             shuangpin_profile: "xiaohe".into(),
             answered_by_pinyin_fallback: false,
@@ -1033,4 +1040,48 @@ fn wubi_top_commit_takes_the_engines_first_row_past_an_inserted_one() {
     let topped = harness.key(b'a');
     assert!(topped.commit.unwrap().starts_with('工'));
     assert_eq!(harness.runtime.engine.picks, [0]);
+}
+
+#[test]
+fn keystroke_rerank_skips_keyboard_runner_ups_and_the_settled_pass_compares_them() {
+    let build = |runner_ups: Vec<bool>| {
+        let mut engine = TransformEngine::new(&["甲", "乙"]);
+        engine.sources = vec![LATTICE_SOURCE; 2];
+        engine.runner_ups = runner_ups;
+        let mut harness = Harness::new(engine, Vec::new());
+        let model = || {
+            Some(Reranker::new(std::sync::Arc::new(favouring_model(
+                &['甲', '乙'],
+                &['乙'],
+            ))))
+        };
+        harness.runtime.set_reranker(model());
+        harness.runtime.set_settled_reranker(model());
+        harness.key(b'a');
+        harness
+    };
+    // 对照：乙不是键盘模型的次选时，逐键重排就把它提到首位。
+    assert_eq!(build(Vec::new()).shown(), ["乙", "甲"]);
+    // 乙是次选：逐键重排不比较它，停顿后精排照常比较并把它提上来。
+    let mut harness = build(vec![false, true]);
+    assert_eq!(harness.shown(), ["甲", "乙"]);
+    assert_eq!(
+        harness.runtime.cached.candidate_keyboard_runner_up,
+        [false, true]
+    );
+    assert!(harness.runtime.rerank_settled());
+    assert_eq!(harness.shown(), ["乙", "甲"]);
+    // 标记跟着行走。
+    assert_eq!(
+        harness.runtime.cached.candidate_keyboard_runner_up,
+        [true, false]
+    );
+    // 异步的停顿评分同样比较它。
+    let mut asynchronous = build(vec![false, true]);
+    let request = asynchronous.runtime.begin_settled_rerank().unwrap();
+    let applied = asynchronous
+        .runtime
+        .apply_settled_rerank(score_settled_rerank(request));
+    assert!(applied.current && applied.moved);
+    assert_eq!(asynchronous.shown(), ["乙", "甲"]);
 }

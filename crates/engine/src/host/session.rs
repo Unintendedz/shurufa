@@ -114,6 +114,8 @@ pub struct EngineSnapshot {
     pub candidate_answers_key: Vec<bool>,
     /// 与候选同步排列的词网格逐字评分证据；非词网格行为空，证据缺失或长度不符时沿用原模型决策。
     pub candidate_static_evidence: Vec<Option<crate::ordering::StaticEvidence>>,
+    /// 与候选同步排列：这一行是引擎键盘模型的次选整句（`WordItem::keyboard_runner_up`）。长度不符时按全是假处理，逐键重排多比较几行，只多花时间。
+    pub candidate_keyboard_runner_up: Vec<bool>,
     /// The scheme's openable candidate list is showing (the Korean Hanja list, the Zhuyin conversion list); candidates are its rows while it is.
     pub candidate_list_open: bool,
     /// 整句改字时改好的整句，否则为空（`SessionSnapshot::conversion`）。
@@ -306,6 +308,7 @@ impl Session {
             candidate_corrected: Vec::with_capacity(count),
             candidate_answers_key: Vec::with_capacity(count),
             candidate_static_evidence: Vec::with_capacity(count),
+            candidate_keyboard_runner_up: Vec::with_capacity(count),
             candidate_list_open: value.candidate_list_open,
             conversion: value.conversion,
             conversion_focus_start: value.conversion_focus.0,
@@ -365,6 +368,9 @@ impl Session {
             output
                 .candidate_static_evidence
                 .push(candidate.static_evidence());
+            output
+                .candidate_keyboard_runner_up
+                .push(candidate.keyboard_runner_up);
             output.candidate_codes.push(candidate.pinyin.into_string());
             output.candidates.push(candidate.word.into_string());
         }

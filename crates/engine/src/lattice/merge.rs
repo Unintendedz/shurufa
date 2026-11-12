@@ -182,6 +182,30 @@ pub(crate) fn merge_decoded(
     rescoring_context: &str,
     decoded: DecodedSentences,
 ) -> Option<TypoSentence> {
+    merge_decoded_with_runner_ups(
+        candidates,
+        syllables,
+        typed_pinyin,
+        options,
+        rerankers,
+        rescoring_context,
+        decoded,
+        None,
+    )
+}
+
+/// `merge_decoded`，另外把键盘模型的次选整句交给 `runner_ups`（见 `keyboard_runner_up_rows`）；`None` 时与 `merge_decoded` 相同。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn merge_decoded_with_runner_ups(
+    candidates: &mut Vec<WordItem>,
+    syllables: &[String],
+    typed_pinyin: &str,
+    options: &LatticeOptions<'_>,
+    rerankers: &mut [NeuralReranker],
+    rescoring_context: &str,
+    decoded: DecodedSentences,
+    runner_ups: Option<&mut Vec<WordItem>>,
+) -> Option<TypoSentence> {
     let DecodedSentences { paths, typo } = decoded;
     if paths.is_empty() {
         return None;
@@ -195,10 +219,12 @@ pub(crate) fn merge_decoded(
         rescoring_context,
         Cow::Owned(paths),
         typo,
+        runner_ups,
     )
 }
 
 /// 缓存命中时先借用路径，只为最终入选的候选复制字段；缓存内容与容量保持不变。
+#[cfg(test)]
 pub(crate) fn merge_decoded_borrowed(
     candidates: &mut Vec<WordItem>,
     syllables: &[String],
@@ -207,6 +233,30 @@ pub(crate) fn merge_decoded_borrowed(
     rerankers: &mut [NeuralReranker],
     rescoring_context: &str,
     decoded: &DecodedSentences,
+) -> Option<TypoSentence> {
+    merge_decoded_borrowed_with_runner_ups(
+        candidates,
+        syllables,
+        typed_pinyin,
+        options,
+        rerankers,
+        rescoring_context,
+        decoded,
+        None,
+    )
+}
+
+/// `merge_decoded_borrowed` 的次选整句版本，见 `merge_decoded_with_runner_ups`。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn merge_decoded_borrowed_with_runner_ups(
+    candidates: &mut Vec<WordItem>,
+    syllables: &[String],
+    typed_pinyin: &str,
+    options: &LatticeOptions<'_>,
+    rerankers: &mut [NeuralReranker],
+    rescoring_context: &str,
+    decoded: &DecodedSentences,
+    runner_ups: Option<&mut Vec<WordItem>>,
 ) -> Option<TypoSentence> {
     merge_decoded_paths(
         candidates,
@@ -217,6 +267,7 @@ pub(crate) fn merge_decoded_borrowed(
         rescoring_context,
         Cow::Borrowed(&decoded.paths),
         decoded.typo.clone(),
+        runner_ups,
     )
 }
 
@@ -232,6 +283,7 @@ fn merge_decoded_paths(
     rescoring_context: &str,
     mut paths: Cow<'_, [SentencePath]>,
     typo: Option<TypoSentence>,
+    runner_ups: Option<&mut Vec<WordItem>>,
 ) -> Option<TypoSentence> {
     if paths.is_empty() {
         return None;
@@ -305,6 +357,21 @@ fn merge_decoded_paths(
                 .copied()
                 .chain(scored..path_count)
         });
+        if let (Some(runner_ups), Some(ranked)) = (runner_ups, ranked.clone()) {
+            let rows = match already.as_ref() {
+                Some(already) => {
+                    keyboard_runner_up_rows(&paths, ranked, options, typed_pinyin, |sentence| {
+                        already.contains(sentence)
+                    })
+                }
+                None => {
+                    keyboard_runner_up_rows(&paths, ranked, options, typed_pinyin, |sentence| {
+                        candidates.iter().any(|item| item.word == sentence)
+                    })
+                }
+            };
+            runner_ups.extend(rows);
+        }
         if let Some(already) = already.as_ref() {
             reranked_block(
                 paths,
@@ -447,6 +514,37 @@ fn take_sentence_index(
         }
     }
     None
+}
+
+/// 键盘模型给出的其余路径：`reranked_block` 放进整句块的两条（词格首选和键盘模型选中的那条）以外、还没有出现在候选里的路径，按键盘模型的顺序成为 `Generated` 行，标上 `keyboard_runner_up`。
+///
+/// 两条的上限让正确整句经常根本不在列表里（`daoshikan` 的「到时看」排在 12 条路径里，但上文是「其他」时键盘模型挑的是「导师看」）；全部丢掉时，停顿后精排也只能在已有候选之间挪。调用方把这些行接在整张候选列表的末尾，由 `ordering::runner_up_order` 决定哪几条回到第一页。它们刚被同一个模型排在选中那条之后，所以逐键重排不再比较它们（`ordering::rerank_pick`）。
+fn keyboard_runner_up_rows(
+    paths: &[SentencePath],
+    ranked: impl IntoIterator<Item = usize> + Clone,
+    options: &LatticeOptions<'_>,
+    typed_pinyin: &str,
+    is_listed: impl Fn(&str) -> bool,
+) -> Vec<WordItem> {
+    let literal = (options.include_lattice_best || options.include_collocation_best)
+        .then(|| take_sentence_index(paths, 0..paths.len(), None, options, &is_listed))
+        .flatten();
+    let pick = take_sentence_index(paths, ranked.clone(), literal, options, &is_listed);
+    ranked
+        .into_iter()
+        .filter(|&index| {
+            Some(index) != literal && Some(index) != pick && !is_listed(&paths[index].sentence)
+        })
+        .map(|index| {
+            let mut row = owned_sentence_row(
+                typed_pinyin,
+                paths[index].clone(),
+                CandidateSource::Generated,
+            );
+            row.keyboard_runner_up = true;
+            row
+        })
+        .collect()
 }
 
 /// 两个来源先按旧规则选索引，再把字段交给输出槽；槽顺序始终是字面、键盘。
@@ -1043,6 +1141,49 @@ mod tests {
             "without the lattice row the keyboard may pick the lattice best"
         );
         assert_eq!(words(&block(&lattice, None, &options, &[])), []);
+    }
+
+    #[test]
+    fn keyboard_runner_ups_are_the_other_paths_in_keyboard_order() {
+        // 词格顺序是甲乙丙丁戊；键盘模型排成丁甲戊丙乙，选中的是丁（甲是词格首选，不重复）。
+        let paths = [
+            path("甲", -1.0),
+            path("乙", -2.0),
+            path("丙", -3.0),
+            path("丁", -4.0),
+            path("戊", -5.0),
+        ];
+        let ranked = [3, 0, 4, 2, 1];
+        let options = LatticeOptions {
+            show_next_on_duplicate: true,
+            ..LatticeOptions::default()
+        };
+        let rows = |listed: &[&str]| {
+            keyboard_runner_up_rows(&paths, ranked, &options, "ab", |sentence| {
+                listed.contains(&sentence)
+            })
+            .into_iter()
+            .map(|item| {
+                assert!(item.keyboard_runner_up && item.sentence_association);
+                assert_eq!(item.source, Generated);
+                item.word.into_string()
+            })
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(rows(&[]), ["戊", "丙", "乙"]);
+        // 已在候选里的句子不再出现；词格首选已列出时，下一条词格路径乙成为首行，次选里没有它。
+        assert_eq!(rows(&["戊"]), ["丙", "乙"]);
+        assert_eq!(rows(&["甲"]), ["戊", "丙"]);
+        // 不出词格首选时，次选是键盘模型选中那条之后的全部路径。
+        let keyboard_only = LatticeOptions {
+            include_lattice_best: false,
+            ..options.clone()
+        };
+        let rows: Vec<_> = keyboard_runner_up_rows(&paths, ranked, &keyboard_only, "ab", |_| false)
+            .into_iter()
+            .map(|item| item.word.into_string())
+            .collect();
+        assert_eq!(rows, ["甲", "戊", "丙", "乙"]);
     }
 }
 

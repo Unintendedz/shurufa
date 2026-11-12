@@ -296,6 +296,18 @@ fn order_rows(snapshot: &EngineSnapshot) -> ParallelOrderRows<'_> {
     .with_static_evidence(&snapshot.candidate_static_evidence)
 }
 
+/// `Runtime::rerank_with` 是逐键的快速重排，还是停顿后精排借用同一套后处理。
+#[derive(Clone, Copy)]
+enum RerankPass {
+    Keystroke,
+    Settled,
+}
+
+/// 逐键重排读的候选行：在 `order_rows` 之上标出引擎键盘模型的次选整句，`rerank_pick` 不再比较它们。停顿后精排用 `order_rows`，照常比较。
+fn keystroke_order_rows(snapshot: &EngineSnapshot) -> ParallelOrderRows<'_> {
+    order_rows(snapshot).with_keyboard_runner_ups(&snapshot.candidate_keyboard_runner_up)
+}
+
 /// 复制候选行，供停顿模型在会话线程之外评分。
 struct SettledRerankRows {
     texts: Vec<String>,
@@ -711,6 +723,9 @@ impl<E: InputEngine> Runtime<E> {
             snapshot.candidate_answers_key.swap(left, right);
             if snapshot.candidate_static_evidence.len() == order.len() {
                 snapshot.candidate_static_evidence.swap(left, right);
+            }
+            if snapshot.candidate_keyboard_runner_up.len() == order.len() {
+                snapshot.candidate_keyboard_runner_up.swap(left, right);
             }
             engine_order.swap(left, right);
         });
@@ -1194,8 +1209,8 @@ impl<E: InputEngine> Runtime<E> {
         self.snapshot_settled_seats();
         let marked = self.settled_highlight();
         std::mem::swap(&mut self.reranker, &mut self.settled_reranker);
-        // 使用快速重排相同的后处理，保留固定席位。
-        let moved = self.rerank();
+        // 使用快速重排相同的后处理，保留固定席位；键盘模型的次选整句由停顿模型照常比较。
+        let moved = self.rerank_with(RerankPass::Settled);
         std::mem::swap(&mut self.reranker, &mut self.settled_reranker);
         self.finish_settled_presentation(moved, marked)
     }
@@ -2715,6 +2730,10 @@ impl<E: InputEngine> Runtime<E> {
     }
 
     fn rerank(&mut self) -> bool {
+        self.rerank_with(RerankPass::Keystroke)
+    }
+
+    fn rerank_with(&mut self, pass: RerankPass) -> bool {
         // 整句改字的候选是光标处一段的替换，按读音长短排好，不参与整句的重排。光标后编辑的首选接着固定的那段，必须留在首位。
         if !self.cached.conversion.is_empty() || self.cached.caret_edit_suffix {
             return false;
@@ -2736,7 +2755,10 @@ impl<E: InputEngine> Runtime<E> {
                 return false;
             }
             // 方案、五笔表码和上文窗口的判断都在 `rerank_pick` 里，这里同步旋转候选元数据和引擎座位映射。
-            let rows = order_rows(snapshot);
+            let rows = match pass {
+                RerankPass::Keystroke => keystroke_order_rows(snapshot),
+                RerankPass::Settled => order_rows(snapshot),
+            };
             rerank_pick(
                 reranker,
                 &self.ai_context,
@@ -2778,6 +2800,9 @@ impl<E: InputEngine> Runtime<E> {
         rotate_to_front(&mut snapshot.candidate_answers_key, promote);
         if snapshot.candidate_static_evidence.len() == count {
             rotate_to_front(&mut snapshot.candidate_static_evidence, promote);
+        }
+        if snapshot.candidate_keyboard_runner_up.len() == count {
+            rotate_to_front(&mut snapshot.candidate_keyboard_runner_up, promote);
         }
         rotate_to_front(&mut self.engine_order, promote);
         true
@@ -2895,6 +2920,7 @@ impl<E: InputEngine> Runtime<E> {
                     candidate_corrected: Vec::new(),
                     candidate_answers_key: Vec::new(),
                     candidate_static_evidence: Vec::new(),
+                    candidate_keyboard_runner_up: Vec::new(),
                     candidate_list_open: false,
                     microsoft_shuangpin: false,
                     shuangpin_profile: String::new(),
@@ -2946,7 +2972,9 @@ impl<E: InputEngine> Runtime<E> {
                 && self.cached.candidate_positions == previous.candidate_positions
                 && self.cached.candidate_corrected == previous.candidate_corrected
                 && self.cached.candidate_answers_key == previous.candidate_answers_key
-                && self.cached.candidate_static_evidence == previous.candidate_static_evidence;
+                && self.cached.candidate_static_evidence == previous.candidate_static_evidence
+                && self.cached.candidate_keyboard_runner_up
+                    == previous.candidate_keyboard_runner_up;
             if candidates_held {
                 self.highlighted = previous_highlight.min(self.visible_len().saturating_sub(1));
             } else if previous_highlight > 0 {

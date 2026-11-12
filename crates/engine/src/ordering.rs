@@ -153,6 +153,12 @@ pub trait OrderRowSource<'a> {
         None
     }
 
+    /// 这一行是引擎键盘模型排在它选中那条之后的整句路径（`WordItem::keyboard_runner_up`）。
+    /// 逐键重排的调用方用它把这些行排除出比较；停顿后精排不传，照常比较。
+    fn keyboard_runner_up(&self, _index: usize) -> bool {
+        false
+    }
+
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -213,6 +219,9 @@ impl<'a, R: OrderRowSource<'a> + ?Sized> OrderRowSource<'a> for ScoredOrderRows<
         }
         self.evidence.get(index).copied().flatten()
     }
+    fn keyboard_runner_up(&self, index: usize) -> bool {
+        self.rows.keyboard_runner_up(index)
+    }
 }
 
 /// 借用快照里的并行候选数组，避免排序前复制一份行数组。
@@ -222,21 +231,21 @@ pub struct ParallelOrderRows<'a> {
     answers_key: &'a [bool],
     corrected: &'a [bool],
     static_evidence: Option<&'a [Option<StaticEvidence>]>,
+    keyboard_runner_ups: Option<&'a [bool]>,
 }
 
 /// 找出实际交给模型比较的候选中最长的一行。
 ///
 /// `Reranker::best_where` 只比较前九条回答当前按键的候选；比较集合之后的长候选不能影响上下文窗口，否则会让模型每次无关的长行出现时重建前缀。
-fn longest_rerank_candidate<'a, R, F>(rows: &R, answers_key: &F) -> usize
+fn longest_rerank_candidate<'a, R, F>(rows: &R, compared: &F) -> usize
 where
     R: OrderRowSource<'a> + ?Sized,
-    F: Fn(OrderRow<'a>) -> bool,
+    F: Fn(usize) -> bool,
 {
     (0..rows.len())
-        .map(|index| rows.get(index))
-        .filter(|row| answers_key(*row))
+        .filter(|index| compared(*index))
         .take(STATIC_RERANK_LIMIT)
-        .map(|row| row.text.chars().count())
+        .map(|index| rows.get(index).text.chars().count())
         .max()
         .unwrap_or(0)
 }
@@ -254,11 +263,18 @@ impl<'a> ParallelOrderRows<'a> {
             answers_key,
             corrected,
             static_evidence: None,
+            keyboard_runner_ups: None,
         }
     }
 
     pub fn with_static_evidence(mut self, evidence: &'a [Option<StaticEvidence>]) -> Self {
         self.static_evidence = (evidence.len() == self.texts.len()).then_some(evidence);
+        self
+    }
+
+    /// 长度和候选不一致时整份作废，按每行都不是键盘模型的次选处理：多比较几行只多花时间，不会排错。
+    pub fn with_keyboard_runner_ups(mut self, runner_ups: &'a [bool]) -> Self {
+        self.keyboard_runner_ups = (runner_ups.len() == self.texts.len()).then_some(runner_ups);
         self
     }
 }
@@ -270,6 +286,11 @@ impl<'a> OrderRowSource<'a> for ParallelOrderRows<'a> {
 
     fn static_evidence(&self, index: usize) -> Option<StaticEvidence> {
         self.static_evidence?.get(index).copied().flatten()
+    }
+
+    fn keyboard_runner_up(&self, index: usize) -> bool {
+        self.keyboard_runner_ups
+            .is_some_and(|runner_ups| runner_ups.get(index).copied().unwrap_or(false))
     }
 
     fn get(&self, index: usize) -> OrderRow<'a> {
@@ -339,20 +360,25 @@ pub fn rerank_pick<'a, R: OrderRowSource<'a> + ?Sized>(
     answered_by_pinyin_fallback: bool,
     rows: &'a R,
 ) -> Option<usize> {
-    if !rerank_needs_model(scheme, answered_by_pinyin_fallback, rows) {
+    // 键盘模型的次选不会领先；真领先时没有可与之比较的首行，按拒绝比较处理。
+    if !rerank_needs_model(scheme, answered_by_pinyin_fallback, rows) || rows.keyboard_runner_up(0)
+    {
         return None;
     }
-    let answers_key = |row: OrderRow<'a>| row_answers_key(scheme, row);
+    // 键盘模型的次选刚被同一个模型在同一上文下排在它选中那条之后，逐键重排不再给它们打分：
+    // 它们都回答整个按键串，不排除就会占满比较集合，每键多给几条长句打分，结果却不变。
+    let compared =
+        |index: usize| row_answers_key(scheme, rows.get(index)) && !rows.keyboard_runner_up(index);
     let corrected_key = any_corrected_key(scheme, rows);
     // 只有参与比较的候选需要占用模型上下文窗口。
-    let longest = longest_rerank_candidate(rows, &answers_key);
+    let longest = longest_rerank_candidate(rows, &compared);
     let context = rerank_context(context, reranker.model().context_length(), longest);
     if rows.static_evidence(0).is_some() {
         let mut considered = [0; STATIC_RERANK_LIMIT];
         let mut statik = [0.0; STATIC_RERANK_LIMIT];
         let mut subset = [""; STATIC_RERANK_LIMIT];
         if let Some(count) =
-            fill_static_rerank_inputs(rows, answers_key, &mut considered, &mut statik, &mut subset)
+            fill_static_rerank_inputs(rows, compared, &mut considered, &mut statik, &mut subset)
         {
             let neural = reranker.log_probabilities(context, &subset[..count]);
             if neural.len() == count {
@@ -370,7 +396,7 @@ pub fn rerank_pick<'a, R: OrderRowSource<'a> + ?Sized>(
     }
     with_row_texts(rows, |texts| {
         reranker.best_where(context, texts, |index| CandidateFacts {
-            answers_key: answers_key(rows.get(index)),
+            answers_key: compared(index),
             trusted_dictionary_hit: DICTIONARY_SOURCES.contains(&rows.get(index).source)
                 && !corrected_key,
         })
@@ -379,21 +405,21 @@ pub fn rerank_pick<'a, R: OrderRowSource<'a> + ?Sized>(
 
 fn fill_static_rerank_inputs<'a, R, F>(
     rows: &'a R,
-    answers_key: F,
+    compared: F,
     considered: &mut [usize; STATIC_RERANK_LIMIT],
     statik: &mut [f64; STATIC_RERANK_LIMIT],
     subset: &mut [&'a str; STATIC_RERANK_LIMIT],
 ) -> Option<usize>
 where
     R: OrderRowSource<'a> + ?Sized,
-    F: Fn(OrderRow<'a>) -> bool,
+    F: Fn(usize) -> bool,
 {
     let mut count = 0;
     for index in 0..rows.len() {
-        let row = rows.get(index);
-        if !answers_key(row) {
+        if !compared(index) {
             continue;
         }
+        let row = rows.get(index);
         if count == STATIC_RERANK_LIMIT {
             break;
         }
@@ -615,7 +641,10 @@ mod tests {
             row("壬", LATTICE_SOURCE),
             row("这是没有进入模型比较集合的长候选", LATTICE_SOURCE),
         ];
-        assert_eq!(longest_rerank_candidate(&rows, &|row| row.answers_key), 1);
+        assert_eq!(
+            longest_rerank_candidate(&rows, &|index| rows[index].answers_key),
+            1
+        );
     }
 
     #[test]
@@ -761,7 +790,7 @@ mod tests {
             let mut subset = [""; STATIC_RERANK_LIMIT];
             let count = fill_static_rerank_inputs(
                 &scored,
-                |row| row.answers_key,
+                |index| scored.get(index).answers_key,
                 &mut considered,
                 &mut statik,
                 &mut subset,

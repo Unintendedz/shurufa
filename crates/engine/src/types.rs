@@ -798,6 +798,8 @@ pub struct WordItem {
     pub sentence_association: bool,
     /// Word boundaries of a decoded sentence, for personal context learning.
     pub sentence_words: Vec<String>,
+    /// 引擎键盘模型给整句路径排序时排在它选中那条之后的路径（`lattice::merge` 的次选整句）。逐键重排不再比较这些行，停顿后精排照常比较。
+    pub keyboard_runner_up: bool,
 }
 
 impl WordItem {
