@@ -12,11 +12,11 @@ Status: proposed
 
 ## Proposal
 
-只对主切分（`resolution.segmentation`）：键盘模型没选中的其余路径按键盘模型的排列顺序作为 `Generated` 行保留，接在整张候选列表的末尾（所有切分、补全词、单字之后），不放进整句块。哪几条回到第一页，仍由现有的 `runner_up_order` 决定（3 字以上留 3 条读法，2 字留 1 条）。备选切分照旧只出两条。不新增阈值或开关。
+只对主切分（`resolution.segmentation`）：键盘模型没选中的其余路径按键盘模型的排列顺序作为 `Generated` 行保留，接在整张候选列表的末尾（所有切分、补全词、单字之后），不放进整句块。哪几条回到第一页，仍由现有的 `runner_up_order` 决定（3 字以上留 3 条读法，2 字留 1 条）。备选切分照旧只出两条。这些行不进逐键重排（runtime 的 `rerank_pick`）的比较集合：它们刚被同一个模型文件（`sentence-model.safetensors`）在同一上文下评过、排在键盘模型选中的那条之后；停顿后精排（更大的桌面模型）照常比较它们。不新增阈值或开关。
 
 ## Evaluation
 
-`convert_eval --keyboard-neural`，全拼，学习关；锁定资源 dict-v2.0.24 加 `sentence-model.safetensors`，「停顿后精排开」再加 `sentence-model-desktop.safetensors`。逐条配对，括号内为 McNemar 精确检验 p 值。实验代码在分支 `exp/keyboard-sentence-tail`（`EXP_SENTENCE_TAIL=keyboard-end-primary-global`），不合入。
+`convert_eval --keyboard-neural`，全拼，学习关；锁定资源 dict-v2.0.24 加 `sentence-model.safetensors`，「停顿后精排开」再加 `sentence-model-desktop.safetensors`。逐条配对，括号内为 McNemar 精确检验 p 值。实验代码在分支 `exp/keyboard-sentence-tail`（`EXP_SENTENCE_TAIL=keyboard-end-primary-global-skipkey`），不合入。
 
 停顿后精排开（维护者的配置）：
 
@@ -32,7 +32,9 @@ Status: proposed
 
 words 剩下的 5–6 条都是被截断的四字词补全（`fangshujiang` → 防暑降温），主切分多出的读法占了座位，补全词从第 4 位落到第 6 位；这是多给整句座位的直接代价。
 
-`rerank_latency --exp-tail` 两臂都开键盘模型和逐键重排，按键配对：sentences-v1 每键多 mean 1.07 ms、p95 6.08 ms（p95 11.82 → 17.09 ms）；neutral 取 277 条多 mean 1.43 ms、p95 7.79 ms（16.17 → 23.32 ms）。p50 几乎不变，代价集中在长输入。来源尚未拆开，可能是多出的读法进入逐键重排比较的前九条、模型要给更长的文本打分。
+`rerank_latency --exp-tail` 两臂都开键盘模型和逐键重排，按键配对。多出的行也进逐键重排比较时，sentences-v1 每键多 mean 1.07 ms、p95 6.08 ms（p95 11.82 → 17.09 ms），neutral 取 277 条多 mean 1.43 ms、p95 7.79 ms（16.17 → 23.32 ms）。拆开后：`--exp-no-runtime-reranker` 两臂都不挂逐键重排时增量只剩 p95 0.17 / 0.26 ms，引擎一侧几乎不花时间；计数显示逐键重排每次比较的行从 1.6–1.8 条（约 9–11 字）涨到 9 条（约 52–59 字），整串读法都回答当前按键，比较集合的上限 9（`chinese-ime-lm` 的 `COMPARED`）就被它们占满。
+
+把这些行排除出逐键比较后，增量回到 p95 0.18 ms（sentences-v1）和 0.25 ms（neutral），评测的候选列表与不排除时逐条相同（只有 words 2791 条里 3 条的列表有差别，指标不变），停顿后精排开时的首选收益也一样。也就是说在这个摆放下，逐键重排给这些行打的分从来没有改变过结果。
 
 ## Alternatives considered
 
@@ -41,14 +43,16 @@ words 剩下的 5–6 条都是被截断的四字词补全（`fangshujiang` → 
 - **接在各自切分的末尾**（`keyboard-end`）：整句收益相同；但停顿后精排开时词级前五 −20，语气词前五 −4：另一切分的正确读法（`xieshanga` 的「协商啊」）在列表里排到主切分多出的读法后面，被 `runner_up_order` 挪去末尾。
 - **只给主切分、仍接在切分末尾**（`keyboard-end-primary`）：词级 −14，语气词 −4，第二种代价没有消失，说明问题在放的位置而不在离谱切分。
 - **按词网格顺序而不是键盘模型顺序**（`lattice`）：neutral 前五少 40 条（0.890 对 0.927）。
+- **让逐键重排也比较多出的行**：理由是逐键重排能在词典行和整句之间重新挑首选；但在全局末尾的摆放下它从没改变过结果，每键 p95 却多 6–8 ms。
 
 ## Acceptance criteria
 
 - neutral、harvested 的前五与找到率不低于上表；sentences-v1、particles 不出现逐条变差多于变好；words 前五的变差限于补全词被读法挤后一两位。
-- 长输入的逐键 p95 增量先拆清来源再定是否接受；`verify-local.sh` 的 `rerank latency` 阶段需要能打开键盘模型量这一项。
+- 逐键 p95 增量不超过 0.5 ms；`verify-local.sh` 的 `rerank latency` 阶段需要能打开键盘模型量这一项。
+- 「不进逐键比较」要作为结构化的事实传给 runtime（行自带的标记），实验里按文本查表的做法不能进产品。
 - 九键、14 键、双拼各跑一遍对应集合。
 
 ## Risks
 
-- 长输入的按键延迟变高，已经在 16 ms 预算附近的情形会更常超出。
+- 若以后改成让逐键重排也比较这些行，延迟会回到上面的 +6–8 ms。
 - `runner_up_order` 现在决定第一页留几条读法，它的常数是在不开键盘模型时标定的。
