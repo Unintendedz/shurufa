@@ -22,6 +22,7 @@ struct Fixture {
     local_mode: String,
     words: Vec<String>,
     codes: Vec<String>,
+    answers_key: Vec<bool>,
     text: String,
     snapshot_fails: bool,
     balanced_openings: Vec<u8>,
@@ -1081,7 +1082,11 @@ impl InputEngine for Fixture {
                 vec![0; self.words.len()]
             },
             candidate_corrected: vec![false; self.words.len()],
-            candidate_answers_key: vec![true; self.words.len()],
+            candidate_answers_key: if self.answers_key.len() == self.words.len() {
+                self.answers_key.clone()
+            } else {
+                vec![true; self.words.len()]
+            },
             candidate_list_open: false,
             microsoft_shuangpin: self.microsoft_shuangpin,
             shuangpin_profile: "xiaohe".into(),
@@ -1781,6 +1786,7 @@ fn runtime() -> Runtime<Fixture> {
             local_mode: "none".into(),
             words: (0..12).map(|n| format!("candidate-{n}")).collect(),
             codes: Vec::new(),
+            answers_key: Vec::new(),
             text: String::new(),
             snapshot_fails: false,
             balanced_openings: Vec::new(),
@@ -1840,6 +1846,7 @@ fn several_candidates_from_one_provider_take_their_seat_as_a_group() {
                 // The seating only runs on a snapshot whose parallel arrays all match, so the
                 // codes have to be as long as the words for this to exercise anything.
                 codes: (0..words.len()).map(|n| format!("code-{n}")).collect(),
+                answers_key: Vec::new(),
                 text: String::new(),
                 snapshot_fails: false,
                 balanced_openings: Vec::new(),
@@ -2090,6 +2097,7 @@ fn promoted_english_candidate_keeps_the_first_seat_with_cloud_and_ai() {
                 local_mode: "none".into(),
                 words: words.iter().map(|word| (*word).into()).collect(),
                 codes: (0..words.len()).map(|n| format!("code-{n}")).collect(),
+                answers_key: Vec::new(),
                 text: String::new(),
                 snapshot_fails: false,
                 balanced_openings: Vec::new(),
@@ -2429,6 +2437,7 @@ fn a_chosen_phrase_piece_waits_for_the_rest_of_the_phrase() {
                 local_mode: "none".into(),
                 words: vec!["海滩".into(), "跑步".into()],
                 codes: Vec::new(),
+                answers_key: Vec::new(),
                 text: String::new(),
                 snapshot_fails: false,
                 balanced_openings: Vec::new(),
@@ -2536,6 +2545,7 @@ fn a_phrase_piece_survives_the_reading_being_deleted() {
             local_mode: "none".into(),
             words: vec!["海滩".into(), "跑步".into()],
             codes: Vec::new(),
+            answers_key: Vec::new(),
             text: String::new(),
             snapshot_fails: false,
             balanced_openings: Vec::new(),
@@ -3414,6 +3424,7 @@ fn candidate_codes_follow_candidates_in_page_and_complete_snapshots() {
             local_mode: "none".into(),
             words: vec!["甲".into(), "乙".into()],
             codes: vec!["ab".into(), "ac".into()],
+            answers_key: Vec::new(),
             text: String::new(),
             snapshot_fails: false,
             balanced_openings: Vec::new(),
@@ -5039,16 +5050,30 @@ fn a_two_character_reading_keeps_only_the_first() {
 }
 
 #[test]
-fn only_readings_as_wide_as_the_first_are_counted() {
-    // A shorter lattice row is a reading of part of the key, not a runner-up for the whole of it.
-    let mut runtime = lattice_runtime(&[
-        ("根据官方新闻稿", 8),
-        ("根据官方", 8),
-        ("根据", 0),
-        ("根据官房新闻稿", 8),
-        ("根据关防新闻稿", 8),
-        ("根据官方新闻高", 8),
-    ]);
+fn only_readings_that_answer_the_whole_key_are_counted() {
+    // 部分按键生成的片段（answers_key = false）不算整句次选，而回答整码的异长切分（如 NeuralKeyboard）仍可编组。
+    let rows = [
+        ("根据官方新闻稿", 8, true),
+        ("根据官方", 8, false),
+        ("根据", 0, false),
+        ("根据官房新闻稿", 8, true),
+        ("根据关防新闻稿", 8, true),
+        ("根据官方新闻高", 8, true),
+    ];
+    let mut runtime = Runtime::new(
+        Fixture {
+            local_mode: "none".into(),
+            words: rows.iter().map(|(text, _, _)| (*text).to_owned()).collect(),
+            sources: rows.iter().map(|(_, source, _)| *source).collect(),
+            codes: vec![String::new(); rows.len()],
+            answers_key: rows.iter().map(|(_, _, answers)| *answers).collect(),
+            ..Fixture::default()
+        },
+        9,
+    )
+    .unwrap();
+    runtime.focus(true).unwrap();
+    type_key(&mut runtime);
     assert_eq!(
         candidate_texts(&mut runtime),
         [
@@ -5058,6 +5083,30 @@ fn only_readings_as_wide_as_the_first_are_counted() {
             "根据官方",
             "根据",
             "根据官方新闻高",
+        ]
+    );
+
+    let mut mixed_widths = lattice_runtime(&[
+        ("根据官方词", 8),
+        ("根据词", 0),
+        ("根剧", 0),
+        ("跟据方圆", 11),
+        ("跟居", 0),
+        ("根", 0),
+        ("跟聚芳园", 17),
+        ("根据官方辞", 8),
+    ]);
+    assert_eq!(
+        candidate_texts(&mut mixed_widths),
+        [
+            "根据官方词",
+            "跟据方圆",
+            "跟聚芳园",
+            "根据词",
+            "根剧",
+            "跟居",
+            "根据官方辞",
+            "根",
         ]
     );
 }
@@ -7440,6 +7489,7 @@ fn withholding_runtime(offered: usize, withheld: usize, page_size: u8) -> Runtim
             local_mode: "none".into(),
             words: (0..offered).map(|n| format!("candidate-{n}")).collect(),
             codes: Vec::new(),
+            answers_key: Vec::new(),
             text: String::new(),
             snapshot_fails: false,
             balanced_openings: Vec::new(),

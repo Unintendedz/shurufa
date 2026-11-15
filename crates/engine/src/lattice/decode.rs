@@ -77,6 +77,12 @@ pub struct LatticeOptions<'a> {
     /// 语法模型激活时把解码最优路径以 `CandidateSource::Collocation` 行展示；
     /// 与 `include_lattice_best` 同开且指向同一句时归属 Collocation。
     pub include_collocation_best: bool,
+    /// 末列额外的束宽下限；为 0 时沿用 `beam`。产品的 `SentenceNgramTables::options` 设为 `64`。
+    pub terminal_beam: usize,
+    /// 末列在 `terminal_diversity_margin` 窗口内对四音节以上且前驱列 `>= 3` 的同一前缀先取的唯一句子上限；为 0 时不限流。
+    pub terminal_max_per_prefix: usize,
+    /// 启用 `terminal_max_per_prefix` 时，相对最优路径触发同前驱限流的自然对数分差上限。
+    pub terminal_diversity_margin: f64,
 }
 
 /// 多字词每音节奖励，并扣一份作为每词插入代价。九宫格跨切分比较再扣音节奖励，保留已经计入的每词代价，见 `nine_key::comparable_weight`。
@@ -141,6 +147,9 @@ impl Default for LatticeOptions<'_> {
             collocation_scorer: None,
             collocation_weight: 0.0,
             include_collocation_best: false,
+            terminal_beam: 0,
+            terminal_max_per_prefix: 0,
+            terminal_diversity_margin: 0.0,
         }
     }
 }
@@ -166,6 +175,9 @@ impl SentenceNgramTables {
             emit: if sentence_alternatives { 0 } else { 1 },
             bigram: self.bigram.clone(),
             trigram: self.trigram.clone(),
+            terminal_beam: SMALL_SENTENCE_PATHS,
+            terminal_max_per_prefix: 2,
+            terminal_diversity_margin: 8.0,
             ..LatticeOptions::default()
         }
     }
@@ -182,6 +194,9 @@ pub fn make_sentence_lattice_options<'a>(
         emit: if sentence_alternatives { 0 } else { 1 },
         bigram: NgramTable::shared(&paths.dictionary(assets::BIGRAM_TABLE)),
         trigram: NgramTable::shared(&paths.dictionary(assets::TRIGRAM_TABLE)),
+        terminal_beam: SMALL_SENTENCE_PATHS,
+        terminal_max_per_prefix: 2,
+        terminal_diversity_margin: 8.0,
         ..LatticeOptions::default()
     }
 }
@@ -384,6 +399,101 @@ pub(super) struct Edge {
 /// Edges by start column.
 pub(super) type Graph = Vec<Vec<Edge>>;
 
+/// 在指定字符序号替换为 `'她'` / `'它'` 的比较与构造辅助。要求原位就是 3 字节 UTF-8 的 `'他'`。
+fn char_offset_if_exact_len(word: &str, target_pos: usize, expected_len: usize) -> Option<usize> {
+    let mut offset = None;
+    let mut count = 0;
+    for (byte_idx, _) in word.char_indices() {
+        if count == target_pos {
+            offset = Some(byte_idx);
+        }
+        count += 1;
+        if count > expected_len {
+            return None;
+        }
+    }
+    (count == expected_len).then_some(offset).flatten()
+}
+
+/// 比较将 `word[offset..offset+3]` 替换为 `replacement` 后是否与 `other` 相等（栈上完成，零堆分配）。
+fn equals_replaced_pronoun(word: &str, offset: usize, replacement: &str, other: &str) -> bool {
+    if word.len() != other.len() || replacement.len() != 3 {
+        return false;
+    }
+    let wb = word.as_bytes();
+    let ob = other.as_bytes();
+    wb[..offset] == ob[..offset]
+        && replacement.as_bytes() == &ob[offset..offset + 3]
+        && wb[offset + 3..] == ob[offset + 3..]
+}
+
+fn build_replaced_pronoun(word: &str, offset: usize, replacement: &str) -> String {
+    let mut out = String::with_capacity(word.len());
+    out.push_str(&word[..offset]);
+    out.push_str(replacement);
+    out.push_str(&word[offset + 3..]);
+    out
+}
+
+/// 与语料中「他→她」的自然对数级差对齐，无上文时保持「他 > 她 > 它」，指物语境下可被重排模型顺畅推至首位。
+const INANIMATE_PRONOUN_BACKOFF: f64 = 0.35;
+
+/// 多音节跨度在 `"ta"` 音节位同时收录「他」与「她」词边、却漏收同形「它」词边时，
+/// 证明该位在此搭配中是第三人称单数代词而非专名或语素（排除「吉他」「他乡」），
+/// 按两者较低对数分减 `INANIMATE_PRONOUN_BACKOFF` 补齐「它」边，保留词组长度奖励下限。
+fn append_inanimate_pronoun_edges(
+    span: &[String],
+    end: usize,
+    begin: usize,
+    edges: &mut Vec<Edge>,
+    options: &LatticeOptions<'_>,
+) {
+    let span_len = span.len();
+    if span_len < 2 || edges.len() <= begin || !span.iter().any(|syllable| syllable == "ta") {
+        return;
+    }
+    let initial_end = edges.len();
+    let floor = edge_log_prob(1, span_len, options);
+    for (pos, syllable) in span.iter().enumerate() {
+        if syllable != "ta" {
+            continue;
+        }
+        for idx in begin..initial_end {
+            let Some(offset) = char_offset_if_exact_len(&edges[idx].word, pos, span_len) else {
+                continue;
+            };
+            if edges[idx].word.as_bytes().get(offset..offset + 3) != Some("他".as_bytes()) {
+                continue;
+            }
+            let Some(she_log_prob) = edges[begin..initial_end]
+                .iter()
+                .find(|candidate| {
+                    equals_replaced_pronoun(&edges[idx].word, offset, "她", &candidate.word)
+                })
+                .map(|candidate| candidate.log_prob)
+            else {
+                continue;
+            };
+            if edges[begin..].iter().any(|candidate| {
+                equals_replaced_pronoun(&edges[idx].word, offset, "它", &candidate.word)
+            }) {
+                continue;
+            }
+            let it_word = build_replaced_pronoun(&edges[idx].word, offset, "它");
+            let key = edges[idx].key.clone();
+            let log_prob =
+                (edges[idx].log_prob.min(she_log_prob) - INANIMATE_PRONOUN_BACKOFF).max(floor);
+            edges.push(Edge {
+                end,
+                word: it_word,
+                key,
+                log_prob,
+                typo: false,
+            });
+        }
+    }
+}
+
 /// WL:110-148.
 pub(super) fn build_graph(
     syllables: &[String],
@@ -425,8 +535,7 @@ pub(super) fn build_graph(
                 }
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     let rows = lookup(span);
-                    let reserve = rows.len().min(options.span_limit);
-                    edges.reserve(reserve);
+                    edges.reserve(rows.len().min(options.span_limit));
                     let begin = edges.len();
                     let mut span_key = None;
                     for row in rows.into_iter().take(options.span_limit) {
@@ -450,9 +559,12 @@ pub(super) fn build_graph(
                             typo: false,
                         });
                     }
+                    append_inanimate_pronoun_edges(span, end, begin, edges, options);
+                    let span_edges = begin..edges.len();
+                    let reserve = span_edges.len();
                     entry.insert(CachedSpan {
                         column: start,
-                        edges: begin..edges.len(),
+                        edges: span_edges,
                         reserve,
                     });
                 }
@@ -501,8 +613,7 @@ pub(super) fn build_graph_borrowed<'rows>(
                 }
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     let rows = lookup(span);
-                    let reserve = rows.len().min(options.span_limit);
-                    edges.reserve(reserve);
+                    edges.reserve(rows.len().min(options.span_limit));
                     let begin = edges.len();
                     let mut span_key = None;
                     for row in rows.iter().take(options.span_limit) {
@@ -525,9 +636,12 @@ pub(super) fn build_graph_borrowed<'rows>(
                             typo: false,
                         });
                     }
+                    append_inanimate_pronoun_edges(span, end, begin, edges, options);
+                    let span_edges = begin..edges.len();
+                    let reserve = span_edges.len();
                     entry.insert(CachedSpan {
                         column: start,
-                        edges: begin..edges.len(),
+                        edges: span_edges,
                         reserve,
                     });
                 }
@@ -698,7 +812,7 @@ pub(super) fn decode_graph(
     extra: Option<&Graph>,
 ) -> Vec<SentencePath> {
     // 常见预算与非末列一致，单独实例化以保留展开循环的固定束宽。
-    if options.nbest > options.beam {
+    if options.nbest > options.beam || options.terminal_beam > options.beam {
         decode_graph_with_terminal::<true>(graph, options, extra)
     } else {
         decode_graph_with_terminal::<false>(graph, options, extra)
@@ -721,7 +835,7 @@ fn decode_graph_with_terminal<const WIDE_TERMINAL: bool>(
     let mut memo = options.bigram_memo.map(RefCell::borrow_mut);
     let capacities = column_capacities(graph, extra, options.beam);
     let terminal_limit = if WIDE_TERMINAL {
-        options.beam.max(options.nbest)
+        options.beam.max(options.nbest).max(options.terminal_beam)
     } else {
         options.beam
     };
@@ -908,49 +1022,85 @@ fn decode_graph_with_terminal<const WIDE_TERMINAL: bool>(
     let inline_unique = last.len() <= SMALL_SENTENCE_PATHS;
     let mut paths: Vec<SentencePath> = Vec::with_capacity(last.len());
     let mut trace = Vec::new();
-    for hyp in &last {
-        if inline_unique && paths.len() == take {
-            break;
-        }
-        // 图在回溯期间不变；首条实际访问的路径才申请引用页，后续路径复用它。
-        trace.clear();
-        trace.reserve_exact(n);
-        let mut cursor = Some(hyp);
-        while let Some(step) = cursor {
-            let Some(edge) = step.edge else { break };
-            trace.push(edge);
-            let (column, at) = step.prev;
-            cursor = Some(&columns[column].hyps[at]);
-        }
-        trace.reverse();
-        let mut sentence = String::with_capacity(trace.iter().map(|edge| edge.word.len()).sum());
-        for edge in &trace {
-            sentence.push_str(&edge.word);
-        }
-        if sentence.is_empty()
-            || (inline_unique && paths.iter().any(|path| path.sentence == sentence))
-        {
-            continue;
-        }
-        // 保留的路径才复制拥有词；按边数连接读音，空读音也保留原分隔符。
-        let mut words = Vec::with_capacity(n);
-        let mut key = String::with_capacity(
-            trace.iter().map(|edge| edge.key.len()).sum::<usize>() + trace.len().saturating_sub(1),
-        );
-        for (index, edge) in trace.iter().enumerate() {
-            words.push(edge.word.clone());
-            if index != 0 {
-                key.push('\'');
+    let max_per_prefix = options.terminal_max_per_prefix;
+    if max_per_prefix == 0 || take <= max_per_prefix || n < 4 {
+        for hyp in &last {
+            if inline_unique && paths.len() == take {
+                break;
             }
-            key.push_str(&edge.key);
+            materialize_terminal_hyp(hyp, &columns, n, &mut trace, &mut paths, inline_unique);
         }
-        paths.push(SentencePath {
-            sentence,
-            key,
-            log_prob: hyp.score,
-            words,
-            typo_edges: hyp.typo_edges,
-        });
+    } else {
+        let best_score = last[0].score;
+        let margin = options.terminal_diversity_margin;
+        let mut stack_prefixes = [((0usize, 0usize), 0usize); SMALL_SENTENCE_PATHS];
+        let mut stack_prefix_len = 0usize;
+        let mut heap_prefixes: Vec<((usize, usize), usize)> = Vec::new();
+        let mut stack_deferred = [0usize; SMALL_SENTENCE_PATHS];
+        let mut stack_deferred_len = 0usize;
+        let mut heap_deferred: Vec<usize> = Vec::new();
+        let mut pass1_end = last.len();
+
+        for (hyp_idx, hyp) in last.iter().enumerate() {
+            if inline_unique && paths.len() == take {
+                break;
+            }
+            if (best_score - hyp.score) > margin {
+                pass1_end = hyp_idx;
+                break;
+            }
+            let prefix = hyp.prev;
+            let throttled = prefix.0 >= 3
+                && prefix_emitted_count(
+                    &stack_prefixes[..stack_prefix_len],
+                    &heap_prefixes,
+                    prefix,
+                ) >= max_per_prefix;
+            if throttled {
+                if inline_unique && stack_deferred_len < SMALL_SENTENCE_PATHS {
+                    stack_deferred[stack_deferred_len] = hyp_idx;
+                    stack_deferred_len += 1;
+                } else {
+                    heap_deferred.push(hyp_idx);
+                }
+                continue;
+            }
+            if materialize_terminal_hyp(hyp, &columns, n, &mut trace, &mut paths, inline_unique)
+                && prefix.0 >= 3
+            {
+                increment_prefix_count(
+                    &mut stack_prefixes,
+                    &mut stack_prefix_len,
+                    &mut heap_prefixes,
+                    prefix,
+                    inline_unique,
+                );
+            }
+        }
+        // 第一遍未集齐 `take` 条唯一句时，先按分数顺序从窗口内暂缓队列回填。
+        for &hyp_idx in stack_deferred[..stack_deferred_len]
+            .iter()
+            .chain(heap_deferred.iter())
+        {
+            if inline_unique && paths.len() == take {
+                break;
+            }
+            materialize_terminal_hyp(
+                &last[hyp_idx],
+                &columns,
+                n,
+                &mut trace,
+                &mut paths,
+                inline_unique,
+            );
+        }
+        // 仍未集齐时再顺序补齐超出 `terminal_diversity_margin` 窗口的尾部假设，避免低分生僻词越过暂缓队列。
+        for hyp in &last[pass1_end..] {
+            if inline_unique && paths.len() == take {
+                break;
+            }
+            materialize_terminal_hyp(hyp, &columns, n, &mut trace, &mut paths, inline_unique);
+        }
     }
     drop(trace);
     if !inline_unique {
@@ -958,6 +1108,93 @@ fn decode_graph_with_terminal<const WIDE_TERMINAL: bool>(
     }
     rescore_with_trigram(&mut paths, options);
     paths
+}
+
+fn prefix_emitted_count(
+    stack: &[((usize, usize), usize)],
+    heap: &[((usize, usize), usize)],
+    prefix: (usize, usize),
+) -> usize {
+    stack
+        .iter()
+        .chain(heap.iter())
+        .find(|(slot, _)| *slot == prefix)
+        .map_or(0, |(_, count)| *count)
+}
+
+fn increment_prefix_count(
+    stack: &mut [((usize, usize), usize); SMALL_SENTENCE_PATHS],
+    stack_len: &mut usize,
+    heap: &mut Vec<((usize, usize), usize)>,
+    prefix: (usize, usize),
+    prefer_stack: bool,
+) {
+    if let Some((_, count)) = stack[..*stack_len]
+        .iter_mut()
+        .find(|(slot, _)| *slot == prefix)
+    {
+        *count += 1;
+        return;
+    }
+    if let Some((_, count)) = heap.iter_mut().find(|(slot, _)| *slot == prefix) {
+        *count += 1;
+        return;
+    }
+    if prefer_stack && *stack_len < SMALL_SENTENCE_PATHS {
+        stack[*stack_len] = (prefix, 1);
+        *stack_len += 1;
+    } else {
+        heap.push((prefix, 1));
+    }
+}
+
+fn materialize_terminal_hyp<'g>(
+    hyp: &Hyp<'g>,
+    columns: &[BeamColumn<'g>],
+    n: usize,
+    trace: &mut Vec<&'g Edge>,
+    paths: &mut Vec<SentencePath>,
+    inline_unique: bool,
+) -> bool {
+    // 图在回溯期间不变；首条实际访问的路径才申请引用页，后续路径复用它。
+    trace.clear();
+    trace.reserve_exact(n);
+    let mut cursor = Some(hyp);
+    while let Some(step) = cursor {
+        let Some(edge) = step.edge else { break };
+        trace.push(edge);
+        let (column, at) = step.prev;
+        cursor = Some(&columns[column].hyps[at]);
+    }
+    trace.reverse();
+    let mut sentence = String::with_capacity(trace.iter().map(|edge| edge.word.len()).sum());
+    for edge in trace.iter() {
+        sentence.push_str(&edge.word);
+    }
+    if sentence.is_empty() || (inline_unique && paths.iter().any(|path| path.sentence == sentence))
+    {
+        return false;
+    }
+    // 保留的路径才复制拥有词；按边数连接读音，空读音也保留原分隔符。
+    let mut words = Vec::with_capacity(n);
+    let mut key = String::with_capacity(
+        trace.iter().map(|edge| edge.key.len()).sum::<usize>() + trace.len().saturating_sub(1),
+    );
+    for (index, edge) in trace.iter().enumerate() {
+        words.push(edge.word.clone());
+        if index != 0 {
+            key.push('\'');
+        }
+        key.push_str(&edge.key);
+    }
+    paths.push(SentencePath {
+        sentence,
+        key,
+        log_prob: hyp.score,
+        words,
+        typo_edges: hyp.typo_edges,
+    });
+    true
 }
 
 const SMALL_SENTENCE_PATHS: usize = 64;
@@ -1085,6 +1322,9 @@ pub(super) fn decode_typo_on_graph_with_policy(
         } else {
             options.nbest
         },
+        terminal_beam: 0,
+        terminal_max_per_prefix: 0,
+        terminal_diversity_margin: 0.0,
         ..options.clone()
     };
     let paths = decode_graph(graph, &typo_options, Some(&extra));
@@ -1887,6 +2127,157 @@ pub(super) mod tests {
             &[pinned(1, 3, "贝", "bei")],
         )
         .is_empty());
+    }
+
+    #[test]
+    fn inanimate_pronoun_edges_are_synthesized_only_when_both_genders_exist() {
+        let rows = table(&[
+            ("zhi'dao'ta", &[("知道他", 50000), ("知道她", 20000)]),
+            // 已有“它”时不重复插入；仅单一性别的专名/普通词（吉他）也不派生“它”。
+            (
+                "wen'ta",
+                &[("问他", 50000), ("问她", 40000), ("问它", 35000)],
+            ),
+            ("ji'ta", &[("吉他", 80000)]),
+            ("she", &[("设", 1000)]),
+        ]);
+        let options = LatticeOptions::default();
+        // 含重复跨度 `zhi'dao'ta'zhi'dao'ta` 以同时覆盖 Span 缓存命中与未命中分支。
+        let text = syllables("zhi'dao'ta'zhi'dao'ta'wen'ta'ji'ta");
+        let graph = build_graph(&text, &mut lookup(&rows), &options);
+
+        let check_span = |col: usize| {
+            let it_edges: Vec<&Edge> = graph[col]
+                .iter()
+                .filter(|edge| edge.word == "知道它")
+                .collect();
+            assert_eq!(it_edges.len(), 1);
+            let she_lp = graph[col]
+                .iter()
+                .find(|edge| edge.word == "知道她")
+                .unwrap()
+                .log_prob;
+            let expected = (she_lp - INANIMATE_PRONOUN_BACKOFF).max(edge_log_prob(1, 3, &options));
+            assert!((it_edges[0].log_prob - expected).abs() < 1e-12);
+        };
+        check_span(0);
+        check_span(3);
+
+        let wen_it_count = graph[6].iter().filter(|edge| edge.word == "问它").count();
+        assert_eq!(wen_it_count, 1);
+        assert!(!graph[8].iter().any(|edge| edge.word == "吉它"));
+
+        // `build_graph_borrowed` 应产出一致的图边（包括缓存复用的第二个 `zhi'dao'ta`）。
+        let mut borrowed_lookup = |span: &[String]| -> &[LatticeLexeme] {
+            rows.get(&span.join("'")).map(Vec::as_slice).unwrap_or(&[])
+        };
+        let borrowed = build_graph_borrowed(&text, &mut borrowed_lookup, &options);
+        assert_eq!(borrowed[3].iter().filter(|e| e.word == "知道它").count(), 1);
+    }
+
+    #[test]
+    fn terminal_prefix_diversity_preserves_runner_up_prefix_and_backfills_single_prefix() {
+        let base = LatticeOptions {
+            beam: 16,
+            nbest: 3,
+            terminal_beam: 64,
+            terminal_max_per_prefix: 2,
+            terminal_diversity_margin: 8.0,
+            ..LatticeOptions::default()
+        };
+        let rich = table(&[
+            ("wo'men'qu", &[("我们去", 100000), ("我门去", 20000)]),
+            (
+                "de",
+                &[
+                    ("的", 900000),
+                    ("地", 800000),
+                    ("得", 700000),
+                    ("德", 600000),
+                    ("㝵", 1),
+                ],
+            ),
+        ]);
+        let top3: Vec<String> = decode("wo'men'qu'de", &rich, &base)
+            .into_iter()
+            .map(|path| path.sentence)
+            .collect();
+        // 4 音节以上且前驱列 >= 3 时，第一遍给「我们去」最多留 2 条，让「我门去的」留在前 3 位。
+        assert_eq!(top3, ["我们去的", "我们去地", "我门去的"]);
+
+        let backfilled: Vec<String> = decode(
+            "wo'men'qu'de",
+            &rich,
+            &LatticeOptions {
+                nbest: 5,
+                ..base.clone()
+            },
+        )
+        .into_iter()
+        .map(|path| path.sentence)
+        .collect();
+        // 窗口外低分字「㝵」不得插队，先取窗口内次优前驱再回填暂缓队列中的「我们去得」。
+        assert_eq!(
+            backfilled,
+            ["我们去的", "我们去地", "我门去的", "我门去地", "我们去得"]
+        );
+
+        let single_prefix = table(&[
+            ("wo'men'qu", &[("我们去", 100000)]),
+            (
+                "de",
+                &[
+                    ("的", 900000),
+                    ("地", 800000),
+                    ("得", 700000),
+                    ("德", 600000),
+                ],
+            ),
+        ]);
+        let single_sentences: Vec<String> = decode(
+            "wo'men'qu'de",
+            &single_prefix,
+            &LatticeOptions {
+                nbest: 4,
+                ..base.clone()
+            },
+        )
+        .into_iter()
+        .map(|path| path.sentence)
+        .collect();
+        assert_eq!(
+            single_sentences,
+            ["我们去的", "我们去地", "我们去得", "我们去德"]
+        );
+
+        // 三音节词组查询不触发前驱限流，同一双字前驱下的第 5 位同音结尾仍应完整保留。
+        let lexical = table(&[
+            ("ming'liang", &[("明亮", 9000)]),
+            ("ming", &[("明", 500000)]),
+            ("liang'zhuan", &[("亮赚", 800)]),
+            (
+                "zhuan",
+                &[
+                    ("转", 1200000),
+                    ("专", 360000),
+                    ("赚", 88000),
+                    ("传", 62000),
+                    ("砖", 40000),
+                ],
+            ),
+        ]);
+        let lexical_sentences: Vec<String> = decode(
+            "ming'liang'zhuan",
+            &lexical,
+            &LatticeOptions { nbest: 6, ..base },
+        )
+        .into_iter()
+        .map(|path| path.sentence)
+        .collect();
+        assert!(
+            lexical_sentences.iter().any(|s| s == "明亮砖"),
+            "三音节词组不应限流同前驱末字: {lexical_sentences:?}"
+        );
     }
 }
 

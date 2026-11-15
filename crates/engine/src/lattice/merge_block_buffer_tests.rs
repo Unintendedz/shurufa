@@ -365,7 +365,7 @@ fn real_merge_preserves_nonempty_and_neural_rows_with_typo_return() {
 }
 
 // 沿用 input-runtime 的合成零层模型，固定字符偏好，不依赖真实模型资源。
-pub(super) fn favouring_model(
+pub(crate) fn favouring_model(
     characters: &[char],
     favoured: &[char],
 ) -> chinese_ime_lm::SentenceModel {

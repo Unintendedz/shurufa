@@ -800,6 +800,8 @@ pub struct WordItem {
     pub sentence_words: Vec<String>,
     /// 引擎键盘模型给整句路径排序时排在它选中那条之后的路径（`lattice::merge` 的次选整句）。逐键重排不再比较这些行，停顿后精排照常比较。
     pub keyboard_runner_up: bool,
+    /// 比主切分多拆出的字面隔音音节数；静态证据按该数额外扣除词长奖励，不改动原始 `weight`。
+    pub extra_syllables: u8,
 }
 
 impl WordItem {
@@ -820,8 +822,16 @@ impl WordItem {
         let syllables = self.canonical_pinyin.split('\'').count();
         let bonus =
             (crate::lattice::decode::PHRASE_LENGTH_BONUS * 1000.0 * syllables as f64) as i64;
+        // 隔音多拆出的音节若凑成双字词，会比主切分单字边少受一次 `ln(unigram_z)` 归一惩罚并稀释字数分母；
+        // 按每多一音节额外扣除 1.5 倍词长奖励（30 nats），压住低频隔音误切并保留高频专名语境晋升空间。
+        let extra_hiatus_penalty = (crate::lattice::decode::PHRASE_LENGTH_BONUS
+            * 1500.0
+            * f64::from(self.extra_syllables)) as i64;
         Some(crate::ordering::StaticEvidence {
-            log_prob_milli_nats: self.weight.saturating_sub(bonus),
+            log_prob_milli_nats: self
+                .weight
+                .saturating_sub(bonus)
+                .saturating_sub(extra_hiatus_penalty),
             characters: self.word.chars().count(),
         })
     }

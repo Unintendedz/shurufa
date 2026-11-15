@@ -64,6 +64,7 @@ fn clone_row_reusing(source: &WordItem, previous: WordItem) -> WordItem {
         sentence_association: _,
         sentence_words,
         keyboard_runner_up: _,
+        extra_syllables: _,
     } = previous;
     WordItem {
         pinyin: clone_shared_string_reusing(&source.pinyin, pinyin),
@@ -82,5 +83,6 @@ fn clone_row_reusing(source: &WordItem, previous: WordItem) -> WordItem {
             |source, previous| clone_string_reusing(source, previous),
         ),
         keyboard_runner_up: source.keyboard_runner_up,
+        extra_syllables: source.extra_syllables,
     }
 }

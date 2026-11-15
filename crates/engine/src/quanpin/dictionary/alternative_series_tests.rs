@@ -192,14 +192,25 @@ fn literal_alternative_series_reuses_prefix_rows_across_dense_paths() {
             dictionary.merge_alternative_full(raw, primary, &segments, &alternatives, primary_rows);
         let mut supplemental = Vec::new();
         for path in &alternatives {
-            supplemental.extend(dictionary.query_series_with_typos(
+            let rows_for_path = dictionary.query_series_with_typos(
                 raw,
                 &join_segments(path),
                 path,
                 false,
                 None,
                 None,
-            ));
+            );
+            if path.len() > segments.len() {
+                let extra = (path.len() - segments.len()).min(usize::from(u8::MAX)) as u8;
+                for mut item in rows_for_path {
+                    if item.sentence_association {
+                        item.extra_syllables = extra;
+                    }
+                    supplemental.push(item);
+                }
+            } else {
+                supplemental.extend(rows_for_path);
+            }
         }
         merge_series_by_coverage(&mut rows, supplemental);
         rows
@@ -248,5 +259,103 @@ fn literal_alternative_series_shared_prefixes_keep_the_original_sparse_threshold
     assert!(
         shared.is_empty(),
         "已在主路径显示的八行仍满足稀疏门槛，不能额外回退到 di"
+    );
+}
+
+#[test]
+fn extra_syllable_literal_cut_sentences_follow_primary_runner_ups_with_length_deduction() {
+    let fixture = Fixture::new();
+    for (key, word, weight) in [
+        ("zhuan", "转", 500),
+        ("zhuan", "专", 400),
+        ("ba", "巴", 500),
+        ("zhu", "主", 450),
+        ("an", "案", 450),
+        ("an'ba", "案吧", 600),
+    ] {
+        fixture.insert(key, word, weight);
+    }
+    let mut dictionary = QuanpinDictionary::new(&fixture.paths);
+    let rows = dictionary.query_exact("zhuanba", "", 0);
+    assert_eq!(dictionary.pinyin_segmentation, "zhuan'ba");
+
+    let primary_pos = rows
+        .iter()
+        .position(|row| row.word == "转巴" && row.sentence_association)
+        .expect("主切分应生成整句");
+    let prefix_pos = rows
+        .iter()
+        .position(|row| row.word == "转" && !row.sentence_association)
+        .expect("主切分应包含前缀词");
+    let extra_cut = rows
+        .iter()
+        .position(|row| row.word == "主案吧" && row.sentence_association)
+        .expect("多拆音节的字面备选切分仍应生成整句");
+
+    assert!(primary_pos < extra_cut);
+    assert!(
+        extra_cut < prefix_pos,
+        "无重排器时全覆盖备选整句仍在主切分前缀之前: {rows:?}"
+    );
+    let extra_row = &rows[extra_cut];
+    let raw_segments = ["zhu", "an", "ba"].map(str::to_owned);
+    let raw_extra_rows = QuanpinDictionary::new(&fixture.paths).query_series_with_typos(
+        "zhuanba",
+        "zhu'an'ba",
+        &raw_segments,
+        false,
+        None,
+        None,
+    );
+    let raw_extra = raw_extra_rows
+        .iter()
+        .find(|row| row.word == "主案吧" && row.sentence_association)
+        .expect("直接按备选切分查询应得到未扣分的整句");
+    assert_eq!(
+        extra_row.weight, raw_extra.weight,
+        "不能直接改写原始 weight，以免破坏静态权重合约"
+    );
+    assert_eq!(extra_row.extra_syllables, 1);
+    assert!(!extra_row.keyboard_runner_up);
+    let expected_deduction = (crate::lattice::decode::PHRASE_LENGTH_BONUS * 1500.0).round() as i64;
+    assert_eq!(
+        raw_extra.static_evidence().unwrap().log_prob_milli_nats
+            - extra_row.static_evidence().unwrap().log_prob_milli_nats,
+        expected_deduction,
+        "多出 1 个音节应仅在 static_evidence 中精确扣除 1.5 倍 PHRASE_LENGTH_BONUS"
+    );
+
+    let model = Arc::new(crate::lattice::merge::block_buffer_tests::favouring_model(
+        &['转', '专', '巴', '主', '案', '吧'],
+        &['转'],
+    ));
+    dictionary
+        .rerankers
+        .push(NeuralReranker::new(CandidateSource::NeuralKeyboard, model));
+    dictionary.reset_cache();
+    let reranked_rows = dictionary.query_exact("zhuanba", "", 0);
+    let reranked_prefix_pos = reranked_rows
+        .iter()
+        .position(|row| row.word == "转" && !row.sentence_association)
+        .expect("启用重排器后主切分应包含前缀词");
+    let reranked_extra_cut = reranked_rows
+        .iter()
+        .position(|row| row.word == "主案吧" && row.sentence_association)
+        .expect("启用重排器后多拆音节备选整句仍应保留");
+    assert!(
+        reranked_prefix_pos < reranked_extra_cut,
+        "启用重排器后多拆音节备选整句应让位到主切分前缀之后: {reranked_rows:?}"
+    );
+    let reranked_extra = &reranked_rows[reranked_extra_cut];
+    assert!(reranked_extra.keyboard_runner_up);
+    assert_eq!(reranked_extra.extra_syllables, 1);
+    assert_eq!(reranked_extra.weight, raw_extra.weight);
+    assert_eq!(
+        raw_extra.static_evidence().unwrap().log_prob_milli_nats
+            - reranked_extra
+                .static_evidence()
+                .unwrap()
+                .log_prob_milli_nats,
+        expected_deduction
     );
 }

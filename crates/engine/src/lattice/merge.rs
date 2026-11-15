@@ -1193,7 +1193,7 @@ mod block_frozen;
 
 #[cfg(test)]
 #[path = "merge_block_buffer_tests.rs"]
-mod block_buffer_tests;
+pub(crate) mod block_buffer_tests;
 
 #[cfg(test)]
 #[path = "merge_borrowed_order_tests.rs"]

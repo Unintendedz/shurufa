@@ -445,6 +445,7 @@ fn page_copy_preserves_all_fields_and_clone_capacities_across_shapes() {
                     sentence_association: true,
                     sentence_words: vec!["合成边界一".into(), "合成边界二😀".into()],
                     keyboard_runner_up: index % 3 == 0,
+                    extra_syllables: (index % 4) as u8,
                 };
                 let mut source: Vec<_> = (0..new_len).map(make).collect();
                 for row in &mut source {
@@ -467,6 +468,7 @@ fn page_copy_preserves_all_fields_and_clone_capacities_across_shapes() {
                     row.corrected_from.clear();
                     row.sentence_association = false;
                     row.sentence_words.push("合成旧边界".into());
+                    row.extra_syllables = row.extra_syllables.wrapping_add(1);
                     previous.push(row);
                 }
                 let actual = page_copy::clone_rows_reusing(&source, previous);

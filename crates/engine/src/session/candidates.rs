@@ -58,6 +58,7 @@ pub(super) fn clone_candidate_rows(source: &[WordItem], destination: &mut Vec<Wo
         target.sentence_association = item.sentence_association;
         target.sentence_words.clone_from(&item.sentence_words);
         target.keyboard_runner_up = item.keyboard_runner_up;
+        target.extra_syllables = item.extra_syllables;
     }
     if destination.len() > source.len() {
         destination.truncate(source.len());
@@ -896,6 +897,7 @@ mod tests {
             sentence_association: true,
             sentence_words: vec!["合".to_owned(), "成词".to_owned()],
             keyboard_runner_up: true,
+            extra_syllables: 1,
         };
         let plain = WordItem::new("ni", "你", 1, CandidateSource::Database, "ni");
         let mut destination = vec![marked.clone(), marked.clone(), marked.clone()];

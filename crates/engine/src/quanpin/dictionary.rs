@@ -855,6 +855,8 @@ impl QuanpinDictionary {
         let mut result;
         // 只有主切分留下键盘模型的次选整句：备选切分的次选大多是生造的读法（`da'o'shi'kan` 的「打哦试看」），而它们自己的两条整句已经在列表里。
         let mut runner_ups = Vec::new();
+        // 比主切分多拆音节的隔音备选切分整句，扣减虚增的词组长度分并接在主切分次选之后。
+        let mut extra_syllable_runner_ups = Vec::new();
         if resolution.corrected_input {
             // The corrected reading is the primary key, so selection and weight updates land on the right rows; the literal reading stays behind it as a fallback tail.
             result = self.query_primary_series(
@@ -872,12 +874,13 @@ impl QuanpinDictionary {
             append_unique_words(&mut result, literal);
             // Same-cost readings of the typo compete with the primary cut on dictionary frequency, and the best keeps a protected slot near the top.
             if !alternatives.is_empty() {
-                result = self.merge_alternatives(
+                result = self.merge_alternatives_with_runner_ups(
                     raw,
                     primary_segmentation,
                     &resolution.corrected,
                     &alternatives,
                     result,
+                    Some(&mut extra_syllable_runner_ups),
                 );
             }
             // Costlier readings go below the whole primary tier, so a frequent dearer correction (gau -> gai, weight 13) never precedes the cheaper one (gau -> gua, weight 10).
@@ -889,17 +892,19 @@ impl QuanpinDictionary {
             result =
                 self.query_primary_series(raw, primary_segmentation, &segments, &mut runner_ups);
             if !alternatives.is_empty() {
-                result = self.merge_alternatives(
+                result = self.merge_alternatives_with_runner_ups(
                     raw,
                     primary_segmentation,
                     &segments,
                     &alternatives,
                     result,
+                    Some(&mut extra_syllable_runner_ups),
                 );
             }
         }
         // 接在所有切分、补全词和单字之后：放在主切分自己的那段末尾时，另一切分的正确读法（`xieshanga` 的「协商啊」）会排到它们后面，被 `runner_up_order` 挪去列表末尾。
         append_unique_words(&mut result, runner_ups);
+        append_unique_words(&mut result, extra_syllable_runner_ups);
         let (cached, projected) = match cold {
             ColdRows::Transfer => {
                 let cached = result.clone();
@@ -944,6 +949,7 @@ impl QuanpinDictionary {
     }
 
     /// 完整词继续按词频合并，字面备选另外补齐前缀和整句，不能叠加一层纠错。
+    #[cfg(test)]
     fn merge_alternatives(
         &mut self,
         raw: &str,
@@ -951,6 +957,30 @@ impl QuanpinDictionary {
         primary_segments: &[String],
         alternatives: &[Vec<String>],
         result: Vec<WordItem>,
+    ) -> Vec<WordItem> {
+        self.merge_alternatives_with_runner_ups(
+            raw,
+            primary_segmentation,
+            primary_segments,
+            alternatives,
+            result,
+            None,
+        )
+    }
+
+    /// 完整词继续按词频合并，字面备选另外补齐前缀和整句，不能叠加一层纠错。
+    ///
+    /// 比主切分多拆出音节的字面切分（隔音备选），其整句行会少受一次单字归一惩罚而偏高，
+    /// 因此把多出的音节数记入 `extra_syllables`，让 `static_evidence` 扣除对应词长奖励而不改原始 `weight`；
+    /// 启用神经重排时同步标为 `keyboard_runner_up` 并移至主切分次选之后，避免在逐键重排和首屏预算里压过主切分合法候选。
+    fn merge_alternatives_with_runner_ups(
+        &mut self,
+        raw: &str,
+        primary_segmentation: &str,
+        primary_segments: &[String],
+        alternatives: &[Vec<String>],
+        result: Vec<WordItem>,
+        mut extra_syllable_runner_ups: Option<&mut Vec<WordItem>>,
     ) -> Vec<WordItem> {
         let mut result = self.merge_alternative_full(
             raw,
@@ -970,6 +1000,7 @@ impl QuanpinDictionary {
                 }
             }
         }
+        let has_rerankers = !self.rerankers.is_empty();
         for path in alternatives {
             if is_literal_segmentation(raw, path) {
                 let rows = self.query_series_with_typos(
@@ -980,7 +1011,27 @@ impl QuanpinDictionary {
                     Some(&mut queried_prefixes),
                     None,
                 );
-                supplemental.extend(rows);
+                if path.len() > primary_segments.len() {
+                    let extra_syllables =
+                        (path.len() - primary_segments.len()).min(usize::from(u8::MAX)) as u8;
+                    for mut item in rows {
+                        if item.sentence_association {
+                            item.extra_syllables = extra_syllables;
+                            if has_rerankers {
+                                if let Some(extra_runner_ups) =
+                                    extra_syllable_runner_ups.as_deref_mut()
+                                {
+                                    item.keyboard_runner_up = true;
+                                    extra_runner_ups.push(item);
+                                    continue;
+                                }
+                            }
+                        }
+                        supplemental.push(item);
+                    }
+                } else {
+                    supplemental.extend(rows);
+                }
             }
         }
         if !supplemental.is_empty() {

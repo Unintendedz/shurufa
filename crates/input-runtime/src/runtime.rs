@@ -4,7 +4,7 @@
 use super::*;
 use msime_engine::ordering::{
     apply_order_with, ensure_engine_order, rerank_needs_model, rerank_pick, rotate_to_front,
-    runner_up_order, ParallelOrderRows, StaticEvidence,
+    runner_up_order, settled_rerank_order, ParallelOrderRows, StaticEvidence,
 };
 // 排序决策搬进了 `msime_engine::ordering`；`tests.rs` 仍按原来的 crate 内名字引用这几项，这里为它们重新导出。
 #[cfg(test)]
@@ -296,13 +296,6 @@ fn order_rows(snapshot: &EngineSnapshot) -> ParallelOrderRows<'_> {
     .with_static_evidence(&snapshot.candidate_static_evidence)
 }
 
-/// `Runtime::rerank_with` 是逐键的快速重排，还是停顿后精排借用同一套后处理。
-#[derive(Clone, Copy)]
-enum RerankPass {
-    Keystroke,
-    Settled,
-}
-
 /// 逐键重排读的候选行：在 `order_rows` 之上标出引擎键盘模型的次选整句，`rerank_pick` 不再比较它们。停顿后精排用 `order_rows`，照常比较。
 fn keystroke_order_rows(snapshot: &EngineSnapshot) -> ParallelOrderRows<'_> {
     order_rows(snapshot).with_keyboard_runner_ups(&snapshot.candidate_keyboard_runner_up)
@@ -330,12 +323,12 @@ pub struct SettledRerankRequest {
     reranker: Reranker,
 }
 
-/// [`score_settled_rerank`] 产生的模型和待提升的候选行。
+/// [`score_settled_rerank`] 产生的模型与完整重排顺序。
 pub struct SettledRerankScore {
     generation: u64,
     settings_epoch: Arc<()>,
     model_epoch: Arc<()>,
-    promote: Option<usize>,
+    order: Option<Vec<usize>>,
     reranker: Reranker,
 }
 
@@ -351,7 +344,7 @@ pub struct SettledRerankApplied {
 /// 计算 [`Runtime::begin_settled_rerank`] 取出的请求；拥有模型及候选副本，
 /// 不访问会话，可以在任意线程调用。
 pub fn score_settled_rerank(mut request: SettledRerankRequest) -> SettledRerankScore {
-    let promote = {
+    let order = {
         let rows = ParallelOrderRows::new(
             &request.rows.texts,
             &request.rows.sources,
@@ -359,7 +352,7 @@ pub fn score_settled_rerank(mut request: SettledRerankRequest) -> SettledRerankS
             &request.rows.corrected,
         )
         .with_static_evidence(&request.rows.static_evidence);
-        rerank_pick(
+        settled_rerank_order(
             &mut request.reranker,
             &request.context,
             request.scheme,
@@ -371,7 +364,7 @@ pub fn score_settled_rerank(mut request: SettledRerankRequest) -> SettledRerankS
         generation: request.generation,
         settings_epoch: request.settings_epoch,
         model_epoch: request.model_epoch,
-        promote,
+        order,
         reranker: request.reranker,
     }
 }
@@ -1208,10 +1201,10 @@ impl<E: InputEngine> Runtime<E> {
         }
         self.snapshot_settled_seats();
         let marked = self.settled_highlight();
-        std::mem::swap(&mut self.reranker, &mut self.settled_reranker);
-        // 使用快速重排相同的后处理，保留固定席位；键盘模型的次选整句由停顿模型照常比较。
-        let moved = self.rerank_with(RerankPass::Settled);
-        std::mem::swap(&mut self.reranker, &mut self.settled_reranker);
+        let order = self.settled_model_order();
+        let moved = order
+            .as_deref()
+            .is_some_and(|order| self.apply_settled_order(order));
         self.finish_settled_presentation(moved, marked)
     }
 
@@ -1263,7 +1256,7 @@ impl<E: InputEngine> Runtime<E> {
             generation,
             settings_epoch,
             model_epoch,
-            promote,
+            order,
             reranker,
         } = score;
         let current = generation == self.generation
@@ -1279,7 +1272,9 @@ impl<E: InputEngine> Runtime<E> {
         }
         // 评分期间用户仍可移动高亮，按发布前的实际选择恢复。
         let marked = self.settled_highlight();
-        let moved = promote.is_some_and(|index| self.promote_row(index));
+        let moved = order
+            .as_deref()
+            .is_some_and(|order| self.apply_settled_order(order));
         SettledRerankApplied {
             current: true,
             moved: self.finish_settled_presentation(moved, marked),
@@ -2730,10 +2725,6 @@ impl<E: InputEngine> Runtime<E> {
     }
 
     fn rerank(&mut self) -> bool {
-        self.rerank_with(RerankPass::Keystroke)
-    }
-
-    fn rerank_with(&mut self, pass: RerankPass) -> bool {
         // 整句改字的候选是光标处一段的替换，按读音长短排好，不参与整句的重排。光标后编辑的首选接着固定的那段，必须留在首位。
         if !self.cached.conversion.is_empty() || self.cached.caret_edit_suffix {
             return false;
@@ -2755,10 +2746,7 @@ impl<E: InputEngine> Runtime<E> {
                 return false;
             }
             // 方案、五笔表码和上文窗口的判断都在 `rerank_pick` 里，这里同步旋转候选元数据和引擎座位映射。
-            let rows = match pass {
-                RerankPass::Keystroke => keystroke_order_rows(snapshot),
-                RerankPass::Settled => order_rows(snapshot),
-            };
+            let rows = keystroke_order_rows(snapshot);
             rerank_pick(
                 reranker,
                 &self.ai_context,
@@ -2771,6 +2759,51 @@ impl<E: InputEngine> Runtime<E> {
             return false;
         };
         self.promote_row(promote)
+    }
+
+    fn settled_model_order(&mut self) -> Option<Vec<usize>> {
+        if !self.cached.conversion.is_empty() || self.cached.caret_edit_suffix {
+            return None;
+        }
+        let reranker = self.settled_reranker.as_mut()?;
+        let snapshot = &self.cached;
+        let count = snapshot.candidates.len();
+        if count < 2
+            || snapshot.candidate_sources.len() != count
+            || snapshot.candidate_codes.len() != count
+            || snapshot.candidate_annotations.len() != count
+            || snapshot.candidate_positions.len() != count
+            || snapshot.candidate_corrected.len() != count
+            || snapshot.candidate_answers_key.len() != count
+        {
+            return None;
+        }
+        settled_rerank_order(
+            reranker,
+            &self.ai_context,
+            snapshot.scheme,
+            snapshot.answered_by_pinyin_fallback,
+            &order_rows(snapshot),
+        )
+    }
+
+    /// 把停顿精排产出的排列同步应用到全部并行候选数组与引擎座位映射。
+    fn apply_settled_order(&mut self, order: &[usize]) -> bool {
+        let count = self.cached.candidates.len();
+        if count < 2
+            || order.len() != count
+            || self.cached.candidate_sources.len() != count
+            || self.cached.candidate_codes.len() != count
+            || self.cached.candidate_annotations.len() != count
+            || self.cached.candidate_positions.len() != count
+            || self.cached.candidate_corrected.len() != count
+            || self.cached.candidate_answers_key.len() != count
+            || order.iter().enumerate().all(|(seat, index)| seat == *index)
+        {
+            return false;
+        }
+        self.apply_candidate_order(order);
+        true
     }
 
     /// 把 `promote` 旋到首位，并同步候选元数据和引擎座位映射。下标为 0 或越界时不动。

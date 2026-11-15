@@ -6,9 +6,11 @@ use crate::SchemeType;
 
 pub use chinese_ime_lm::{CandidateFacts, Reranker, SentenceModel, DICTIONARY_SOURCES};
 
-/// `CandidateSource::Generated`: a whole-sentence path the word lattice assembled. The one source
-/// whose members really are alternative readings of the same key.
+/// `CandidateSource::Generated`：词网格解码出的整句路径。
 pub const LATTICE_SOURCE: u8 = 8;
+
+/// 会产生回答完整按键的整句或长词读法的来源集合：`Generated`、`NeuralKeyboard`、`Collocation`。
+const SENTENCE_READING_SOURCES: [u8; 3] = [LATTICE_SOURCE, 11, 17];
 
 /// `CandidateSource::QuickPhrase`, `Emoji` and `Kaomoji`: entries a keyword finds in a catalog, listed in the catalog's order. They are not readings of the key, so the reranker neither compares them nor promotes them: typing `kiss` in kaomoji mode had the model seat the catalog's 646th entry, `French Kiss!(*￣(￣　*)`, above its first.
 const CATALOG_SOURCES: [u8; 3] = [5, 6, 7];
@@ -25,8 +27,11 @@ const MIXED_JAPANESE_SOURCE: u8 = 13;
 /// 候选列表通常不超过一页；短列表的文本引用放在栈上，较大列表继续走堆缓冲。
 const SMALL_RERANK_TEXTS: usize = 128;
 
-/// 静态证据分支只比较前九条真正回答按键的候选。
+/// 逐键静态证据分支只比较前九条真正回答按键的候选，守住逐键时延预算。
 const STATIC_RERANK_LIMIT: usize = 9;
+
+/// 停顿后精排在后台线程运行，放宽至十六条回答当前按键的候选，覆盖完整十二条次选与隔音备选。
+const SETTLED_STATIC_RERANK_LIMIT: usize = 16;
 
 /// The traits of the scheme behind `scheme`, which the Engine reports as its `SchemeType` ordinal. Only the placeholder snapshot of a failed refresh carries an ordinal no scheme has; each caller decides what that placeholder means, the way the ordinal comparisons this replaces did.
 fn scheme_type(scheme: u8) -> Option<SchemeType> {
@@ -236,15 +241,15 @@ pub struct ParallelOrderRows<'a> {
 
 /// 找出实际交给模型比较的候选中最长的一行。
 ///
-/// `Reranker::best_where` 只比较前九条回答当前按键的候选；比较集合之后的长候选不能影响上下文窗口，否则会让模型每次无关的长行出现时重建前缀。
-fn longest_rerank_candidate<'a, R, F>(rows: &R, compared: &F) -> usize
+/// 比较集合之后的长候选不能影响上下文窗口，否则会让模型在无关长行出现时重建前缀。
+fn longest_rerank_candidate<'a, const LIMIT: usize, R, F>(rows: &R, compared: &F) -> usize
 where
     R: OrderRowSource<'a> + ?Sized,
     F: Fn(usize) -> bool,
 {
     (0..rows.len())
         .filter(|index| compared(*index))
-        .take(STATIC_RERANK_LIMIT)
+        .take(LIMIT)
         .map(|index| rows.get(index).text.chars().count())
         .max()
         .unwrap_or(0)
@@ -371,15 +376,19 @@ pub fn rerank_pick<'a, R: OrderRowSource<'a> + ?Sized>(
         |index: usize| row_answers_key(scheme, rows.get(index)) && !rows.keyboard_runner_up(index);
     let corrected_key = any_corrected_key(scheme, rows);
     // 只有参与比较的候选需要占用模型上下文窗口。
-    let longest = longest_rerank_candidate(rows, &compared);
+    let longest = longest_rerank_candidate::<STATIC_RERANK_LIMIT, _, _>(rows, &compared);
     let context = rerank_context(context, reranker.model().context_length(), longest);
     if rows.static_evidence(0).is_some() {
         let mut considered = [0; STATIC_RERANK_LIMIT];
         let mut statik = [0.0; STATIC_RERANK_LIMIT];
         let mut subset = [""; STATIC_RERANK_LIMIT];
-        if let Some(count) =
-            fill_static_rerank_inputs(rows, compared, &mut considered, &mut statik, &mut subset)
-        {
+        if let Some(count) = fill_static_rerank_inputs::<STATIC_RERANK_LIMIT, _, _>(
+            rows,
+            compared,
+            &mut considered,
+            &mut statik,
+            &mut subset,
+        ) {
             let neural = reranker.log_probabilities(context, &subset[..count]);
             if neural.len() == count {
                 // 模型逐字分与词网格逐字分等权混合，两侧均为自然对数。
@@ -403,12 +412,82 @@ pub fn rerank_pick<'a, R: OrderRowSource<'a> + ?Sized>(
     })
 }
 
-fn fill_static_rerank_inputs<'a, R, F>(
+/// 停顿后精排的整体重排决策：返回新座位到旧座位的排列；无需改动时返回 `None`。
+///
+/// 停顿阶段不在按键热路径上，因此静态证据分支比较前 16 条回答当前按键的候选，
+/// 并按 `0.5 * (static + neural)` 的完整名次原地重排比较集合，而不只旋转第 1 名，
+/// 让精排模型排出的第 2、3 名整句也能顺位进入首页。无静态证据时退回 `best_where`。
+pub fn settled_rerank_order<'a, R: OrderRowSource<'a> + ?Sized>(
+    reranker: &mut Reranker,
+    context: &str,
+    scheme: u8,
+    answered_by_pinyin_fallback: bool,
+    rows: &'a R,
+) -> Option<Vec<usize>> {
+    if !rerank_needs_model(scheme, answered_by_pinyin_fallback, rows) {
+        return None;
+    }
+    let compared = |index: usize| row_answers_key(scheme, rows.get(index));
+    let count = rows.len();
+    if rows.static_evidence(0).is_some() {
+        let longest =
+            longest_rerank_candidate::<SETTLED_STATIC_RERANK_LIMIT, _, _>(rows, &compared);
+        let context = rerank_context(context, reranker.model().context_length(), longest);
+        let mut considered = [0; SETTLED_STATIC_RERANK_LIMIT];
+        let mut statik = [0.0; SETTLED_STATIC_RERANK_LIMIT];
+        let mut subset = [""; SETTLED_STATIC_RERANK_LIMIT];
+        if let Some(compared_count) = fill_static_rerank_inputs::<SETTLED_STATIC_RERANK_LIMIT, _, _>(
+            rows,
+            compared,
+            &mut considered,
+            &mut statik,
+            &mut subset,
+        ) {
+            let neural = reranker.log_probabilities(context, &subset[..compared_count]);
+            if neural.len() == compared_count {
+                let mut combined = [0.0f64; SETTLED_STATIC_RERANK_LIMIT];
+                let mut rank = [0usize; SETTLED_STATIC_RERANK_LIMIT];
+                for index in 0..compared_count {
+                    combined[index] = (statik[index] + f64::from(neural[index])) * 0.5;
+                    rank[index] = index;
+                }
+                // 降序排列，平分时保持比较集合内的原有先后次序。
+                rank[..compared_count].sort_by(|&a, &b| combined[b].total_cmp(&combined[a]));
+                if (0..compared_count).all(|seat| rank[seat] == seat) {
+                    return None;
+                }
+                let mut order: Vec<usize> = (0..count).collect();
+                for seat in 0..compared_count {
+                    order[considered[seat]] = considered[rank[seat]];
+                }
+                return Some(order);
+            }
+        }
+    }
+    let longest = longest_rerank_candidate::<STATIC_RERANK_LIMIT, _, _>(rows, &compared);
+    let context = rerank_context(context, reranker.model().context_length(), longest);
+    let corrected_key = any_corrected_key(scheme, rows);
+    let promote = with_row_texts(rows, |texts| {
+        reranker.best_where(context, texts, |index| CandidateFacts {
+            answers_key: compared(index),
+            trusted_dictionary_hit: DICTIONARY_SOURCES.contains(&rows.get(index).source)
+                && !corrected_key,
+        })
+    })?;
+    if promote == 0 || promote >= count {
+        return None;
+    }
+    let mut order: Vec<usize> = (0..count).collect();
+    rotate_to_front(&mut order, promote);
+    Some(order)
+}
+
+fn fill_static_rerank_inputs<'a, const LIMIT: usize, R, F>(
     rows: &'a R,
     compared: F,
-    considered: &mut [usize; STATIC_RERANK_LIMIT],
-    statik: &mut [f64; STATIC_RERANK_LIMIT],
-    subset: &mut [&'a str; STATIC_RERANK_LIMIT],
+    considered: &mut [usize; LIMIT],
+    statik: &mut [f64; LIMIT],
+    subset: &mut [&'a str; LIMIT],
 ) -> Option<usize>
 where
     R: OrderRowSource<'a> + ?Sized,
@@ -420,7 +499,7 @@ where
             continue;
         }
         let row = rows.get(index);
-        if count == STATIC_RERANK_LIMIT {
+        if count == LIMIT {
             break;
         }
         considered[count] = index;
@@ -459,17 +538,78 @@ where
 /// They are moved rather than removed. Deleting them threw away the model's later choices, so a reading the model ranked fourth was unreachable even when it was right.
 ///
 /// Only lattice readings are touched. An earlier version of this keyed on "any source that is not a dictionary", which is wrong twice over: a source number says which code produced a candidate, not that two candidates are spellings of one answer, and most of the other sources are plural by design — English words, emoji, kaomoji, quick phrases and AI suggestions all arrive as lists, and that version silently dropped all but one of each.
+fn visit_runner_up_order(
+    count: usize,
+    first_reading: usize,
+    keep: usize,
+    front_limit: usize,
+    is_reading: &impl Fn(usize) -> bool,
+    mut emit: impl FnMut(usize),
+) {
+    // 1. 首条全键读法之前的候选保持原位（如领先的精确词典命中）。
+    for index in 0..first_reading {
+        emit(index);
+    }
+    // 2. 首页保留的前 `keep` 条全键读法，按原有次序相邻排列。
+    let mut kept_readings = 0;
+    for index in first_reading..count {
+        if is_reading(index) {
+            emit(index);
+            kept_readings += 1;
+            if kept_readings == keep {
+                break;
+            }
+        }
+    }
+    // 3. 留在剩余次选读法之前的首页前排非读法行（按引擎固有词长先排多字前缀词，不超过 `front_limit` 条）。
+    let mut kept_front = 0;
+    if front_limit > 0 {
+        for index in (first_reading + 1)..count {
+            if !is_reading(index) {
+                emit(index);
+                kept_front += 1;
+                if kept_front == front_limit {
+                    break;
+                }
+            }
+        }
+    }
+    // 4. 第 `keep` 条之后的其余全键次选读法紧随首页前排之后，排在所有单字与余下非读法行之前。
+    let mut reading_seen = 0;
+    for index in first_reading..count {
+        if is_reading(index) {
+            if reading_seen >= keep {
+                emit(index);
+            }
+            reading_seen += 1;
+        }
+    }
+    // 5. 其余非读法行（超出前排限额的前缀词与单字）按原相对顺序收尾。
+    let mut skipped_front = 0;
+    for index in (first_reading + 1)..count {
+        if is_reading(index) {
+            continue;
+        }
+        if skipped_front < front_limit {
+            skipped_front += 1;
+            continue;
+        }
+        emit(index);
+    }
+}
+
 pub fn runner_up_order<'a, R: OrderRowSource<'a> + ?Sized>(
     scheme: u8,
     rows: &R,
 ) -> Option<Vec<usize>> {
-    // The lattice runs from two syllables (a single syllable is never decoded), so a shorter candidate reached the list some other way and is not a reading of the same sentence. Japanese kana are the case that proves it: あ and ア are both Generated and both one character. Two rather than three because two-syllable keys are where the lattice's runner-up readings otherwise fill the first page ahead of dictionary words: on quanpin-words-v1 this moves two-syllable top5 from 0.883 to 0.924 with top1 unchanged.
+    // 词网格从两音节开始解码；假名单字等长度不足的行不按整句读法归组。
     const SENTENCE_SYLLABLES: usize = 2;
-    // From this many characters a reading is a sentence rather than a word, and the page keeps `SENTENCE_READINGS` of them.
+    // 达到三个汉字时在首页保留 `SENTENCE_READINGS` 条整句读法与至多 `FRONT_NON_READING_LIMIT` 条前排非读法行（满 6 格首屏），其余全键读法紧随第 2 页开头。
     const LONG_SENTENCE_CHARACTERS: usize = 3;
     const SENTENCE_READINGS: usize = 3;
+    const FRONT_NON_READING_LIMIT: usize = 3;
+    const SHORT_FRONT_ROW_LIMIT: usize = 4;
 
-    // Korean Hanja rows are not lattice readings, and their table order is the one to keep.
     if !reorders_candidates(scheme) {
         return None;
     }
@@ -477,96 +617,67 @@ pub fn runner_up_order<'a, R: OrderRowSource<'a> + ?Sized>(
     if count < 2 {
         return None;
     }
-    let width = (0..rows.len())
-        .map(|index| rows.get(index))
-        .find(|row| row.source == LATTICE_SOURCE)
-        .map(|row| row.text.chars().count())?;
-    if width < SENTENCE_SYLLABLES {
-        return None;
-    }
+    let is_sentence_source = |index: usize| {
+        let row = rows.get(index);
+        SENTENCE_READING_SOURCES.contains(&row.source)
+            && row.text.chars().count() >= SENTENCE_SYLLABLES
+    };
+    // 光标后编辑等模式整表 `answers_key` 为假，此时退回按同字数归组整句读法。
+    let any_reading_answers_key =
+        (0..count).any(|index| rows.get(index).answers_key && is_sentence_source(index));
+    let first_reading = (0..count).find(|&index| {
+        is_sentence_source(index) && (!any_reading_answers_key || rows.get(index).answers_key)
+    })?;
+    let width = rows.get(first_reading).text.chars().count();
+    let is_reading = |index: usize| {
+        if any_reading_answers_key {
+            rows.get(index).answers_key && is_sentence_source(index)
+        } else {
+            SENTENCE_READING_SOURCES.contains(&rows.get(index).source)
+                && rows.get(index).text.chars().count() == width
+        }
+    };
     let keep = if width >= LONG_SENTENCE_CHARACTERS {
         SENTENCE_READINGS
     } else {
         1
     };
-    // Every lattice reading of the full key, in list order. The first stays where it is, the next `keep - 1` are seated right behind it, and the rest go to the back in their existing order. `keep` is at most three, so rescanning the rows costs less than allocating separate reading and membership arrays.
-    let is_reading = |index: usize| {
-        let row = rows.get(index);
-        row.source == LATTICE_SOURCE && row.text.chars().count() == width
+    let front_limit = if width >= LONG_SENTENCE_CHARACTERS {
+        FRONT_NON_READING_LIMIT
+    } else {
+        SHORT_FRONT_ROW_LIMIT
     };
-    // 先只扫描输出顺序，常见的整句候选已经连续时直接返回，避免为最终排列分配缓冲。
+
+    // 先做零分配线性扫描检查是否已处于目标顺序；仅确实需要重排时才构造返回向量。
     let mut output = 0;
     let mut identity = true;
-    let mut reading_seen = 0;
-    for index in 0..count {
-        if !is_reading(index) {
+    visit_runner_up_order(
+        count,
+        first_reading,
+        keep,
+        front_limit,
+        &is_reading,
+        |index| {
             identity &= output == index;
             output += 1;
-            continue;
-        }
-        if reading_seen == 0 {
-            identity &= output == index;
-            output += 1;
-            let mut kept = 1;
-            for next in index + 1..count {
-                if is_reading(next) {
-                    if kept == keep {
-                        break;
-                    }
-                    identity &= output == next;
-                    output += 1;
-                    kept += 1;
-                }
-            }
-        }
-        reading_seen += 1;
-    }
-    reading_seen = 0;
-    for index in 0..count {
-        if is_reading(index) {
-            if reading_seen >= keep {
-                identity &= output == index;
-                output += 1;
-            }
-            reading_seen += 1;
-        }
-    }
+        },
+    );
     debug_assert_eq!(output, count);
     if identity {
         return None;
     }
 
     let mut order = Vec::with_capacity(count);
-    let mut reading_seen = 0;
-    for index in 0..count {
-        if !is_reading(index) {
+    visit_runner_up_order(
+        count,
+        first_reading,
+        keep,
+        front_limit,
+        &is_reading,
+        |index| {
             order.push(index);
-            continue;
-        }
-        if reading_seen == 0 {
-            order.push(index);
-            let mut kept = 1;
-            for next in index + 1..count {
-                if is_reading(next) {
-                    if kept == keep {
-                        break;
-                    }
-                    order.push(next);
-                    kept += 1;
-                }
-            }
-        }
-        reading_seen += 1;
-    }
-    reading_seen = 0;
-    for index in 0..count {
-        if is_reading(index) {
-            if reading_seen >= keep {
-                order.push(index);
-            }
-            reading_seen += 1;
-        }
-    }
+        },
+    );
     debug_assert_eq!(order.len(), count);
     if order.iter().enumerate().all(|(seat, index)| seat == *index) {
         return None;
@@ -642,7 +753,8 @@ mod tests {
             row("这是没有进入模型比较集合的长候选", LATTICE_SOURCE),
         ];
         assert_eq!(
-            longest_rerank_candidate(&rows, &|index| rows[index].answers_key),
+            longest_rerank_candidate::<STATIC_RERANK_LIMIT, _, _>(&rows, &|index| rows[index]
+                .answers_key),
             1
         );
     }
@@ -788,7 +900,7 @@ mod tests {
             let mut considered = [0; STATIC_RERANK_LIMIT];
             let mut statik = [0.0; STATIC_RERANK_LIMIT];
             let mut subset = [""; STATIC_RERANK_LIMIT];
-            let count = fill_static_rerank_inputs(
+            let count = fill_static_rerank_inputs::<STATIC_RERANK_LIMIT, _, _>(
                 &scored,
                 |index| scored.get(index).answers_key,
                 &mut considered,
@@ -851,7 +963,7 @@ mod tests {
 
     #[test]
     fn long_sentences_keep_three_readings_after_the_first() {
-        // 第一条整句留在原位，其后两条紧跟着，其余整句挪到末尾；非整句来源保持相对顺序。
+        // 第一条整句留在原位，其后两条紧跟着；前排保留不超过三条非读法行，其余整句紧随其后。
         let rows = [
             row("今天天气", LATTICE_SOURCE),
             row("今天", 0),
@@ -861,6 +973,188 @@ mod tests {
             row("金", 0),
         ];
         assert_eq!(runner_up_order(0, &rows), Some(vec![0, 2, 3, 1, 5, 4]));
+    }
+
+    fn favouring_model(characters: &[char], favoured: &[char]) -> SentenceModel {
+        const CONTEXT: usize = 16;
+        let vocabulary: Vec<String> = ["<pad>", "<unk>", "<bos>"]
+            .into_iter()
+            .map(str::to_owned)
+            .chain(characters.iter().map(char::to_string))
+            .collect();
+        let logits: Vec<f32> = [0.0, -8.0, 0.0]
+            .into_iter()
+            .chain(
+                characters
+                    .iter()
+                    .map(|c| if favoured.contains(c) { 8.0 } else { -8.0 }),
+            )
+            .collect();
+        let config = format!(
+            r#"{{"vocab":{},"n_layer":0,"n_head":1,"n_embd":1,"context":{CONTEXT},"dropout":0.0}}"#,
+            vocabulary.len()
+        );
+        let tensors: [(&str, usize, Vec<f32>); 4] = [
+            ("tok.weight", vocabulary.len(), logits),
+            ("pos.weight", CONTEXT, vec![0.0; CONTEXT]),
+            ("ln_f.weight", 1, vec![0.0]),
+            ("ln_f.bias", 1, vec![1.0]),
+        ];
+        let mut header = serde_json::Map::new();
+        header.insert(
+            "__metadata__".into(),
+            serde_json::json!({
+                "format": "chinese-ime-lm",
+                "version": "1",
+                "precision": "f32",
+                "config": config,
+                "vocab": serde_json::to_string(&vocabulary).unwrap(),
+            }),
+        );
+        let mut data = Vec::new();
+        for (name, rows, values) in tensors {
+            let start = data.len();
+            data.extend(values.iter().flat_map(|value| value.to_le_bytes()));
+            header.insert(
+                name.into(),
+                serde_json::json!({"dtype": "F32", "shape": [rows, 1], "data_offsets": [start, data.len()]}),
+            );
+        }
+        header["ln_f.weight"]["shape"] = serde_json::json!([1]);
+        header["ln_f.bias"]["shape"] = serde_json::json!([1]);
+        let header = serde_json::to_vec(&serde_json::Value::Object(header)).unwrap();
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(&header);
+        bytes.extend_from_slice(&data);
+        SentenceModel::load(&bytes).unwrap()
+    }
+
+    #[test]
+    fn runner_up_order_recognizes_neural_and_collocation_sources_and_is_idempotent() {
+        let rows = [
+            row("甲乙丙", LATTICE_SOURCE),
+            row("甲乙", 0),
+            row("甲", 0),
+            row("假乙丙", 11),
+            row("加乙丙", 17),
+            row("佳乙丙", 11),
+            row("乙", 0),
+            row("丙", 0),
+        ];
+        let order = runner_up_order(0, &rows).expect("应重排神经/搭配次选与单字顺序");
+        assert_eq!(order, vec![0, 3, 4, 1, 2, 6, 5, 7]);
+        let reordered: Vec<_> = order.iter().map(|&index| rows[index]).collect();
+        assert_eq!(runner_up_order(0, &reordered), None);
+    }
+
+    #[test]
+    fn runner_up_order_uses_answers_key_for_different_lengths_and_caps_front_non_readings_with_suffix_fallback(
+    ) {
+        let mut partial = row("甲乙", LATTICE_SOURCE);
+        partial.answers_key = false;
+        let rows = [
+            row("甲乙丙丁", LATTICE_SOURCE),
+            partial,
+            row("词一", 0),
+            row("词二", 0),
+            row("词三", 0),
+            row("单", 0),
+            row("甲乙丙", 11),
+            row("乙丙丁", 17),
+            row("甲丙", 11),
+        ];
+        // 首行后保留 2 条回答整码的非同长度整句（下标 6、7），接着至多 3 条前排非读法行（1、2、3），
+        // 第 4 条词（4）和单字（5）排到余下的整句（8）之后。
+        assert_eq!(
+            runner_up_order(0, &rows),
+            Some(vec![0, 6, 7, 1, 2, 3, 8, 4, 5])
+        );
+
+        // 光标后编辑等场景整表 answers_key 均为假时，退回按同字数归组整句读法。
+        let suffix_rows: Vec<_> = [
+            row("丙丁戊", LATTICE_SOURCE),
+            row("丙定戊", 11),
+            row("丙", 0),
+            row("丁", 0),
+            row("戊", 0),
+            row("己", 0),
+            row("并丁戊", 17),
+            row("柄丁戊", LATTICE_SOURCE),
+        ]
+        .into_iter()
+        .map(|mut candidate| {
+            candidate.answers_key = false;
+            candidate
+        })
+        .collect();
+        assert_eq!(
+            runner_up_order(0, &suffix_rows),
+            Some(vec![0, 1, 6, 2, 3, 4, 7, 5])
+        );
+    }
+
+    #[test]
+    fn settled_rerank_order_sorts_up_to_sixteen_static_candidates_and_falls_back_without_evidence()
+    {
+        let mut reranker = Reranker::new(std::sync::Arc::new(favouring_model(
+            &['甲', '乙', '丙', '丁'],
+            &['乙', '丙', '丁'],
+        )));
+        let rows = [
+            row("甲甲", LATTICE_SOURCE),
+            row("甲乙", LATTICE_SOURCE),
+            row("甲丙", LATTICE_SOURCE),
+            row("甲丁", LATTICE_SOURCE),
+            row("乙甲", LATTICE_SOURCE),
+            row("丙甲", LATTICE_SOURCE),
+            row("丁甲", LATTICE_SOURCE),
+            row("乙乙", LATTICE_SOURCE),
+            row("甲戊", LATTICE_SOURCE),
+            row("甲己", LATTICE_SOURCE),
+            row("甲庚", LATTICE_SOURCE),
+            row("乙", 0),
+            row("丙乙", LATTICE_SOURCE),
+            row("甲辛", LATTICE_SOURCE),
+            row("甲壬", LATTICE_SOURCE),
+            row("丙丙", LATTICE_SOURCE),
+            row("丁丁", LATTICE_SOURCE),
+        ];
+        // 17 条里只有前 16 条（0..16）进入精排比较集合，16 号“丁丁”虽高分但留在原位；
+        // 前 16 条中，静态分较高的“丙丙”(15) 和“乙”(11) 与“丙乙”(12) 按总分顺位排到前列。
+        let scores: Vec<Option<StaticEvidence>> = (0..rows.len())
+            .map(|index| {
+                let milli = match index {
+                    15 => -500,
+                    12 => -900,
+                    11 => -1200,
+                    16 => -100,
+                    _ => -20000 - (index as i64) * 100,
+                };
+                Some(StaticEvidence {
+                    log_prob_milli_nats: milli,
+                    characters: rows[index].text.chars().count(),
+                })
+            })
+            .collect();
+        let scored = ScoredOrderRows::new(&rows, &scores);
+        let order = settled_rerank_order(&mut reranker, "", 0, false, &scored)
+            .expect("停顿精排应按综合分重排前 16 条候选");
+        assert_eq!(&order[..3], &[15, 12, 11]);
+        assert_eq!(order[16], 16);
+
+        // 无静态证据时退回仅旋前第 1 名；若本来已有序则返回 None。
+        let mut plain_reranker =
+            Reranker::new(std::sync::Arc::new(favouring_model(&['甲', '乙'], &['乙'])));
+        let fallback_rows = [row("甲", LATTICE_SOURCE), row("乙", LATTICE_SOURCE)];
+        assert_eq!(
+            settled_rerank_order(&mut plain_reranker, "", 0, false, &fallback_rows),
+            Some(vec![1, 0])
+        );
+        let ordered_rows = [row("乙", LATTICE_SOURCE), row("甲", LATTICE_SOURCE)];
+        assert_eq!(
+            settled_rerank_order(&mut plain_reranker, "", 0, false, &ordered_rows),
+            None
+        );
     }
 
     #[test]
