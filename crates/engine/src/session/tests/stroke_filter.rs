@@ -296,3 +296,198 @@ fn d_is_the_dot_stroke_like_n() {
     assert_eq!(words(&session), ["大家", "大"]);
     assert_eq!(session.snapshot().preedit, "dajia｜hpd");
 }
+
+const RADICAL_USABILITY_FIXTURE: &str = "CREATE TABLE tbl_1_d(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+INSERT INTO tbl_1_d VALUES('dao','d','到',1200),('dao','d','倒',1100),('dao','d','道',1000),('dao','d','刀',900),('dao','d','岛',800);\
+CREATE TABLE tbl_1_q(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+INSERT INTO tbl_1_q VALUES('qian','q','前',1000),('qian','q','钱',900),('qian','q','欠',800);\
+CREATE TABLE tbl_1_g(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+INSERT INTO tbl_1_g VALUES('gei','g','给',1000);\
+CREATE TABLE tbl_1_x(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+INSERT INTO tbl_1_x VALUES('xin','x','信',1000),('xin','x','心',900),('xin','x','忻',800);";
+
+#[test]
+fn radical_filter_accepts_full_pinyin_aliases_trailing_and_pure_x() {
+    let fixture = Fixture::new(RADICAL_USABILITY_FIXTURE);
+    let mut session = filter_session(&fixture);
+
+    // 部件全拼前缀：`qian` + Tab + `jin` 找到金字旁的 钱。
+    type_text(&mut session, "qian");
+    assert!(tab(&mut session));
+    type_text(&mut session, "jin");
+    assert_eq!(words(&session), ["钱"]);
+    assert_eq!(session.snapshot().preedit, "qian｜jin");
+    session.command(Command::Cancel);
+
+    // 部首俗称：`gei` + Tab + `j` / `jiao` 找到绞丝旁的 给。
+    type_text(&mut session, "gei");
+    assert!(tab(&mut session));
+    type_text(&mut session, "jiao");
+    assert_eq!(words(&session), ["给"]);
+    session.command(Command::Cancel);
+
+    // 右偏旁/立刀（`l` 找 到、倒、刀）、俗称（`d` 找 到、倒、刀）与首尾组合（`baoshan` 找 岛）。
+    type_text(&mut session, "dao");
+    assert!(tab(&mut session));
+    type_text(&mut session, "l");
+    assert_eq!(words(&session), ["到", "倒", "刀"]);
+    session.command(Command::Backspace);
+    type_text(&mut session, "d");
+    assert_eq!(words(&session), ["到", "倒", "刀"]);
+    session.command(Command::Backspace);
+    type_text(&mut session, "baoshan");
+    assert_eq!(words(&session), ["岛"]);
+    session.command(Command::Cancel);
+
+    // 独体字 马 按 `ma` 命中；单字 `x` 不再当全字库通配笔顺，只按心/穴/小等部件筛选。
+    let ma_fixture = Fixture::new(MA_FIXTURE);
+    let mut ma_session = filter_session(&ma_fixture);
+    type_text(&mut ma_session, "ma");
+    assert!(tab(&mut ma_session));
+    type_text(&mut ma_session, "ma");
+    assert_eq!(words(&ma_session), ["妈", "吗", "马", "嘛", "码"]);
+
+    type_text(&mut session, "xin");
+    assert!(tab(&mut session));
+    type_text(&mut session, "x");
+    assert_eq!(words(&session), ["心", "忻"]);
+    assert!(!words(&session).contains(&"信".to_owned()));
+
+    // 与具体笔画组合时，`x` 仍作为任意一笔通配符生效。
+    let dajia_fixture = Fixture::new(DAJIA_FIXTURE);
+    let mut dajia_session = filter_session(&dajia_fixture);
+    type_text(&mut dajia_session, "dajia");
+    assert!(tab(&mut dajia_session));
+    type_text(&mut dajia_session, "hsx");
+    assert_eq!(words(&dajia_session), ["打架", "打"]);
+}
+
+const LONG_SENTENCE_FILTER_FIXTURE: &str =
+    "CREATE TABLE tbl_2_d(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+INSERT INTO tbl_2_d VALUES('dao''bi','db','倒闭',2000),('dao''bi','db','倒逼',1500);\
+CREATE TABLE tbl_1_d(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+INSERT INTO tbl_1_d VALUES('dao','d','到',3000),('dao','d','倒',1000),('dao','d','佻',1);\
+CREATE TABLE tbl_1_b(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+INSERT INTO tbl_1_b VALUES('bi','b','闭',1000),('bi','b','逼',900),('bi','b','必',800);\
+CREATE TABLE tbl_1_m(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+INSERT INTO tbl_1_m VALUES('ma','m','吗',1000),('ma','m','妈',900),('ma','m','嘛',800);";
+
+#[test]
+fn filtered_long_sentence_caps_runner_ups_and_promotes_tail_sentences() {
+    let fixture = Fixture::new(LONG_SENTENCE_FILTER_FIXTURE);
+    let mut session = fixture.session_with(|options| {
+        options.tab_stroke_filter = true;
+        options.stroke_dictionary = filter_dictionary(fixture.path());
+        options.sentence_alternatives = true;
+    });
+    type_text(&mut session, "daobima");
+    let total_sentences_before = session
+        .snapshot()
+        .candidates
+        .iter()
+        .filter(|item| item.word.chars().count() == 3)
+        .count();
+    assert!(total_sentences_before > 2);
+    assert!(tab(&mut session));
+    type_text(&mut session, "r");
+    let filtered = words(&session);
+    let sentences: Vec<_> = filtered
+        .iter()
+        .filter(|word| word.chars().count() == 3)
+        .collect();
+    assert_eq!(
+        sentences.len(),
+        2,
+        "长句筛选最多保留 2 条整句: {filtered:?}"
+    );
+    let phrase_pos = filtered
+        .iter()
+        .position(|word| word == "倒闭")
+        .expect("应保留前缀词 倒闭");
+    let single_pos = filtered
+        .iter()
+        .position(|word| word == "倒")
+        .expect("应保留单字 倒");
+    assert!(phrase_pos < single_pos && single_pos <= 4, "{filtered:?}");
+    session.command(Command::Cancel);
+
+    // 主整句被筛掉、只剩末尾的 `keyboard_runner_up` 整句落在生僻字后面时，筛选后应只留 2 条并升回短前缀词与单字之前。
+    type_text(&mut session, "daobima");
+    assert!(tab(&mut session));
+    type_text(&mut session, "r");
+    let make_sentence = |text: &str, runner_up: bool| {
+        let mut item = crate::types::WordItem::new(
+            "dao'bi'ma",
+            text,
+            -1000,
+            CandidateSource::Generated,
+            "dao'bi'ma",
+        );
+        item.sentence_association = true;
+        item.keyboard_runner_up = runner_up;
+        item
+    };
+    let make_dict = |pinyin: &str, text: &str| {
+        crate::types::WordItem::new(pinyin, text, 1000, CandidateSource::Database, pinyin)
+    };
+    session.input.ranking_candidates = None;
+    session.input.mixed_candidates = vec![
+        make_dict("dao'bi", "倒闭"),
+        make_dict("dao", "倒"),
+        make_dict("dao", "佻"),
+        make_sentence("倒逼吗", true),
+        make_sentence("倒闭吗", true),
+        make_sentence("倒逼妈", true),
+    ];
+    session.input.apply_stroke_filter();
+    assert_eq!(words(&session), ["倒逼吗", "倒闭吗", "倒闭", "倒", "佻"]);
+    assert!(session
+        .input
+        .mixed_candidates
+        .iter()
+        .take(2)
+        .all(|item| !item.keyboard_runner_up));
+
+    // 两音节输入已有命中的精确双字词典词时，末尾合成的 `keyboard_runner_up` 双字整句直接丢弃；没有精确双字词典词时才升回首位。
+    let two_syl_fixture = Fixture::new(LONG_SENTENCE_FILTER_FIXTURE);
+    let mut two_syl = filter_session(&two_syl_fixture);
+    type_text(&mut two_syl, "daobi");
+    assert!(tab(&mut two_syl));
+    type_text(&mut two_syl, "r");
+    let make_two = |pinyin: &str, text: &str, sentence: bool, runner_up: bool| {
+        let mut item = crate::types::WordItem::new(
+            pinyin,
+            text,
+            1000,
+            if sentence {
+                CandidateSource::Generated
+            } else {
+                CandidateSource::Database
+            },
+            pinyin,
+        );
+        item.sentence_association = sentence;
+        item.keyboard_runner_up = runner_up;
+        item
+    };
+    two_syl.input.ranking_candidates = None;
+    two_syl.input.mixed_candidates = vec![
+        make_two("dao'bi", "倒闭", false, false),
+        make_two("dao'bi", "倒逼", false, false),
+        make_two("dao", "倒", false, false),
+        make_two("dao", "佻", false, false),
+        make_two("dao'bi", "倒必", true, true),
+    ];
+    two_syl.input.apply_stroke_filter();
+    assert_eq!(words(&two_syl), ["倒闭", "倒逼", "倒", "佻"]);
+
+    two_syl.input.ranking_candidates = None;
+    two_syl.input.mixed_candidates = vec![
+        make_two("dao", "倒", false, false),
+        make_two("dao", "佻", false, false),
+        make_two("dao'bi", "倒必", true, true),
+    ];
+    two_syl.input.apply_stroke_filter();
+    assert_eq!(words(&two_syl), ["倒必", "倒", "佻"]);
+    assert!(!two_syl.input.mixed_candidates[0].keyboard_runner_up);
+}

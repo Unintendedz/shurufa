@@ -1,9 +1,9 @@
-//! Tab 笔画筛选（`SessionOptions::tab_stroke_filter`），搜狗拼音「Tab 加笔画、部首」的对应物：全拼、双拼组字时按 Tab 进入筛选，之后打的小写字母是筛选码，候选只留第一个字合这串码的那些（词也留，比的是它的第一个字）。一个字合码有两种方式，满足一种就留下：
+//! Tab 笔画与偏旁筛选（`SessionOptions::tab_stroke_filter`），搜狗拼音「Tab 加笔画、部首」的对应物：全拼、双拼组字时按 Tab 进入筛选，之后打的小写字母是筛选码，候选只留第一个字合这串码的那些（词也留，比的是它的第一个字）。一个字合码有两种方式，满足一种就留下：
 //!
-//! - 笔顺：码里只有 `h` `s` `p` `n` `z`（横竖撇点折）、`d`（点，和 `n` 同义）和 `x`（任意一笔）时，按笔顺比，读 `msime-stroke.db`；
-//! - 部件：码是这个字某种拆法的各部件拼音首字母的开头：口读 kou，所以 `k` 找带口的字，`kz` 找 嚏（口、疐），读 `local::chaizi` 编进引擎的拆字表。
+//! - 笔顺：码里只有 `h` `s` `p` `n` `z`（横竖撇点折）、`d`（点，和 `n` 同义）和 `x`（任意一笔），且至少含一笔具体笔画（纯 `x` 不查笔顺，留给心/穴/小等部件筛选）时，按笔顺比，读 `msime-stroke.db`；
+//! - 部件：由 `local::chaizi::matches_component_filter` 匹配，支持按顺序各部件首字母或全拼前缀（`k`、`kou`、`kz`、`kouzhi`）、常用部首俗称（`j`/`jiao` 绞丝、`d`/`dan` 单人、`s`/`shuang` 双人/双耳、`f`/`fan` 反犬/反文、`l`/`li` 立刀等）、右/底后置部首（排除同音声旁）、三部件以上首尾部件组合以及常用独体部首字。
 //!
-//! 一串码只按一种方式读，不在同一串里先比部件再比笔画。
+//! 一串码只按一种方式读，不在同一串里先比部件再比笔画。筛选后的长句只留前 2 条整句，并将来自末尾的合法次选整句归位到精确词典词之后、短前缀词与单字之前；双音节已有精确词典词时丢弃合成的双字次选整句。
 //!
 //! 码不进组字原文：原文、光标和 `editing_text` 都不变，只有快照的预编辑在拼音后面接上 `｜` 和码。Backspace 先删码，删光后再按一次退出筛选；大写字母和 Tab 被吞掉；数字、空格、标点和翻页照常。筛选只属于按 Tab 时的那串原文：选中一行、编辑原文、移动光标、进入本地模式或改字都结束它，`update_mixed_candidates` 每次刷新都核对一遍。
 //!
@@ -16,12 +16,15 @@ use crate::diagnostics;
 use crate::language_dictionary;
 use crate::local::chaizi;
 use crate::stroke;
+use crate::text::count_utf8_chars;
 use crate::types::{Command, KeyResult, LocalInputMode, SchemeType, WordItem};
 
 /// 预编辑里码前的分隔，按 Tab 后还没打码时也让人看得出在筛选。
 const PREEDIT_MARK: char = '｜';
 /// 码最长这么多个字母，与笔画方案的上限相同。
 const MAX_CODE: usize = stroke::MAX_STROKES;
+/// 筛选态下三字及以上长句最多保留的整句行条数，避免几十条尾词次选挤走前排短词与首字单字。
+const LONG_FILTERED_SENTENCE_LIMIT: usize = 2;
 
 #[derive(Debug, Default)]
 pub(super) struct StrokeFilter {
@@ -39,20 +42,22 @@ impl StrokeFilter {
             self.strokes
                 .as_ref()
                 .is_some_and(|strokes| strokes.contains(&first))
-                || chaizi::components_start_with(first, &self.code)
+                || chaizi::matches_component_filter(first, &self.code)
         })
     }
 }
 
-/// 码当笔顺读时的笔画键串（`d` 换成 `n`）；码里有笔画以外的字母时为 `None`。
+/// 码当笔顺读时的笔画键串（`d` 换成 `n`）；码里有笔画以外的字母、或只有通配符 `x` 时为 `None`。
 fn stroke_keys(code: &str) -> Option<String> {
-    code.bytes()
+    let keys: String = code
+        .bytes()
         .map(|key| match key {
             b'd' => Some('n'),
             _ if stroke::is_key(key) => Some(char::from(key)),
             _ => None,
         })
-        .collect()
+        .collect::<Option<String>>()?;
+    keys.bytes().any(|key| key != b'x').then_some(keys)
 }
 
 impl InputSession {
@@ -253,6 +258,76 @@ impl InputSession {
             self.ranking_candidates = Some(self.mixed_candidates.clone());
         }
         self.mixed_candidates.retain(|row| filter.keeps(row));
+        self.compact_filtered_sentences();
+    }
+
+    /// 筛选后收敛整句数量并将来自末尾的合法次选整句归位到精确整键词典词之后、短前缀词与单字之前，避免大量尾词排列组合或整串生僻单字挤占前排。
+    fn compact_filtered_sentences(&mut self) {
+        if !self
+            .mixed_candidates
+            .iter()
+            .any(|item| item.sentence_association && self.selection_completes_composition(item))
+        {
+            return;
+        }
+        let candidates = std::mem::take(&mut self.mixed_candidates);
+        let is_sentence = |item: &WordItem| {
+            item.sentence_association && self.selection_completes_composition(item)
+        };
+        let Some(first_sentence) = candidates.iter().find(|item| is_sentence(item)) else {
+            self.mixed_candidates = candidates;
+            return;
+        };
+        let long_sentence = count_utf8_chars(&first_sentence.word) >= 3;
+        let has_primary = candidates
+            .iter()
+            .any(|item| is_sentence(item) && !item.keyboard_runner_up);
+        let exact_dictionary_lead = candidates
+            .iter()
+            .take_while(|item| {
+                item.source.is_dictionary()
+                    && self.selection_completes_composition(item)
+                    && self.reading_answers_key(item)
+            })
+            .count();
+
+        let sentence_limit = if long_sentence {
+            LONG_FILTERED_SENTENCE_LIMIT
+        } else if has_primary || exact_dictionary_lead == 0 {
+            1
+        } else {
+            // 两音节输入已有命中的精确双字词典词（如 `daobi｜ps` 的 倒闭、倒毙、倒逼）时，丢弃末尾合成的双字次选整句。
+            0
+        };
+
+        let mut kept_sentences = 0usize;
+        let mut insert_at = exact_dictionary_lead;
+        let mut promoted = Vec::new();
+        let mut kept = Vec::with_capacity(candidates.len());
+        for (index, mut item) in candidates.into_iter().enumerate() {
+            if is_sentence(&item) {
+                let eligible = long_sentence || !has_primary || !item.keyboard_runner_up;
+                if eligible && kept_sentences < sentence_limit {
+                    kept_sentences += 1;
+                    item.keyboard_runner_up = false;
+                    if item.fixed_position == 0 && index >= exact_dictionary_lead {
+                        promoted.push(item);
+                        continue;
+                    }
+                    if index < exact_dictionary_lead {
+                        insert_at = insert_at.saturating_sub(1);
+                    }
+                    kept.push(item);
+                }
+                continue;
+            }
+            kept.push(item);
+        }
+        if !promoted.is_empty() {
+            let at = insert_at.min(kept.len());
+            kept.splice(at..at, promoted);
+        }
+        self.mixed_candidates = kept;
     }
 
     /// 快照预编辑在拼音后面接的筛选码（`｜kz`）；没有在筛选时为 `None`。

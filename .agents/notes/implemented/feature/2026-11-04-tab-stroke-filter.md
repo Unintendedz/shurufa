@@ -16,13 +16,13 @@ Status: implemented
 - 进入：`SessionOptions::tab_stroke_filter` 开着、`stroke_dictionary` 不为空，全拼或双拼在组字、光标在末尾，不在本地模式、专用英文、整句改字、光标后编辑和显式辅助码前导里，这时快照的 `spelling_symbols` 带 `\t`。macOS 宿主原本就按 `spelling_symbols` 里有没有 `\t` 决定 Tab 交不交给会话（双拼手动辅助码用的同一条路），所以宿主不用改按键路由。双拼开着 Tab 手动辅助码时 Tab 归辅助码。笔画词库在第一次按 Tab 时才打开，打不开时报 `LANGUAGE_DICTIONARY_UNAVAILABLE`，组字不变。
 - 筛选里：小写字母追加进筛选码；大写字母和 Tab 被吞掉；Backspace 删一个字母，删光后再按一次退出，再按才删拼音；数字、空格、标点、翻页照常。移动光标和向后删先退出筛选再照常处理；选中一行（`commit`）、Cancel、`reset_composition` 都结束筛选。
 - 筛选码不进组字原文。原文、光标、`editing_text` 都不变，只在快照的 `preedit` 后面接 `｜` 和码（`da'jia｜hs`）。同一个字母可能是笔画也可能是部件，所以显示字母本身而不是笔画字形。`MSIMEPreeditCaretPosition` 认不出这串字母时本来就把光标放在末尾。筛选记下按 Tab 时的原文，`update_mixed_candidates` 每次刷新都核对一遍：原文、光标、模式任何一项变了就结束筛选，不靠每条修改路径各自记得清它。
-- 比的是候选的第一个字（词和整句看它的第一个字，英文和符号行被筛掉），合下面两种读法之一就留下：
-  - 笔顺：码里只有 `hspnz`、`d`（点，读作 `n`）和 `x`（任意一笔）时，`stroke::characters_with_stroke_prefix` 从 `msime-stroke.db` 取出笔顺以它开头的全部单字。九宫格的笔画筛选改用同一个函数。带 `x` 时走新加的 `LanguageDictionary::texts_matching_key_prefix`（GLOB，字面前缀限定扫描范围），不带时就是原来的 `texts_with_key_prefix`。码里有别的字母时不查笔画库。
-  - 部件：`local::chaizi::components_start_with` 看这个字在拆字表（kfcd/chaizi，`C` 模式用的同一张，编进引擎）里有没有一种拆法，各部件拼音的首字母依次以码开头：`ti` Tab `k` 得 啼、嚏，`zhen` Tab `hh` 只按笔顺得 珍。反查表在第一次用到时从 `chaizi.tsv` 建一次。表里没有拆法的独体字（口、马）只能按笔顺找。
+- 比的是候选的第一个字（词和整句看它的第一个字，英文和符号行被筛掉），合下面两种读法之一就留下（后续直觉化匹配、纯 `x` 收口与长句次选收敛见 [Tab 偏旁与笔画筛选修复](../bug-fix/2026-11-16-tab-radical-filter-usability.md)）：
+  - 笔顺：码里只有 `hspnz`、`d`（点，读作 `n`）和 `x`（任意一笔）且至少含一笔具体笔画时，`stroke::characters_with_stroke_prefix` 从 `msime-stroke.db` 取出笔顺以它开头的全部单字。九宫格的笔画筛选改用同一个函数。带 `x` 时走新加的 `LanguageDictionary::texts_matching_key_prefix`（GLOB，字面前缀限定扫描范围），不带时就是原来的 `texts_with_key_prefix`。纯 `x` 或码里有别的字母时不查笔画库。
+  - 部件：`local::chaizi::matches_component_filter` 从编进引擎的拆字表（kfcd/chaizi，`C` 模式用的同一张）与常用独体部首字表比对：支持各部件按顺序首字母或全拼前缀（`k`、`kou`、`kz`、`kouzhi`）、日常部首俗称（`j`/`jiao` 绞丝、`d`/`dan` 单人等）、右/底后置部首（排除同音声旁）、三部件以上首尾组合与常用独体部首字（口、马、心等）。反查表在第一次用到时从 `chaizi.tsv` 与 `chaizi-chars.tsv` 建一次。
   - 一串码整串按一种读法比，不在同一串里先比部件再比笔画。
 - 一个字母筛不出任何候选时不收它，候选窗不会被筛空。
 - 进入筛选时先 `expand_initial_candidates`：单字母首段只给前几十个单字，筛选要在全部单字里找。
-- 筛掉的行留在 `ranking_candidates`，学习、固定位置经 `ranking_index` 按原列表里的名次找行：靠筛选从后面翻出来的字照常往前调。
+- 筛掉的行留在 `ranking_candidates`，学习、固定位置经 `ranking_index` 按原列表里的名次找行：靠筛选从后面翻出来的字照常往前调；筛选态由 `InputSession::compact_filtered_sentences` 收敛长句次选数量并把合法次选整句归位到精确词典词之后。
 
 ### 偏好、版本表和打包
 
@@ -46,6 +46,6 @@ Status: implemented
 
 - Shurufa 的包多了 2.3 MB 的 `msime-stroke.db` 和它的 LGPL-3.0 许可证文本（`rime-stroke-LGPL-3.0.txt` 原本就随包）；第一次构建要联网下载语言词库（三套一起下，约 24 MB，只暂存笔画那套）。
 - 全拼、双拼组字时 Tab 不再翻页、不再打开展开候选，而是进入笔画筛选；关掉偏好就恢复原来的行为。
-- `h`、`s`、`p`、`n`、`z`、`d`、`x` 既是笔画也是部件首字母，两种读法的结果合在一起，第一个字母筛得比只按笔画宽，多打一两个字母才收窄。
+- `h`、`s`、`p`、`n`、`z`、`d` 既是笔画也是部件首字母，两种读法的结果合在一起，第一个字母筛得比只按笔画宽，多打一两个字母才收窄；纯 `x` 仅按部件筛选，与具体笔画组合时兼作任意一笔通配。
 - Windows、Linux 的 host-api 不把偏好交给 Engine，行为不变。
-- 测试：`crates/engine/src/session/tests/stroke_filter.rs`（进入、筛选、不收空筛、退格、选词、光标、双拼两种情形、学习名次、词库打不开、部件首字母、`d` 当点），`local::chaizi` 的部件首字母匹配，`language_dictionary` 的通配前缀查询，host-api 的偏好到视图，client-core 的偏好默认值与版本表功能位。
+- 测试：`crates/engine/src/session/tests/stroke_filter.rs`（进入、筛选、不收空筛、退格、选词、光标、双拼两种情形、学习名次、词库打不开、部件首字母、俗称与全拼前缀、右/底部首、纯 `x`、长句次选收敛、`d` 当点），`local::chaizi` 的 `matches_component_filter` 匹配，`language_dictionary` 的通配前缀查询，host-api 的偏好到视图，client-core 的偏好默认值与版本表功能位，以及 `crates/input-runtime/src/tests.rs` 的预编辑变更回首页验证。

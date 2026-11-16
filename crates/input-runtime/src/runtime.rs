@@ -2990,6 +2990,9 @@ impl<E: InputEngine> Runtime<E> {
         let plugin_marks_changed = self.transform_candidates();
         self.snapshot_valid = true;
         let composition_held = self.cached.editing_text == previous.editing_text
+            && self.cached.preedit == previous.preedit
+            && self.cached.nine_key_strokes == previous.nine_key_strokes
+            && self.cached.nine_key_single_character == previous.nine_key_single_character
             && self.cached.scheme == previous.scheme
             && self.cached.local_mode == previous.local_mode
             && self.cached.reading == previous.reading

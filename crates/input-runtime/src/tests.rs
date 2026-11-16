@@ -7604,6 +7604,143 @@ fn a_late_cloud_candidate_keeps_the_page_the_user_opened() {
     assert_eq!(home.candidates[1].text, "云联想");
 }
 
+/// 翻页后再按 Tab 进筛选或加减筛选码时，`editing_text` 和 `reading` 不变但 `preedit` 变了，
+/// 候选页必须回到第 1 页第 1 项；`preedit` 与组字都不变的旁路刷新（如云联想）仍停在已翻开的页。
+#[test]
+fn preedit_filter_change_resets_open_page_while_same_preedit_keeps_it() {
+    #[derive(Default)]
+    struct FilterFixture {
+        editing_text: String,
+        preedit: String,
+        words: Vec<String>,
+    }
+
+    impl InputEngine for FilterFixture {
+        fn snapshot(&self) -> Result<EngineSnapshot, RuntimeError> {
+            let count = self.words.len();
+            Ok(EngineSnapshot {
+                local_mode: "none".into(),
+                spelling_symbols: "\t".into(),
+                editing_text: self.editing_text.clone(),
+                reading: self.editing_text.clone(),
+                display_reading: self.editing_text.clone(),
+                preedit: self.preedit.clone(),
+                caret_position: self.editing_text.len(),
+                candidate_codes: vec![self.editing_text.clone(); count],
+                candidate_annotations: vec![String::new(); count],
+                candidate_sources: vec![0; count],
+                candidate_positions: vec![0; count],
+                candidate_corrected: vec![false; count],
+                candidate_answers_key: vec![true; count],
+                candidates: self.words.clone(),
+                ..EngineSnapshot::default()
+            })
+        }
+
+        fn character(&mut self, value: u8, _shift: bool) -> Result<EngineResult, RuntimeError> {
+            if value == b'\t' && self.preedit == self.editing_text {
+                self.preedit = format!("{}｜", self.editing_text);
+                return Ok(empty_result(true));
+            }
+            if value.is_ascii_lowercase() && self.preedit.contains('｜') {
+                self.preedit.push(char::from(value));
+                if self.preedit.ends_with("｜ps") {
+                    self.words = [
+                        "倒闭", "倒毙", "倒逼", "倒", "㠀", "佻", "儔", "島", "軇", "鳥",
+                    ]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect();
+                }
+                return Ok(empty_result(true));
+            }
+            Ok(empty_result(false))
+        }
+
+        fn command(&mut self, _command: Command) -> Result<EngineResult, RuntimeError> {
+            Ok(empty_result(false))
+        }
+
+        fn select(&mut self, _index: usize) -> Result<EngineResult, RuntimeError> {
+            Ok(empty_result(false))
+        }
+
+        fn select_edge(
+            &mut self,
+            _index: usize,
+            _edge: CandidateEdge,
+        ) -> Result<EngineResult, RuntimeError> {
+            Ok(empty_result(false))
+        }
+
+        fn finish(&mut self, _index: usize) -> Result<EngineResult, RuntimeError> {
+            Ok(empty_result(false))
+        }
+
+        fn punctuation(&mut self, _value: u8) -> Result<EngineResult, RuntimeError> {
+            Ok(empty_result(false))
+        }
+    }
+
+    let words: Vec<String> = (0..12).map(|n| format!("词{n}")).collect();
+    let mut runtime = Runtime::new(
+        FilterFixture {
+            editing_text: "daobi".into(),
+            preedit: "daobi".into(),
+            words,
+        },
+        5,
+    )
+    .unwrap();
+    runtime.focus(true).unwrap();
+
+    // 先翻到第 2 页。
+    let paged = runtime.dispatch(Action::NextPage).unwrap().view;
+    assert_eq!(paged.page, 1);
+    assert_eq!(paged.candidates[0].text, "词5");
+
+    // 按 Tab 进筛选：`editing_text` 没变，但 `preedit` 变为 `daobi｜`，回到第 1 页。
+    let entered = runtime
+        .dispatch(Action::Character {
+            value: b'\t',
+            shift: false,
+        })
+        .unwrap()
+        .view;
+    assert_eq!(entered.preedit, "daobi｜");
+    assert_eq!(entered.page, 0);
+    assert!(entered.candidates[0].highlighted);
+
+    // 即使在筛选里又翻到第 2 页，继续键入筛选码 `ps` 后也必须回到第 1 页看常用命中，不能落在生僻字页。
+    assert_eq!(runtime.dispatch(Action::NextPage).unwrap().view.page, 1);
+    runtime
+        .dispatch(Action::Character {
+            value: b'p',
+            shift: false,
+        })
+        .unwrap();
+    let filtered = runtime
+        .dispatch(Action::Character {
+            value: b's',
+            shift: false,
+        })
+        .unwrap()
+        .view;
+    assert_eq!(filtered.preedit, "daobi｜ps");
+    assert_eq!(filtered.page, 0);
+    assert_eq!(filtered.candidates[0].text, "倒闭");
+    assert!(filtered.candidates[0].highlighted);
+
+    // 翻到筛选结果的第 2 页后，`preedit` 不变的旁路刷新仍留在第 2 页。
+    assert_eq!(runtime.dispatch(Action::NextPage).unwrap().view.page, 1);
+    runtime.engine.words.push("云联想".into());
+    runtime.refresh().unwrap();
+    let kept = runtime.view();
+    assert_eq!(kept.page, 1);
+    assert_eq!(kept.candidates[0].text, "佻");
+    assert!(kept.candidates[0].highlighted);
+}
+
 /// 高亮那一条若只剩更前一页上的副本，不跟回去。翻开的页留在原地。
 #[test]
 fn a_promoted_candidate_does_not_pull_an_open_page_back() {
