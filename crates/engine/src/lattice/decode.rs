@@ -1033,9 +1033,13 @@ fn decode_graph_with_terminal<const WIDE_TERMINAL: bool>(
     } else {
         let best_score = last[0].score;
         let margin = options.terminal_diversity_margin;
+        let max_per_segmentation = (take / 3).max(max_per_prefix.saturating_mul(2));
         let mut stack_prefixes = [((0usize, 0usize), 0usize); SMALL_SENTENCE_PATHS];
         let mut stack_prefix_len = 0usize;
         let mut heap_prefixes: Vec<((usize, usize), usize)> = Vec::new();
+        let mut stack_segmentations = [(0u64, 0usize); SMALL_SENTENCE_PATHS];
+        let mut stack_segmentation_len = 0usize;
+        let mut heap_segmentations: Vec<(u64, usize)> = Vec::new();
         let mut stack_deferred = [0usize; SMALL_SENTENCE_PATHS];
         let mut stack_deferred_len = 0usize;
         let mut heap_deferred: Vec<usize> = Vec::new();
@@ -1050,13 +1054,19 @@ fn decode_graph_with_terminal<const WIDE_TERMINAL: bool>(
                 break;
             }
             let prefix = hyp.prev;
-            let throttled = prefix.0 >= 3
+            let prefix_throttled = prefix.0 >= 3
                 && prefix_emitted_count(
                     &stack_prefixes[..stack_prefix_len],
                     &heap_prefixes,
                     prefix,
                 ) >= max_per_prefix;
-            if throttled {
+            let seg_sig = segmentation_signature(hyp, &columns);
+            let seg_throttled = segmentation_emitted_count(
+                &stack_segmentations[..stack_segmentation_len],
+                &heap_segmentations,
+                seg_sig,
+            ) >= max_per_segmentation;
+            if prefix_throttled || seg_throttled {
                 if inline_unique && stack_deferred_len < SMALL_SENTENCE_PATHS {
                     stack_deferred[stack_deferred_len] = hyp_idx;
                     stack_deferred_len += 1;
@@ -1065,14 +1075,21 @@ fn decode_graph_with_terminal<const WIDE_TERMINAL: bool>(
                 }
                 continue;
             }
-            if materialize_terminal_hyp(hyp, &columns, n, &mut trace, &mut paths, inline_unique)
-                && prefix.0 >= 3
-            {
-                increment_prefix_count(
-                    &mut stack_prefixes,
-                    &mut stack_prefix_len,
-                    &mut heap_prefixes,
-                    prefix,
+            if materialize_terminal_hyp(hyp, &columns, n, &mut trace, &mut paths, inline_unique) {
+                if prefix.0 >= 3 {
+                    increment_prefix_count(
+                        &mut stack_prefixes,
+                        &mut stack_prefix_len,
+                        &mut heap_prefixes,
+                        prefix,
+                        inline_unique,
+                    );
+                }
+                increment_segmentation_count(
+                    &mut stack_segmentations,
+                    &mut stack_segmentation_len,
+                    &mut heap_segmentations,
+                    seg_sig,
                     inline_unique,
                 );
             }
@@ -1145,6 +1162,67 @@ fn increment_prefix_count(
         *stack_len += 1;
     } else {
         heap.push((prefix, 1));
+    }
+}
+
+/// 回溯计算整句路径的词边界签名（各词起始列的位掩码），用于限制单一分词骨架的同音笛卡尔积占满 `nbest`。
+fn segmentation_signature<'g>(hyp: &Hyp<'g>, columns: &[BeamColumn<'g>]) -> u64 {
+    let mut mask = 0u64;
+    let mut cursor = Some(hyp);
+    let mut shift = 0u32;
+    while let Some(step) = cursor {
+        if step.edge.is_none() {
+            break;
+        }
+        let (column, at) = step.prev;
+        if column < u64::BITS as usize {
+            mask |= 1u64 << column;
+        } else {
+            mask ^= (column as u64)
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .rotate_left(shift & 63);
+        }
+        shift = shift.wrapping_add(7);
+        cursor = Some(&columns[column].hyps[at]);
+    }
+    mask
+}
+
+fn segmentation_emitted_count(
+    stack: &[(u64, usize)],
+    heap: &[(u64, usize)],
+    signature: u64,
+) -> usize {
+    stack
+        .iter()
+        .chain(heap.iter())
+        .find(|(slot, _)| *slot == signature)
+        .map_or(0, |(_, count)| *count)
+}
+
+fn increment_segmentation_count(
+    stack: &mut [(u64, usize); SMALL_SENTENCE_PATHS],
+    stack_len: &mut usize,
+    heap: &mut Vec<(u64, usize)>,
+    signature: u64,
+    prefer_stack: bool,
+) {
+    if let Some((_, count)) = stack[..*stack_len]
+        .iter_mut()
+        .find(|(slot, _)| *slot == signature)
+    {
+        *count += 1;
+        return;
+    }
+    if let Some((_, count)) = heap.iter_mut().find(|(slot, _)| *slot == signature) {
+        *count += 1;
+        return;
+    }
+    if prefer_stack && *stack_len < SMALL_SENTENCE_PATHS {
+        stack[*stack_len] = (signature, 1);
+        *stack_len += 1;
+    } else {
+        heap.push((signature, 1));
     }
 }
 
@@ -1337,8 +1415,32 @@ pub(super) fn decode_typo_on_graph_with_policy(
     if best.typo_edges == 0 || best.sentence == literal_best.sentence {
         return None;
     }
-    if !allow_nonleading && best.log_prob <= literal_best.log_prob {
-        return None;
+    if !allow_nonleading {
+        // 单字边在 `edge_log_prob` 中扣减了 `ln(unigram_z)`，而多音节纠错词边的 `penalty` 只抵消词长加分、未做同等归一；
+        // 当纠错路径比字面最优路径合并掉了单字词时，每条纠错边须补齐一份 `ln(unigram_z)` 的尺度差，避免低频双字纠错词压过合法常用单字。
+        let literal_single_chars = literal_best
+            .words
+            .iter()
+            .filter(|word| word.chars().count() == 1)
+            .count();
+        let typo_single_chars = best
+            .words
+            .iter()
+            .filter(|word| word.chars().count() == 1)
+            .count();
+        let normalization_gap = if typo_single_chars < literal_single_chars {
+            let z = if options.unigram_z > 1.0 {
+                options.unigram_z
+            } else {
+                1e6
+            };
+            z.ln() * (best.typo_edges as f64)
+        } else {
+            0.0
+        };
+        if best.log_prob <= literal_best.log_prob + normalization_gap {
+            return None;
+        }
     }
     Some(TypoSentence {
         sentence: best.sentence,
@@ -2278,6 +2380,106 @@ pub(super) mod tests {
             lexical_sentences.iter().any(|s| s == "明亮砖"),
             "三音节词组不应限流同前驱末字: {lexical_sentences:?}"
         );
+    }
+
+    #[test]
+    fn terminal_segmentation_diversity_prevents_cartesian_homophones_from_evicting_parallel_cuts() {
+        let options = LatticeOptions {
+            beam: 32,
+            nbest: 8,
+            terminal_beam: 64,
+            terminal_max_per_prefix: 2,
+            terminal_diversity_margin: 8.0,
+            ..LatticeOptions::default()
+        };
+        let rows = table(&[
+            ("jin'tian'qu", &[("今天去", 126_000)]),
+            (
+                "you'shi",
+                &[
+                    ("优势", 500_700),
+                    ("有时", 500_400),
+                    ("又是", 500_300),
+                    ("有事", 138_600),
+                ],
+            ),
+            ("hou'ye", &[("侯爷", 9_300), ("后夜", 3_400)]),
+            ("bu'qing'chu'gai", &[("不清楚该", 100)]),
+            ("you'shi'hou", &[("有时候", 364_000)]),
+            ("ye'bu'qing'chu", &[("也不清楚", 149_500)]),
+            ("gai", &[("该", 1_351_000)]),
+            ("xuan'na", &[("选哪", 20_500)]),
+            ("ge", &[("个", 7_259_000), ("各", 513_000)]),
+        ]);
+        let decoded: Vec<String> = decode(
+            "jin'tian'qu'you'shi'hou'ye'bu'qing'chu'gai'xuan'na'ge",
+            &rows,
+            &options,
+        )
+        .into_iter()
+        .map(|path| path.sentence)
+        .collect();
+        assert!(
+            decoded.iter().any(|s| s == "今天去有时候也不清楚该选哪个"),
+            "中段同音笛卡尔积不应把并行正统切分挤出 nbest: {decoded:?}"
+        );
+    }
+
+    #[test]
+    fn typo_decode_requires_unigram_normalization_gap_when_fusing_single_chars() {
+        let options = LatticeOptions::default();
+        let rows = table(&[
+            ("xin'ji", &[("心急", 50_000)]),
+            ("qiu", &[("求", 1_200_000)]),
+            ("kuai", &[("快", 2_500_000)]),
+        ]);
+        let text = "xin'ji'qiu'kuai";
+        let mut rows_lookup = lookup(&rows);
+        let literal = decode(text, &rows, &options);
+        assert_eq!(literal[0].sentence, "心急求快");
+        // 「区块」仅因合并掉两个单字而规避 `-ln(unigram_z)` 惩罚，真实频率并不足以压过合法字面输入，应拒绝产出纠错句。
+        let false_positive = TypoEdge {
+            start: 2,
+            end: 4,
+            key: "qu'kuai".into(),
+            value: "区块".into(),
+            weight: 50_000,
+            penalty: 24.0,
+        };
+        assert!(decode_typo_sentence(
+            &syllables(text),
+            &mut rows_lookup,
+            &options,
+            &literal[0],
+            &[false_positive],
+        )
+        .is_none());
+
+        // 当真实高频纠错词跨越单字归一差（如低频单字拼凑 vs 超高频词组）时仍照常产出纠错句。
+        let genuine_rows = table(&[
+            ("mei", &[("没", 1_000)]),
+            ("gan", &[("干", 1_000)]),
+            ("xi", &[("系", 1_000)]),
+        ]);
+        let mut genuine_lookup = lookup(&genuine_rows);
+        let genuine_literal = decode("mei'gan'xi", &genuine_rows, &options);
+        let genuine_edge = TypoEdge {
+            start: 1,
+            end: 3,
+            key: "guan'xi".into(),
+            value: "关系".into(),
+            weight: 100_000,
+            penalty: 24.0,
+        };
+        let accepted = decode_typo_sentence(
+            &syllables("mei'gan'xi"),
+            &mut genuine_lookup,
+            &options,
+            &genuine_literal[0],
+            &[genuine_edge],
+        )
+        .expect("跨过单字归一差的真实错拼仍应产出纠错整句");
+        assert_eq!(accepted.sentence, "没关系");
     }
 }
 

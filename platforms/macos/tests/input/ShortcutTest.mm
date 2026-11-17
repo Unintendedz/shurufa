@@ -13472,6 +13472,12 @@ int main(int argc, char **argv) {
     assert(MSIMEShouldRegisterInputSource(2, registerArguments));
     @autoreleasepool {
         [NSApplication sharedApplication];
+        assert(([CandidateDisplay(@{@"text":@"汉语", @"corrected":@YES, @"annotation":@"(aB)", @"source":@2}, YES) isEqual:@"漢語*(aB) ☁️"]));
+        assert(([CandidateDisplay(@{@"text":@"上好", @"corrected":@YES, @"annotation":@"sahnghao"}, NO) isEqual:@"上好*"]));
+        assert(([CandidateDisplay(@{@"text":@"今天天气真不错我们去散步", @"corrected":@YES, @"annotation":@"jintiantianqizhenbucuowomenqusanbu"}, NO) isEqual:@"今天天气真不错我们去散步*"]));
+        assert(([CandidateDisplay(@{@"text":@"上好", @"corrected":@YES, @"annotation":@"sahnghao wqvb"}, NO) isEqual:@"上好*(wqvb)"]));
+        assert(([CandidateAnnotationRun(@{@"text":@"上好", @"corrected":@YES, @"annotation":@"sahnghao"}, NO, @"") isEqual:@""]));
+        assert(([CandidateAnnotationRun(@{@"text":@"上好", @"corrected":@YES, @"annotation":@"(AC)"}, NO, @"") isEqual:@"(AC)"]));
         if (argc == 2 && std::string(argv[1]) == "--cross-commit-spacing") {
             TestCrossCommitSpacing();
             TestCrossCommitSpacingReentrancy();
@@ -15482,6 +15488,9 @@ int main(int argc, char **argv) {
         assert(([CandidateDisplay(@{@"text": @"hello網絡学校", @"source": @18}, YES) isEqual:@"hello網絡学校"]));
         assert(([CandidateDisplay(@{@"text": @"学校", @"source": @0}, YES) isEqual:@"學校"]));
         assert(([CandidateDisplay(@{@"text":@"汉语", @"corrected":@YES, @"annotation":@"(aB)", @"source":@2}, YES) isEqual:@"漢語*(aB) ☁️"]));
+        assert(([CandidateDisplay(@{@"text":@"上好", @"corrected":@YES, @"annotation":@"sahnghao"}, NO) isEqual:@"上好*"]));
+        assert(([CandidateDisplay(@{@"text":@"今天天气真不错我们去散步", @"corrected":@YES, @"annotation":@"jintiantianqizhenbucuowomenqusanbu"}, NO) isEqual:@"今天天气真不错我们去散步*"]));
+        assert(([CandidateDisplay(@{@"text":@"上好", @"corrected":@YES, @"annotation":@"sahnghao wqvb"}, NO) isEqual:@"上好*(wqvb)"]));
         for (id corrected in @[@NO, @1, @"true", NSNull.null])
             assert(([CandidateDisplay(@{@"text":@"汉语", @"corrected":corrected}, NO) isEqual:@"汉语"]));
         for (id source in @[@0, @1, @4, @255, @(-1), @YES, @2.0, @"2", NSNull.null])

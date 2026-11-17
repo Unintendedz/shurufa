@@ -121,6 +121,19 @@ fn static_evidence_preserves_dictionary_and_key_comparability_rules() {
     );
     rows[1].answers_key = true;
     rows[1].corrected = true;
+    // 首行是未纠错字面读法时，词网格附带的音节纠错整句（`LATTICE_SOURCE`）不抢占首位。
+    assert_eq!(
+        rerank_pick(
+            &mut model(),
+            "",
+            0,
+            false,
+            &ScoredOrderRows::new(&rows, &scores)
+        ),
+        None
+    );
+    // 词典纠错行（如切分纠错后的词条）在全拼下仍可参与比较，双拼保持禁止纠错领先。
+    rows[1].source = 0;
     assert_eq!(
         rerank_pick(
             &mut model(),
@@ -310,6 +323,7 @@ fn large_static_rerank_lists_preserve_fallback_and_key_rules() {
                 }
                 4 => {
                     rows[0].source = 0;
+                    rows[1].source = 0;
                     rows[1].corrected = true;
                     scores[1] = evidence(-1000, 1);
                     scores[0] = evidence(-40000, 1);

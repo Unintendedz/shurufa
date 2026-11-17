@@ -70,6 +70,7 @@ Status: implemented
 - [九宫格切分路径按音节频度截断](2026-10-08-nine-key-path-ranking.md)：借鉴跨切分扣除 `PHRASE_LENGTH_BONUS * 1000` 的对齐原则并在隔音多切分场景取 `1.5` 倍惩罚以抵消双字词归一差；通过 `SentenceNgramTables::options` 与 `extra_syllables` 隔离改动范围，不改变九键 `split_paths` 48 路约束与内存预算。
 - [词网格给句末语气词加分](2026-10-23-sentence-final-particles.md)：保留句末语气词加分，三遍前缀多样性物化减少末段同音词对前驱的挤压，使 `particles` 集 `top1` 在两条资源线分别从 `0.738 / 0.757` 升至 `0.874 / 0.893`。
 - [词网格末列按最终预算流式保留假设](../testing/2026-10-17-lattice-terminal-stream.md) 与 [整句候选恒等排列避免临时分配](../testing/2026-10-08-runner-up-order-identity.md)：`LatticeOptions` 新增字段默认关闭，保留所有既有 `decode_terminal` / `decode_return` / `decode_materialization` 快照与峰值分配契约；`runner_up_order` 继续保留无变化零分配恒等快路径。
+- [全拼整句纠错归一门槛、重排席位保护、中段切分多样性与纠错回显省略](2026-11-17-typo-sentence-gating-and-lattice-segmentation-diversity.md)：后续在此基础上为第一遍物化叠加词边界骨架限流，防止中段同音笛卡尔积绕过末词前驱限流，并隔离附带纠错整句的重排与首页席位。
 
 ## Alternatives considered
 

@@ -1053,6 +1053,22 @@ impl QuanpinDictionary {
                         }
                         supplemental.push(item);
                     }
+                } else if has_rerankers
+                    && primary_segments.len() > MAX_SYLLABLES_FOR_MULTIPLE_SEGMENTATIONS
+                {
+                    // 超出四音节常规多切分上限的长句隔音备选（仅在纠错模式下由 `CutMode::Correction` 产生），
+                    // 保持 `keyboard_runner_up = false` 以便逐键与停顿模型仍能将其真隔音首选（如 `fang'an -> 方案`）提至第 1 名，
+                    // 但默认排在主切分次选之后，避免落选的误隔音句（如 `sang'e -> 丧饿`、`ren'ao -> 人傲`）挤占首页次选座。
+                    for item in rows {
+                        if item.sentence_association {
+                            if let Some(extra_runner_ups) = extra_syllable_runner_ups.as_deref_mut()
+                            {
+                                extra_runner_ups.push(item);
+                                continue;
+                            }
+                        }
+                        supplemental.push(item);
+                    }
                 } else {
                     supplemental.extend(rows);
                 }

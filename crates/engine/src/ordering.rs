@@ -316,6 +316,15 @@ fn row_answers_key(scheme: u8, row: OrderRow<'_>) -> bool {
         && (corrections_may_lead(scheme) || !row.corrected)
 }
 
+/// 首行已是未纠错整句读法时，后排带 `corrected` 的整句读法是词网格附带的音节纠错句（`typo_lead_margin = INFINITY`），
+/// 不参与模型重排抢占字面整句席位；切分层整体纠错（首行本身带 `corrected`）或词典行居首的场景不受影响。
+fn speculative_typo_sentence(leader: OrderRow<'_>, row: OrderRow<'_>) -> bool {
+    !leader.corrected
+        && SENTENCE_READING_SOURCES.contains(&leader.source)
+        && row.corrected
+        && SENTENCE_READING_SOURCES.contains(&row.source)
+}
+
 fn any_corrected_key<'a, R: OrderRowSource<'a> + ?Sized>(scheme: u8, rows: &'a R) -> bool {
     corrections_may_lead(scheme) && (0..rows.len()).any(|index| rows.get(index).corrected)
 }
@@ -370,10 +379,15 @@ pub fn rerank_pick<'a, R: OrderRowSource<'a> + ?Sized>(
     {
         return None;
     }
+    let leader = rows.get(0);
     // 键盘模型的次选刚被同一个模型在同一上文下排在它选中那条之后，逐键重排不再给它们打分：
     // 它们都回答整个按键串，不排除就会占满比较集合，每键多给几条长句打分，结果却不变。
-    let compared =
-        |index: usize| row_answers_key(scheme, rows.get(index)) && !rows.keyboard_runner_up(index);
+    let compared = |index: usize| {
+        let row = rows.get(index);
+        row_answers_key(scheme, row)
+            && !speculative_typo_sentence(leader, row)
+            && !rows.keyboard_runner_up(index)
+    };
     let corrected_key = any_corrected_key(scheme, rows);
     // 只有参与比较的候选需要占用模型上下文窗口。
     let longest = longest_rerank_candidate::<STATIC_RERANK_LIMIT, _, _>(rows, &compared);
@@ -427,7 +441,11 @@ pub fn settled_rerank_order<'a, R: OrderRowSource<'a> + ?Sized>(
     if !rerank_needs_model(scheme, answered_by_pinyin_fallback, rows) {
         return None;
     }
-    let compared = |index: usize| row_answers_key(scheme, rows.get(index));
+    let leader = rows.get(0);
+    let compared = |index: usize| {
+        let row = rows.get(index);
+        row_answers_key(scheme, row) && !speculative_typo_sentence(leader, row)
+    };
     let count = rows.len();
     if rows.static_evidence(0).is_some() {
         let longest =
@@ -544,20 +562,35 @@ fn visit_runner_up_order(
     keep: usize,
     front_limit: usize,
     is_reading: &impl Fn(usize) -> bool,
+    is_deferred_reading: &impl Fn(usize) -> bool,
     mut emit: impl FnMut(usize),
 ) {
+    let primary_reading = |index: usize| is_reading(index) && !is_deferred_reading(index);
+    let deferred_reading = |index: usize| is_reading(index) && is_deferred_reading(index);
     // 1. 首条全键读法之前的候选保持原位（如领先的精确词典命中）。
     for index in 0..first_reading {
         emit(index);
     }
-    // 2. 首页保留的前 `keep` 条全键读法，按原有次序相邻排列。
-    let mut kept_readings = 0;
+    // 2. 首页保留的前 `keep` 条全键读法：优先排未纠错字面读法，名额未满时再补纠错整句。
+    let mut kept_primary = 0;
     for index in first_reading..count {
-        if is_reading(index) {
+        if primary_reading(index) {
             emit(index);
-            kept_readings += 1;
-            if kept_readings == keep {
+            kept_primary += 1;
+            if kept_primary == keep {
                 break;
+            }
+        }
+    }
+    let mut kept_deferred = 0;
+    if kept_primary < keep {
+        for index in first_reading..count {
+            if deferred_reading(index) {
+                emit(index);
+                kept_deferred += 1;
+                if kept_primary + kept_deferred == keep {
+                    break;
+                }
             }
         }
     }
@@ -574,14 +607,23 @@ fn visit_runner_up_order(
             }
         }
     }
-    // 4. 第 `keep` 条之后的其余全键次选读法紧随首页前排之后，排在所有单字与余下非读法行之前。
-    let mut reading_seen = 0;
+    // 4. 第 `keep` 条之后的其余全键次选读法紧随首页前排之后（先未纠错次选，再纠错整句），排在所有单字与余下非读法行之前。
+    let mut primary_seen = 0;
     for index in first_reading..count {
-        if is_reading(index) {
-            if reading_seen >= keep {
+        if primary_reading(index) {
+            if primary_seen >= kept_primary {
                 emit(index);
             }
-            reading_seen += 1;
+            primary_seen += 1;
+        }
+    }
+    let mut deferred_seen = 0;
+    for index in first_reading..count {
+        if deferred_reading(index) {
+            if deferred_seen >= kept_deferred {
+                emit(index);
+            }
+            deferred_seen += 1;
         }
     }
     // 5. 其余非读法行（超出前排限额的前缀词与单字）按原相对顺序收尾。
@@ -648,6 +690,9 @@ pub fn runner_up_order<'a, R: OrderRowSource<'a> + ?Sized>(
         SHORT_FRONT_ROW_LIMIT
     };
 
+    let defer_corrected = !rows.get(first_reading).corrected;
+    let is_deferred_reading = |index: usize| defer_corrected && rows.get(index).corrected;
+
     // 先做零分配线性扫描检查是否已处于目标顺序；仅确实需要重排时才构造返回向量。
     let mut output = 0;
     let mut identity = true;
@@ -657,6 +702,7 @@ pub fn runner_up_order<'a, R: OrderRowSource<'a> + ?Sized>(
         keep,
         front_limit,
         &is_reading,
+        &is_deferred_reading,
         |index| {
             identity &= output == index;
             output += 1;
@@ -674,6 +720,7 @@ pub fn runner_up_order<'a, R: OrderRowSource<'a> + ?Sized>(
         keep,
         front_limit,
         &is_reading,
+        &is_deferred_reading,
         |index| {
             order.push(index);
         },
@@ -1187,5 +1234,64 @@ mod tests {
             runner_up_order(0, &[row("你好", LATTICE_SOURCE), row("你", 0)]),
             None
         );
+    }
+
+    #[test]
+    fn speculative_typo_sentence_never_displaces_uncorrected_readings_and_defers_first_page_seat() {
+        let mut reranker =
+            Reranker::new(std::sync::Arc::new(favouring_model(&['甲', '乙'], &['乙'])));
+        let mut typo = row("乙乙乙", LATTICE_SOURCE);
+        typo.corrected = true;
+        let mut prefix = row("甲甲", 0);
+        prefix.answers_key = false;
+        let mut single = row("甲", 0);
+        single.answers_key = false;
+        let rows = [
+            row("甲甲甲", LATTICE_SOURCE),
+            typo,
+            prefix,
+            row("甲乙甲", 11),
+            row("甲甲乙", LATTICE_SOURCE),
+            single,
+        ];
+        let scores = [
+            Some(StaticEvidence {
+                log_prob_milli_nats: -15_000,
+                characters: 3,
+            }),
+            Some(StaticEvidence {
+                log_prob_milli_nats: -1_000,
+                characters: 3,
+            }),
+            None,
+            Some(StaticEvidence {
+                log_prob_milli_nats: -14_000,
+                characters: 3,
+            }),
+            Some(StaticEvidence {
+                log_prob_milli_nats: -16_000,
+                characters: 3,
+            }),
+            None,
+        ];
+        let scored = ScoredOrderRows::new(&rows, &scores);
+        // 首行未纠错时，逐键与停顿重排均只比较未纠错字面读法（0、3、4），不把附带纠错句（1）旋至首位。
+        assert_eq!(rerank_pick(&mut reranker, "", 0, false, &scored), Some(3));
+        let settled = settled_rerank_order(&mut reranker, "", 0, false, &scored)
+            .expect("停顿重排应重排未纠错字面读法");
+        assert_eq!(settled, vec![3, 1, 2, 4, 0, 5]);
+
+        // 首页满 3 条未纠错读法时，纠错整句退居前排前缀词之后的次选区，且再次调用保持恒等零分配。
+        let page_order = runner_up_order(0, &rows).expect("首页应优先保留三条未纠错整句");
+        assert_eq!(page_order, vec![0, 3, 4, 2, 5, 1]);
+        let reordered: Vec<_> = page_order.iter().map(|&idx| rows[idx]).collect();
+        let (again, allocations) =
+            crate::ime::personal_rerank::allocations::count(|| runner_up_order(0, &reordered));
+        assert_eq!(again, None);
+        assert_eq!(allocations, 0);
+
+        // 未纠错读法不足 3 条时（如 `meiganxi`），纠错整句仍保留在首页字面读法之后。
+        let short_list = [row("没干系", LATTICE_SOURCE), typo, row("没", 0)];
+        assert_eq!(runner_up_order(0, &short_list), None);
     }
 }

@@ -423,13 +423,41 @@ static NSString *CandidateSourceBadge(NSDictionary *candidate, NSString *aiBadge
     return @"";
 }
 
+// 纠错候选已在字面末尾标出 `*`；未开辅助码时引擎在 `annotation` 回传折叠后的整串原始按键（`corrected_from`），
+// 与上方预编辑串重复且在长句中会把候选窗撑到整串拼音宽度，显示层省略该回显，保留带括号的辅助码与五笔反查等真实注释。
+static BOOL MSIMEIsLowercaseASCIIToken(NSString *value) {
+    if (![value isKindOfClass:NSString.class] || value.length == 0) return NO;
+    for (NSUInteger i = 0; i < value.length; ++i) {
+        const unichar ch = [value characterAtIndex:i];
+        if (ch < 'a' || ch > 'z') return NO;
+    }
+    return YES;
+}
+
+static NSString *MSIMEVisibleCandidateAnnotation(NSDictionary *candidate) {
+    if (![candidate isKindOfClass:NSDictionary.class]) return @"";
+    id raw = candidate[@"annotation"];
+    if (![raw isKindOfClass:NSString.class]) return @"";
+    NSString *trimmed = [(NSString *)raw stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (trimmed.length == 0) return @"";
+    if (!MSIMEStrictBoolean(candidate[@"corrected"])) return (NSString *)raw;
+    if (MSIMEIsLowercaseASCIIToken(trimmed)) return @"";
+    NSRange space = [trimmed rangeOfString:@" "];
+    if (space.location != NSNotFound) {
+        NSString *head = [trimmed substringToIndex:space.location];
+        NSString *tail = [[trimmed substringFromIndex:NSMaxRange(space)] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (MSIMEIsLowercaseASCIIToken(head) && tail.length > 0) return tail;
+    }
+    return (NSString *)raw;
+}
+
 // 画候选文字（含来源与固定排位的角标）。徽标串由调用方按偏好算好：AI 来源用它替换写死的 🤖，
 // 固定排位追加在来源角标之后，与 Windows candidate_view_model.h 的 text+annotation+badge 顺序一致。
 static NSString *CandidateDisplayWithBadges(NSDictionary *candidate, BOOL traditional, NSString *aiBadge, NSString *fixedBadge) {
     // 未提供缓存时回退出厂徽标；显式空串保留关闭状态，不把 nil 传给字符串拼接。
     aiBadge = aiBadge ?: MSIMECandidateBadgeString(msime::mac::candidate_ai_badge("robot"));
     fixedBadge = fixedBadge ?: MSIMECandidateBadgeString(msime::mac::candidate_fixed_badge(true, "paperclip"));
-    NSString *annotation = MSIMEParenthesizedAnnotation(candidate[@"annotation"]);
+    NSString *annotation = MSIMEParenthesizedAnnotation(MSIMEVisibleCandidateAnnotation(candidate));
     NSString *text = candidate[@"text"] ?: @"";
     id corrected = candidate[@"corrected"];
     if (MSIMEStrictBoolean(corrected)) text = [text stringByAppendingString:@"*"];
@@ -542,7 +570,7 @@ static NSString *CandidateTextRun(NSDictionary *candidate, BOOL traditional, NSS
 
 static NSString *CandidateAnnotationRun(NSDictionary *candidate, BOOL traditional, NSString *hint) {
     NSString *annotation = [hint isKindOfClass:NSString.class] && hint.length ? [NSString stringWithFormat:@"(%@)", hint]
-                                                                              : candidate[@"annotation"];
+                                                                              : MSIMEVisibleCandidateAnnotation(candidate);
     if (![annotation isKindOfClass:NSString.class] || annotation.length == 0) return @"";
     return MSIMEChineseOutputString(annotation, traditional);
 }

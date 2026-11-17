@@ -45,6 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut grid: Option<KeyGrid> = None;
     let mut segmentation_filter: Option<KeyGrid> = None;
     let mut keyboard_neural = false;
+    let mut autocorrect = false;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut index = 0;
@@ -66,6 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--dump" => dump = Some(PathBuf::from(take(&mut index)?)),
             "--grid" => grid = Some(grid_keys::parse_grid(&take(&mut index)?)?),
             "--keyboard-neural" => keyboard_neural = true,
+            "--autocorrect" => autocorrect = true,
             // `--grid nine` 的旧写法，verify-local.sh 和笔记里都用过。
             "--nine-key" => grid = Some(KeyGrid::NineKey),
             // 只留全拼切成音节只有一种切法的用例，与九键双拼量的是同一批。
@@ -111,13 +113,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let state = tempfile::tempdir()?;
     let report = run(
-        &resources,
-        state.path(),
+        &EvalConfig {
+            resources: &resources,
+            state: state.path(),
+            dump: dump.as_deref(),
+            grid,
+            keyboard_neural,
+            autocorrect,
+            source_commit: &verified.source_commit,
+        },
         &cases,
-        dump.as_deref(),
-        grid,
-        keyboard_neural,
-        &verified.source_commit,
     )?;
     let json = render(&report, &cases);
 
@@ -181,15 +186,26 @@ fn load(path: &Path) -> Result<Vec<Case>, Box<dyn std::error::Error>> {
     Ok(cases)
 }
 
-fn run(
-    resources: &Path,
-    state: &Path,
-    cases: &[Case],
-    dump: Option<&Path>,
+struct EvalConfig<'a> {
+    resources: &'a Path,
+    state: &'a Path,
+    dump: Option<&'a Path>,
     grid: Option<KeyGrid>,
     keyboard_neural: bool,
-    source_commit: &str,
-) -> Result<Report, Box<dyn std::error::Error>> {
+    autocorrect: bool,
+    source_commit: &'a str,
+}
+
+fn run(config: &EvalConfig<'_>, cases: &[Case]) -> Result<Report, Box<dyn std::error::Error>> {
+    let EvalConfig {
+        resources,
+        state,
+        dump,
+        grid,
+        keyboard_neural,
+        autocorrect,
+        source_commit,
+    } = *config;
     // Optional JSONL of the real candidate lists, for offline experiments that must not be able
     // to change what the harness measures.
     let mut dumped = String::new();
@@ -204,8 +220,8 @@ fn run(
     // Off so a case cannot promote its own answer for the cases that follow.
     options.learning = false;
     options.frequency_mode = "disabled".into();
-    options.autocorrect_transposition = false;
-    options.autocorrect_neighbor = false;
+    options.autocorrect_transposition = autocorrect;
+    options.autocorrect_neighbor = autocorrect;
     options.fuzzy_pinyin_rules = 0;
     options.helpcode = false;
     options.show_helpcode = false;
