@@ -116,6 +116,8 @@ pub struct EngineOptions {
     pub english_minimum_prefix: u8,
     /// 中文状态下首页最多展示几个英文候选（Windows `general.cn_en_mixed_input_first_page_count`，1–3，`EnglishInputOptions::first_page_count`）。
     pub english_first_page_count: u8,
+    /// 中文组字下的短前缀与大写英文补全（`EnglishInputOptions::short_prefix_completion`），默认关。
+    pub english_short_prefix_completion: bool,
     pub mixed_emoji: bool,
     pub mixed_kaomoji: bool,
     /// 打拼音出符号（`MixedExpressiveOptions::symbol_candidates`）。默认关，宿主按共享偏好 `mixed_input.symbols` 打开；引擎层关着，golden 基准、句子转换评测和网页引擎才不受影响。
@@ -269,6 +271,7 @@ pub fn prepare_options_for(
         mixed_english: true,
         english_minimum_prefix: 5,
         english_first_page_count: 1,
+        english_short_prefix_completion: false,
         mixed_emoji: false,
         mixed_kaomoji: false,
         mixed_symbols: false,
@@ -415,6 +418,7 @@ pub fn session_options(options: &EngineOptions) -> Result<SessionOptions> {
         mixed_candidates: options.mixed_english,
         minimum_prefix: usize::from(options.english_minimum_prefix),
         first_page_count: usize::from(options.english_first_page_count),
+        short_prefix_completion: options.english_short_prefix_completion,
     };
     session.expressive = MixedExpressiveOptions {
         emoji_candidates: options.mixed_emoji,

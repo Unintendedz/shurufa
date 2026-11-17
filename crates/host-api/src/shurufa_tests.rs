@@ -15,7 +15,12 @@ fn type_keys(handle: u64, keys: &str) -> Value {
     value(msime_client_command(handle, 3));
     let mut view = value(msime_client_view(handle));
     for byte in keys.bytes() {
-        view = value(msime_client_character(handle, byte, false))["view"].clone();
+        view = value(msime_client_character(
+            handle,
+            byte,
+            byte.is_ascii_uppercase(),
+        ))["view"]
+            .clone();
     }
     view
 }
@@ -75,6 +80,45 @@ fn bundled_input_learning_and_neural_model() {
     });
     let view = type_keys(handle, "nihao");
     assert_eq!(choose(handle, &view, "你好")["commit"], "你好");
+    let dajia = type_keys(handle, "dajia");
+    assert_eq!(dajia["candidates"][0]["text"], "大家");
+    for typed in ["dj", "cd"] {
+        let view = type_keys(handle, typed);
+        assert_eq!(view["candidates"][0]["source"], 0, "{typed}: {view}");
+        assert!(
+            view["candidates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|row| row["source"] == 4)
+                .count()
+                <= 1,
+            "{typed} 两字母简拼最多只展示一条完整英文匹配：{view}"
+        );
+    }
+    let conf = type_keys(handle, "conf");
+    let conf_texts: Vec<&str> = conf["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["text"].as_str().unwrap())
+        .collect();
+    assert!(
+        conf_texts.contains(&"configuration"),
+        "conf 首页应包含 configuration：{conf_texts:?}"
+    );
+    assert_eq!(value(msime_client_command(handle, 2))["commit"], "conf");
+    let inter = type_keys(handle, "inter");
+    assert_eq!(inter["candidates"][0]["text"], "inter");
+    assert_eq!(inter["candidates"][1]["text"], "international");
+    let interf = type_keys(handle, "interf");
+    assert_eq!(choose(handle, &interf, "interface")["commit"], "interface");
+    let cla = type_keys(handle, "Cla");
+    assert_eq!(cla["candidates"][0]["text"], "Cla");
+    assert_eq!(cla["candidates"][1]["text"], "Class");
+    assert_eq!(value(msime_client_command(handle, 2))["commit"], "Cla");
+    let clau = type_keys(handle, "Clau");
+    assert_eq!(choose(handle, &clau, "Claude")["commit"], "Claude");
     println!("quanpin: nihao -> 你好; neural model attached; statistics disabled");
 
     let before = type_keys(handle, "shi");
@@ -131,12 +175,21 @@ fn removed_input_modes_stay_unreachable_after_legacy_preferences_and_updates() {
             )
             .unwrap();
     }
-    let mut legacy = msime_client_core::preferences::Preferences::default();
-    legacy.paired_punctuation = true;
-    legacy.smart_punctuation = true;
-    legacy.smart_punctuation_repeat = true;
-    legacy.smart_punctuation_space_convert = true;
-    legacy.mixed_input.english = true;
+    let mut legacy = msime_client_core::preferences::Preferences {
+        paired_punctuation: true,
+        smart_punctuation: true,
+        smart_punctuation_repeat: true,
+        smart_punctuation_space_convert: true,
+        ..Default::default()
+    };
+    legacy.mixed_input.enabled = false;
+    legacy.mixed_input.english = false;
+    legacy.mixed_input.first_page_count = 1;
+    legacy.mixed_input.emoji = true;
+    legacy.mixed_input.kaomoji = true;
+    legacy.mixed_input.symbols = true;
+    legacy.mixed_input.japanese = true;
+    legacy.mixed_input.quick_phrase = true;
     legacy.local_modes.expression = true;
     legacy.local_modes.command = true;
     legacy.local_modes.mention = true;
@@ -172,7 +225,19 @@ fn removed_input_modes_stay_unreachable_after_legacy_preferences_and_updates() {
                 session.options.local_expression
                     && session.options.local_expression_lowercase_entry
             );
-            assert!(!session.options.mixed_english && !session.options.quick_phrase_candidates);
+            assert!(
+                session.options.mixed_candidates
+                    && session.options.mixed_english
+                    && session.options.english_first_page_count == 3
+                    && session.options.english_short_prefix_completion
+            );
+            assert!(
+                !session.options.mixed_emoji
+                    && !session.options.mixed_kaomoji
+                    && !session.options.mixed_symbols
+                    && !session.options.mixed_japanese
+                    && !session.options.quick_phrase_candidates
+            );
             assert!(!session.applied.smart_punctuation && !session.applied.word_character.enabled);
             assert!(session.applied.navigation.brackets && session.applied.navigation.mouse_wheel);
         });
@@ -240,4 +305,151 @@ fn embedded_shurufa_options_default_missing_helpcode_off() {
             .unwrap_or(false);
         assert_eq!(options.preferences.quanpin_helpcode.enabled, expected);
     }
+}
+
+#[test]
+fn shurufa_english_autocomplete_gestures_and_helpcode_gate() {
+    let root = tempfile::tempdir().unwrap();
+    let path = |name| {
+        let path = root.path().join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    };
+    let resources = path("resources");
+    let dictionaries = path("dictionaries");
+    for directory in [&resources, &dictionaries] {
+        rusqlite::Connection::open(directory.join("msime-pinyin.db"))
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE tbl_1_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+                 INSERT INTO tbl_1_n VALUES('ni','n','你',300);
+                 CREATE TABLE tbl_1_l(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+                 INSERT INTO tbl_1_l VALUES('la','l','啦',300),('la','l','拉',200);
+                 CREATE TABLE tbl_1_c(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+                 INSERT INTO tbl_1_c VALUES('cong','c','从',300);
+                 CREATE TABLE tbl_1_f(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+                 INSERT INTO tbl_1_f VALUES('fa','f','发',300);
+                 CREATE TABLE tbl_2_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+                 INSERT INTO tbl_2_n VALUES('ni''hao','nh','你好',300);
+                 CREATE TABLE tbl_2_d(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+                 INSERT INTO tbl_2_d VALUES('da''jia','dj','大家',300);
+                 CREATE TABLE tbl_2_c(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+                 INSERT INTO tbl_2_c VALUES('cheng''du','cd','成都',300);
+                 CREATE TABLE quick_parases(key TEXT,value TEXT,weight INTEGER);
+                 INSERT INTO quick_parases VALUES('conf','不应出现的短语',999);",
+            )
+            .unwrap();
+        msime_engine::ensure_english_schema(&directory.join("msime-english.db")).unwrap();
+        rusqlite::Connection::open(directory.join("msime-english.db"))
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO english_words(word,display,weight) VALUES
+                 ('conf','conf',50),
+                 ('config','config',250),
+                 ('configuration','configuration',300),
+                 ('inter','inter',100),
+                 ('interface','interface',300),
+                 ('claude','Claude',300),
+                 ('class','class',250),
+                 ('nice','nice',300),
+                 ('dj','DJ',200),
+                 ('django','Django',150),
+                 ('cd','CD',200),
+                 ('cdn','CDN',150);",
+            )
+            .unwrap();
+    }
+    let prefs = Preferences::for_edition(Edition::by_id("shurufa").unwrap());
+    let request = json!({
+        "api_version": 1,
+        "edition": "shurufa",
+        "resources": resources,
+        "dictionaries": dictionaries,
+        "user_data": path("user"),
+        "cache": path("cache"),
+        "preferences": prefs,
+    })
+    .to_string();
+    // SAFETY: 合成配置缓冲区在同步调用期间有效。
+    let created = value(unsafe { msime_client_create(request.as_ptr(), request.len()) });
+    let handle = created["session"].as_u64().unwrap();
+    let idle = value(msime_client_focus(handle, true))["view"].clone();
+    assert_eq!(idle["editing_text"], "");
+    assert_eq!(idle["candidates"].as_array().unwrap().len(), 0);
+
+    // 中文全拼与常见简拼保持中文首选，两字母简拼不展开英文补全。
+    for (typed, expected) in [
+        ("nihao", "你好"),
+        ("dajia", "大家"),
+        ("dj", "大家"),
+        ("cd", "成都"),
+    ] {
+        let view = type_keys(handle, typed);
+        assert_eq!(view["candidates"][0]["text"], expected, "{typed}");
+        assert_eq!(value(msime_client_command(handle, 1))["commit"], expected);
+    }
+
+    // 4 字母不可拆前缀：首页展示英文补全，且快捷短语不会混入；回车原样上屏，方向键加空格可提交补全词。
+    let conf = type_keys(handle, "conf");
+    let conf_words: Vec<&str> = conf["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["text"].as_str().unwrap())
+        .collect();
+    assert!(conf_words.contains(&"configuration") && conf_words.contains(&"config"));
+    assert!(!conf_words.contains(&"不应出现的短语"));
+    assert_eq!(value(msime_client_command(handle, 2))["commit"], "conf");
+
+    let conf = type_keys(handle, "conf");
+    let target_pos = conf["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|row| row["text"] == "configuration")
+        .unwrap();
+    for _ in 0..target_pos {
+        value(msime_client_command(handle, 102));
+    }
+    assert_eq!(
+        value(msime_client_command(handle, 1))["commit"],
+        "configuration"
+    );
+
+    // 5 字母完全匹配领先并紧跟补全词；大写起手 `Cla` 保留原文居首且展示 `Claude`、`Class`。
+    let inter = type_keys(handle, "inter");
+    assert_eq!(inter["candidates"][0]["text"], "inter");
+    assert_eq!(inter["candidates"][1]["text"], "interface");
+    assert_eq!(choose(handle, &inter, "interface")["commit"], "interface");
+
+    let cla = type_keys(handle, "Cla");
+    assert_eq!(cla["candidates"][0]["text"], "Cla");
+    assert_eq!(cla["candidates"][1]["text"], "Claude");
+    assert_eq!(cla["candidates"][2]["text"], "Class");
+    assert_eq!(value(msime_client_command(handle, 2))["commit"], "Cla");
+    let cla = type_keys(handle, "Cla");
+    assert_eq!(choose(handle, &cla, "Claude")["commit"], "Claude");
+
+    // 默认关闭全拼辅助码时 `niC` 走大写英文补全；手动开启全拼辅助码后 `niC` 归辅助码过滤。
+    let nic = type_keys(handle, "niC");
+    assert_eq!(nic["candidates"][1]["text"], "niCe");
+    value(msime_client_command(handle, 3));
+
+    let mut enabled_helpcode = Preferences::for_edition(Edition::by_id("shurufa").unwrap());
+    enabled_helpcode.quanpin_helpcode.enabled = true;
+    let snapshot = json!({
+        "format_version": 1,
+        "revision": 1,
+        "preferences": enabled_helpcode,
+    })
+    .to_string();
+    // SAFETY: 合成偏好缓冲区在同步调用期间有效。
+    value(unsafe { msime_client_update_preferences(handle, snapshot.as_ptr(), snapshot.len()) });
+    let nic_helpcode = type_keys(handle, "niC");
+    assert!(!nic_helpcode["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["text"].as_str().unwrap().eq_ignore_ascii_case("nice")));
+    value(msime_client_destroy(handle));
 }

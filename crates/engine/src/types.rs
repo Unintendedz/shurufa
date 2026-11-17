@@ -1473,6 +1473,9 @@ pub struct EnglishInputOptions {
     pub minimum_prefix: usize,
     /// 中文状态下首页最多展示几个英文候选（Windows `general.cn_en_mixed_input_first_page_count`），范围 1..=3：第一行英文进优先位置之后，其余英文紧跟它继续占首页的空位，放不下的照旧接在列表末尾。
     pub first_page_count: usize,
+    /// 中文组字下的短前缀与大写英文补全（Shurufa 启用，默认关）：
+    /// 含大写且非激活辅助码的纯字母串从 2 个字母起查前缀补全并置于首页前段；全小写 3..minimum_prefix 且拆不成完整音节的前缀在非首选优先座位展示最多 2 条补全。
+    pub short_prefix_completion: bool,
 }
 
 impl Default for EnglishInputOptions {
@@ -1481,6 +1484,7 @@ impl Default for EnglishInputOptions {
             mixed_candidates: false,
             minimum_prefix: 2,
             first_page_count: 1,
+            short_prefix_completion: false,
         }
     }
 }

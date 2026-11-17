@@ -21,6 +21,9 @@ const AI_SEAT_SOURCES: [u8; 2] = [3, 12];
 /// `CandidateSource::EnglishDictionary`。混输英文只在拼音拆不开、英文完全匹配（或用户固定在第一位）时才由引擎放到首位，那是引擎有意的安排；句子模型读的是中文，不能因为英文行不算词典命中就把中文行转到它前面。这道检查不分方案和模式：只有英文行的列表（比如专用英文模式、临时英文）首行也是英文，同样不重排，这是有意的：模型读的是中文，比较英文行没有意义。
 const ENGLISH_SOURCE: u8 = 4;
 
+/// `CandidateSource::Fallback`：大写字面输入、特殊符号字面行及无匹配兜底原文。它居首时是引擎保留原样输入的安排，也不参与中文句子模型评分。
+const FALLBACK_SOURCE: u8 = 9;
+
 /// `CandidateSource::MixedJapanese`：日文混输行。它领先时是引擎判定拼音给不出整段的词，和领先的英文一样不重排；它在别的位置时也不让模型拿它比较、把它提到首位，句子模型读的是中文。
 const MIXED_JAPANESE_SOURCE: u8 = 13;
 
@@ -312,7 +315,10 @@ fn row_answers_key(scheme: u8, row: OrderRow<'_>) -> bool {
     row.answers_key
         && !CATALOG_SOURCES.contains(&row.source)
         && !AI_SEAT_SOURCES.contains(&row.source)
-        && row.source != MIXED_JAPANESE_SOURCE
+        && !matches!(
+            row.source,
+            ENGLISH_SOURCE | FALLBACK_SOURCE | MIXED_JAPANESE_SOURCE
+        )
         && (corrections_may_lead(scheme) || !row.corrected)
 }
 
@@ -1293,5 +1299,49 @@ mod tests {
         // 未纠错读法不足 3 条时（如 `meiganxi`），纠错整句仍保留在首页字面读法之后。
         let short_list = [row("没干系", LATTICE_SOURCE), typo, row("没", 0)];
         assert_eq!(runner_up_order(0, &short_list), None);
+    }
+
+    #[test]
+    fn reranker_preserves_literal_fallback_leaders_and_ignores_mixed_english_rows() {
+        let model = favouring_model(&['甲', '乙', 'C', '啦'], &['乙', '啦']);
+        let mut reranker = Reranker::new(model.into());
+
+        // 大写字面原文（`Fallback`）居首时，逐键与停顿重排均不得把后面的中文拼凑候选旋至首位。
+        let literal_rows = [
+            row("Cla", FALLBACK_SOURCE),
+            row("Class", ENGLISH_SOURCE),
+            row("C啦", LATTICE_SOURCE),
+        ];
+        assert!(!rerank_needs_model(0, false, &literal_rows));
+        assert_eq!(
+            rerank_pick(&mut reranker, "", 0, false, &literal_rows),
+            None
+        );
+        assert_eq!(
+            settled_rerank_order(&mut reranker, "", 0, false, &literal_rows),
+            None
+        );
+
+        // 中文整句居首且非首选位置混有英文补全行时，静态证据评分不被无静态分数的英文行打断。
+        let mixed_rows = [
+            row("甲甲", LATTICE_SOURCE),
+            row("conf", ENGLISH_SOURCE),
+            row("configuration", ENGLISH_SOURCE),
+            row("乙乙", LATTICE_SOURCE),
+        ];
+        let scores = [
+            Some(StaticEvidence {
+                log_prob_milli_nats: -12_000,
+                characters: 2,
+            }),
+            None,
+            None,
+            Some(StaticEvidence {
+                log_prob_milli_nats: -8_000,
+                characters: 2,
+            }),
+        ];
+        let scored = ScoredOrderRows::new(&mixed_rows, &scores);
+        assert_eq!(rerank_pick(&mut reranker, "", 0, false, &scored), Some(3));
     }
 }

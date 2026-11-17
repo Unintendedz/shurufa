@@ -6362,6 +6362,7 @@ mod tests {
                     mixed_candidates: true,
                     minimum_prefix: 2,
                     first_page_count: count,
+                    short_prefix_completion: false,
                 },
             );
             session.set_first_page_rows(FirstPageRows::new(page_rows));
@@ -6388,6 +6389,7 @@ mod tests {
             mixed_candidates: false,
             minimum_prefix: 2,
             first_page_count: 1,
+            short_prefix_completion: false,
         };
         let mut words_only = open(&fixture.paths, false, options);
         words_only.set_english_only(true);

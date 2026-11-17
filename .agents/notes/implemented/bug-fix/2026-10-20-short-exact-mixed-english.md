@@ -12,7 +12,7 @@ Status: implemented
 
 ## Historical audit
 
-检索 `minimum_prefix`、短英文、中英混输和英文首选。部分修订[英文领先规则](../../implemented/feature/2026-10-12-mixed-english-leads-unsegmentable-input.md)：其五字符领先门槛、完整音节判定与个人固定位置继续保留，只让短词作为候选出现。九键的空列表英文回退与本次 26 键混排入口独立；字典英文纠错与大小写候选不变。
+检索 `minimum_prefix`、短英文、中英混输和英文首选。部分修订[英文领先规则](../../implemented/feature/2026-10-12-mixed-english-leads-unsegmentable-input.md)：其五字符领先门槛、完整音节判定与个人固定位置继续保留，只让短词作为候选出现。独立版 Shurufa 在此基础上对 3～4 字母不可拆小写前缀及大写起手单独开放前缀补全，见 [Shurufa 中文输入下的英文单词自动补全](../feature/2026-11-17-shurufa-english-word-autocomplete.md)。九键的空列表英文回退与本次 26 键混排入口独立；字典英文纠错与大小写候选不变。
 
 ## Alternatives considered
 

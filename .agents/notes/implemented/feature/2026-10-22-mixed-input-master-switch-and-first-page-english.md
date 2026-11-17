@@ -20,7 +20,7 @@ A9 归 A，落成真实的引擎级门而不是 UI 批量写：共享偏好 `mix
 
 ## Existing notes
 
-[英文领先不可拆输入](../feature/2026-10-12-mixed-english-leads-unsegmentable-input.md) 同属混输域，记录 `minimum_prefix` 默认 5 的取舍，本次扩展其同一结构但不改变归属。
+[英文领先不可拆输入](../feature/2026-10-12-mixed-english-leads-unsegmentable-input.md) 同属混输域，记录 `minimum_prefix` 默认 5 的取舍，本次扩展其同一结构但不改变归属。独立版 Shurufa 在运行时副本中单独启用英文混输并将 `first_page_count` 固定为 3，同时打开短不可拆前缀与大写补全，见 [Shurufa 中文输入下的英文单词自动补全](2026-11-17-shurufa-english-word-autocomplete.md)。
 
 ## Alternatives considered
 

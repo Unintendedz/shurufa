@@ -14018,5 +14018,152 @@ fn real_shipped_model_and_dictionary_disambiguate_words_from_preceding_context()
     assert!(failures.is_empty(), "failures: {failures:#?}");
 }
 
+#[test]
+fn shurufa_short_prefix_completion_handles_uppercase_lowercase_and_helpcode_boundaries() {
+    let fixture = Fixture::new(
+        "CREATE TABLE tbl_1_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+         INSERT INTO tbl_1_n VALUES('ni','n','你',300),('ni','n','泥',200);
+         CREATE TABLE tbl_1_l(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+         INSERT INTO tbl_1_l VALUES('la','l','啦',300),('la','l','拉',200);
+         CREATE TABLE tbl_1_c(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+         INSERT INTO tbl_1_c VALUES('cong','c','从',300);
+         CREATE TABLE tbl_1_f(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+         INSERT INTO tbl_1_f VALUES('fa','f','发',300);
+         CREATE TABLE tbl_2_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+         INSERT INTO tbl_2_n VALUES('ni''hao','nh','你好',300);
+         CREATE TABLE tbl_2_d(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+         INSERT INTO tbl_2_d VALUES('da''jia','dj','大家',300);
+         CREATE TABLE tbl_2_c(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+         INSERT INTO tbl_2_c VALUES('cheng''du','cd','成都',300);",
+    )
+    .with_english(
+        "INSERT INTO english_words VALUES
+         ('claude','Claude',200),
+         ('class','class',300),
+         ('classic','classic',150),
+         ('claim','claim',100),
+         ('python','python',200),
+         ('python','Python',199),
+         ('pythagoras','Pythagoras',100),
+         ('mac','Mac',200),
+         ('machine','machine',300),
+         ('machines','machines',150),
+         ('conf','conf',50),
+         ('conference','conference',300),
+         ('configuration','configuration',200),
+         ('interface','interface',300),
+         ('inter','inter',100),
+         ('nice','nice',300),
+         ('nick','nick',200),
+         ('dj','DJ',200),
+         ('django','Django',150),
+         ('cd','CD',200),
+         ('cdn','CDN',150);",
+    );
+
+    let make_session = |helpcode: bool| {
+        fixture.session_with(|options| {
+            options.first_page_rows = 6;
+            options.helpcode = helpcode;
+            options.mixed_candidates = true;
+            options.english = crate::types::EnglishInputOptions {
+                mixed_candidates: true,
+                minimum_prefix: 5,
+                first_page_count: 3,
+                short_prefix_completion: true,
+            };
+            options.local_modes.shift_letter_entry = false;
+            options.local_modes.temporary_english = false;
+            options.local_modes.expression = true;
+            options.local_modes.expression_lowercase_entry = true;
+        })
+    };
+
+    // 1. Shift+字母快捷总开关关闭时，大写起手仍进入字面组字并排在前排展示大小写投影补全；回车原样上屏。
+    let mut session = make_session(false);
+    assert!(session.character(b'C', true).handled);
+    type_text(&mut session, "la");
+    assert_eq!(
+        &words(&session)[..4],
+        ["Cla", "Class", "Claude", "Classic"],
+        "未完成的大写前缀应保留原文首选并紧跟补全词：{:?}",
+        words(&session)
+    );
+    assert_eq!(
+        session.command(Command::CommitRaw).commit.as_deref(),
+        Some("Cla")
+    );
+    assert!(session.character(b'C', true).handled);
+    type_text(&mut session, "la");
+    assert_eq!(session.select(2).commit.as_deref(), Some("Claude"));
+
+    // 2. 大小写投影后同名的词条（`python` 与 `Python`）自动去重；完整大写词（`Mac`）居首并带出补全词。
+    assert!(session.character(b'P', true).handled);
+    type_text(&mut session, "yth");
+    assert_eq!(&words(&session)[..3], ["Pyth", "Python", "Pythagoras"]);
+    session.command(Command::Cancel);
+    assert!(session.character(b'M', true).handled);
+    type_text(&mut session, "ac");
+    assert_eq!(&words(&session)[..3], ["Mac", "Machine", "Machines"]);
+    session.command(Command::Cancel);
+
+    // 3. 无英文前缀命中的大写+完整拼音（如 `Fnihao`）保持中文转换居首。
+    assert!(session.character(b'F', true).handled);
+    type_text(&mut session, "nihao");
+    assert_eq!(words(&session)[0], "F你好");
+    session.command(Command::Cancel);
+
+    // 4. 全拼辅助码关闭时 `niC` 走大写英文补全；手动开启全拼辅助码时 `niC` 归辅助码且不混入 `nice`/`nick`，而首字母大写 `NiC` 仍走英文补全。
+    type_text(&mut session, "ni");
+    assert!(session.character(b'C', true).handled);
+    assert_eq!(&words(&session)[..3], ["niC", "niCe", "niCk"]);
+    session.command(Command::Cancel);
+
+    let mut with_helpcode = make_session(true);
+    type_text(&mut with_helpcode, "ni");
+    assert!(with_helpcode.character(b'C', true).handled);
+    assert!(
+        !words(&with_helpcode)
+            .iter()
+            .any(|word| word.eq_ignore_ascii_case("nice") || word.eq_ignore_ascii_case("nick")),
+        "辅助码激活时不应把 niC 扩成英文补全：{:?}",
+        words(&with_helpcode)
+    );
+    with_helpcode.command(Command::Cancel);
+    assert!(with_helpcode.character(b'N', true).handled);
+    type_text(&mut with_helpcode, "i");
+    assert!(with_helpcode.character(b'C', true).handled);
+    assert_eq!(&words(&with_helpcode)[..3], ["NiC", "NiCe", "NiCk"]);
+    with_helpcode.command(Command::Cancel);
+
+    // 5. 全小写中文全拼、常见简拼与短不可拆英文前缀互不抢位。
+    for (typed, first_choice) in [
+        ("nihao", "你好"),
+        ("dajia", "大家"),
+        ("dj", "大家"),
+        ("cd", "成都"),
+    ] {
+        session.command(Command::Cancel);
+        type_text(&mut session, typed);
+        assert_eq!(words(&session)[0], first_choice, "{typed}");
+        assert!(
+            !words(&session).contains(&"Django".to_owned())
+                && !words(&session).contains(&"CDN".to_owned()),
+            "{typed}: {:?}",
+            words(&session)
+        );
+    }
+    session.command(Command::Cancel);
+    type_text(&mut session, "conf");
+    assert_eq!(
+        &words(&session)[1..4],
+        ["conf", "conference", "configuration"]
+    );
+    assert_eq!(
+        session.command(Command::CommitRaw).commit.as_deref(),
+        Some("conf")
+    );
+}
+
 mod caret_suffix;
 mod stroke_filter;

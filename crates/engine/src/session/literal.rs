@@ -222,10 +222,15 @@ impl InputSession {
             }
         }
         // 英文行保留词库身份，大小写只在快照和上屏副本中恢复。内部光标时不提供会整段结束组字的英文行。
+        let english_min_prefix = if self.english_options.short_prefix_completion {
+            2
+        } else {
+            self.english_options.minimum_prefix
+        };
         if end == raw.len()
             && self.mixed_candidates_enabled
             && self.english_options.mixed_candidates
-            && raw.len() >= self.english_options.minimum_prefix
+            && raw.len() >= english_min_prefix
             && raw.bytes().all(|byte| byte.is_ascii_alphabetic())
         {
             let key = raw.to_ascii_lowercase();
@@ -233,17 +238,87 @@ impl InputSession {
                 .queries
                 .english_dictionary()
                 .query_prefix(&key, MIXED_ENGLISH_LIMIT);
-            // 完全匹配的英文优先，补全仍可选择；未知词的原文始终有自己的候选。
-            if let Some(index) = english.iter().position(|row| row.pinyin == key) {
-                let exact = english.remove(index);
-                let mut display = exact.word.clone();
-                self.apply_english_word_case(exact.source, &mut display);
-                if display == raw {
-                    rows.retain(|row| row.source != CandidateSource::Fallback || row.word != raw);
+            if self.english_options.short_prefix_completion {
+                // 不同大小写词形按用户输入投影后可能同名（如 `python` 与 `Python`），只留权重最高的一条。
+                let mut seen_displays = Vec::with_capacity(english.len());
+                english.retain(|item| {
+                    let mut display = item.word.clone();
+                    self.apply_english_word_case(item.source, &mut display);
+                    if seen_displays
+                        .iter()
+                        .any(|seen: &crate::types::SharedString| seen == &display)
+                        || rows.iter().any(|row| {
+                            row.source != CandidateSource::Fallback && row.word == display
+                        })
+                    {
+                        return false;
+                    }
+                    seen_displays.push(display);
+                    true
+                });
+                if !english.is_empty() {
+                    if let Some(index) = english.iter().position(|row| row.pinyin == key) {
+                        let exact = english.remove(index);
+                        let mut display = exact.word.clone();
+                        self.apply_english_word_case(exact.source, &mut display);
+                        let mut front_end = 1;
+                        if display == raw {
+                            rows.retain(|row| {
+                                row.source != CandidateSource::Fallback || row.word != raw
+                            });
+                        } else if let Some(fallback_index) = rows.iter().position(|row| {
+                            row.source == CandidateSource::Fallback && row.word == raw
+                        }) {
+                            let fallback = rows.remove(fallback_index);
+                            rows.insert(0, fallback);
+                            front_end = 2;
+                        }
+                        rows.insert(0, exact);
+                        let extra_limit = self
+                            .english_options
+                            .first_page_count
+                            .saturating_sub(1)
+                            .min(self.first_page_rows.saturating_sub(front_end))
+                            .min(english.len());
+                        let extra: Vec<WordItem> = english.drain(..extra_limit).collect();
+                        rows.splice(front_end..front_end, extra);
+                        rows.extend(english);
+                    } else {
+                        // 未打完的大写前缀把原文放在首选，紧跟前排高频补全，不让 `C啦` 等拼凑单字挤占首页。
+                        if let Some(fallback_index) = rows.iter().position(|row| {
+                            row.source == CandidateSource::Fallback && row.word == raw
+                        }) {
+                            if fallback_index != 0 {
+                                let fallback = rows.remove(fallback_index);
+                                rows.insert(0, fallback);
+                            }
+                        }
+                        let front_limit = self
+                            .english_options
+                            .first_page_count
+                            .min(self.first_page_rows.saturating_sub(1))
+                            .min(english.len());
+                        let front: Vec<WordItem> = english.drain(..front_limit).collect();
+                        let insert_at = 1.min(rows.len());
+                        rows.splice(insert_at..insert_at, front);
+                        rows.extend(english);
+                    }
                 }
-                rows.insert(0, exact);
+            } else {
+                // 完全匹配的英文优先，补全仍可选择；未知词的原文始终有自己的候选。
+                if let Some(index) = english.iter().position(|row| row.pinyin == key) {
+                    let exact = english.remove(index);
+                    let mut display = exact.word.clone();
+                    self.apply_english_word_case(exact.source, &mut display);
+                    if display == raw {
+                        rows.retain(|row| {
+                            row.source != CandidateSource::Fallback || row.word != raw
+                        });
+                    }
+                    rows.insert(0, exact);
+                }
+                rows.extend(english);
             }
-            rows.extend(english);
             let journal = self.journal_path();
             let context = self.position_context(true, false);
             apply_fixed_positions_with_state(

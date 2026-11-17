@@ -361,6 +361,7 @@ fn local_mode_resource_gates_preserve_unrelated_modes() {
         mixed_english: false,
         english_minimum_prefix: 2,
         english_first_page_count: 1,
+        english_short_prefix_completion: false,
         mixed_emoji: false,
         mixed_kaomoji: false,
         mixed_symbols: false,

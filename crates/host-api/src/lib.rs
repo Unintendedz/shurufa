@@ -428,8 +428,10 @@ fn apply_shurufa_input_policy(preferences: &mut Preferences, edition: &Edition) 
     preferences.english_online_candidates = false;
     preferences.enter_learns_english_word = false;
     preferences.multilingual_input.enabled = false;
-    preferences.mixed_input.enabled = false;
-    preferences.mixed_input.english = false;
+    // Shurufa 仅放开英文单词自动补全，首页保留 3 个英文席位；其余混输分成员全部关闭。
+    preferences.mixed_input.enabled = true;
+    preferences.mixed_input.english = true;
+    preferences.mixed_input.first_page_count = 3;
     preferences.mixed_input.emoji = false;
     preferences.mixed_input.kaomoji = false;
     preferences.mixed_input.symbols = false;
@@ -2263,6 +2265,7 @@ impl HostOptions {
                 self.preferences.mixed_input.minimum_prefix,
             ),
             english_first_page_count: self.preferences.mixed_input.first_page_count,
+            english_short_prefix_completion: edition.id == "shurufa",
             mixed_emoji: self.preferences.mixed_input.emoji,
             mixed_kaomoji: self.preferences.mixed_input.kaomoji,
             mixed_symbols: self.preferences.mixed_input.symbols,

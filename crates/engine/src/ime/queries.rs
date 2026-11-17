@@ -397,23 +397,33 @@ impl CandidateQueries {
             return candidates;
         }
 
-        let english_rows =
-            if english.mixed_candidates && prefix.bytes().all(|byte| byte.is_ascii_lowercase()) {
-                if prefix.len() >= english.minimum_prefix {
-                    self.english_dictionary()
-                        .query_prefix(prefix, MIXED_ENGLISH_LIMIT)
-                } else if prefix.len() >= 2 {
-                    self.english_dictionary()
-                        .query_exact(prefix)
-                        .into_iter()
-                        .collect()
-                } else {
-                    Vec::new()
-                }
+        let shuangpin = self.profile;
+        let lowercase_ascii = prefix.bytes().all(|byte| byte.is_ascii_lowercase());
+        let mut unsegmentable = None;
+        let mut is_unsegmentable = |profile: &ShuangpinProfile| {
+            *unsegmentable.get_or_insert_with(|| !spells_whole_syllables(prefix, scheme, profile))
+        };
+        let short_unsegmentable_prefix = english.mixed_candidates
+            && lowercase_ascii
+            && english.short_prefix_completion
+            && english_may_lead
+            && (3..english.minimum_prefix).contains(&prefix.len())
+            && is_unsegmentable(shuangpin);
+        let english_rows = if english.mixed_candidates && lowercase_ascii {
+            if prefix.len() >= english.minimum_prefix || short_unsegmentable_prefix {
+                self.english_dictionary()
+                    .query_prefix(prefix, MIXED_ENGLISH_LIMIT)
+            } else if prefix.len() >= 2 {
+                self.english_dictionary()
+                    .query_exact(prefix)
+                    .into_iter()
+                    .collect()
             } else {
                 Vec::new()
-            };
-        let shuangpin = self.profile;
+            }
+        } else {
+            Vec::new()
+        };
         let long_enough = prefix.len() >= MIXED_EXPRESSIVE_MINIMUM_INPUT;
         let (emoji_rows, kaomoji_rows) =
             if long_enough && (expressive.emoji_candidates || expressive.kaomoji_candidates) {
@@ -441,8 +451,16 @@ impl CandidateQueries {
         let english_lead = (english_may_lead
             && prefix.len() >= english.minimum_prefix
             && !english_rows.is_empty()
-            && !spells_whole_syllables(prefix, scheme, self.profile))
+            && is_unsegmentable(shuangpin))
         .then_some(prefix);
+        // 3～4 字母的不可拆小写前缀不抢中文首选，首页在可选精确匹配之外最多跟进 2 条补全词。
+        let first_page_count = if short_unsegmentable_prefix {
+            let exact_slot =
+                usize::from(english_rows.first().is_some_and(|row| row.pinyin == prefix));
+            (exact_slot + 2).min(english.first_page_count)
+        } else {
+            english.first_page_count
+        };
         insert_mixed_rows_with_japanese(
             candidates,
             english_rows,
@@ -451,7 +469,7 @@ impl CandidateQueries {
             symbol_rows,
             english_lead,
             japanese,
-            english.first_page_count,
+            first_page_count,
             first_page_rows,
         )
     }
@@ -899,6 +917,7 @@ mod tests {
             mixed_candidates: true,
             minimum_prefix: usize::MAX,
             first_page_count: 1,
+            short_prefix_completion: false,
         };
         for (prefix, english, expressive, with_japanese) in [
             ("ni", english, MixedExpressiveOptions::default(), false),
@@ -1368,6 +1387,7 @@ mod tests {
             minimum_prefix: 2,
 
             first_page_count: 1,
+            short_prefix_completion: false,
         };
         let expressive_on = MixedExpressiveOptions {
             emoji_candidates: true,
@@ -1913,6 +1933,7 @@ mod tests {
                 minimum_prefix,
 
                 first_page_count: 1,
+                short_prefix_completion: false,
             },
             MixedExpressiveOptions::default(),
             false,
@@ -2445,5 +2466,106 @@ mod tests {
             list()
         );
         assert!(queries.english.is_none());
+    }
+
+    #[test]
+    fn short_prefix_completion_expands_unsegmentable_three_and_four_letter_lowercase_without_leading(
+    ) {
+        let (_directory, mut queries) = queries_with_english(
+            default_profile(),
+            &[
+                ("dj", "DJ", 500),
+                ("django", "Django", 400),
+                ("important", "important", 300),
+                ("improve", "improve", 200),
+                ("impact", "impact", 100),
+                ("conf", "conf", 50),
+                ("conference", "conference", 300),
+                ("configuration", "configuration", 200),
+                ("conflict", "conflict", 100),
+                ("can", "can", 300),
+                ("candy", "candy", 200),
+                ("inter", "inter", 50),
+                ("international", "international", 300),
+                ("interface", "interface", 200),
+                ("internet", "internet", 100),
+            ],
+        );
+        let options = EnglishInputOptions {
+            mixed_candidates: true,
+            minimum_prefix: 5,
+            first_page_count: 3,
+            short_prefix_completion: true,
+        };
+        let run = |queries: &mut CandidateQueries, prefix: &str, may_lead: bool| {
+            queries.mixed(
+                database(&["首选词", "次选词", "三选词"]),
+                prefix,
+                SchemeType::Quanpin,
+                options,
+                MixedExpressiveOptions::default(),
+                false,
+                LocalInputMode::None,
+                may_lead,
+                true,
+                None,
+                6,
+                true,
+            )
+        };
+
+        // 两字母简拼只保留完整词精确匹配，不展开前缀补全，中文仍居首。
+        assert_eq!(
+            words(&run(&mut queries, "dj", true)),
+            vec!["首选词", "DJ", "次选词", "三选词"]
+        );
+        // 3 字母不可拆前缀：中文居首，首页最多展示 2 条补全，其余退至列表末尾。
+        assert_eq!(
+            words(&run(&mut queries, "imp", true)),
+            vec![
+                "首选词",
+                "important",
+                "improve",
+                "次选词",
+                "三选词",
+                "impact"
+            ]
+        );
+        // 4 字母不可拆前缀且自身是完整词：中文仍居首，精确词后紧跟最多 2 条补全词。
+        assert_eq!(
+            words(&run(&mut queries, "conf", true)),
+            vec![
+                "首选词",
+                "conf",
+                "conference",
+                "configuration",
+                "次选词",
+                "三选词",
+                "conflict",
+            ]
+        );
+        // 3 字母完整拼音音节（`can`）：只保留完整词精确匹配，不混入补全词 `candy`。
+        assert_eq!(
+            words(&run(&mut queries, "can", true)),
+            vec!["首选词", "can", "次选词", "三选词"]
+        );
+        // 辅助码激活或光标前缀解码（`english_may_lead = false`）时不把 `imp` 当短英文前缀展开。
+        assert_eq!(
+            words(&run(&mut queries, "imp", false)),
+            vec!["首选词", "次选词", "三选词"]
+        );
+        // 5 字母不可拆且完全匹配：英文占首选，其后紧跟 2 条补全词（满首页 3 席）。
+        assert_eq!(
+            words(&run(&mut queries, "inter", true)),
+            vec![
+                "inter",
+                "international",
+                "interface",
+                "首选词",
+                "次选词",
+                "三选词",
+                "internet",
+            ]
+        );
     }
 }

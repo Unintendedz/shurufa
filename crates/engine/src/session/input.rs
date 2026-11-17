@@ -436,8 +436,13 @@ impl InputSession {
             && self.engine.cantonese_shuangpin_accepts_semicolon();
         let japanese_long_vowel = value == b'-' && scheme == SchemeType::JapaneseRomaji;
         // 已启用的快捷入口在上面处理；被关闭或资源不可用的入口按普通大写字母继续。
-        let starts_pinyin_with_shift =
-            shift_only && self.local_mode_options.shift_letter_entry && !self.uppercase_passthrough;
+        // Shurufa 关闭了快捷入口总开关，但开启短前缀与大写英文补全时 Shift+字母仍应起手进入字面组字。
+        let starts_pinyin_with_shift = shift_only
+            && (self.local_mode_options.shift_letter_entry
+                || (self.mixed_candidates_enabled
+                    && self.english_options.mixed_candidates
+                    && self.english_options.short_prefix_completion))
+            && !self.uppercase_passthrough;
         let composing_pinyin_uppercase = value.is_ascii_uppercase()
             && (self.has_composition() || starts_pinyin_with_shift)
             && matches!(scheme, SchemeType::Quanpin | SchemeType::Shuangpin);

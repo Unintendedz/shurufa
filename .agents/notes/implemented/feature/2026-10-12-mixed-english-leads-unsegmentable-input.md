@@ -29,7 +29,7 @@ Status: implemented
 | 小鹤双拼 `hello` | 奇数长度，拆不开 | [hello, ...] |
 | 小鹤双拼 `home` | ho（huo）+ me，完整 | 不变 |
 
-短完整词的展示由[短英文完整匹配](../bug-fix/2026-10-20-short-exact-mixed-english.md)补充：26 键在低于 `minimum_prefix` 时仍可列出至少两个字母的完整词，有中文时保持非首选；本篇的领先门槛、音节判定和达到门槛后的补全规则继续适用。
+短完整词的展示由[短英文完整匹配](../bug-fix/2026-10-20-short-exact-mixed-english.md)补充：26 键在低于 `minimum_prefix` 时仍可列出至少两个字母的完整词，有中文时保持非首选；本篇的领先门槛、音节判定和达到门槛后的补全规则继续适用。Shurufa 独立版另通过 `short_prefix_completion` 对 3～4 字母不可拆小写前缀与 2 字母以上大写输入补充非领先的前缀补全，见 [Shurufa 中文输入下的英文单词自动补全](2026-11-17-shurufa-english-word-autocomplete.md)。
 
 ### 下游配套
 

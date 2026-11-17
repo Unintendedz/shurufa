@@ -174,6 +174,7 @@ pub fn product_options(options: &mut SessionOptions) {
         mixed_candidates: true,
         minimum_prefix: 5,
         first_page_count: 1,
+        short_prefix_completion: false,
     };
     options.expressive = MixedExpressiveOptions {
         emoji_candidates: false,
@@ -320,6 +321,7 @@ mod tests {
                 mixed_candidates: true,
                 minimum_prefix: 5,
                 first_page_count: 1,
+                short_prefix_completion: false,
             }
         );
         assert_eq!(options.autocorrect_types, 0);

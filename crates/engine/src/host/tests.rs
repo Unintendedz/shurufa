@@ -58,6 +58,7 @@ fn options(root: &Path) -> EngineOptions {
         mixed_english: true,
         english_minimum_prefix: 5,
         english_first_page_count: 1,
+        english_short_prefix_completion: false,
         mixed_emoji: false,
         mixed_kaomoji: false,
         mixed_symbols: false,
