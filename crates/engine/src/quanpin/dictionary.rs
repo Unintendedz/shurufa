@@ -694,6 +694,30 @@ impl QuanpinDictionary {
         }
     }
 
+    /// 是否已挂载逐键神经重排模型，供首组同音字典候选按前文重排。
+    pub fn has_dictionary_reranker(&self) -> bool {
+        self.rerankers
+            .iter()
+            .any(|reranker| reranker.source == CandidateSource::NeuralKeyboard)
+    }
+
+    /// 用已挂载的键盘神经模型按 `context` 在多字同音词中选出应提至首位的下标。
+    pub fn pick_dictionary_homophone(
+        &mut self,
+        items: &[&WordItem],
+        context: &str,
+    ) -> Option<usize> {
+        let mut picked = None;
+        for reranker in self
+            .rerankers
+            .iter_mut()
+            .filter(|reranker| reranker.source == CandidateSource::NeuralKeyboard)
+        {
+            picked = reranker.pick_dictionary_homophone(items, context);
+        }
+        picked
+    }
+
     /// The series cache slot of a resolution's key (overlays.md §1.6.2). The association switches decide which sentence rows a list carries, so they are always part of the slot. The reference bypassed the cache while a neural model ran, because its scores came from an asynchronous worker; scoring here is synchronous, so a reranked list is cached under the trimmed context it was scored with and a commit moves the next query to a fresh slot instead of clearing every list.
     fn series_slot(&self, cache_key: &str) -> String {
         series_slot_key(

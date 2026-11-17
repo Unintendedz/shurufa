@@ -121,14 +121,18 @@ pub(super) fn rerank_order_into(
 pub struct NeuralReranker {
     pub source: CandidateSource,
     reranker: Reranker,
+    /// 同音词典候选独立持有上文 KV 与续算缓冲，避免覆盖整句路径跨按键复用的 `TailRun`。
+    homophone_reranker: Reranker,
 }
 
 impl NeuralReranker {
     /// `source` is `NeuralKeyboard`, the one sentence-model row the engine emits.
     pub fn new(source: CandidateSource, model: Arc<SentenceModel>) -> Self {
+        let homophone_reranker = Reranker::new(Arc::clone(&model));
         Self {
             source,
             reranker: Reranker::new(model),
+            homophone_reranker,
         }
     }
 
@@ -188,6 +192,50 @@ impl NeuralReranker {
             statik[index] = paths[index].log_prob;
         }
         rerank_order_into(&neural[..scored], &statik[..scored], order)
+    }
+
+    /// 按 `context` 最后 64 字的模型评分在多字同音词切片中挑选唯一更贴合语境的首选下标。
+    ///
+    /// 单字没有词内搭配约束，不同读音简拼的静态权重也不可直接互比；因此调用方只传入字数 `>= 2`
+    /// 且完整读音一致的同音词引用。仅当最佳同音词相对原首选的 `ln(weight) + neural_nats` 总分优势
+    /// 不少于 `1.5` nats（等价于 `0.5` 等权融合下领先 `0.75` nat）时返回其下标，否则返回 `None`。
+    pub fn pick_dictionary_homophone(
+        &mut self,
+        items: &[&crate::types::WordItem],
+        context: &str,
+    ) -> Option<usize> {
+        const HOMOPHONE_PROMOTE_SUM_MARGIN_NATS: f64 = 1.5;
+        let trimmed = last_characters(context, CONTEXT_CHARACTERS);
+        let scored = items.len().min(MAX_RERANK_PATHS);
+        if scored < 2 || trimmed.is_empty() {
+            return None;
+        }
+        let mut texts = [""; MAX_RERANK_PATHS];
+        for (text, item) in texts[..scored].iter_mut().zip(&items[..scored]) {
+            *text = item.word.as_str();
+        }
+        let means = self
+            .homophone_reranker
+            .log_probabilities(trimmed, &texts[..scored]);
+        if means.len() != scored {
+            return None;
+        }
+        let chars = texts[0].chars().count() as f64;
+        let score_of = |index: usize| {
+            (items[index].weight.max(1) as f64).ln() + f64::from(means[index]) * chars
+        };
+        let leader_score = score_of(0);
+        let mut best = 0;
+        let mut best_score = leader_score;
+        for index in 1..scored {
+            let candidate_score = score_of(index);
+            if candidate_score > best_score {
+                best = index;
+                best_score = candidate_score;
+            }
+        }
+        (best != 0 && best_score - leader_score >= HOMOPHONE_PROMOTE_SUM_MARGIN_NATS)
+            .then_some(best)
     }
 }
 

@@ -851,6 +851,30 @@ impl ShuangpinDictionary {
         }
     }
 
+    /// 是否已挂载逐键神经重排模型，供首组同音字典候选按前文重排。
+    pub fn has_dictionary_reranker(&self) -> bool {
+        self.rerankers
+            .iter()
+            .any(|reranker| reranker.source == CandidateSource::NeuralKeyboard)
+    }
+
+    /// 用已挂载的键盘神经模型按 `context` 在多字同音词中选出应提至首位的下标。
+    pub fn pick_dictionary_homophone(
+        &mut self,
+        items: &[&WordItem],
+        context: &str,
+    ) -> Option<usize> {
+        let mut picked = None;
+        for reranker in self
+            .rerankers
+            .iter_mut()
+            .filter(|reranker| reranker.source == CandidateSource::NeuralKeyboard)
+        {
+            picked = reranker.pick_dictionary_homophone(items, context);
+        }
+        picked
+    }
+
     pub fn reset_cache(&mut self) {
         self.rows_cache.clear();
         self.series_cache.clear();

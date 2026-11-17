@@ -146,7 +146,7 @@ impl InputSession {
         // 日文整段转换只算一次：个人上下文重排生效时下面要混排两张表。
         let japanese = self.mixed_japanese_conversion();
         self.multilingual_conversion = self.query_multilingual();
-        // 提交链起点没有上下文，候选偏好由词频设置负责。
+        // 提交链起点没有上下文，候选偏好由词频设置负责；若前文含有汉字且未命中个人转移，再用逐键神经模型重排首组字典候选。
         let reordered = match self.chain.previous.as_deref() {
             Some(previous) if self.personal_context_applies() => {
                 let journal = self.journal_path();
@@ -161,26 +161,13 @@ impl InputSession {
                         self.prefix_active || self.selection_completes_composition(row)
                     },
                     &mut |leader: &str| {
-                        is_pinned_candidate(journal, &context, leader)
-                            || (self.frequency.mode != FrequencyAdjustmentMode::Disabled
-                                && decoded.first().is_some_and(|row| {
-                                    if !row.source.is_dictionary() || !row.scheme.is_pinyin() {
-                                        return false;
-                                    }
-                                    // 用调频写入的真实读音匹配，单码和双拼不能拿显示编码查日志。
-                                    let key = if row.canonical_pinyin.is_empty() {
-                                        Cow::Owned(candidate_dictionary_key(row, &context))
-                                    } else {
-                                        Cow::Borrowed(row.canonical_pinyin.as_ref())
-                                    };
-                                    has_matching_user_weight(
-                                        journal,
-                                        PersonalDictionaryKind::Pinyin,
-                                        &key,
-                                        &row.word,
-                                        row.weight,
-                                    )
-                                }))
+                        Self::leader_is_pinned_or_user_weighted(
+                            journal,
+                            &context,
+                            self.frequency.mode,
+                            &decoded,
+                            leader,
+                        )
                     },
                 )
             }
@@ -196,8 +183,147 @@ impl InputSession {
                 self.ranking_candidates = Some(self.mixed_from(decoded, japanese.as_ref()));
                 self.personal_reranked = true;
             }
-            None => self.mixed_candidates = self.mixed_from(decoded, japanese.as_ref()),
+            None => {
+                if let Some(promote) = self.contextual_dictionary_promote(&decoded) {
+                    clone_candidate_rows(&decoded, &mut reranked);
+                    reranked[..=promote].rotate_right(1);
+                    self.mixed_candidates = self.mixed_from(reranked, japanese.as_ref());
+                    self.ranking_candidates = Some(self.mixed_from(decoded, japanese.as_ref()));
+                    self.personal_reranked = true;
+                } else {
+                    self.mixed_candidates = self.mixed_from(decoded, japanese.as_ref());
+                }
+            }
         }
+    }
+
+    fn leader_is_pinned_or_user_weighted(
+        journal: &std::path::Path,
+        context: &str,
+        frequency_mode: FrequencyAdjustmentMode,
+        decoded: &[WordItem],
+        leader: &str,
+    ) -> bool {
+        is_pinned_candidate(journal, context, leader)
+            || (frequency_mode != FrequencyAdjustmentMode::Disabled
+                && decoded.first().is_some_and(|row| {
+                    if !row.source.is_dictionary() || !row.scheme.is_pinyin() {
+                        return false;
+                    }
+                    // 用调频写入的真实读音匹配，单码和双拼不能拿显示编码查日志。
+                    let key = if row.canonical_pinyin.is_empty() {
+                        Cow::Owned(candidate_dictionary_key(row, context))
+                    } else {
+                        Cow::Borrowed(row.canonical_pinyin.as_ref())
+                    };
+                    has_matching_user_weight(
+                        journal,
+                        PersonalDictionaryKind::Pinyin,
+                        &key,
+                        &row.word,
+                        row.weight,
+                    )
+                }))
+    }
+
+    /// 前文含汉字且挂有逐键神经模型时，在前段同音、同字长且未经手动置顶或调频的系统词典候选中选出更贴合语境的首选下标。
+    ///
+    /// 只对完整音节、无模糊音或纠错偏移的多字精确词典命中生效，避免半截声母键（如 `huiy`）白跑模型；
+    /// 词库查询可能在同音双字词之间夹入更长的补全词组（如「登录」与「登陆」之间夹有「登录时间」），
+    /// 因此在前 32 行内跳过补全词收集最多 12 条同音候选评分，仅把胜出项旋至第 0 位。
+    fn contextual_dictionary_promote(&mut self, decoded: &[WordItem]) -> Option<usize> {
+        const HOMOPHONE_SCAN_WINDOW: usize = 32;
+        if self.local_mode != LocalInputMode::None
+            || self.dedicated_english
+            || self.prefix_active
+            || self.caret_edit.active
+            || self.has_literal_input()
+            || self.has_active_helpcode()
+            || !self.engine.has_han_rescoring_context()
+        {
+            return None;
+        }
+        fn reading_of(item: &WordItem) -> &str {
+            if item.canonical_pinyin.is_empty() {
+                item.pinyin.as_str()
+            } else {
+                item.canonical_pinyin.as_str()
+            }
+        }
+        let first = decoded.first()?;
+        let reading = reading_of(first);
+        if first.source != CandidateSource::Database
+            || !first.scheme.is_pinyin()
+            || first.fuzzy
+            || !first.corrected_from.is_empty()
+            || reading.is_empty()
+            || !self.selection_completes_composition(first)
+            || !self.reading_answers_key(first)
+            || !self.engine.has_dictionary_reranker(first.scheme)
+        {
+            return None;
+        }
+        let typed_segmentation = match first.scheme {
+            SchemeType::Quanpin => first.pinyin.as_str(),
+            SchemeType::Shuangpin => self.engine.request().normalized_segmentation.as_str(),
+            _ => return None,
+        };
+        if !typed_segmentation
+            .split('\'')
+            .filter(|piece| !piece.is_empty())
+            .all(crate::pinyin::syllables::is_intact)
+        {
+            return None;
+        }
+        let characters = first.word.chars().count();
+        if characters < 2 {
+            return None;
+        }
+        let scheme = first.scheme;
+        let mut refs = [first; crate::lattice::neural::MAX_RERANK_PATHS];
+        let mut indices = [0usize; crate::lattice::neural::MAX_RERANK_PATHS];
+        let mut count = 1usize;
+        for (index, item) in decoded
+            .iter()
+            .enumerate()
+            .take(HOMOPHONE_SCAN_WINDOW)
+            .skip(1)
+        {
+            if item.source == CandidateSource::Database
+                && item.scheme == scheme
+                && !item.fuzzy
+                && item.corrected_from.is_empty()
+                && reading_of(item) == reading
+                && item.word.chars().count() == characters
+                && self.selection_completes_composition(item)
+                && self.reading_answers_key(item)
+            {
+                refs[count] = item;
+                indices[count] = index;
+                count += 1;
+                if count == crate::lattice::neural::MAX_RERANK_PATHS {
+                    break;
+                }
+            }
+        }
+        if count < 2 {
+            return None;
+        }
+        let journal = self.journal_path();
+        let context = self.pinyin_ranking_context();
+        if Self::leader_is_pinned_or_user_weighted(
+            journal,
+            &context,
+            self.frequency.mode,
+            decoded,
+            &first.word,
+        ) {
+            return None;
+        }
+        let best = self
+            .engine
+            .pick_dictionary_homophone(scheme, &refs[..count])?;
+        (best > 0).then_some(indices[best])
     }
 
     /// The candidates learning ranks against: the list before the personal rerank.

@@ -67,6 +67,8 @@
 @interface ShadowSession : NSObject
 @property(nonatomic) NSUInteger contextualCalls;
 @property(nonatomic) uint32_t lastPreceding;
+@property(nonatomic, strong) NSMutableArray<NSString *> *surroundingContexts;
+@property(nonatomic, copy) NSString *composingAfterASCII;
 @end
 @implementation ShadowSession
 - (NSDictionary *)punctuation:(uint8_t)ascii preceding:(uint32_t)preceding error:(NSError **)error {
@@ -76,6 +78,21 @@
     const unichar mark = ascii;
     return @{@"handled" : @YES, @"commit" : [NSString stringWithCharacters:&mark length:1],
              @"view" : @{@"editing_text" : @"", @"candidates" : @[]}};
+}
+- (BOOL)setSurroundingContext:(NSString *)context error:(NSError **)error {
+    (void)error;
+    if (!self.surroundingContexts) self.surroundingContexts = [NSMutableArray array];
+    [self.surroundingContexts addObject:context ?: @""];
+    return YES;
+}
+- (NSDictionary *)typeASCII:(uint8_t)character shift:(BOOL)shift error:(NSError **)error {
+    (void)character; (void)shift; (void)error;
+    if (self.composingAfterASCII.length) {
+        return @{@"handled" : @YES,
+                 @"view" : @{@"scheme" : @0, @"editing_text" : self.composingAfterASCII,
+                             @"candidates" : @[@{@"text" : @"它", @"highlighted" : @YES}]}};
+    }
+    return nil;
 }
 - (NSDictionary *)hostOptions { return @{}; }
 - (NSMethodSignature *)methodSignatureForSelector:(SEL)selector {
@@ -97,11 +114,20 @@
 // The posted rewrite is recorded instead of reaching the window server; `permitted` plays the Accessibility permission.
 @interface ShadowController : MSIMEInputController
 @property(nonatomic) BOOL permitted;
+@property(nonatomic) BOOL secure;
+@property(nonatomic, copy) NSString *axFallbackContext;
+@property(nonatomic) NSUInteger axFallbackCalls;
 @property(nonatomic, strong) NSMutableArray<NSNumber *> *posted;
 @end
 @implementation ShadowController
 - (void)ensureAppearance {}
 - (void)prepareSession {}
+- (BOOL)secureEventInputActive { return self.secure; }
+- (NSString *)readAXPrecedingContextForBundle:(NSString *)bundle maxUTF16Units:(NSUInteger)maxUnits {
+    (void)bundle; (void)maxUnits;
+    ++self.axFallbackCalls;
+    return self.axFallbackContext;
+}
 - (BOOL)postSmartPunctuationRewrite:(unichar)replacement client:(id)client {
     (void)client;
     if (!self.permitted) return NO;
@@ -387,6 +413,59 @@ int main() {
         [controller handleEvent:Key(18, @"1", 0) client:nil];
         assert(!ShadowValid(controller));
 
+        // 敲拼音开始组字时，仅在首枚字母键同步一次光标前现成文本；组字中后续字母、空闲态、安全输入和终端均不读取。
+        ReadableClient *contextEditor = [ReadableClient new];
+        contextEditor.document = @"这是一只小猫，";
+        contextEditor.selection = NSMakeRange(contextEditor.document.length, 0);
+        Focus(contextEditor);
+        [controller setValue:@{@"scheme" : @0, @"editing_text" : @"", @"candidates" : @[]} forKey:@"view"];
+        session.surroundingContexts = [NSMutableArray array];
+        session.composingAfterASCII = @"t";
+        assert([controller handleEvent:Key(17, @"t", 0) client:contextEditor]);
+        assert(session.surroundingContexts.count == 1 && [session.surroundingContexts[0] isEqual:@"这是一只小猫，"]);
+        assert(controller.axFallbackCalls == 0);
+        // 同一轮组字的第 2 枚字母不再回读文档。
+        session.composingAfterASCII = @"ta";
+        assert([controller handleEvent:Key(0, @"a", 0) client:contextEditor]);
+        assert(session.surroundingContexts.count == 1);
+
+        // 光标挪到非空文档起点（0 位）或删空已知可读文档时，把上下文同步为空串以切断旧前文。
+        [controller setValue:@{@"scheme" : @0, @"editing_text" : @"", @"candidates" : @[]} forKey:@"view"];
+        contextEditor.selection = NSMakeRange(0, 0);
+        session.composingAfterASCII = @"t";
+        assert([controller handleEvent:Key(17, @"t", 0) client:contextEditor]);
+        assert(session.surroundingContexts.count == 2 && [session.surroundingContexts[1] isEqual:@""]);
+
+        [controller setValue:@{@"scheme" : @0, @"editing_text" : @"", @"candidates" : @[]} forKey:@"view"];
+        contextEditor.document = @"";
+        contextEditor.selection = NSMakeRange(0, 0);
+        assert([controller handleEvent:Key(17, @"t", 0) client:contextEditor]);
+        assert(session.surroundingContexts.count == 3 && [session.surroundingContexts[2] isEqual:@""]);
+
+        // 安全输入（密码框）下不读取、不同步现成文本。
+        [controller setValue:@{@"scheme" : @0, @"editing_text" : @"", @"candidates" : @[]} forKey:@"view"];
+        contextEditor.document = @"秘密文本";
+        contextEditor.selection = NSMakeRange(contextEditor.document.length, 0);
+        controller.secure = YES;
+        assert([controller handleEvent:Key(17, @"t", 0) client:contextEditor]);
+        assert(session.surroundingContexts.count == 3);
+        controller.secure = NO;
+
+        // 不回传文档的 Electron/Chromium 类客户端触发 AX 兜底；AX 也为空时保留会话自身的上屏历史而不覆盖。
+        TerminalLikeClient *electronLike = [TerminalLikeClient new];
+        Focus(electronLike);
+        [controller setValue:@{@"scheme" : @0, @"editing_text" : @"", @"candidates" : @[]} forKey:@"view"];
+        controller.axFallbackCalls = 0;
+        controller.axFallbackContext = @"来自AX的前文";
+        assert([controller handleEvent:Key(17, @"t", 0) client:electronLike]);
+        assert(controller.axFallbackCalls == 1 && session.surroundingContexts.count == 4 &&
+               [session.surroundingContexts[3] isEqual:@"来自AX的前文"]);
+        [controller setValue:@{@"scheme" : @0, @"editing_text" : @"", @"candidates" : @[]} forKey:@"view"];
+        controller.axFallbackContext = nil;
+        assert([controller handleEvent:Key(17, @"t", 0) client:electronLike]);
+        assert(controller.axFallbackCalls == 2 && session.surroundingContexts.count == 4);
+
+        session.composingAfterASCII = nil;
         MSIMERemoveTestPreferenceSuite(defaults, suite);
     }
     std::puts("macOS smart punctuation shadow passed.");

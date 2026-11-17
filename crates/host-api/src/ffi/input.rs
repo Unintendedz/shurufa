@@ -237,6 +237,49 @@ pub extern "C" fn msime_client_set_private_session(handle: u64, enabled: bool) -
     })
 }
 
+/// 宿主单次同步光标前文本的输入字节上限；runtime 内部再按字符边界保留末尾 1024 字节。
+const SURROUNDING_CONTEXT_LIMIT: usize = 4_096;
+
+/// 组字开始前由宿主同步光标左侧的现成文本；隐私或安全字段清空上下文并返回 `false`，正在组字时返回 `false` 不动状态。
+///
+/// # Safety
+/// `length` 不为 0 时，`context` 必须指向至少 `length` 个可读字节。
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_set_surrounding_context(
+    handle: u64,
+    context: *const u8,
+    length: usize,
+) -> *mut c_char {
+    if length > SURROUNDING_CONTEXT_LIMIT || (length != 0 && context.is_null()) {
+        return response(|| Err("invalid surrounding context".into()));
+    }
+    let bytes = if length == 0 {
+        &[][..]
+    } else {
+        // SAFETY：由调用方契约保证。
+        unsafe { std::slice::from_raw_parts(context, length) }
+    };
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return response(|| Err("invalid surrounding context".into()));
+    };
+    response(|| {
+        with_session(handle, |session| {
+            let private_traits = session.lifecycle.as_deref().is_some_and(|state| {
+                state.context().traits & (lifecycle::TRAIT_SECURE | lifecycle::TRAIT_PRIVATE) != 0
+            });
+            if session.statistics_private || private_traits {
+                session.runtime.clear_context();
+                return Ok(Value::Bool(false));
+            }
+            if session.runtime.has_composition() {
+                return Ok(Value::Bool(false));
+            }
+            session.runtime.set_surrounding_context(text);
+            Ok(Value::Bool(true))
+        })
+    })
+}
+
 /// 在组字空闲后开启引擎负责的九键数字处理：全拼九宫格，或注音九键。`msime_client_set_key_grid` 的九键开关，关掉时连 14 键也关掉。
 #[no_mangle]
 pub extern "C" fn msime_client_set_nine_key_mode(handle: u64, enabled: bool) -> *mut c_char {

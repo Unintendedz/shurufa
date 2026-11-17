@@ -110,6 +110,39 @@ uint32_t MSIMETextClientPrecedingUnicodeScalar(id<MSIMETextClient> client) {
     return selected.length == 0 ? MSIMETextClientScalarBefore(client, selected.location, nil) : 0;
 }
 
+NSString *MSIMETextClientPrecedingContext(id<MSIMETextClient> client, NSUInteger maxUTF16Units,
+                                          BOOL knownReadable, BOOL *provedReadable) {
+    if (provedReadable) *provedReadable = NO;
+    if (!client || !maxUTF16Units || ![client respondsToSelector:@selector(selectedRange)] ||
+        ![client respondsToSelector:@selector(attributedSubstringFromRange:)])
+        return nil;
+    const NSRange selected = [client selectedRange];
+    if (selected.location == NSNotFound) return nil;
+    if (selected.location == 0) {
+        NSAttributedString *after = [client attributedSubstringFromRange:NSMakeRange(0, 1)];
+        if (after.string.length > 0) {
+            if (provedReadable) *provedReadable = YES;
+            return @"";
+        }
+        return knownReadable ? @"" : nil;
+    }
+    const NSUInteger start = selected.location > maxUTF16Units ? selected.location - maxUTF16Units : 0;
+    const NSUInteger length = selected.location - start;
+    NSAttributedString *substring = [client attributedSubstringFromRange:NSMakeRange(start, length)];
+    NSString *text = substring.string;
+    if (!text) return nil;
+    if (provedReadable) *provedReadable = YES;
+    if (!text.length) return @"";
+    NSUInteger trimStart = 0;
+    if (CFStringIsSurrogateLowCharacter([text characterAtIndex:0])) trimStart = 1;
+    NSUInteger trimEnd = text.length;
+    if (trimEnd > trimStart && CFStringIsSurrogateHighCharacter([text characterAtIndex:trimEnd - 1]))
+        --trimEnd;
+    if (trimStart >= trimEnd) return @"";
+    if (trimStart == 0 && trimEnd == text.length) return text;
+    return [text substringWithRange:NSMakeRange(trimStart, trimEnd - trimStart)];
+}
+
 void MSIMEApplyTransitionWithWriteGuard(NSDictionary *transition, id<MSIMETextClient> client,
                                        MSIMEInlinePreeditStyle style, NSString *closing,
                                        BOOL *clientHasMarkedText, BOOL (^isCurrent)(void)) {

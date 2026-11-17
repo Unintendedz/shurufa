@@ -3480,6 +3480,74 @@ fn nine_key_filters_cross_the_host_boundary() {
 }
 
 #[test]
+fn surrounding_context_crosses_host_boundary_and_obeys_idle_and_privacy_gates() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut prefs = chinese_preferences();
+    prefs.ai_assistant.enabled = true;
+    let handle = test_host_with_pinyin_fixture(dir.path(), prefs);
+    read(msime_client_focus(handle, true));
+
+    // 参数边界：非零长度空指针和超长缓冲被拒绝。
+    assert_eq!(
+        read(unsafe { msime_client_set_surrounding_context(handle, std::ptr::null(), 3) })["ok"],
+        false
+    );
+    let oversized = vec![b'a'; 4097];
+    assert_eq!(
+        read(unsafe {
+            msime_client_set_surrounding_context(handle, oversized.as_ptr(), oversized.len())
+        })["ok"],
+        false
+    );
+
+    // 空闲态同步光标前现成文本：不产生候选，进入组字后进入 online_query.ai_context。
+    let text = "输入框里现成的句子，";
+    let synced =
+        read(unsafe { msime_client_set_surrounding_context(handle, text.as_ptr(), text.len()) });
+    assert_eq!(synced["ok"], true);
+    assert_eq!(synced["value"], true);
+    let idle_view = read(msime_client_view(handle));
+    assert_eq!(idle_view["value"]["candidates"], json!([]));
+
+    read(msime_client_character(handle, b'n', false));
+    read(msime_client_character(handle, b'i', false));
+    read(msime_client_character(handle, b'h', false));
+    read(msime_client_character(handle, b'a', false));
+    read(msime_client_character(handle, b'o', false));
+    let query = read(msime_client_online_query(handle));
+    assert_eq!(query["value"]["ai_context"], text);
+
+    // 组字进行中拒绝改写，保持原上下文。
+    let ignored = read(unsafe {
+        msime_client_set_surrounding_context(handle, "中途忽略".as_ptr(), "中途忽略".len())
+    });
+    assert_eq!(ignored["value"], false);
+    assert_eq!(
+        read(msime_client_online_query(handle))["value"]["ai_context"],
+        text
+    );
+
+    // 取消回空闲后，安全输入字段或隐私会话清空已有上下文并拒绝写入。
+    read(msime_client_command(handle, 3));
+    msime_client_set_lifecycle(handle, 0);
+    msime_client_set_field_traits(handle, lifecycle::TRAIT_KNOWN | lifecycle::TRAIT_SECURE);
+    let blocked =
+        read(unsafe { msime_client_set_surrounding_context(handle, text.as_ptr(), text.len()) });
+    assert_eq!(blocked["value"], false);
+    msime_client_set_field_traits(handle, lifecycle::TRAIT_KNOWN);
+    read(msime_client_character(handle, b'n', false));
+    read(msime_client_character(handle, b'i', false));
+    read(msime_client_character(handle, b'h', false));
+    read(msime_client_character(handle, b'a', false));
+    read(msime_client_character(handle, b'o', false));
+    let cleared_query = read(msime_client_online_query(handle));
+    assert!(cleared_query["value"].is_object());
+    assert!(cleared_query["value"].get("ai_context").is_none());
+
+    read(msime_client_destroy(handle));
+}
+
+#[test]
 fn nine_key_mode_and_spelling_identity_cross_the_host_boundary() {
     let dir = tempfile::tempdir().unwrap();
     let handle = test_host(dir.path());

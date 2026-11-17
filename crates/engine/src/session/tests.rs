@@ -13849,5 +13849,174 @@ fn shuangpin_prefix_range_rows_do_not_answer_the_typed_key() {
     assert!(!answers_key(&session, "这么烦"), "{:?}", words(&session));
 }
 
+fn write_synthetic_keyboard_model(path: &std::path::Path, characters: &[char], favoured: &[char]) {
+    const CONTEXT: usize = 16;
+    let vocabulary: Vec<String> = ["<pad>", "<unk>", "<bos>"]
+        .into_iter()
+        .map(str::to_owned)
+        .chain(characters.iter().map(char::to_string))
+        .collect();
+    let logits: Vec<f32> = [0.0, -8.0, 0.0]
+        .into_iter()
+        .chain(
+            characters
+                .iter()
+                .map(|c| if favoured.contains(c) { 8.0 } else { -8.0 }),
+        )
+        .collect();
+    let config = format!(
+        r#"{{"vocab":{},"n_layer":0,"n_head":1,"n_embd":1,"context":{CONTEXT},"dropout":0.0}}"#,
+        vocabulary.len()
+    );
+    let tensors: [(&str, usize, Vec<f32>); 4] = [
+        ("tok.weight", vocabulary.len(), logits),
+        ("pos.weight", CONTEXT, vec![0.0; CONTEXT]),
+        ("ln_f.weight", 1, vec![0.0]),
+        ("ln_f.bias", 1, vec![1.0]),
+    ];
+    let mut header = serde_json::Map::new();
+    header.insert(
+        "__metadata__".into(),
+        serde_json::json!({
+            "format": "chinese-ime-lm",
+            "version": "1",
+            "precision": "f32",
+            "config": config,
+            "vocab": serde_json::to_string(&vocabulary).unwrap(),
+        }),
+    );
+    let mut data = Vec::new();
+    for (name, rows, values) in tensors {
+        let start = data.len();
+        data.extend(values.iter().flat_map(|value| value.to_le_bytes()));
+        header.insert(
+            name.into(),
+            serde_json::json!({"dtype": "F32", "shape": [rows, 1], "data_offsets": [start, data.len()]}),
+        );
+    }
+    header["ln_f.weight"]["shape"] = serde_json::json!([1]);
+    header["ln_f.bias"]["shape"] = serde_json::json!([1]);
+    let header = serde_json::to_vec(&serde_json::Value::Object(header)).unwrap();
+    let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+    bytes.extend_from_slice(&header);
+    bytes.extend_from_slice(&data);
+    std::fs::write(path, bytes).unwrap();
+}
+
+#[test]
+fn han_rescoring_context_reorders_leading_dictionary_homophones_while_respecting_pins() {
+    let fixture = Fixture::new(
+        "CREATE TABLE tbl_2_h(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_2_h VALUES('hui''yi','hy','会议',500000);\
+         INSERT INTO tbl_2_h VALUES('hui''yi','hy','回忆',400000);",
+    );
+    write_synthetic_keyboard_model(
+        &fixture.path().join(assets::NEURAL_MODEL_KEYBOARD),
+        &['美', '好', '的', '会', '议', '回', '忆'],
+        &['回', '忆'],
+    );
+    let mut session = fixture.session_with(|options| {
+        options.sentence_association.neural_keyboard = true;
+    });
+
+    // 无前文或纯 ASCII 前文时，保持词典原始词频顺序。
+    type_text(&mut session, "huiyi");
+    assert_eq!(&words(&session)[..2], ["会议", "回忆"]);
+    session.command(Command::Cancel);
+
+    session.set_rescoring_context("ASCII only");
+    type_text(&mut session, "huiyi");
+    assert_eq!(&words(&session)[..2], ["会议", "回忆"]);
+    session.command(Command::Cancel);
+
+    // 含汉字前文时，按模型与词频混合把贴合上文的同音词提至首位，且空闲时不产生任何候选。
+    session.set_rescoring_context("美好的");
+    assert!(session.snapshot().candidates.is_empty());
+    type_text(&mut session, "huiyi");
+    assert_eq!(&words(&session)[..2], ["回忆", "会议"]);
+
+    // 手动置顶首选后，上下文重排不得挤掉置顶词。
+    session.command(Command::Cancel);
+    session.set_rescoring_context("");
+    type_text(&mut session, "huiyi");
+    session.pin(0);
+    session.command(Command::Cancel);
+    session.set_rescoring_context("美好的");
+    type_text(&mut session, "huiyi");
+    assert_eq!(&words(&session)[..2], ["会议", "回忆"]);
+}
+
+#[test]
+fn real_shipped_model_and_dictionary_disambiguate_words_from_preceding_context() {
+    let Some(resources) = std::env::var_os("MSIME_EVAL_RESOURCES").map(PathBuf::from) else {
+        eprintln!("skipped: MSIME_EVAL_RESOURCES is not set");
+        return;
+    };
+    if !resources.join(assets::NEURAL_MODEL_KEYBOARD).is_file()
+        || !resources.join(assets::MAIN_DICTIONARY).is_file()
+    {
+        eprintln!("skipped: dictionary or keyboard model missing in MSIME_EVAL_RESOURCES");
+        return;
+    }
+    let user = tempfile::tempdir().unwrap();
+    let root = user.path().to_path_buf();
+    let mut options = SessionOptions::new(RuntimePaths {
+        resources: resources.clone(),
+        user_data: root.clone(),
+        cache: root,
+        dictionaries: resources,
+    });
+    options.sentence_association.neural_keyboard = true;
+    options.learning = false;
+    let mut session = Session::new(options).unwrap();
+
+    let mut failures = Vec::new();
+    for (context, pinyin, expected_top) in [
+        ("美好的", "huiyi", "回忆"),
+        ("召开", "huiyi", "会议"),
+        ("竭尽", "quanli", "全力"),
+        ("维护公民的合法", "quanli", "权利"),
+        ("把理论付诸", "shijian", "实践"),
+        ("节省宝贵的", "shijian", "时间"),
+        ("请输入账号", "denglu", "登录"),
+    ] {
+        session.command(Command::Cancel);
+        session.set_rescoring_context(context);
+        assert!(session.snapshot().candidates.is_empty());
+        type_text(&mut session, pinyin);
+        let top5 = words(&session)[..words(&session).len().min(5)].to_vec();
+        if top5[0] != expected_top {
+            failures.push(format!(
+                "{context:?}+{pinyin:?}: got {top5:?}, expected {expected_top:?}"
+            ));
+        }
+    }
+    // 整句组字同样消费 `rescoring_context`：词格静态首选因词频落在「会议过去」，而在「美好的」前文下键盘模型给出「回忆过去」。
+    session.command(Command::Cancel);
+    session.set_rescoring_context("美好的");
+    type_text(&mut session, "huiyiguoqu");
+    assert!(
+        session.snapshot().candidates.iter().any(|row| {
+            row.source == CandidateSource::NeuralKeyboard && row.word == "回忆过去"
+        }),
+        "got {:?}",
+        &words(&session)[..words(&session).len().min(5)]
+    );
+    // 置信度不足时保持词典原有顺序，不把次选「校验」挤到低频词后面。
+    session.command(Command::Cancel);
+    session.set_rescoring_context("奇偶");
+    type_text(&mut session, "jiaoyan");
+    assert_eq!(&words(&session)[..2], ["教研", "校验"]);
+
+    // 双拼下同样按前文重排多字同音词典候选（小鹤双拼 `hvyi` = `hui'yi`）。
+    session.command(Command::Cancel);
+    session.switch_scheme(SchemeType::Shuangpin).unwrap();
+    session.set_rescoring_context("美好的");
+    type_text(&mut session, "hvyi");
+    assert_eq!(words(&session)[0], "回忆");
+
+    assert!(failures.is_empty(), "failures: {failures:#?}");
+}
+
 mod caret_suffix;
 mod stroke_filter;

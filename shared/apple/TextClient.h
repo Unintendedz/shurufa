@@ -55,6 +55,11 @@ NSString * MSIMETextClientFollowingCharacter(id<MSIMETextClient> client);
 /// the host cannot safely expose document context.
 uint32_t MSIMETextClientPrecedingUnicodeScalar(id<MSIMETextClient> client);
 
+/// 读取选区或折叠光标前至多 `maxUTF16Units` 个 UTF-16 码元的现成文本；客户端无法暴露文档时返回 `nil`。
+/// `knownReadable` 表示该客户端此前已成功返回过文档片段，此时光标位于 0 返回空串 `@""`；`provedReadable` 输出本次是否确认可读。
+NSString *MSIMETextClientPrecedingContext(id<MSIMETextClient> client, NSUInteger maxUTF16Units,
+                                          BOOL knownReadable, BOOL *provedReadable);
+
 /// 校验刚上屏文本仍紧邻折叠光标，返回其文档范围与左侧标量；未知、过长或过期时返回 NSNotFound。
 NSRange MSIMETextClientCommittedRange(id<MSIMETextClient> client, NSString *text,
                                       uint32_t *preceding, BOOL (^isCurrent)(void));

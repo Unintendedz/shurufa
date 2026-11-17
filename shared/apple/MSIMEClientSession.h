@@ -49,6 +49,8 @@ FOUNDATION_EXPORT NSNotificationName const MSIMEClientSessionDidReplaceSnapshotN
 - (nullable NSDictionary *)setCharacterWidthFull:(BOOL)fullwidth error:(NSError **)error;
 /// 报告大写锁定状态（`msime_client_set_caps_lock`）。会话重建后自动恢复。
 - (BOOL)setCapsLockEnabled:(BOOL)enabled error:(NSError **)error;
+/// 组字开始前同步光标左侧现成文本（`msime_client_set_surrounding_context`）；空闲调用不产生候选。
+- (BOOL)setSurroundingContext:(NSString *)context error:(NSError **)error;
 - (nullable NSDictionary<NSString *, id> *)typeASCII:(uint8_t)character shift:(BOOL)shift error:(NSError **)error;
 /// Finish the highlighted composition and append a literal ASCII punctuation mark.
 - (nullable NSDictionary<NSString *, id> *)punctuationASCII:(uint8_t)ascii error:(NSError **)error;

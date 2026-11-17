@@ -42,6 +42,7 @@
 #import "../backend/core/BackendSelectionObservation.h"
 #include "../core/ToolTextReturn.h"
 #include "../core/ToolApplicationActivation.h"
+#include "../core/AXPrecedingContext.h"
 #include "../settings/PreferenceSaveState.h"
 #include "../settings/PreferenceLoadState.h"
 #include "../settings/PreferenceSnapshotMerge.h"
@@ -1830,6 +1831,7 @@ static NSImage *MSIMECandidateLogoImage() {
     unichar _spaceRevertChinese;
     NSTimeInterval _spaceRevertTime;
     __weak id _spaceRevertClient;
+    __weak id _readableDocumentClient;
     msime::mac::PairedPunctuationTracker _pairedPunctuation;
     // Key heatmap counts not yet written, and the timer that writes them if typing stops before a batch fills.
     msime::mac::KeyPressBatch _keyPressBatch;
@@ -2038,6 +2040,38 @@ static NSImage *MSIMECandidateLogoImage() {
         [client attributedSubstringFromRange:NSMakeRange(0, 1)].string.length)
         return NO;
     return YES;
+}
+
+- (NSString *)readAXPrecedingContextForBundle:(NSString *)bundle maxUTF16Units:(NSUInteger)maxUnits {
+    return msime::mac::ReadAXPrecedingContext(bundle, maxUnits);
+}
+
+// 仅在空闲会话按下首枚字母键开始中文组字前，读取一次光标左侧现成文本同步给运行时。
+// 组字中途、空闲未敲字母、安全密码框、终端或非中文组字方案均不读取，既不产生额外 IPC 也不在空闲时弹出候选。
+- (void)syncSurroundingContextForCharacter:(unichar)typed client:(id<MSIMETextClient>)client {
+    if (!client || !_session || ![_session respondsToSelector:@selector(setSurroundingContext:error:)]) return;
+    if (!((typed >= 'a' && typed <= 'z') || (typed >= 'A' && typed <= 'Z'))) return;
+    if (_appearance.englishMode || _managedEnglishComposition || [self secureEventInputActive]) return;
+    if ([_view[@"editing_text"] length] ||
+        ([_view[@"candidates"] isKindOfClass:NSArray.class] && [_view[@"candidates"] count]) ||
+        [_view[@"phrase_prefix"] length] ||
+        MSIMEStrictBoolean(_view[@"dedicated_english"]))
+        return;
+    if (!MSIMESchemeRulesApply(_view)) return;
+    const auto scheme = MSIMEViewScheme(_view);
+    if (scheme != msime::mac::scheme::Quanpin &&
+        scheme != msime::mac::scheme::Shuangpin &&
+        scheme != msime::mac::scheme::Wubi)
+        return;
+    NSString *bundle = [(id)client respondsToSelector:@selector(bundleIdentifier)]
+        ? [(id)client bundleIdentifier] : nil;
+    if (msime::mac::IsTerminalBundleIdentifier(bundle)) return;
+    BOOL provedReadable = NO;
+    NSString *preceding = MSIMETextClientPrecedingContext(
+        client, 96, _readableDocumentClient == client, &provedReadable);
+    if (provedReadable) _readableDocumentClient = client;
+    if (!preceding) preceding = [self readAXPrecedingContextForBundle:bundle maxUTF16Units:96];
+    if (preceding) [_session setSurroundingContext:preceding error:nil];
 }
 
 // Replaces the character left of the caret when the host exposes no text there and the shadow says it is `expected`. Returns NO, having posted nothing, when the document is readable (including a selection or a caret at its start), the shadow disagrees or is unknown, or the posted rewrite is not available.
@@ -8496,6 +8530,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         unichar typed = [event.characters characterAtIndex:0];
         if (MSIMESchemeTrait(_view, msime::mac::scheme::FoldsLetterCase)) typed = (unichar)msime::mac::KoreanKeyLetter((char)typed, shift);
         _punctuationKeyInFlight = MSIMEASCIIPunctuation(typed) ? typed : 0;
+        [self syncSurroundingContextForCharacter:typed client:(id<MSIMETextClient>)sender];
         transition = [_session typeASCII:(uint8_t)typed shift:shift error:nil];
     }
     if (!transition) { _punctuationKeyInFlight = 0; return NO; }

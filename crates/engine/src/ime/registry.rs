@@ -243,6 +243,41 @@ impl ProviderRegistry {
         }
     }
 
+    /// 方案词典是否已挂载逐键神经模型。
+    pub fn has_dictionary_reranker(&self, scheme: SchemeType) -> bool {
+        match scheme {
+            SchemeType::Quanpin => self
+                .quanpin
+                .as_ref()
+                .is_some_and(|quanpin| quanpin.has_dictionary_reranker()),
+            SchemeType::Shuangpin => self
+                .shuangpin
+                .as_ref()
+                .is_some_and(|shuangpin| shuangpin.has_dictionary_reranker()),
+            _ => false,
+        }
+    }
+
+    /// 用方案的键盘神经模型按 `context` 在同音字典候选中选出应旋至首位的下标。
+    pub fn pick_dictionary_homophone(
+        &mut self,
+        scheme: SchemeType,
+        items: &[&WordItem],
+        context: &str,
+    ) -> Option<usize> {
+        match scheme {
+            SchemeType::Quanpin => self
+                .quanpin
+                .as_mut()?
+                .pick_dictionary_homophone(items, context),
+            SchemeType::Shuangpin => self
+                .shuangpin
+                .as_mut()?
+                .pick_dictionary_homophone(items, context),
+            _ => None,
+        }
+    }
+
     /// 全拼词典里每个键最好那一行的权重，供滑行输入使用；会话没有全拼 provider 时为空。
     pub fn quanpin_best_weights(&self, keys: &[String]) -> HashMap<String, i64> {
         self.quanpin

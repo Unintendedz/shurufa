@@ -142,6 +142,18 @@ impl QuanpinEngine {
         self.dictionary.find_candidate(key, value)
     }
 
+    pub fn has_dictionary_reranker(&self) -> bool {
+        self.dictionary.has_dictionary_reranker()
+    }
+
+    pub fn pick_dictionary_homophone(
+        &mut self,
+        items: &[&WordItem],
+        context: &str,
+    ) -> Option<usize> {
+        self.dictionary.pick_dictionary_homophone(items, context)
+    }
+
     pub fn knows_han_char(&self, han: &str) -> bool {
         self.dictionary.knows_han_char(han)
     }

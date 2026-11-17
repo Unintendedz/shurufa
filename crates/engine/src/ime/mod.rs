@@ -928,6 +928,31 @@ impl ImeSession {
         context.clone_into(&mut self.rescoring_context);
     }
 
+    /// 模型读取的最近 64 字窗口内是否含有汉字，不含时不触发中文首组字典重排。
+    pub fn has_han_rescoring_context(&self) -> bool {
+        crate::text::last_characters(
+            &self.rescoring_context,
+            crate::lattice::neural::CONTEXT_CHARACTERS,
+        )
+        .chars()
+        .any(crate::text::is_han)
+    }
+
+    /// 指定拼音方案的词典是否挂有逐键神经模型。
+    pub fn has_dictionary_reranker(&self, scheme: SchemeType) -> bool {
+        self.registry.has_dictionary_reranker(scheme)
+    }
+
+    /// 按当前 `rescoring_context` 在同音词切片中选出应提至首位的下标；无明显优势或未挂模型时返回 `None`。
+    pub(crate) fn pick_dictionary_homophone(
+        &mut self,
+        scheme: SchemeType,
+        items: &[&WordItem],
+    ) -> Option<usize> {
+        self.registry
+            .pick_dictionary_homophone(scheme, items, &self.rescoring_context)
+    }
+
     /// Routed by the producing row's scheme in mixed wubi (overlays.md §3.3). The provider layer only reads: the session writes pins, removals and frequency learning into user_dictionary, keyed by the selected row's scheme, and learned phrases through its own canonical-pinyin `QuanpinEngine`; `reset_cache` then makes the providers see them.
     pub fn find_candidate(&self, scheme: SchemeType, key: &str, value: &str) -> Option<WordItem> {
         self.registry.find_candidate(scheme, key, value)

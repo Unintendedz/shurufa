@@ -763,6 +763,18 @@ impl ShuangpinEngine {
         self.dictionary.find_candidate(key, value)
     }
 
+    pub fn has_dictionary_reranker(&self) -> bool {
+        self.dictionary.has_dictionary_reranker()
+    }
+
+    pub fn pick_dictionary_homophone(
+        &mut self,
+        items: &[&WordItem],
+        context: &str,
+    ) -> Option<usize> {
+        self.dictionary.pick_dictionary_homophone(items, context)
+    }
+
     pub fn reset_cache(&mut self) {
         self.dictionary.reset_cache();
         if let Some(fuzzy_dictionary) = &mut self.fuzzy_dictionary {

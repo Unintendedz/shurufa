@@ -1403,6 +1403,31 @@ impl<E: InputEngine> Runtime<E> {
         self.engine.set_rescoring_context("");
     }
 
+    /// 用宿主在组字开始前读到的光标前文本同步当前上下文。
+    ///
+    /// 传入的是编辑器光标左侧的实时前文而非单次追加：
+    /// - 未聚焦时清空上下文；
+    /// - 去掉富文本附件占位符（`U+FFFC`）及 `query_candidates` 拒收的控制字符，按字符边界保留末尾至多 1024 字节；
+    /// - 若非空且当前 `ai_context` 已以这段前文结尾，说明光标仍停在本会话刚上屏的位置，保留完整 `ai_context` 与引擎词序链；
+    /// - 否则说明前文是现成文本，或用户移动了光标、粘贴、删除了文字，切断引擎旧词序链并替换为当前光标前文本。
+    pub fn set_surrounding_context(&mut self, text: &str) {
+        if !self.focused {
+            self.ai_context.clear();
+            self.engine.set_rescoring_context("");
+            return;
+        }
+        let cleaned = sanitize_surrounding_context(text);
+        if !cleaned.is_empty() && self.ai_context.ends_with(cleaned.as_ref()) {
+            return;
+        }
+        if self.ai_context != cleaned.as_ref() {
+            self.engine.reset_context();
+            self.ai_context.clear();
+            self.ai_context.push_str(cleaned.as_ref());
+            self.engine.set_rescoring_context(&self.ai_context);
+        }
+    }
+
     /// 移动引擎前缀解码的光标；`None` 恢复到组字末尾。候选可能随前缀改变，旧候选 ID 必须失效。
     pub fn set_caret(&mut self, caret: Option<usize>) -> Result<(), RuntimeError> {
         self.advance()?;
@@ -3926,4 +3951,30 @@ pub(crate) fn wubi_four_code_is_complete(snapshot: &EngineSnapshot) -> bool {
         && msime_client_core::is_ascii_alphabetic(&snapshot.editing_text)
         && snapshot.caret_position == WUBI_COMPLETE_CODE_LENGTH
         && !snapshot.candidates.is_empty()
+}
+
+/// 过滤富文本附件占位符（`U+FFFC`）及 `query_candidates` 拒收的控制字符，并按字符边界保留末尾至多 1024 字节。
+fn sanitize_surrounding_context(text: &str) -> std::borrow::Cow<'_, str> {
+    const MAX_BYTES: usize = 1024;
+    let allowed_char =
+        |c: char| c != '\u{fffc}' && (!c.is_control() || matches!(c, '\n' | '\r' | '\t'));
+    if text.chars().all(allowed_char) {
+        if text.len() <= MAX_BYTES {
+            return std::borrow::Cow::Borrowed(text);
+        }
+        let mut cut = text.len() - MAX_BYTES;
+        while cut < text.len() && !text.is_char_boundary(cut) {
+            cut += 1;
+        }
+        return std::borrow::Cow::Borrowed(&text[cut..]);
+    }
+    let mut cleaned: String = text.chars().filter(|&c| allowed_char(c)).collect();
+    if cleaned.len() > MAX_BYTES {
+        let mut cut = cleaned.len() - MAX_BYTES;
+        while cut < cleaned.len() && !cleaned.is_char_boundary(cut) {
+            cut += 1;
+        }
+        cleaned.drain(..cut);
+    }
+    std::borrow::Cow::Owned(cleaned)
 }

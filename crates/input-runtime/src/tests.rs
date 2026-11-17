@@ -5273,6 +5273,89 @@ fn a_replacement_engine_inherits_the_committed_text() {
     assert_eq!(runtime.engine.contexts, ["上一句"]);
 }
 
+#[derive(Default)]
+struct ContextAndResetEngine {
+    inner: Fixture,
+    contexts: Vec<String>,
+    resets: usize,
+}
+
+impl InputEngine for ContextAndResetEngine {
+    fn set_rescoring_context(&mut self, context: &str) {
+        self.contexts.push(context.to_owned());
+    }
+    fn reset_context(&mut self) {
+        self.resets += 1;
+    }
+    fn snapshot(&self) -> Result<EngineSnapshot, RuntimeError> {
+        self.inner.snapshot()
+    }
+    fn character(&mut self, value: u8, shift: bool) -> Result<EngineResult, RuntimeError> {
+        self.inner.character(value, shift)
+    }
+    fn command(&mut self, command: Command) -> Result<EngineResult, RuntimeError> {
+        self.inner.command(command)
+    }
+    fn select(&mut self, index: usize) -> Result<EngineResult, RuntimeError> {
+        self.inner.select(index)
+    }
+    fn select_edge(
+        &mut self,
+        index: usize,
+        edge: CandidateEdge,
+    ) -> Result<EngineResult, RuntimeError> {
+        self.inner.select_edge(index, edge)
+    }
+    fn finish(&mut self, index: usize) -> Result<EngineResult, RuntimeError> {
+        self.inner.finish(index)
+    }
+    fn punctuation(&mut self, value: u8) -> Result<EngineResult, RuntimeError> {
+        self.inner.punctuation(value)
+    }
+}
+
+#[test]
+fn surrounding_context_syncs_cleanly_preserves_continuous_suffix_and_resets_on_cursor_jump() {
+    let mut runtime = Runtime::new(ContextAndResetEngine::default(), 5).unwrap();
+    runtime.focus(true).unwrap();
+    let resets_after_focus = runtime.engine.resets;
+
+    // 同步现成文本后空闲态不产生任何候选或预编辑，同时清理附件占位符与控制字符。
+    runtime.set_surrounding_context("这是一只\u{fffc}\u{0007}小猫，");
+    assert_eq!(runtime.ai_context, "这是一只小猫，");
+    assert!(msime_client_core::is_bounded_text_with_options(
+        &runtime.ai_context,
+        1024,
+        true
+    ));
+    assert_eq!(
+        runtime.engine.contexts.last().map(String::as_str),
+        Some("这是一只小猫，")
+    );
+    assert_eq!(runtime.engine.resets, resets_after_focus + 1);
+    assert!(runtime.view().candidates.is_empty());
+    assert!(runtime.view().editing_text.is_empty());
+
+    // 同一位置连续输入：编辑器报出的较短尾部若与当前已提交上文后缀一致，不切断词序链也不缩短上文。
+    runtime.seed_context("它很可爱");
+    assert_eq!(runtime.ai_context, "这是一只小猫，它很可爱");
+    let resets_before_continue = runtime.engine.resets;
+    let contexts_before_continue = runtime.engine.contexts.len();
+    runtime.set_surrounding_context("它很可爱");
+    assert_eq!(runtime.ai_context, "这是一只小猫，它很可爱");
+    assert_eq!(runtime.engine.resets, resets_before_continue);
+    assert_eq!(runtime.engine.contexts.len(), contexts_before_continue);
+
+    // 挪动光标到另一段文字或清空文档时，切断旧词序链并替换为当前光标前文本。
+    runtime.set_surrounding_context("美好的");
+    assert_eq!(runtime.ai_context, "美好的");
+    assert_eq!(runtime.engine.resets, resets_before_continue + 1);
+
+    runtime.set_surrounding_context("");
+    assert!(runtime.ai_context.is_empty());
+    assert_eq!(runtime.engine.resets, resets_before_continue + 2);
+}
+
 // The real Engine, not the fixture. Unicode mode is the one place where a bare
 // digit is input rather than a candidate index, and the two layers decide that
 // separately: the Engine reports the digit as handled, and the runtime only

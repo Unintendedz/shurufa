@@ -818,6 +818,22 @@ int main() {
         assert(MSIMETextClientPrecedingUnicodeScalar(client) == 'a');
         client.documentSelection = NSMakeRange(0, 0);
         assert(MSIMETextClientPrecedingUnicodeScalar(client) == 0);
+
+        // 光标前现成文本读取：安全截断代理对，正确区分文档起点与不可读客户端。
+        BOOL proved = NO;
+        client.document = @"前文😀小猫";
+        client.documentSelection = NSMakeRange(client.document.length, 0);
+        assert([MSIMETextClientPrecedingContext(client, 96, NO, &proved) isEqual:@"前文😀小猫"] && proved);
+        // 截断窗口恰落在 😀 的低代理位时，自动剥掉孤立低代理。
+        assert([MSIMETextClientPrecedingContext(client, 3, NO, &proved) isEqual:@"小猫"] && proved);
+        // 光标移回非空文档开头（0 位后仍有字符）：返回空串 `@""`。
+        client.documentSelection = NSMakeRange(0, 0);
+        assert([MSIMETextClientPrecedingContext(client, 96, NO, &proved) isEqual:@""] && proved);
+        // 已知可读的文档被删空（`knownReadable=YES`）时返回 `@""`；从未返回过文本的空客户端（如终端）返回 `nil`。
+        client.document = @"";
+        assert([MSIMETextClientPrecedingContext(client, 96, YES, &proved) isEqual:@""] && !proved);
+        client.document = nil;
+        assert(MSIMETextClientPrecedingContext(client, 96, NO, &proved) == nil && !proved);
     }
     return 0;
 }

@@ -689,6 +689,22 @@ static void MSIMEInvokeAnnounce(void *context) {
     _capsLock = enabled;
     return YES;
 }
+- (BOOL)setSurroundingContext:(NSString *)context error:(NSError **)error {
+    if (![self checkThreadAndHandle:error]) return NO;
+    NSData *utf8 = [(context ?: @"") dataUsingEncoding:NSUTF8StringEncoding];
+    if (!utf8) return NO;
+    // 超过单次 C 接口字节上限时先按 UTF-16 安全截尾，保留紧邻光标的一段。
+    if (utf8.length > 4096) {
+        NSUInteger keepUnits = MIN(context.length, (NSUInteger)1024);
+        NSUInteger start = context.length - keepUnits;
+        if (start > 0 && CFStringIsSurrogateLowCharacter([context characterAtIndex:start])) ++start;
+        utf8 = [[context substringFromIndex:start] dataUsingEncoding:NSUTF8StringEncoding];
+        if (!utf8 || utf8.length > 4096) return NO;
+    }
+    id value = decodeValue(msime_client_set_surrounding_context(
+        _handle, static_cast<const uint8_t *>(utf8.bytes), utf8.length), error);
+    return [value isEqual:@YES];
+}
 - (nullable NSDictionary *)setCharacterWidthFull:(BOOL)fullwidth error:(NSError **)error {
     if (![self checkThreadAndHandle:error]) return nil;
     NSDictionary *view = decode(msime_client_set_character_width(_handle, fullwidth), error);
