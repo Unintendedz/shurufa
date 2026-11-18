@@ -19,6 +19,12 @@ pub const MANAGED_WEIGHT_CEILING: i64 = 100_000_000;
 pub const MANAGED_WEIGHT_FLOOR: i64 = 1;
 pub const REBALANCE_GAP: i64 = 1_000;
 pub const REBALANCE_COUNT: usize = 16;
+/// 核心高频词护城河下限：榜首权重达到该量级且远高于被选低频词时，单次自动调频按倍率渐进抬升而不一步跨过榜首。
+const CORE_LEADER_MOAT_WEIGHT: i64 = 200_000;
+/// 触发核心高频词护城河的榜首与被选词权重倍数比（`leader > selected * 8`）。
+const CORE_LEADER_MOAT_RATIO: i64 = 8;
+/// 护城河内单次自动调频的最小绝对增量，防止极低权重词起步过慢。
+const CORE_LEADER_MIN_STEP: i64 = 15_000;
 
 /// A fixed candidate keeps its slot by position, not by weight, so learning never moves it (J:1356-1358).
 const FIXED_CANDIDATE: &str = "The candidate has a fixed position";
@@ -493,7 +499,47 @@ pub fn adjust_candidate_ranking(request: &RankingRequest<'_>) -> Result<bool> {
     let mut main = open_dictionary_for_writing(request.main_db)?;
     let main_transaction = main.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let weights: Vec<i64> = database_candidates.iter().map(|item| item.weight).collect();
-    let plan = plan_weights(&weights, owns_entry_key, target);
+    let mut plan = plan_weights(&weights, owns_entry_key, target);
+    if !request.force_top
+        && request.mode != FrequencyAdjustmentMode::Pin
+        && request.kind == PersonalDictionaryKind::Pinyin
+    {
+        let leader_weight = weights[0];
+        let selected_weight = weights[rank];
+        // 超高频榜首（如 `一个`）被普通自动调频一次偶发选词击穿时，不直接写到 `leader + REBALANCE_GAP`，
+        // 而是按 3 倍 / 至少 +15,000 渐进抬升，连续多次有意选择后才跨过核心词护城河；手动置顶（Pin）仍直达榜首。
+        if target == 0
+            && leader_weight >= CORE_LEADER_MOAT_WEIGHT
+            && selected_weight >= 0
+            && selected_weight.saturating_mul(CORE_LEADER_MOAT_RATIO) < leader_weight
+        {
+            let stepped = selected_weight
+                .saturating_mul(3)
+                .max(selected_weight.saturating_add(CORE_LEADER_MIN_STEP))
+                .min(leader_weight - 1);
+            if stepped > selected_weight {
+                plan = WeightPlan {
+                    selected: clamp_managed_weight(stepped),
+                    staircase: Vec::new(),
+                };
+            }
+        } else if target == 1
+            && plan.staircase.is_empty()
+            && leader_weight >= CORE_LEADER_MOAT_WEIGHT
+            && weights[1] >= 0
+            && weights[1].saturating_mul(CORE_LEADER_MOAT_RATIO) < leader_weight
+        {
+            // 选中第三名仅需越过第二名时，不能用与榜首的中点值一步跳出 `leader / 8` 护城河。
+            let cap = (leader_weight / CORE_LEADER_MOAT_RATIO).saturating_sub(1);
+            let desired = weights[1]
+                .saturating_mul(2)
+                .max(weights[1].saturating_add(REBALANCE_GAP))
+                .min(cap);
+            if desired > weights[1] && desired < plan.selected {
+                plan.selected = clamp_managed_weight(desired);
+            }
+        }
+    }
     for (index, weight) in plan.staircase {
         update_ranked_weight(
             &main_transaction,
@@ -1245,5 +1291,47 @@ mod tests {
             count(&user_db, "SELECT count(*) FROM user_dictionary_operations WHERE dictionary='english' AND key='nimbus' AND value='Nimbus' AND weight=1200"),
             1
         );
+    }
+
+    #[test]
+    fn core_leader_moat_gates_single_pick_hijack_while_allowing_pin() {
+        let dir = Dir::new();
+        dir.pinyin(&[
+            ("ni", "甲", 508_964),
+            ("ni", "乙", 20_030),
+            ("ni", "丙", 7_240),
+        ]);
+
+        // 选中悬殊第三名只越过第二名且停在 `leader / 8` 护城河下方，不能一步跳到 26 万多。
+        assert!(pick(&dir, "丙", FrequencyAdjustmentMode::Promote, 1, 1).unwrap());
+        let after_third = dir.weight("ni", "丙").unwrap();
+        assert!(
+            after_third > 20_030 && after_third < 508_964 / CORE_LEADER_MOAT_RATIO,
+            "after_third={after_third}"
+        );
+        assert_eq!(index_of(&dir, "甲"), 0);
+        assert_eq!(index_of(&dir, "丙"), 1);
+
+        // 在护城河外缘重新测算：20,030 与 508,964 悬殊 > 8 倍，Promote 需三次渐进才能超越榜首。
+        let dir = Dir::new();
+        dir.pinyin(&[("ni", "甲", 508_964), ("ni", "乙", 20_030)]);
+        assert!(pick(&dir, "乙", FrequencyAdjustmentMode::Promote, 1, 1).unwrap());
+        assert_eq!(dir.weight("ni", "乙"), Some(60_090));
+        assert_eq!(index_of(&dir, "甲"), 0);
+
+        assert!(pick(&dir, "乙", FrequencyAdjustmentMode::Promote, 1, 1).unwrap());
+        assert_eq!(dir.weight("ni", "乙"), Some(180_270));
+        assert_eq!(index_of(&dir, "甲"), 0);
+
+        assert!(pick(&dir, "乙", FrequencyAdjustmentMode::Promote, 1, 1).unwrap());
+        assert!(dir.weight("ni", "乙").unwrap() > 508_964);
+        assert_eq!(index_of(&dir, "乙"), 0);
+
+        // 手动置顶（Pin / force_top）绕过护城河，单次直达榜首。
+        let dir = Dir::new();
+        dir.pinyin(&[("ni", "甲", 508_964), ("ni", "乙", 20_030)]);
+        assert!(pick(&dir, "乙", FrequencyAdjustmentMode::Pin, 1, 1).unwrap());
+        assert!(dir.weight("ni", "乙").unwrap() > 508_964);
+        assert_eq!(index_of(&dir, "乙"), 0);
     }
 }

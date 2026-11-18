@@ -226,8 +226,10 @@ impl InputSession {
                 }))
     }
 
-    /// 前文含汉字且挂有逐键神经模型时，在前段同音、同字长且未经手动置顶或调频的系统词典候选中选出更贴合语境的首选下标。
+    /// 前文含汉字且挂有逐键神经模型时，在前段同音、同字长且未经手动置顶的系统词典候选中选出更贴合语境的首选下标。
     ///
+    /// 普通自动调频只改词条权重、仍按 `ln(weight) + neural_nats` 参与语境竞争，避免一次偶发选词永久屏蔽前文纠偏；
+    /// 手动置顶（`pinned_candidates`）则锁定第 0 位不参与语境替换。
     /// 只对完整音节、无模糊音或纠错偏移的多字精确词典命中生效，避免半截声母键（如 `huiy`）白跑模型；
     /// 词库查询可能在同音双字词之间夹入更长的补全词组（如「登录」与「登陆」之间夹有「登录时间」），
     /// 因此在前 32 行内跳过补全词收集最多 12 条同音候选评分，仅把胜出项旋至第 0 位。
@@ -311,13 +313,7 @@ impl InputSession {
         }
         let journal = self.journal_path();
         let context = self.pinyin_ranking_context();
-        if Self::leader_is_pinned_or_user_weighted(
-            journal,
-            &context,
-            self.frequency.mode,
-            decoded,
-            &first.word,
-        ) {
+        if is_pinned_candidate(journal, &context, &first.word) {
             return None;
         }
         let best = self

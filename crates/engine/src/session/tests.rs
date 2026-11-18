@@ -13947,6 +13947,54 @@ fn han_rescoring_context_reorders_leading_dictionary_homophones_while_respecting
 }
 
 #[test]
+fn han_rescoring_context_can_override_unpinned_auto_learned_leader() {
+    let fixture = Fixture::new(
+        "CREATE TABLE tbl_2_h(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_2_h VALUES('hui''yi','hy','回忆',500000);\
+         INSERT INTO tbl_2_h VALUES('hui''yi','hy','会议',400000);",
+    );
+    write_synthetic_keyboard_model(
+        &fixture.path().join(assets::NEURAL_MODEL_KEYBOARD),
+        &['美', '好', '的', '会', '议', '回', '忆'],
+        &['回', '忆'],
+    );
+    let mut session = fixture.session_with(|options| {
+        options.sentence_association.neural_keyboard = true;
+        options.learning = true;
+        options.frequency.mode = FrequencyAdjustmentMode::Promote;
+        options.frequency.trigger_count = 1;
+    });
+
+    // 无上文时普通自动调频把「会议」抬到榜首，不写入 pinned_candidates。
+    type_text(&mut session, "huiyi");
+    assert_eq!(&words(&session)[..2], ["回忆", "会议"]);
+    assert_eq!(
+        select_word(&mut session, "会议").commit.as_deref(),
+        Some("会议")
+    );
+    session.set_rescoring_context("");
+    type_text(&mut session, "huiyi");
+    assert_eq!(&words(&session)[..2], ["会议", "回忆"]);
+
+    // 切回偏好「回忆」的汉字前文后，未经手动置顶的自动调频榜首仍可被语境同音竞争推翻。
+    session.command(Command::Cancel);
+    session.set_rescoring_context("美好的");
+    type_text(&mut session, "huiyi");
+    assert_eq!(&words(&session)[..2], ["回忆", "会议"]);
+
+    // 显式手动置顶「会议」后，强汉字前文也不得挤掉置顶词。
+    session.command(Command::Cancel);
+    session.set_rescoring_context("");
+    type_text(&mut session, "huiyi");
+    assert_eq!(&words(&session)[..2], ["会议", "回忆"]);
+    session.pin(0);
+    session.command(Command::Cancel);
+    session.set_rescoring_context("美好的");
+    type_text(&mut session, "huiyi");
+    assert_eq!(&words(&session)[..2], ["会议", "回忆"]);
+}
+
+#[test]
 fn real_shipped_model_and_dictionary_disambiguate_words_from_preceding_context() {
     let Some(resources) = std::env::var_os("MSIME_EVAL_RESOURCES").map(PathBuf::from) else {
         eprintln!("skipped: MSIME_EVAL_RESOURCES is not set");

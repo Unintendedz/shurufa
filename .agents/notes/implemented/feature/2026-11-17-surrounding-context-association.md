@@ -25,7 +25,7 @@ Status: implemented
    - `Runtime::set_surrounding_context` 剔除富文本附件占位符 `U+FFFC` 及在线查询拒收的控制字符，按字符边界保留末尾 1024 字节；若非空且当前 `ai_context` 已以该段文本结尾，保留完整 `ai_context` 与引擎 `CommitChain` 不变；否则调用 `engine.reset_context()` 切断旧词序链并更新 `ai_context` 与 `engine.set_rescoring_context`。
 3. **引擎前段多字同音系统词典词按汉字前文提首（`NeuralReranker::pick_dictionary_homophone` + `InputSession::contextual_dictionary_promote`）**：
    - `NeuralReranker` 为同音词典评分独立持有一份共享 `Arc<SentenceModel>` 只读权重的 `Reranker` 状态，使其上文 KV 缓存与整句路径跨按键续算的 `TailRun` 互不覆盖。
-   - 当 `rescoring_context` 最近 64 字窗口内含有汉字、处于无局部模式、无光标前缀截取、无激活辅助码的完整音节（`is_intact`）拼音组字、个人词序链（`personal_context_rerank_order`）未命中转移、且首候选为字数 `>= 2`、无模糊音与纠错偏移、回答完整按键（`selection_completes_composition` 且 `reading_answers_key`）、未经手动置顶与个人调频覆盖的 `CandidateSource::Database` 行时，在前 32 行候选内跳过夹杂的更长前缀补全词（如「登录」与「登陆」之间的「登录时间」），收集至多 12 条与首行读音和字数完全一致的系统词典同音词交由逐键神经模型评分。
+   - 当 `rescoring_context` 最近 64 字窗口内含有汉字、处于无局部模式、无光标前缀截取、无激活辅助码的完整音节（`is_intact`）拼音组字、个人词序链（`personal_context_rerank_order`）未命中转移、且首候选为字数 `>= 2`、无模糊音与纠错偏移、回答完整按键（`selection_completes_composition` 且 `reading_answers_key`）、未经手动置顶覆盖的 `CandidateSource::Database` 行时（见[超高频核心词调频护城河与语境同音解耦](../bug-fix/2026-11-18-core-word-frequency-moat.md)），在前 32 行候选内跳过夹杂的更长前缀补全词（如「登录」与「登陆」之间的「登录时间」），收集至多 12 条与首行读音和字数完全一致的系统词典同音词交由逐键神经模型评分。
    - 仅当最佳同音词相对原首选满足 `(ln(weight) + neural_nats) - leader >= 1.5` nats（等权混合优势不少于 `0.75` nat）时将其单独旋至第 0 位，其余次选保持词典原序不重排；重排前列表存入 `ranking_candidates`，不改变后续 `apply_candidate_positions` 固定排位与选词调频的基准顺序；半截声母键、无前文或纯 ASCII 前文时零开销跳过。
 
 ## Historical audit
