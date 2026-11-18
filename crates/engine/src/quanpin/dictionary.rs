@@ -718,12 +718,19 @@ impl QuanpinDictionary {
         picked
     }
 
+    /// 是否挂载了会读取上文语义的整句组件（逐键神经重排或非零权重的 `.gram` 搭配模型）。
+    fn sentence_reads_context(&self) -> bool {
+        !self.rerankers.is_empty()
+            || (self.collocation_db.is_some()
+                && self.sentence_association.collocation_weight != 0.0)
+    }
+
     /// The series cache slot of a resolution's key (overlays.md §1.6.2). The association switches decide which sentence rows a list carries, so they are always part of the slot. The reference bypassed the cache while a neural model ran, because its scores came from an asynchronous worker; scoring here is synchronous, so a reranked list is cached under the trimmed context it was scored with and a commit moves the next query to a fresh slot instead of clearing every list.
     fn series_slot(&self, cache_key: &str) -> String {
         series_slot_key(
             cache_key,
             &self.sentence_association,
-            !self.rerankers.is_empty(),
+            self.sentence_reads_context(),
             &self.rescoring_context,
         )
     }
@@ -809,9 +816,9 @@ impl QuanpinDictionary {
             }
         }
         let mut segments = None;
+        let sentence_reads_context = self.sentence_reads_context();
         let segmentation_cache = &mut self.segmentation_cache;
         let association = self.sentence_association.clone();
-        let has_rerankers = !self.rerankers.is_empty();
         let context = &self.rescoring_context;
         let pinyin_segmentation = &mut self.pinyin_segmentation;
         let (resolution_hash, (resolution, marking_alternatives, slot)) =
@@ -838,7 +845,7 @@ impl QuanpinDictionary {
                     let slot = series_slot_key(
                         &resolution.cache_key,
                         &association,
-                        has_rerankers,
+                        sentence_reads_context,
                         context,
                     );
                     let owned = match resolution {
@@ -1316,6 +1323,9 @@ impl QuanpinDictionary {
         options.show_next_on_duplicate = association.show_next_on_duplicate;
         options.personal = Some(&*model);
         options.bigram_memo = Some(&self.bigram_memo);
+        if !self.rerankers.is_empty() || has_collocation {
+            options.preceding_context = crate::text::trailing_han_clause(&self.rescoring_context);
+        }
         // 搭配项逐边叠加字级搭配分，与二元/三元在同一 Viterbi 里竞争；
         // query() 是自然对数域，乘 LN_TO_LOG10 换到主分的域。
         let scorer;
@@ -1350,7 +1360,8 @@ impl QuanpinDictionary {
         };
         // 模型已按需重载，此刻的版本就是这次解码用的版本。
         let personal_version = personal.version();
-        let decode_key = sentence_decode_key(segments, types, typo_eligible);
+        let decode_key =
+            sentence_decode_key(segments, types, typo_eligible, options.preceding_context);
         let cached = self
             .sentence_decode_cache
             .get_ref(&decode_key)
@@ -1810,14 +1821,25 @@ fn warm_lattice_span_cache(
     }
 }
 
-/// `sentence_decode_cache` 的键：音节串、这次查询的纠错类型和是否规划纠错整句。纠错整句只在后两者允许时才解，同一串音节在两种情况下的结果不同。
-fn sentence_decode_key(segments: &[String], types: u32, typo_eligible: bool) -> String {
+/// `sentence_decode_cache` 的键：音节串、这次查询的纠错类型、是否规划纠错整句，以及非空连续汉字前文。纠错整句与跨边界上文仅在各自启用时进入键值。
+fn sentence_decode_key(
+    segments: &[String],
+    types: u32,
+    typo_eligible: bool,
+    preceding_context: &str,
+) -> String {
+    let extra_context = if preceding_context.is_empty() {
+        0
+    } else {
+        preceding_context.len() + 1
+    };
     let mut key = String::with_capacity(
         segments
             .iter()
             .map(|segment| segment.len() + 1)
             .sum::<usize>()
-            + 12,
+            + 12
+            + extra_context,
     );
     for (index, segment) in segments.iter().enumerate() {
         if index > 0 {
@@ -1828,6 +1850,10 @@ fn sentence_decode_key(segments: &[String], types: u32, typo_eligible: bool) -> 
     key.push('\u{1f}');
     key.push_str(&types.to_string());
     key.push(if typo_eligible { 't' } else { '-' });
+    if !preceding_context.is_empty() {
+        key.push('\u{1f}');
+        key.push_str(preceding_context);
+    }
     key
 }
 

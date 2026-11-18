@@ -218,9 +218,16 @@ impl ShuangpinDictionary {
         });
     }
 
-    /// Series and helpcode answers carry the reranked sentence rows, which depend on the committed context. The C++ bypassed these caches while a model was loaded because its rows arrived asynchronously; scoring here is synchronous, so the trimmed context joins the key instead and a commit moves to fresh entries without clearing the context-free row cache (overlays.md §1.6.2). Without a reranker no answer reads the context, so the key stays the raw input.
+    /// 是否挂载了会读取上文语义的整句组件（逐键神经重排或非零权重的 `.gram` 搭配模型）。
+    fn sentence_reads_context(&self) -> bool {
+        !self.rerankers.is_empty()
+            || (self.collocation_db.is_some()
+                && self.sentence_association.collocation_weight != 0.0)
+    }
+
+    /// Series and helpcode answers carry the reranked sentence rows, which depend on the committed context. The C++ bypassed these caches while a model was loaded because its rows arrived asynchronously; scoring here is synchronous, so the trimmed context joins the key instead and a commit moves to fresh entries without clearing the context-free row cache (overlays.md §1.6.2). Without a reranker or collocation model no answer reads the context, so the key stays the raw input.
     fn sentence_cache_key(&self, key: &str) -> String {
-        if self.rerankers.is_empty() {
+        if !self.sentence_reads_context() {
             key.to_string()
         } else {
             format!("{key}\u{1}{}", self.rescoring_context)
@@ -345,7 +352,9 @@ impl ShuangpinDictionary {
         // （`generateSeries` 的 `cache_key + signature`），`generate` 内部的行缓存仍按原拼音走。
         let series_key_owned = self.signed_rows_key(rows_key);
         let series_key = series_key_owned.as_ref();
-        let mut key = (!self.rerankers.is_empty()).then(|| self.sentence_cache_key(series_key));
+        let mut key = self
+            .sentence_reads_context()
+            .then(|| self.sentence_cache_key(series_key));
         self.drop_personal_scored_results();
         let cache_hit = match key.as_ref() {
             Some(key) => self.series_cache.get_ref(key).is_some(),
@@ -441,6 +450,9 @@ impl ShuangpinDictionary {
         }
         let model = self.personal.model();
         options.personal = (!model.is_empty()).then_some(&*model);
+        if !self.rerankers.is_empty() || has_collocation {
+            options.preceding_context = crate::text::trailing_han_clause(&self.rescoring_context);
+        }
         let mut lookup = |span: &[String]| {
             // 先按辅助码过滤再做搜索，不能用普通查询的每段截断提前丢掉目标字。
             self.database
@@ -504,6 +516,9 @@ impl ShuangpinDictionary {
         // Held for the whole merge: the options borrow the model.
         let model = self.personal.model();
         options.personal = (!model.is_empty()).then_some(&*model);
+        if !self.rerankers.is_empty() || has_collocation {
+            options.preceding_context = crate::text::trailing_han_clause(&self.rescoring_context);
+        }
         let database = &self.database;
         let span_limit = options.span_limit;
         if segments.split_last().is_some_and(|(last, leading)| {

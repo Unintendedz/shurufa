@@ -10,7 +10,7 @@ use lru::LruCache;
 
 use super::decode::SentencePath;
 use crate::ordering::apply_order;
-use crate::text::last_characters;
+use crate::text::{last_characters, trailing_han_clause};
 use crate::types::CandidateSource;
 
 pub const RERANK_LAMBDA: f64 = 0.5;
@@ -178,7 +178,7 @@ impl NeuralReranker {
             *text = path.sentence.as_str();
         }
         let means = self.reranker.log_probabilities(
-            last_characters(context, CONTEXT_CHARACTERS),
+            last_characters(trailing_han_clause(context), CONTEXT_CHARACTERS),
             &texts[..scored],
         );
         // 模型评分数量不完整时保持原序，避免只重排部分结果。
@@ -205,7 +205,7 @@ impl NeuralReranker {
         context: &str,
     ) -> Option<usize> {
         const HOMOPHONE_PROMOTE_SUM_MARGIN_NATS: f64 = 1.5;
-        let trimmed = last_characters(context, CONTEXT_CHARACTERS);
+        let trimmed = last_characters(trailing_han_clause(context), CONTEXT_CHARACTERS);
         let scored = items.len().min(MAX_RERANK_PATHS);
         if scored < 2 || trimmed.is_empty() {
             return None;

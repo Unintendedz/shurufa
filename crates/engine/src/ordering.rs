@@ -395,9 +395,13 @@ pub fn rerank_pick<'a, R: OrderRowSource<'a> + ?Sized>(
             && !rows.keyboard_runner_up(index)
     };
     let corrected_key = any_corrected_key(scheme, rows);
-    // 只有参与比较的候选需要占用模型上下文窗口。
+    // 只有参与比较的候选需要占用模型上下文窗口；剥离末尾非汉字前缀以免 `<unk>` 污染语境。
     let longest = longest_rerank_candidate::<STATIC_RERANK_LIMIT, _, _>(rows, &compared);
-    let context = rerank_context(context, reranker.model().context_length(), longest);
+    let context = rerank_context(
+        crate::text::trailing_han_clause(context),
+        reranker.model().context_length(),
+        longest,
+    );
     if rows.static_evidence(0).is_some() {
         let mut considered = [0; STATIC_RERANK_LIMIT];
         let mut statik = [0.0; STATIC_RERANK_LIMIT];
@@ -456,7 +460,11 @@ pub fn settled_rerank_order<'a, R: OrderRowSource<'a> + ?Sized>(
     if rows.static_evidence(0).is_some() {
         let longest =
             longest_rerank_candidate::<SETTLED_STATIC_RERANK_LIMIT, _, _>(rows, &compared);
-        let context = rerank_context(context, reranker.model().context_length(), longest);
+        let context = rerank_context(
+            crate::text::trailing_han_clause(context),
+            reranker.model().context_length(),
+            longest,
+        );
         let mut considered = [0; SETTLED_STATIC_RERANK_LIMIT];
         let mut statik = [0.0; SETTLED_STATIC_RERANK_LIMIT];
         let mut subset = [""; SETTLED_STATIC_RERANK_LIMIT];
@@ -489,7 +497,11 @@ pub fn settled_rerank_order<'a, R: OrderRowSource<'a> + ?Sized>(
         }
     }
     let longest = longest_rerank_candidate::<STATIC_RERANK_LIMIT, _, _>(rows, &compared);
-    let context = rerank_context(context, reranker.model().context_length(), longest);
+    let context = rerank_context(
+        crate::text::trailing_han_clause(context),
+        reranker.model().context_length(),
+        longest,
+    );
     let corrected_key = any_corrected_key(scheme, rows);
     let promote = with_row_texts(rows, |texts| {
         reranker.best_where(context, texts, |index| CandidateFacts {
@@ -1524,5 +1536,133 @@ mod tests {
         let four_char_reordered_scored =
             ScoredOrderRows::new(&four_char_reordered, &four_char_reordered_scores);
         assert_eq!(runner_up_order(0, &four_char_reordered_scored), None);
+    }
+
+    fn context_sensitive_layer_model() -> SentenceModel {
+        const CONTEXT: usize = 16;
+        const EMBD: usize = 2;
+        let vocabulary: Vec<String> = ["<pad>", "<unk>", "<bos>", "培", "养", "乙", "丙"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let tok: Vec<f32> = vec![
+            0.0, 0.0, // <pad>
+            -10.0, 10.0, // <unk>：非汉字若未剥离会压倒正常汉字前文
+            -1.0, 1.0, // <bos>：默认倾向「乙」
+            3.0, -3.0, // 培
+            3.0, -3.0, // 养
+            -1.0, 1.0, // 乙
+            1.0, -1.0, // 丙
+        ];
+        let qkv_weight: Vec<f32> = vec![
+            0.0, 0.0, 0.0, 0.0, // Q
+            0.0, 0.0, 0.0, 0.0, // K
+            1.0, 0.0, 0.0, 1.0, // V = I
+        ];
+        let proj_weight: Vec<f32> = vec![20.0, 0.0, 0.0, 20.0];
+        let config = format!(
+            r#"{{"vocab":{},"n_layer":1,"n_head":1,"n_embd":{EMBD},"context":{CONTEXT},"dropout":0.0}}"#,
+            vocabulary.len()
+        );
+        let tensors: [(&str, Vec<usize>, Vec<f32>); 16] = [
+            ("tok.weight", vec![vocabulary.len(), EMBD], tok),
+            ("pos.weight", vec![CONTEXT, EMBD], vec![0.0; CONTEXT * EMBD]),
+            ("blocks.0.ln1.weight", vec![EMBD], vec![1.0, 1.0]),
+            ("blocks.0.ln1.bias", vec![EMBD], vec![0.0, 0.0]),
+            ("blocks.0.qkv.weight", vec![3 * EMBD, EMBD], qkv_weight),
+            ("blocks.0.qkv.bias", vec![3 * EMBD], vec![0.0; 3 * EMBD]),
+            ("blocks.0.proj.weight", vec![EMBD, EMBD], proj_weight),
+            ("blocks.0.proj.bias", vec![EMBD], vec![0.0; EMBD]),
+            ("blocks.0.ln2.weight", vec![EMBD], vec![1.0, 1.0]),
+            ("blocks.0.ln2.bias", vec![EMBD], vec![0.0, 0.0]),
+            (
+                "blocks.0.fc.weight",
+                vec![4 * EMBD, EMBD],
+                vec![0.0; 4 * EMBD * EMBD],
+            ),
+            ("blocks.0.fc.bias", vec![4 * EMBD], vec![0.0; 4 * EMBD]),
+            (
+                "blocks.0.out.weight",
+                vec![EMBD, 4 * EMBD],
+                vec![0.0; EMBD * 4 * EMBD],
+            ),
+            ("blocks.0.out.bias", vec![EMBD], vec![0.0; EMBD]),
+            ("ln_f.weight", vec![EMBD], vec![2.0, 2.0]),
+            ("ln_f.bias", vec![EMBD], vec![0.0, 0.0]),
+        ];
+        let mut header = serde_json::Map::new();
+        header.insert(
+            "__metadata__".into(),
+            serde_json::json!({
+                "format": "chinese-ime-lm",
+                "version": "1",
+                "precision": "f32",
+                "config": config,
+                "vocab": serde_json::to_string(&vocabulary).unwrap(),
+            }),
+        );
+        let mut data = Vec::new();
+        for (name, shape, values) in tensors {
+            let start = data.len();
+            data.extend(values.iter().flat_map(|value| value.to_le_bytes()));
+            header.insert(
+                name.into(),
+                serde_json::json!({"dtype": "F32", "shape": shape, "data_offsets": [start, data.len()]}),
+            );
+        }
+        let header = serde_json::to_vec(&serde_json::Value::Object(header)).unwrap();
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(&header);
+        bytes.extend_from_slice(&data);
+        SentenceModel::load(&bytes).unwrap()
+    }
+
+    #[test]
+    fn rerank_sanitizes_trailing_non_han_context_against_unk_pollution() {
+        let model = std::sync::Arc::new(context_sensitive_layer_model());
+        let rows = [row("乙", LATTICE_SOURCE), row("丙", LATTICE_SOURCE)];
+        let scores = [
+            Some(StaticEvidence {
+                log_prob_milli_nats: -10_000,
+                characters: 1,
+            }),
+            Some(StaticEvidence {
+                log_prob_milli_nats: -10_000,
+                characters: 1,
+            }),
+        ];
+        let scored = ScoredOrderRows::new(&rows, &scores);
+
+        // 纯汉字「培养」前文把「丙丙」推至首位；前面带着表情符号与空格时效果完全一致。
+        for ctx in ["培养", "🧐 培养"] {
+            let mut reranker = Reranker::new(std::sync::Arc::clone(&model));
+            assert_eq!(
+                rerank_pick(&mut reranker, ctx, 0, false, &scored),
+                Some(1),
+                "ctx={ctx}"
+            );
+            let mut settled = Reranker::new(std::sync::Arc::clone(&model));
+            assert_eq!(
+                settled_rerank_order(&mut settled, ctx, 0, false, &scored),
+                Some(vec![1, 0]),
+                "ctx={ctx}"
+            );
+        }
+
+        // 以标点或非汉字结尾时只剩新子句起点，行为与空上文一致（「乙乙」保持第 0 位）。
+        for ctx in ["", "培养，"] {
+            let mut reranker = Reranker::new(std::sync::Arc::clone(&model));
+            assert_eq!(
+                rerank_pick(&mut reranker, ctx, 0, false, &scored),
+                None,
+                "ctx={ctx}"
+            );
+            let mut settled = Reranker::new(std::sync::Arc::clone(&model));
+            assert_eq!(
+                settled_rerank_order(&mut settled, ctx, 0, false, &scored),
+                None,
+                "ctx={ctx}"
+            );
+        }
     }
 }

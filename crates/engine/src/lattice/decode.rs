@@ -83,6 +83,9 @@ pub struct LatticeOptions<'a> {
     pub terminal_max_per_prefix: usize,
     /// 启用 `terminal_max_per_prefix` 时，相对最优路径触发同前驱限流的自然对数分差上限。
     pub terminal_diversity_margin: f64,
+    /// 已剥离非汉字尾缀的光标前连续汉字上文（由调用方通过 `trailing_han_clause` 传入）。
+    /// 非空时，首列静态二元表不再套用句首 `<bos>` 奖励，而用末尾前词续接；`.gram` 尾窗不足 8 字时向前补齐。
+    pub preceding_context: &'a str,
 }
 
 /// 多字词每音节奖励，并扣一份作为每词插入代价。九宫格跨切分比较再扣音节奖励，保留已经计入的每词代价，见 `nine_key::comparable_weight`。
@@ -150,6 +153,7 @@ impl Default for LatticeOptions<'_> {
             terminal_beam: 0,
             terminal_max_per_prefix: 0,
             terminal_diversity_margin: 0.0,
+            preceding_context: "",
         }
     }
 }
@@ -723,7 +727,19 @@ impl CollocationTail {
 /// 沿 `prev` 链回溯，把路径已累计文本的最后 `COLLOCATION_TAIL_CODEPOINTS`
 /// 个码点装进尾窗。只为 `collocation_scorer` 激活的假设回溯一次，
 /// 未激活路径不占 `Hyp` 的内存。
+#[cfg_attr(not(test), allow(dead_code))]
 fn collocation_tail(columns: &[BeamColumn<'_>], pos: usize, index: usize) -> CollocationTail {
+    collocation_tail_with_context(columns, pos, index, "")
+}
+
+/// 同 [`collocation_tail`]，但当当前拼路径不足 8 个码点且 `preceding_context` 非空时，
+/// 向前补入紧邻汉字前文。
+fn collocation_tail_with_context(
+    columns: &[BeamColumn<'_>],
+    pos: usize,
+    index: usize,
+    preceding_context: &str,
+) -> CollocationTail {
     #[cfg(all(test, debug_assertions))]
     collocation_tail_tests::record_tail();
     let mut words = [None; COLLOCATION_TAIL_CODEPOINTS];
@@ -742,6 +758,13 @@ fn collocation_tail(columns: &[BeamColumn<'_>], pos: usize, index: usize) -> Col
         i = prev.1;
     }
     let mut tail = CollocationTail::default();
+    if cps < COLLOCATION_TAIL_CODEPOINTS && !preceding_context.is_empty() {
+        let prefix =
+            crate::text::last_characters(preceding_context, COLLOCATION_TAIL_CODEPOINTS - cps);
+        if !prefix.is_empty() {
+            tail.push(prefix);
+        }
+    }
     for word in words[..count].iter().rev().flatten() {
         tail.push(word);
     }
@@ -867,6 +890,7 @@ fn decode_graph_with_terminal<const WIDE_TERMINAL: bool>(
     });
 
     // 同一列里很多假设经由同一个词到达，只是更早的历史不同；它们对每条出边查到的二元分完全一样。按前一个词把这一列所有出边的二元分记下来，同一个词只查一遍表。
+    let preceding_word = crate::text::last_characters(options.preceding_context, 2);
     let row_capacity = options.beam.max(options.nbest);
     let mut bigram_rows: Vec<Vec<f32>> = Vec::new();
     let mut bigram_row_indices: HashMap<&str, usize> = HashMap::new();
@@ -888,8 +912,13 @@ fn decode_graph_with_terminal<const WIDE_TERMINAL: bool>(
         let outgoing_len = literal.len() + extra_edges.len();
         let outgoing = literal.iter().chain(extra_edges.iter());
         for (index, hyp) in current.iter().enumerate() {
-            // Column 0 has no predecessor, so the start token carries what the corpus knows about how sentences open; every later column uses the word the hypothesis arrived on.
-            let previous = hyp.edge.map_or(SENTENCE_START, |edge| edge.word.as_str());
+            // 第 0 列在有连续汉字上文时改用末尾前词续接，不再套用句首 `<bos>` 奖励；仅当无紧邻汉字上文时才使用 `SENTENCE_START`。
+            let previous = match hyp.edge {
+                Some(edge) => edge.word.as_str(),
+                None if preceding_word.is_empty() => SENTENCE_START,
+                None => preceding_word,
+            };
+            let personal_previous = hyp.edge.map_or(SENTENCE_START, |edge| edge.word.as_str());
             let bonuses = bigram_table.map(|table| {
                 let cached_row = if used_bigram_rows <= SMALL_BIGRAM_ROWS {
                     small_bigram_row_words[..used_bigram_rows]
@@ -951,12 +980,15 @@ fn decode_graph_with_terminal<const WIDE_TERMINAL: bool>(
                     }
                     _ => None,
                 };
-                personal.context(earlier, Some(previous))
+                personal.context(earlier, Some(personal_previous))
             });
             // 同一假设的出边共享上下文；空列或搭配停用时不回溯。
-            let prepared_tail = collocation
-                .filter(|_| outgoing_len != 0)
-                .map(|scorer| (scorer, collocation_tail(done, pos, index)));
+            let prepared_tail = collocation.filter(|_| outgoing_len != 0).map(|scorer| {
+                (
+                    scorer,
+                    collocation_tail_with_context(done, pos, index, options.preceding_context),
+                )
+            });
             let collocation = prepared_tail
                 .as_ref()
                 .map(|(scorer, tail)| (*scorer, tail.as_str()));
@@ -1332,11 +1364,18 @@ fn rescore_with_trigram(paths: &mut [SentencePath], options: &LatticeOptions<'_>
     if options.trigram_weight == 0.0 || paths.len() < 2 {
         return;
     }
+    let preceding_word = crate::text::last_characters(options.preceding_context, 2);
     for path in paths.iter_mut() {
         let mut bonus = 0.0;
         for (index, word) in path.words.iter().enumerate() {
+            if !preceding_word.is_empty() && index == 0 {
+                // 句中紧接汉字续写时不查伪句首 `(<bos>, <bos>, word)`，以免漏给句中前缀虚增句首分。
+                continue;
+            }
             let before = if index >= 2 {
                 path.words[index - 2].as_str()
+            } else if !preceding_word.is_empty() {
+                preceding_word
             } else {
                 SENTENCE_START
             };
@@ -2568,6 +2607,51 @@ pub(super) mod tests {
             assert_eq!(owned_vo.len(), 1);
             assert_eq!(owned_vo, borrowed_vo);
         }
+    }
+
+    #[test]
+    fn preceding_context_replaces_sentence_start_bigram_and_feeds_collocation_tail() {
+        let directory = tempfile::tempdir().unwrap();
+        let bigram = Arc::new(pair_table(
+            directory.path(),
+            "context.bin",
+            &[(SENTENCE_START, "中式", 2.0), ("培养", "忠实", 2.0)],
+        ));
+        let rows = table(&[
+            ("zhong'shi", &[("中式", 12_000), ("忠实", 10_000)]),
+            ("gu'ke", &[("顾客", 50_000)]),
+        ]);
+
+        // 无上文时套用句首二元项，首选「中式顾客」。
+        let no_ctx = LatticeOptions {
+            bigram: Some(Arc::clone(&bigram)),
+            ..LatticeOptions::default()
+        };
+        assert_eq!(best("zhong'shi'gu'ke", &rows, &no_ctx), "中式顾客");
+
+        // 带连续汉字上文时，首列不再触发句首 `<bos>` 加成，改查上文尾词二元转移，同时向搭配打分器传递跨边界尾窗。
+        let tails = RefCell::new(Vec::<(String, String, bool)>::new());
+        let scorer = |tail: &str, word: &str, is_rear: bool| {
+            tails
+                .borrow_mut()
+                .push((tail.to_string(), word.to_string(), is_rear));
+            0.0
+        };
+        let with_ctx = LatticeOptions {
+            bigram: Some(bigram),
+            collocation_scorer: Some(&scorer),
+            collocation_weight: 1.0,
+            preceding_context: "非常认真地培养",
+            ..LatticeOptions::default()
+        };
+        assert_eq!(best("zhong'shi'gu'ke", &rows, &with_ctx), "忠实顾客");
+        let observed = tails.borrow();
+        assert!(observed
+            .iter()
+            .any(|(tail, word, is_rear)| tail == "非常认真地培养" && word == "忠实" && !is_rear));
+        assert!(observed
+            .iter()
+            .any(|(tail, word, is_rear)| tail == "常认真地培养忠实" && word == "顾客" && *is_rear));
     }
 }
 

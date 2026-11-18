@@ -70,6 +70,20 @@ pub fn last_characters(text: &str, count: usize) -> &str {
     }
 }
 
+/// 返回 `text` 末尾连续汉字子句的切片；若末字符不是汉字（如标点、空格、ASCII、表情符号）或无汉字则返回 `""`。
+/// 句子模型 vocab 不含空格、标点和表情符号，剥离末尾非汉字前缀可防止 `<unk>` 词元污染前文语境。
+pub fn trailing_han_clause(text: &str) -> &str {
+    let mut start = text.len();
+    for (at, ch) in text.char_indices().rev() {
+        if is_han(ch) {
+            start = at;
+        } else {
+            break;
+        }
+    }
+    &text[start..]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,5 +105,11 @@ mod tests {
         assert!(!is_han_phrase("(^_^)"));
         assert!(is_all_han("你好"));
         assert!(!is_all_han("你a"));
+        assert_eq!(trailing_han_clause("🧐 培养"), "培养");
+        assert_eq!(trailing_han_clause("你好，世界"), "世界");
+        assert_eq!(trailing_han_clause("你好，"), "");
+        assert_eq!(trailing_han_clause("ASCII only"), "");
+        assert_eq!(trailing_han_clause(""), "");
+        assert_eq!(trailing_han_clause("难道说没有"), "难道说没有");
     }
 }
