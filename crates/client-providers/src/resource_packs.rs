@@ -30,9 +30,9 @@ const GRAMMAR_HEADER_BYTES: usize = 44;
 const GRAMMAR_MAX_UNITS: usize = 400_000_000;
 const GRAMMAR_MAGIC: &[u8] = b"Rime::Grammar/";
 const GRAMMAR_CATALOG_URL: &str =
-    "https://raw.githubusercontent.com/metasequoiaime/msime/develop/resources/grammar-models.catalog.json";
+    "https://raw.githubusercontent.com/Unintendedz/shurufa/main/resources/grammar-models.catalog.json";
 const GRAMMAR_CATALOG_LIMIT: u64 = 1024 * 1024;
-#[cfg(test)]
+// 远端目录不可达或尚未同步时，回退到随仓库构建打包的语法模型目录。
 const EMBEDDED_GRAMMAR_CATALOG: &str =
     include_str!("../../../resources/grammar-models.catalog.json");
 
@@ -130,7 +130,12 @@ fn select_grammar_models(
     selected
 }
 
-fn fetch_grammar_catalog() -> Result<GrammarCatalog, LocalModelError> {
+fn catalog_digest_check_required(pack: ResourcePack) -> bool {
+    // 万象 LTS 为上游滚动发布文件，不强求命中目录里的固定 sha256/size。
+    pack != ResourcePack::GrammarWanxiang
+}
+
+fn fetch_remote_grammar_catalog() -> Result<GrammarCatalog, LocalModelError> {
     let client = crate::proxy::configure_blocking(reqwest::blocking::Client::builder())
         .https_only(true)
         .redirect(reqwest::redirect::Policy::limited(5))
@@ -163,6 +168,17 @@ fn fetch_grammar_catalog() -> Result<GrammarCatalog, LocalModelError> {
         .map_err(|_| LocalModelError::Network("invalid grammar catalog".into()))?;
     validate_grammar_catalog(&catalog)?;
     Ok(catalog)
+}
+
+fn embedded_grammar_catalog() -> Result<GrammarCatalog, LocalModelError> {
+    let catalog: GrammarCatalog = serde_json::from_str(EMBEDDED_GRAMMAR_CATALOG)
+        .map_err(|_| LocalModelError::Network("invalid embedded grammar catalog".into()))?;
+    validate_grammar_catalog(&catalog)?;
+    Ok(catalog)
+}
+
+fn fetch_grammar_catalog() -> Result<GrammarCatalog, LocalModelError> {
+    fetch_remote_grammar_catalog().or_else(|_| embedded_grammar_catalog())
 }
 
 /// 联网获取当前模型目录并比较已安装模型的本地快照；不下载、不替换任何文件。
@@ -1170,8 +1186,11 @@ pub fn install_for_channel(
             progress,
             cancel,
         )?;
-        if dynamic.artifact.sha256 != model.artifact.sha256
-            || dynamic.artifact.size != model.artifact.size
+        // 万象 LTS 为上游滚动发布文件，已通过 HTTPS 与 `valid_gram_file` 校验；
+        // 跳过目录固定 sha256/size 比对，改由本地 manifest 记录本次实际下载摘要。
+        if catalog_digest_check_required(pack)
+            && (dynamic.artifact.sha256 != model.artifact.sha256
+                || dynamic.artifact.size != model.artifact.size)
         {
             return Err(LocalModelError::ChecksumMismatch(
                 model.artifact.name.clone(),
@@ -2714,5 +2733,19 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn wanxiang_catalog_fallback_and_rolling_digest_policy() {
+        assert!(GRAMMAR_CATALOG_URL
+            .starts_with("https://raw.githubusercontent.com/Unintendedz/shurufa/"));
+        let catalog = embedded_grammar_catalog().expect("embedded grammar catalog should parse");
+        assert!(catalog.models.iter().any(|model| model.id == "wanxiang"));
+        assert!(!catalog_digest_check_required(
+            ResourcePack::GrammarWanxiang
+        ));
+        assert!(catalog_digest_check_required(
+            ResourcePack::GrammarBaguwenCompact
+        ));
     }
 }

@@ -86,3 +86,27 @@ static inline BOOL MSIMEMigrateShurufaQuanpinHelpcode(NSUserDefaults *defaults,
     [defaults synchronize];
     return YES;
 }
+
+// 为 Shurufa 一次性启用万象 LTS 语法搭配模型；仅在当前尚未设置或为 "none" 时迁移开启，之后尊重用户在设置页的选择。
+static inline BOOL MSIMEMigrateShurufaGrammarModel(NSUserDefaults *defaults,
+    NSDictionary *(^load)(void), NSDictionary *(^save)(uint64_t, NSDictionary *)) {
+    NSString *marker = @"ShurufaGrammarModelMigrationV1";
+    if ([defaults boolForKey:marker]) return YES;
+    NSDictionary *snapshot = load();
+    if (![snapshot[@"preferences"] isKindOfClass:NSDictionary.class] || ![snapshot[@"revision"] isKindOfClass:NSNumber.class]) return NO;
+    NSMutableDictionary *updated = [snapshot mutableCopy];
+    NSMutableDictionary *preferences = [snapshot[@"preferences"] mutableCopy];
+    NSMutableDictionary *sentence = [preferences[@"sentence_association"] mutableCopy] ?: [NSMutableDictionary dictionary];
+    id current = sentence[@"grammar_model"];
+    NSString *target = (![current isKindOfClass:NSString.class] || [current length] == 0 || [current isEqual:@"none"])
+        ? @"wanxiang"
+        : current;
+    sentence[@"grammar_model"] = target;
+    preferences[@"sentence_association"] = sentence;
+    updated[@"preferences"] = preferences;
+    if (!save([snapshot[@"revision"] unsignedLongLongValue], updated)) return NO;
+    [defaults setBool:[target isEqual:@"wanxiang"] forKey:@"MSIMEClientSentenceAssociationWanxiangGrammar"];
+    [defaults setBool:YES forKey:marker];
+    [defaults synchronize];
+    return YES;
+}

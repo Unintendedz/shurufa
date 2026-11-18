@@ -80,6 +80,30 @@ int main() {
         [defaults setBool:YES forKey:@"MSIMEClientQuanpinHelpcodeEnabled"];
         assert(MSIMEMigrateShurufaQuanpinHelpcode(defaults, load, save) && saves == 1);
         assert([defaults boolForKey:@"MSIMEClientQuanpinHelpcodeEnabled"]);
+        // 首次安装将默认/none 的 grammar_model 迁至 wanxiang；若已有自定义非 none 模型则保留；迁移完成后尊重用户关闭选择。
+        [defaults removePersistentDomainForName:suite];
+        document = @{@"revision":@7,@"preferences":@{@"sentence_association":@{@"grammar_model":@"none",@"word_lattice":@YES}}};
+        [defaults setBool:NO forKey:@"MSIMEClientSentenceAssociationWanxiangGrammar"];
+        saves = 0;
+        assert(!MSIMEMigrateShurufaGrammarModel(defaults, load, ^NSDictionary *(uint64_t, NSDictionary *) { return nil; }));
+        assert(![defaults boolForKey:@"MSIMEClientSentenceAssociationWanxiangGrammar"] && ![defaults boolForKey:@"ShurufaGrammarModelMigrationV1"]);
+        assert(MSIMEMigrateShurufaGrammarModel(defaults, load, save));
+        assert([defaults boolForKey:@"MSIMEClientSentenceAssociationWanxiangGrammar"] && saves == 1);
+        assert([document[@"preferences"][@"sentence_association"][@"grammar_model"] isEqual:@"wanxiang"]);
+        assert([document[@"preferences"][@"sentence_association"][@"word_lattice"] isEqual:@YES]);
+        // 用户随后手动关闭（none）时，重复运行迁移不再改回 wanxiang。
+        document = @{@"revision":@7,@"preferences":@{@"sentence_association":@{@"grammar_model":@"none"}}};
+        [defaults setBool:NO forKey:@"MSIMEClientSentenceAssociationWanxiangGrammar"];
+        assert(MSIMEMigrateShurufaGrammarModel(defaults, load, save) && saves == 1);
+        assert(![defaults boolForKey:@"MSIMEClientSentenceAssociationWanxiangGrammar"]);
+        assert([document[@"preferences"][@"sentence_association"][@"grammar_model"] isEqual:@"none"]);
+        // 已有手工配置（如 baguwen_compact）时迁移保持原模型且本地万象开关为 NO。
+        [defaults removePersistentDomainForName:suite];
+        document = @{@"revision":@7,@"preferences":@{@"sentence_association":@{@"grammar_model":@"baguwen_compact"}}};
+        saves = 0;
+        assert(MSIMEMigrateShurufaGrammarModel(defaults, load, save) && saves == 1);
+        assert(![defaults boolForKey:@"MSIMEClientSentenceAssociationWanxiangGrammar"]);
+        assert([document[@"preferences"][@"sentence_association"][@"grammar_model"] isEqual:@"baguwen_compact"]);
         [defaults removePersistentDomainForName:suite];
     }
 }

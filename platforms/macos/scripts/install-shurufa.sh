@@ -31,6 +31,11 @@ executable="$destination/Contents/MacOS/Shurufa"
 "$executable" --migrate-voice-shortcut
 "$executable" --migrate-voice-presentation
 "$executable" --migrate-quanpin-helpcode
+wanxiang_gram="$HOME/Library/Application Support/Shurufa/resource-packs/grammar-model-wanxiang/wanxiang-lts-zh-hans.gram"
+if [[ ! -f "$wanxiang_gram" ]]; then
+  CARGO_TARGET_DIR="$root/target/macos-cargo" cargo run --quiet -p msime-client-providers --example install_resource_pack --locked -- "$HOME/Library/Application Support/Shurufa" grammar-model-wanxiang
+fi
+"$executable" --migrate-grammar-model
 set +e
 # 只登记新包，不停用再启用：macOS 27 上 TISEnableInputSource 对键盘输入模式返回 noErr 却不生效，
 # 先停用会让 Shurufa 从输入菜单消失，用户只能手动删掉再添加。已启用的模式按 bundle ID 记录，原地替换后照常可用。
