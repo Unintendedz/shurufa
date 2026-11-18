@@ -268,7 +268,9 @@ pub fn is_complete_input(raw: &str, profile: &ShuangpinProfile) -> bool {
         let bytes = chunk.as_bytes();
         bytes.len().is_multiple_of(2)
             && bytes
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .enumerate()
                 .all(|(index, _)| takes_two_keys(bytes, index * 2, profile))
     })

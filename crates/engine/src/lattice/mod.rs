@@ -6,6 +6,7 @@ pub mod merge;
 pub mod neural;
 pub mod ngram;
 pub mod octagram;
+mod separable_vo;
 
 #[cfg(test)]
 pub(crate) mod active_tables_tests;

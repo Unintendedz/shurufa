@@ -562,13 +562,22 @@ where
 /// They are moved rather than removed. Deleting them threw away the model's later choices, so a reading the model ranked fourth was unreachable even when it was right.
 ///
 /// Only lattice readings are touched. An earlier version of this keyed on "any source that is not a dictionary", which is wrong twice over: a source number says which code produced a candidate, not that two candidates are spellings of one answer, and most of the other sources are plural by design — English words, emoji, kaomoji, quick phrases and AI suggestions all arrive as lists, and that version silently dropped all but one of each.
+/// 对三字短词或离合词（`width == LONG_SENTENCE_CHARACTERS`，恰在两字 `keep = 1` 之上），当次选整句的每字
+/// 静态证据落后首条读法超过此阈值（nats/字）时，说明首条已是完整词汇级跨度而次选属于 `[1, 2]` / `[2, 1]`
+/// 拼凑切分（如「许个愿」对「许各院 / 许哥原」差 `> 3.8` nats/字），不再占用首屏读法席位，改排在第 2 页次选区
+/// 开头；四字及以上短语与长句（合法 `[1, 1, 2]` 组合常与 `[2, 2]` 同音词竞争）保留全部 3 个首屏读法席位。
+const RUNNER_UP_MAX_MEAN_GAP_NATS: f64 = 3.8;
+
+#[allow(clippy::too_many_arguments)]
 fn visit_runner_up_order(
     count: usize,
     first_reading: usize,
     keep: usize,
     front_limit: usize,
+    expand_front_with_unused_keep: bool,
     is_reading: &impl Fn(usize) -> bool,
     is_deferred_reading: &impl Fn(usize) -> bool,
+    is_far_below_leader: &impl Fn(usize) -> bool,
     mut emit: impl FnMut(usize),
 ) {
     let primary_reading = |index: usize| is_reading(index) && !is_deferred_reading(index);
@@ -577,10 +586,10 @@ fn visit_runner_up_order(
     for index in 0..first_reading {
         emit(index);
     }
-    // 2. 首页保留的前 `keep` 条全键读法：优先排未纠错字面读法，名额未满时再补纠错整句。
+    // 2. 首页保留的前 `keep` 条全键读法：排除静态分悬殊落后的拼凑句，优先排未纠错字面读法，名额未满再补纠错整句。
     let mut kept_primary = 0;
     for index in first_reading..count {
-        if primary_reading(index) {
+        if primary_reading(index) && !is_far_below_leader(index) {
             emit(index);
             kept_primary += 1;
             if kept_primary == keep {
@@ -591,7 +600,7 @@ fn visit_runner_up_order(
     let mut kept_deferred = 0;
     if kept_primary < keep {
         for index in first_reading..count {
-            if deferred_reading(index) {
+            if deferred_reading(index) && !is_far_below_leader(index) {
                 emit(index);
                 kept_deferred += 1;
                 if kept_primary + kept_deferred == keep {
@@ -600,36 +609,52 @@ fn visit_runner_up_order(
             }
         }
     }
-    // 3. 留在剩余次选读法之前的首页前排非读法行（按引擎固有词长先排多字前缀词，不超过 `front_limit` 条）。
+    let kept_total = kept_primary + kept_deferred;
+    // 3. 留在剩余次选读法之前的首页前排非读法行（三字以上长串把未用的读法名额补给前排非读法行以凑满首屏）。
+    let effective_front_limit = if expand_front_with_unused_keep {
+        front_limit + keep.saturating_sub(kept_total)
+    } else {
+        front_limit
+    };
     let mut kept_front = 0;
-    if front_limit > 0 {
+    if effective_front_limit > 0 {
         for index in (first_reading + 1)..count {
             if !is_reading(index) {
                 emit(index);
                 kept_front += 1;
-                if kept_front == front_limit {
+                if kept_front == effective_front_limit {
                     break;
                 }
             }
         }
     }
-    // 4. 第 `keep` 条之后的其余全键次选读法紧随首页前排之后（先未纠错次选，再纠错整句），排在所有单字与余下非读法行之前。
-    let mut primary_seen = 0;
+    // 4. 其余全键次选读法紧随首页前排之后（先近分未纠错次选、再悬殊未纠错次选、再纠错整句），排在所有单字与余下非读法行之前。
+    let mut primary_near_seen = 0;
     for index in first_reading..count {
-        if primary_reading(index) {
-            if primary_seen >= kept_primary {
+        if primary_reading(index) && !is_far_below_leader(index) {
+            if primary_near_seen >= kept_primary {
                 emit(index);
             }
-            primary_seen += 1;
+            primary_near_seen += 1;
         }
     }
-    let mut deferred_seen = 0;
     for index in first_reading..count {
-        if deferred_reading(index) {
-            if deferred_seen >= kept_deferred {
+        if primary_reading(index) && is_far_below_leader(index) {
+            emit(index);
+        }
+    }
+    let mut deferred_near_seen = 0;
+    for index in first_reading..count {
+        if deferred_reading(index) && !is_far_below_leader(index) {
+            if deferred_near_seen >= kept_deferred {
                 emit(index);
             }
-            deferred_seen += 1;
+            deferred_near_seen += 1;
+        }
+    }
+    for index in first_reading..count {
+        if deferred_reading(index) && is_far_below_leader(index) {
+            emit(index);
         }
     }
     // 5. 其余非读法行（超出前排限额的前缀词与单字）按原相对顺序收尾。
@@ -638,7 +663,7 @@ fn visit_runner_up_order(
         if is_reading(index) {
             continue;
         }
-        if skipped_front < front_limit {
+        if skipped_front < effective_front_limit {
             skipped_front += 1;
             continue;
         }
@@ -695,9 +720,26 @@ pub fn runner_up_order<'a, R: OrderRowSource<'a> + ?Sized>(
     } else {
         SHORT_FRONT_ROW_LIMIT
     };
+    let expand_front_with_unused_keep = width >= LONG_SENTENCE_CHARACTERS;
 
     let defer_corrected = !rows.get(first_reading).corrected;
     let is_deferred_reading = |index: usize| defer_corrected && rows.get(index).corrected;
+    let leader_mean = (width == LONG_SENTENCE_CHARACTERS)
+        .then(|| {
+            rows.static_evidence(first_reading)
+                .and_then(StaticEvidence::mean)
+        })
+        .flatten();
+    let far_below_leader = |index: usize| {
+        index != first_reading
+            && match (
+                leader_mean,
+                rows.static_evidence(index).and_then(StaticEvidence::mean),
+            ) {
+                (Some(leader), Some(candidate)) => leader - candidate > RUNNER_UP_MAX_MEAN_GAP_NATS,
+                _ => false,
+            }
+    };
 
     // 先做零分配线性扫描检查是否已处于目标顺序；仅确实需要重排时才构造返回向量。
     let mut output = 0;
@@ -707,8 +749,10 @@ pub fn runner_up_order<'a, R: OrderRowSource<'a> + ?Sized>(
         first_reading,
         keep,
         front_limit,
+        expand_front_with_unused_keep,
         &is_reading,
         &is_deferred_reading,
+        &far_below_leader,
         |index| {
             identity &= output == index;
             output += 1;
@@ -725,8 +769,10 @@ pub fn runner_up_order<'a, R: OrderRowSource<'a> + ?Sized>(
         first_reading,
         keep,
         front_limit,
+        expand_front_with_unused_keep,
         &is_reading,
         &is_deferred_reading,
+        &far_below_leader,
         |index| {
             order.push(index);
         },
@@ -1343,5 +1389,140 @@ mod tests {
         ];
         let scored = ScoredOrderRows::new(&mixed_rows, &scores);
         assert_eq!(rerank_pick(&mut reranker, "", 0, false, &scored), Some(3));
+    }
+
+    #[test]
+    fn runner_up_order_defers_far_weaker_readings_from_first_page_and_keeps_idempotence() {
+        let mut prefix1 = row("许个愿望", 0);
+        prefix1.answers_key = false;
+        let mut prefix2 = row("许个", 0);
+        prefix2.answers_key = false;
+        let mut prefix3 = row("许哥", 0);
+        prefix3.answers_key = false;
+        let mut char1 = row("许", 0);
+        char1.answers_key = false;
+        let mut char2 = row("续", 0);
+        char2.answers_key = false;
+        let mut char3 = row("需", 0);
+        char3.answers_key = false;
+        let rows = [
+            row("许个愿", LATTICE_SOURCE),
+            prefix1,
+            prefix2,
+            prefix3,
+            char1,
+            char2,
+            char3,
+            row("许各院", LATTICE_SOURCE),
+            row("许哥原", LATTICE_SOURCE),
+        ];
+        // 首条「许个愿」每字 -5.0 nats；「许各院」「许哥原」每字约 -10.17 nats（落差 > 3.8 nats/字），
+        // 应让出第 2、3 格给前排前缀词与单字以凑满首屏 6 格，落选整句紧跟第 2 页开头且仍在剩余单字之前。
+        let scores = [
+            Some(StaticEvidence {
+                log_prob_milli_nats: -15_000,
+                characters: 3,
+            }),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(StaticEvidence {
+                log_prob_milli_nats: -30_500,
+                characters: 3,
+            }),
+            Some(StaticEvidence {
+                log_prob_milli_nats: -30_400,
+                characters: 3,
+            }),
+        ];
+        let scored = ScoredOrderRows::new(&rows, &scores);
+        let order = runner_up_order(0, &scored).expect("悬殊落后的拼凑次选不应留在首屏");
+        assert_eq!(order, vec![0, 1, 2, 3, 4, 5, 7, 8, 6]);
+
+        let reordered: Vec<_> = order.iter().map(|&idx| rows[idx]).collect();
+        let reordered_scores: Vec<_> = order.iter().map(|&idx| scores[idx]).collect();
+        let reordered_scored = ScoredOrderRows::new(&reordered, &reordered_scores);
+        let (again, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            runner_up_order(0, &reordered_scored)
+        });
+        assert_eq!(again, None);
+        assert_eq!(allocations, 0);
+
+        // 分差在阈值以内的正常同音次选整句照旧保留在首屏前 3 格。
+        let close_rows = [
+            row("今天气", LATTICE_SOURCE),
+            prefix1,
+            prefix2,
+            row("金天气", LATTICE_SOURCE),
+            row("进天气", LATTICE_SOURCE),
+            char1,
+        ];
+        let close_scores = [
+            Some(StaticEvidence {
+                log_prob_milli_nats: -15_000,
+                characters: 3,
+            }),
+            None,
+            None,
+            Some(StaticEvidence {
+                log_prob_milli_nats: -21_000,
+                characters: 3,
+            }),
+            Some(StaticEvidence {
+                log_prob_milli_nats: -22_000,
+                characters: 3,
+            }),
+            None,
+        ];
+        let close_scored = ScoredOrderRows::new(&close_rows, &close_scores);
+        assert_eq!(
+            runner_up_order(0, &close_scored),
+            Some(vec![0, 3, 4, 1, 2, 5])
+        );
+
+        // 四字及以上短语与长句即使静态均分落差 > 3.8 nats/字，仍保留全部 3 个首屏读法席位，且重排后保持幂等。
+        let four_char_rows = [
+            row("走板教学", LATTICE_SOURCE),
+            prefix1,
+            prefix2,
+            row("走板胶靴", LATTICE_SOURCE),
+            row("走班教学", LATTICE_SOURCE),
+            char1,
+        ];
+        let four_char_scores = [
+            Some(StaticEvidence {
+                log_prob_milli_nats: -16_000,
+                characters: 4,
+            }),
+            None,
+            None,
+            Some(StaticEvidence {
+                log_prob_milli_nats: -18_000,
+                characters: 4,
+            }),
+            Some(StaticEvidence {
+                log_prob_milli_nats: -40_000,
+                characters: 4,
+            }),
+            None,
+        ];
+        let four_char_scored = ScoredOrderRows::new(&four_char_rows, &four_char_scores);
+        let four_char_order =
+            runner_up_order(0, &four_char_scored).expect("四字短语应保留全部 3 个首屏读法席位");
+        assert_eq!(four_char_order, vec![0, 3, 4, 1, 2, 5]);
+        let four_char_reordered: Vec<_> = four_char_order
+            .iter()
+            .map(|&idx| four_char_rows[idx])
+            .collect();
+        let four_char_reordered_scores: Vec<_> = four_char_order
+            .iter()
+            .map(|&idx| four_char_scores[idx])
+            .collect();
+        let four_char_reordered_scored =
+            ScoredOrderRows::new(&four_char_reordered, &four_char_reordered_scores);
+        assert_eq!(runner_up_order(0, &four_char_reordered_scored), None);
     }
 }

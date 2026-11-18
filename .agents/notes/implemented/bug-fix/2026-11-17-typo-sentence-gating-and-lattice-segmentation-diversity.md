@@ -53,6 +53,7 @@ Status: implemented
 - [双拼非首选整句纠错候选保留](2026-10-24-shuangpin-nonleading-typo-candidate.md)：职责正交。双拼调用 `allow_nonleading = true` 并在引擎与 `ordering.rs` 两侧原本就禁止纠错领先，本篇的单字归一差门槛仅作用于 `!allow_nonleading` 的全拼路径，双拼行为完全不变。
 - [全拼纠错候选按原始按键推进](2026-10-12-quanpin-correction-consumption.md)：完全保留。引擎内部 `WordItem::corrected_from` 与 `SessionSnapshot::candidate_annotations` 不变，保证选中纠错候选时的原始按键消费长度与黄金基准完全一致；仅在 macOS 显示层省略已由 `*` 表达的重复裸串回显。
 - [独立句子排序保留词网格的静态证据](2026-10-14-rerank-static-evidence.md)：补充边界。保持字面整句的 `static_evidence` 计算公式不变，将首行未纠错时的附带 `TypoSentence` 排除出模型比较集合，防止带不同惩罚量纲的纠错分污染等权混合。
+- [词网格动宾离合词拆插补边与三字短词悬殊次选首屏让位](2026-11-18-separable-vo-compounds-and-runner-up-gating.md)：后续在 `visit_runner_up_order` 的未纠错优先分层之下，为三字短词再叠加 `far_below_leader`（静态均分落后首条 `> 3.8` nats/字）次选退让，并借未占满席位补回前排非读法候选。
 
 ## Alternatives considered
 

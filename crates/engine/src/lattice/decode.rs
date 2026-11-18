@@ -389,11 +389,11 @@ pub fn decode_typo_sentence(
 }
 
 pub(super) struct Edge {
-    end: usize,
-    word: String,
-    key: String,
-    log_prob: f64,
-    typo: bool,
+    pub(super) end: usize,
+    pub(super) word: String,
+    pub(super) key: String,
+    pub(super) log_prob: f64,
+    pub(super) typo: bool,
 }
 
 /// Edges by start column.
@@ -571,6 +571,7 @@ pub(super) fn build_graph(
             }
         }
     }
+    super::separable_vo::append_separable_vo_edges(syllables, &mut graph, options);
     graph
 }
 
@@ -648,6 +649,7 @@ pub(super) fn build_graph_borrowed<'rows>(
             }
         }
     }
+    super::separable_vo::append_separable_vo_edges(syllables, &mut graph, options);
     graph
 }
 
@@ -2480,6 +2482,92 @@ pub(super) mod tests {
         )
         .expect("跨过单字归一差的真实错拼仍应产出纠错整句");
         assert_eq!(accepted.sentence, "没关系");
+    }
+
+    #[test]
+    fn separable_vo_edges_are_synthesized_from_single_char_evidence_and_lead_competitors() {
+        let options = LatticeOptions::default();
+        let rows = table(&[
+            ("xu", &[("许", 1_300_000), ("续", 600_000)]),
+            ("ge", &[("个", 14_789_000), ("各", 856_000)]),
+            ("le", &[("了", 12_000_000)]),
+            ("guo", &[("过", 8_000_000)]),
+            (
+                "yuan",
+                &[("原", 1_473_000), ("院", 672_000), ("愿", 597_000)],
+            ),
+            ("ge'yuan", &[("各院", 10_030)]),
+            ("xu'ge", &[("许哥", 10_000), ("许个", 3_333)]),
+            ("qing", &[("请", 1_000_000)]),
+            ("jia", &[("假", 400_000), ("家", 900_000)]),
+            ("ge'jia", &[("各家", 12_000)]),
+            ("shui", &[("睡", 800_000)]),
+            ("jiao", &[("觉", 600_000), ("脚", 700_000)]),
+            ("ge'jiao", &[("各角", 9_000)]),
+            // 已有真实三字词条时不得重复插入或覆盖原权重。
+            ("xi", &[("洗", 500_000)]),
+            ("zao", &[("澡", 300_000)]),
+            ("xi'ge'zao", &[("洗个澡", 42_000)]),
+        ]);
+
+        // 即使存在「各院」「许哥」等高分双字拼凑竞争项，三音节拆插「许个愿 / 许了愿 / 许过愿 / 请个假」均稳居第 1 名。
+        for (input, expected) in [
+            ("xu'ge'yuan", "许个愿"),
+            ("xu'le'yuan", "许了愿"),
+            ("xu'guo'yuan", "许过愿"),
+            ("qing'ge'jia", "请个假"),
+            ("shui'le'ge'jiao", "睡了个觉"),
+        ] {
+            let decoded = decode(input, &rows, &options);
+            assert_eq!(
+                decoded.first().map(|p| p.sentence.as_str()),
+                Some(expected),
+                "input={input}, decoded={decoded:?}"
+            );
+        }
+
+        // 单字缺失时不得虚构离合词边（如 `"le"` 只有「乐」没有「了」）。
+        let missing_le_rows = table(&[
+            ("xu", &[("许", 1_300_000)]),
+            ("le", &[("乐", 1_000_000)]),
+            ("yuan", &[("愿", 597_000)]),
+        ]);
+        let missing_le = decode("xu'le'yuan", &missing_le_rows, &options);
+        assert!(
+            missing_le.iter().all(|p| p.sentence != "许了愿"),
+            "缺少「了」单字证据时不应合成许了愿: {missing_le:?}"
+        );
+
+        // 已有真实三字词条「洗个澡」时保留原边权重，不重复插入。
+        let existing_graph = build_graph(&syllables("xi'ge'zao"), &mut lookup(&rows), &options);
+        let existing_edges: Vec<&Edge> = existing_graph[0]
+            .iter()
+            .filter(|e| e.end == 3 && e.word == "洗个澡")
+            .collect();
+        assert_eq!(existing_edges.len(), 1);
+        assert!((existing_edges[0].log_prob - edge_log_prob(42_000, 3, &options)).abs() < 1e-12);
+
+        // 含重复跨度时 `build_graph` 与 `build_graph_borrowed` 结果逐项一致。
+        let repeated = syllables("xu'ge'yuan'xu'ge'yuan");
+        let owned_graph = build_graph(&repeated, &mut lookup(&rows), &options);
+        let mut borrowed_lookup = |span: &[String]| -> &[LatticeLexeme] {
+            rows.get(&span.join("'")).map(Vec::as_slice).unwrap_or(&[])
+        };
+        let borrowed_graph = build_graph_borrowed(&repeated, &mut borrowed_lookup, &options);
+        for col in [0usize, 3usize] {
+            let owned_vo: Vec<_> = owned_graph[col]
+                .iter()
+                .filter(|e| e.word == "许个愿")
+                .map(|e| (e.end, &e.key, e.log_prob.to_bits()))
+                .collect();
+            let borrowed_vo: Vec<_> = borrowed_graph[col]
+                .iter()
+                .filter(|e| e.word == "许个愿")
+                .map(|e| (e.end, &e.key, e.log_prob.to_bits()))
+                .collect();
+            assert_eq!(owned_vo.len(), 1);
+            assert_eq!(owned_vo, borrowed_vo);
+        }
     }
 }
 

@@ -1041,16 +1041,16 @@ impl WebHost {
                 corrected: !item.corrected_from.is_empty(),
             })
             .collect();
+        let evidence: Vec<_> = snapshot
+            .candidates
+            .iter()
+            .map(|item| item.static_evidence())
+            .collect();
         let mut order: Vec<usize> = (0..rows.len()).collect();
         let mut ran_model = false;
         if use_model {
             if let Some(reranker) = self.reranker.as_mut() {
                 ran_model = true;
-                let evidence: Vec<_> = snapshot
-                    .candidates
-                    .iter()
-                    .map(|item| item.static_evidence())
-                    .collect();
                 if let Some(promote) = rerank_pick(
                     reranker,
                     &self.context,
@@ -1062,9 +1062,12 @@ impl WebHost {
                 }
             }
         }
-        // `Runtime::demote_runner_up_readings` 看到的是已经旋转过的列表，这里按旋转后的顺序交给它。
+        // `Runtime::demote_runner_up_readings` 看到的是已经旋转过的列表，这里按旋转后的顺序与静态证据交给它。
         let rotated: Vec<OrderRow<'_>> = order.iter().map(|&index| rows[index]).collect();
-        if let Some(demoted) = runner_up_order(scheme, &rotated) {
+        let rotated_evidence: Vec<_> = order.iter().map(|&index| evidence[index]).collect();
+        if let Some(demoted) =
+            runner_up_order(scheme, &ScoredOrderRows::new(&rotated, &rotated_evidence))
+        {
             order = demoted.iter().map(|&seat| order[seat]).collect();
         }
         // 日语每行的 code 都是同一串键入的罗马字，在候选旁显示没有意义，给空串。
