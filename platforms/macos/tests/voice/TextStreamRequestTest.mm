@@ -44,7 +44,8 @@ NSString *MakeRoot(BOOL ready) {
     NSString *model = [root stringByAppendingPathComponent:@"model"];
     assert([NSFileManager.defaultManager createDirectoryAtPath:model withIntermediateDirectories:YES attributes:nil error:nil]);
     if (ready) {
-        for (NSString *file in @[@"config.json", @"model.safetensors"])
+        for (NSString *file in @[@"config.json", @"model.safetensors.index.json",
+                                 @"model-00001-of-00002.safetensors", @"model-00002-of-00002.safetensors"])
             assert([@"x" writeToFile:[model stringByAppendingPathComponent:file] atomically:YES encoding:NSUTF8StringEncoding error:nil]);
         assert([@"stamp" writeToFile:[root stringByAppendingPathComponent:@".ready"] atomically:YES encoding:NSUTF8StringEncoding error:nil]);
     }
@@ -105,11 +106,22 @@ int main(int argc, char **argv) {
         setenv("SHURUFA_TEXTSTREAM_ROOT", root.UTF8String, 1);
         assert(MSIMETextStreamReady());
         assert([MSIMETextStreamModelDirectory() isEqual:[root stringByAppendingPathComponent:@"model"]]);
-        // 缺了模型文件也算没装好。
-        assert([NSFileManager.defaultManager removeItemAtPath:[MSIMETextStreamModelDirectory() stringByAppendingPathComponent:@"model.safetensors"] error:nil]);
+        // 缺了模型分片文件也算没装好。
+        assert([NSFileManager.defaultManager removeItemAtPath:[MSIMETextStreamModelDirectory() stringByAppendingPathComponent:@"model-00002-of-00002.safetensors"] error:nil]);
         assert(!MSIMETextStreamReady());
-        assert([@"x" writeToFile:[MSIMETextStreamModelDirectory() stringByAppendingPathComponent:@"model.safetensors"] atomically:YES encoding:NSUTF8StringEncoding error:nil]);
+        assert([@"x" writeToFile:[MSIMETextStreamModelDirectory() stringByAppendingPathComponent:@"model-00002-of-00002.safetensors"] atomically:YES encoding:NSUTF8StringEncoding error:nil]);
         assert(MSIMETextStreamReady());
+
+        // 仅含旧版单文件 model.safetensors 的目录视为未安装，引导升级重装。
+        NSString *legacyRoot = MakeRoot(NO);
+        for (NSString *file in @[@"config.json", @"model.safetensors"])
+            assert([@"x" writeToFile:[[legacyRoot stringByAppendingPathComponent:@"model"] stringByAppendingPathComponent:file]
+                          atomically:YES encoding:NSUTF8StringEncoding error:nil]);
+        assert([@"stamp" writeToFile:[legacyRoot stringByAppendingPathComponent:@".ready"]
+                          atomically:YES encoding:NSUTF8StringEncoding error:nil]);
+        setenv("SHURUFA_TEXTSTREAM_ROOT", legacyRoot.UTF8String, 1);
+        assert(!MSIMETextStreamReady());
+        setenv("SHURUFA_TEXTSTREAM_ROOT", root.UTF8String, 1);
 
         if (unavailable) {
             MSIMELocalVoiceRequest *request = [[MSIMELocalVoiceRequest alloc] initWithTextStreamOptions:@{@"language" : @"zh-cn"} hostOptions:nil error:nil];

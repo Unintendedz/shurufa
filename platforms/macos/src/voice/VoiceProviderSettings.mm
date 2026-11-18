@@ -1080,7 +1080,7 @@ static void ShowNotice(NSTextField *label, NSString *message, NSColor *color)
 - (void)installTextStream:(id)sender
 {
     (void)sender;
-    ShowNotice(_recognitionNotice, @"正在安装语音模型：首次需要下载运行环境和约 1.9 GB 的模型，可能要几分钟。", NSColor.secondaryLabelColor);
+    ShowNotice(_recognitionNotice, @"正在安装语音模型：首次需要下载运行环境和约 4.7 GB 的模型，可能要几分钟。", NSColor.secondaryLabelColor);
     __weak MetasequoiaVoiceProviderSettingsView *weakSelf = self;
     MSIMETextStreamInstall(^(BOOL success, NSString *summary) {
         MetasequoiaVoiceProviderSettingsView *strongSelf = weakSelf;

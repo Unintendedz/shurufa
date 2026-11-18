@@ -7,7 +7,7 @@
   （OpenLess，AGPL-3.0）。
 - 流式解码设置沿用 textstream-asr（199-biotechnologies/textstream-asr，
   rev cacf67acadbd90789b631d9ee8f2e76f1a6cd7c2，MIT）。
-- 解码由 mlx-qwen3-asr 0.4.4（Apache-2.0）完成，模型为 Qwen/Qwen3-ASR-0.6B。
+- 解码由 mlx-qwen3-asr 0.4.4（Apache-2.0）完成，模型为 Qwen/Qwen3-ASR-1.7B。
 
 本进程不打开麦克风、不联网、不写任何文件。原生推理库只在 hello 阶段导入，模型在 start 时加载。
 """
@@ -64,7 +64,7 @@ def metal_memory_limits(memory_bytes: int, recommended_bytes: int) -> tuple[int,
     """给宿主和前台应用留出内存；MLX 的内存上限只是建议值，不是系统配额。"""
     if memory_bytes <= 0 or recommended_bytes <= 0:
         raise ValueError("Metal memory information is unavailable")
-    memory_limit = min(4 * 1024**3, memory_bytes // 3, recommended_bytes)
+    memory_limit = min(8 * 1024**3, memory_bytes // 3, recommended_bytes)
     cache_limit = min(128 * 1024**2, memory_limit // 16)
     return memory_limit, cache_limit
 
@@ -262,7 +262,20 @@ class DictationSession:
 
 def model_dir_error(path: str) -> str | None:
     d = Path(path)
-    if not (d / "config.json").is_file() or not (d / "model.safetensors").is_file():
+    if not (d / "config.json").is_file():
+        return f"model files are missing: {path}"
+    if (d / "model.safetensors.index.json").is_file():
+        # 分片模型不能与旧单文件共存，否则 mlx 会一并加载导致权重覆盖冲突。
+        if (d / "model.safetensors").exists():
+            return f"model files are missing: {path}"
+        shards = (
+            d / "model-00001-of-00002.safetensors",
+            d / "model-00002-of-00002.safetensors",
+        )
+        if not all(shard.is_file() for shard in shards):
+            return f"model files are missing: {path}"
+        return None
+    if not (d / "model.safetensors").is_file():
         return f"model files are missing: {path}"
     return None
 

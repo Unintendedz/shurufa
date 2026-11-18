@@ -16,7 +16,9 @@ BOOL MSIMETextStreamReady(void) {
     NSArray<NSString *> *files = @[
         [MSIMETextStreamRootDirectory() stringByAppendingPathComponent:@".ready"],
         [MSIMETextStreamModelDirectory() stringByAppendingPathComponent:@"config.json"],
-        [MSIMETextStreamModelDirectory() stringByAppendingPathComponent:@"model.safetensors"],
+        [MSIMETextStreamModelDirectory() stringByAppendingPathComponent:@"model.safetensors.index.json"],
+        [MSIMETextStreamModelDirectory() stringByAppendingPathComponent:@"model-00001-of-00002.safetensors"],
+        [MSIMETextStreamModelDirectory() stringByAppendingPathComponent:@"model-00002-of-00002.safetensors"],
     ];
     for (NSString *file in files)
         if (stat(file.fileSystemRepresentation, &info) != 0 || !S_ISREG(info.st_mode)) return NO;
