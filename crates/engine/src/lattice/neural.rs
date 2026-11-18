@@ -9,7 +9,10 @@ use chinese_ime_lm::{Reranker, SentenceModel};
 use lru::LruCache;
 
 use super::decode::SentencePath;
-use crate::ordering::apply_order;
+use crate::ordering::{
+    apply_order, static_leader_promote_margin_mean_nats, static_prior_free_deficit_mean_nats,
+    STATIC_PRIOR_EXCESS_PENALTY,
+};
 use crate::text::{last_characters, trailing_han_clause};
 use crate::types::CandidateSource;
 
@@ -187,11 +190,43 @@ impl NeuralReranker {
         }
         let mut neural = [0.0; MAX_RERANK_PATHS];
         let mut statik = [0.0; MAX_RERANK_PATHS];
+        let mut statik_mean = [0.0; MAX_RERANK_PATHS];
+        let mut chars = [0.0; MAX_RERANK_PATHS];
+        let mut max_statik_mean = f64::NEG_INFINITY;
         for index in 0..scored {
-            neural[index] = f64::from(means[index]) * texts[index].chars().count() as f64;
+            let count = texts[index].chars().count();
+            chars[index] = count as f64;
+            neural[index] = f64::from(means[index]) * chars[index];
             statik[index] = paths[index].log_prob;
+            statik_mean[index] = if count > 0 {
+                paths[index].log_prob / chars[index]
+            } else {
+                paths[index].log_prob
+            };
+            max_statik_mean = max_statik_mean.max(statik_mean[index]);
         }
-        rerank_order_into(&neural[..scored], &statik[..scored], order)
+        for index in 0..scored {
+            let count = texts[index].chars().count();
+            let free_deficit = static_prior_free_deficit_mean_nats(count);
+            let deficit = (max_statik_mean - statik_mean[index]).max(0.0);
+            let excess = (deficit - free_deficit).max(0.0);
+            // `rerank_order_into` 按 `statik + lambda * (neural - statik)` 计算，提前从 `neural`
+            // 扣除按 `lambda` 还原后的赤字惩罚，使最终均值综合分与 `ordering.rs` 护栏完全一致。
+            neural[index] -= (STATIC_PRIOR_EXCESS_PENALTY / RERANK_LAMBDA) * excess * chars[index];
+        }
+        let ordered = rerank_order_into(&neural[..scored], &statik[..scored], order)?;
+        if order[0] != 0 && statik_mean[order[0]] < statik_mean[0] {
+            let combined = |idx: usize| statik[idx] + RERANK_LAMBDA * (neural[idx] - statik[idx]);
+            let winner = order[0];
+            let leader_margin = static_leader_promote_margin_mean_nats(texts[0].chars().count());
+            let margin = leader_margin * chars[0].max(1.0);
+            if combined(winner) - combined(0) < margin {
+                if let Some(pos) = order[..ordered].iter().position(|&idx| idx == 0) {
+                    order[..=pos].rotate_right(1);
+                }
+            }
+        }
+        Some(ordered)
     }
 
     /// 按 `context` 最后 64 字的模型评分在多字同音词切片中挑选唯一更贴合语境的首选下标。
@@ -573,5 +608,86 @@ mod tests {
                 .map(|item| item.word.as_str())
                 .collect::<Vec<_>>()
         );
+    }
+
+    fn fixed_logit_model(entries: &[(char, f32)]) -> SentenceModel {
+        const CONTEXT: usize = 8;
+        let vocabulary: Vec<String> = ["<pad>", "<unk>", "<bos>"]
+            .into_iter()
+            .map(str::to_owned)
+            .chain(entries.iter().map(|(c, _)| c.to_string()))
+            .collect();
+        let logits: Vec<f32> = [0.0, -8.0, 0.0]
+            .into_iter()
+            .chain(entries.iter().map(|(_, logit)| *logit))
+            .collect();
+        let config = format!(
+            r#"{{"vocab":{},"n_layer":0,"n_head":1,"n_embd":1,"context":{CONTEXT},"dropout":0.0}}"#,
+            vocabulary.len()
+        );
+        let tensors: [(&str, usize, Vec<f32>); 4] = [
+            ("tok.weight", vocabulary.len(), logits),
+            ("pos.weight", CONTEXT, vec![0.0; CONTEXT]),
+            ("ln_f.weight", 1, vec![0.0]),
+            ("ln_f.bias", 1, vec![1.0]),
+        ];
+        let mut header = serde_json::Map::new();
+        header.insert(
+            "__metadata__".into(),
+            serde_json::json!({
+                "format": "chinese-ime-lm",
+                "version": "1",
+                "precision": "f32",
+                "config": config,
+                "vocab": serde_json::to_string(&vocabulary).unwrap(),
+            }),
+        );
+        let mut data = Vec::new();
+        for (name, rows, values) in tensors {
+            let start = data.len();
+            data.extend(values.iter().flat_map(|value| value.to_le_bytes()));
+            header.insert(
+                name.into(),
+                serde_json::json!({"dtype": "F32", "shape": [rows, 1], "data_offsets": [start, data.len()]}),
+            );
+        }
+        header["ln_f.weight"]["shape"] = serde_json::json!([1]);
+        header["ln_f.bias"]["shape"] = serde_json::json!([1]);
+        let header = serde_json::to_vec(&serde_json::Value::Object(header)).unwrap();
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(&header);
+        bytes.extend_from_slice(&data);
+        SentenceModel::load(&bytes).unwrap()
+    }
+
+    #[test]
+    fn score_order_into_applies_static_prior_guardrail_and_leader_margin() {
+        // 构造固定每字对数概率的模型：乙比甲高 1.50/字，丙比甲高 0.48/字。
+        let model = Arc::new(fixed_logit_model(&[('甲', 0.0), ('乙', 1.5), ('丙', 0.48)]));
+        let mut reranker = NeuralReranker::new(CandidateSource::NeuralKeyboard, model);
+
+        // 「乙乙」每字领先 +1.50 神经分：
+        // - 浅赤字（每字落后 0.35，总分 -6.7 对 -6.0）正常翻盘；
+        // - 深赤字（每字落后 1.20，总分 -8.4 对 -6.0）虽无护栏时会 +0.15/字反超，但经赤字护栏额外扣 0.35/字 后反落败，保持首位 0。
+        let shallow_deficit = [path("甲甲", -6.0), path("乙乙", -6.7)];
+        let deep_deficit = [path("甲甲", -6.0), path("乙乙", -8.4)];
+        assert_eq!(
+            reranker.score_order(&shallow_deficit, "").unwrap(),
+            vec![1, 0]
+        );
+        assert_eq!(reranker.score_order(&deep_deficit, "").unwrap(), vec![0, 1]);
+
+        // 「丙丙」每字领先 +0.48 神经分、静态每字落后 0.40（总分 -6.8 对 -6.0）：
+        // 综合净优势仅 0.04/字（< 0.06），防抖晋升阈值保留原首选 0 在第 0 位。
+        let marginal_jitter = [path("甲甲", -6.0), path("丙丙", -6.8)];
+        assert_eq!(
+            reranker.score_order(&marginal_jitter, "").unwrap(),
+            vec![0, 1]
+        );
+
+        // 6 字及以上完整子句（如 6 字"丙丙丙丙丙丙"每字落后 0.40、总分 -20.4 对 -18.0）放宽防抖门槛，
+        // 净优势 +0.04/字（总计 +0.24 nats）仍可正常晋升，不误伤长句单点同音纠偏。
+        let clause_paths = [path("甲甲甲甲甲甲", -18.0), path("丙丙丙丙丙丙", -20.4)];
+        assert_eq!(reranker.score_order(&clause_paths, "").unwrap(), vec![1, 0]);
     }
 }

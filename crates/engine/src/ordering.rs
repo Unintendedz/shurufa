@@ -36,6 +36,58 @@ const STATIC_RERANK_LIMIT: usize = 9;
 /// 停顿后精排在后台线程运行，放宽至十六条回答当前按键的候选，覆盖完整十二条次选与隔音备选。
 const SETTLED_STATIC_RERANK_LIMIT: usize = 16;
 
+/// 短词组与完整子句的分界字数：5 字以内（单条词或双词短语）词内上文短、字级神经模型方差大，
+/// 严格执行静态先验护栏与首选防抖门槛；6 字及以上构成完整子句，句内远距语义约束充分且单点同音差值被字数稀释，
+/// 放宽免费赤字窗口至极端崩塌线并取消按字倍增的首选门槛。
+pub(crate) const FULL_CLAUSE_MIN_CHARACTERS: usize = 6;
+pub(crate) const STATIC_PRIOR_FREE_DEFICIT_SHORT_MEAN_NATS: f64 = 0.50;
+pub(crate) const STATIC_PRIOR_FREE_DEFICIT_CLAUSE_MEAN_NATS: f64 = 2.00;
+pub(crate) const STATIC_PRIOR_EXCESS_PENALTY: f64 = 0.50;
+pub(crate) const STATIC_LEADER_PROMOTE_MARGIN_SHORT_MEAN_NATS: f64 = 0.06;
+
+pub(crate) fn static_prior_free_deficit_mean_nats(characters: usize) -> f64 {
+    if characters >= FULL_CLAUSE_MIN_CHARACTERS {
+        STATIC_PRIOR_FREE_DEFICIT_CLAUSE_MEAN_NATS
+    } else {
+        STATIC_PRIOR_FREE_DEFICIT_SHORT_MEAN_NATS
+    }
+}
+
+pub(crate) fn static_leader_promote_margin_mean_nats(leader_characters: usize) -> f64 {
+    if leader_characters >= FULL_CLAUSE_MIN_CHARACTERS {
+        0.0
+    } else {
+        STATIC_LEADER_PROMOTE_MARGIN_SHORT_MEAN_NATS
+    }
+}
+
+fn fill_guarded_combined_scores(
+    texts: &[&str],
+    statik: &[f64],
+    neural: &[f32],
+    combined: &mut [f64],
+) {
+    let max_statik = statik.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    for index in 0..statik.len() {
+        let free_deficit = static_prior_free_deficit_mean_nats(texts[index].chars().count());
+        let deficit = (max_statik - statik[index]).max(0.0);
+        let excess = (deficit - free_deficit).max(0.0);
+        combined[index] =
+            (statik[index] + f64::from(neural[index])) * 0.5 - STATIC_PRIOR_EXCESS_PENALTY * excess;
+    }
+}
+
+fn leader_promotion_allowed(
+    leader_characters: usize,
+    leader_statik: f64,
+    challenger_statik: f64,
+    leader_combined: f64,
+    challenger_combined: f64,
+) -> bool {
+    let margin = static_leader_promote_margin_mean_nats(leader_characters);
+    challenger_statik >= leader_statik || challenger_combined - leader_combined >= margin
+}
+
 /// The traits of the scheme behind `scheme`, which the Engine reports as its `SchemeType` ordinal. Only the placeholder snapshot of a failed refresh carries an ordinal no scheme has; each caller decides what that placeholder means, the way the ordinal comparisons this replaces did.
 fn scheme_type(scheme: u8) -> Option<SchemeType> {
     SchemeType::from_u8(scheme)
@@ -415,15 +467,29 @@ pub fn rerank_pick<'a, R: OrderRowSource<'a> + ?Sized>(
         ) {
             let neural = reranker.log_probabilities(context, &subset[..count]);
             if neural.len() == count {
-                // 模型逐字分与词网格逐字分等权混合，两侧均为自然对数。
-                let combined = |index: usize| (statik[index] + f64::from(neural[index])) * 0.5;
+                // 模型逐字分与词网格逐字分等权混合，并叠加静态先验赤字护栏与低频翻盘阈值。
+                let mut combined = [0.0; STATIC_RERANK_LIMIT];
+                fill_guarded_combined_scores(
+                    &subset[..count],
+                    &statik[..count],
+                    &neural,
+                    &mut combined[..count],
+                );
                 let mut best = 0;
                 for index in 1..count {
-                    if combined(index) > combined(best) {
+                    if combined[index] > combined[best] {
                         best = index;
                     }
                 }
-                return (best != 0).then(|| considered[best]);
+                let promoted = best != 0
+                    && leader_promotion_allowed(
+                        subset[0].chars().count(),
+                        statik[0],
+                        statik[best],
+                        combined[0],
+                        combined[best],
+                    );
+                return promoted.then(|| considered[best]);
             }
         }
     }
@@ -479,12 +545,32 @@ pub fn settled_rerank_order<'a, R: OrderRowSource<'a> + ?Sized>(
             if neural.len() == compared_count {
                 let mut combined = [0.0f64; SETTLED_STATIC_RERANK_LIMIT];
                 let mut rank = [0usize; SETTLED_STATIC_RERANK_LIMIT];
-                for index in 0..compared_count {
-                    combined[index] = (statik[index] + f64::from(neural[index])) * 0.5;
-                    rank[index] = index;
+                fill_guarded_combined_scores(
+                    &subset[..compared_count],
+                    &statik[..compared_count],
+                    &neural,
+                    &mut combined[..compared_count],
+                );
+                for (seat, entry) in rank[..compared_count].iter_mut().enumerate() {
+                    *entry = seat;
                 }
                 // 降序排列，平分时保持比较集合内的原有先后次序。
                 rank[..compared_count].sort_by(|&a, &b| combined[b].total_cmp(&combined[a]));
+                if rank[0] != 0
+                    && !leader_promotion_allowed(
+                        subset[0].chars().count(),
+                        statik[0],
+                        statik[rank[0]],
+                        combined[0],
+                        combined[rank[0]],
+                    )
+                {
+                    if let Some(leader_seat) =
+                        rank[..compared_count].iter().position(|&idx| idx == 0)
+                    {
+                        rank[..=leader_seat].rotate_right(1);
+                    }
+                }
                 if (0..compared_count).all(|seat| rank[seat] == seat) {
                     return None;
                 }
@@ -1664,5 +1750,97 @@ mod tests {
                 "ctx={ctx}"
             );
         }
+    }
+
+    #[test]
+    fn static_prior_guardrail_blocks_low_frequency_hallucination_and_marginal_jitter() {
+        // Case 1：短词组（< 6 字）对比「合理同音（赤字 0.35）」与「深静态赤字幻觉（赤字 1.20）」。
+        // 在无护栏下「丙」(neural 领先 +1.50, 静态赤字 1.20) 会凭 0.5*(1.50-1.20)=+0.15 反超；
+        // 加入赤字护栏（excess=0.70, 额外扣 0.35）后「丙」综合落败，而赤字仅 0.35 的「乙」(+1.30) 正常晋升。
+        let short_texts = ["甲甲甲甲", "乙甲乙甲", "丙丙丙丙"];
+        let statik = [-3.50, -3.85, -4.70];
+        let neural = [-5.00f32, -3.70, -3.50];
+        let mut combined = [0.0; 3];
+        fill_guarded_combined_scores(&short_texts, &statik, &neural, &mut combined);
+        assert!(combined[1] > combined[0]);
+        assert!(leader_promotion_allowed(
+            4,
+            statik[0],
+            statik[1],
+            combined[0],
+            combined[1]
+        ));
+        assert!(
+            combined[2] < combined[0],
+            "短串深静态赤字候选（-4.70）在 +1.50 神经偏置下仍应被护栏压在首行之后: {combined:?}"
+        );
+
+        // Case 2：短词组挑战者静态分低于首行时，综合分仅微弱领先 0.04 (< 0.06) 不得翻盘；
+        // 但若挑战者静态分高于首行，哪怕综合分领先 0.01 也正常胜出。
+        let jitter_texts = ["甲甲", "乙甲", "丙甲"];
+        let jitter_statik = [-3.50, -3.60, -3.40];
+        let jitter_neural = [-5.00f32, -4.82, -5.08];
+        fill_guarded_combined_scores(&jitter_texts, &jitter_statik, &jitter_neural, &mut combined);
+        assert!(combined[1] > combined[0] && combined[1] - combined[0] < 0.06);
+        assert!(!leader_promotion_allowed(
+            2,
+            jitter_statik[0],
+            jitter_statik[1],
+            combined[0],
+            combined[1]
+        ));
+        assert!(combined[2] > combined[0] && combined[2] - combined[0] < 0.06);
+        assert!(leader_promotion_allowed(
+            2,
+            jitter_statik[0],
+            jitter_statik[2],
+            combined[0],
+            combined[2]
+        ));
+
+        // Case 3：6 字及以上完整子句使用放宽后的免费赤字上限（2.00）并取消按字倍增的晋升门槛（0.0），
+        // 避免误伤专名或长句单点同音词替换的微弱每字分差（例如 +0.04/字，6 字共 +0.24 nats）。
+        let clause_texts = ["甲甲甲甲甲甲", "乙乙乙乙乙乙"];
+        let clause_statik = [-3.50, -4.70];
+        let clause_neural = [-5.00f32, -3.72];
+        let mut clause_combined = [0.0; 2];
+        fill_guarded_combined_scores(
+            &clause_texts,
+            &clause_statik,
+            &clause_neural,
+            &mut clause_combined,
+        );
+        assert!(
+            clause_combined[1] > clause_combined[0]
+                && clause_combined[1] - clause_combined[0] < 0.06
+        );
+        assert!(leader_promotion_allowed(
+            6,
+            clause_statik[0],
+            clause_statik[1],
+            clause_combined[0],
+            clause_combined[1]
+        ));
+
+        // Case 4：经 settled_rerank_order 端到端验证：明显大优势正常重排。
+        let rows = [row("甲甲", LATTICE_SOURCE), row("乙乙", LATTICE_SOURCE)];
+        let weak_scores = [
+            Some(StaticEvidence {
+                log_prob_milli_nats: -10_000,
+                characters: 2,
+            }),
+            Some(StaticEvidence {
+                log_prob_milli_nats: -13_000,
+                characters: 2,
+            }),
+        ];
+        let weak_scored = ScoredOrderRows::new(&rows, &weak_scores);
+        let mut reranker =
+            Reranker::new(std::sync::Arc::new(favouring_model(&['甲', '乙'], &['乙'])));
+        assert_eq!(
+            settled_rerank_order(&mut reranker, "", 0, false, &weak_scored),
+            Some(vec![1, 0]),
+            "favouring_model 给出远超 0.06 的神经增益时应正常重排"
+        );
     }
 }
