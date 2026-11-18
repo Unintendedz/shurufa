@@ -53,8 +53,8 @@ pub(crate) fn static_prior_free_deficit_mean_nats(characters: usize) -> f64 {
     }
 }
 
-pub(crate) fn static_leader_promote_margin_mean_nats(leader_characters: usize) -> f64 {
-    if leader_characters >= FULL_CLAUSE_MIN_CHARACTERS {
+pub(crate) fn static_leader_promote_margin_mean_nats(total_clause_characters: usize) -> f64 {
+    if total_clause_characters >= FULL_CLAUSE_MIN_CHARACTERS {
         0.0
     } else {
         STATIC_LEADER_PROMOTE_MARGIN_SHORT_MEAN_NATS
@@ -78,13 +78,13 @@ fn fill_guarded_combined_scores(
 }
 
 fn leader_promotion_allowed(
-    leader_characters: usize,
+    total_clause_characters: usize,
     leader_statik: f64,
     challenger_statik: f64,
     leader_combined: f64,
     challenger_combined: f64,
 ) -> bool {
-    let margin = static_leader_promote_margin_mean_nats(leader_characters);
+    let margin = static_leader_promote_margin_mean_nats(total_clause_characters);
     challenger_statik >= leader_statik || challenger_combined - leader_combined >= margin
 }
 
@@ -483,7 +483,10 @@ pub fn rerank_pick<'a, R: OrderRowSource<'a> + ?Sized>(
                 }
                 let promoted = best != 0
                     && leader_promotion_allowed(
-                        subset[0].chars().count(),
+                        context
+                            .chars()
+                            .count()
+                            .saturating_add(subset[0].chars().count()),
                         statik[0],
                         statik[best],
                         combined[0],
@@ -558,7 +561,10 @@ pub fn settled_rerank_order<'a, R: OrderRowSource<'a> + ?Sized>(
                 rank[..compared_count].sort_by(|&a, &b| combined[b].total_cmp(&combined[a]));
                 if rank[0] != 0
                     && !leader_promotion_allowed(
-                        subset[0].chars().count(),
+                        context
+                            .chars()
+                            .count()
+                            .saturating_add(subset[0].chars().count()),
                         statik[0],
                         statik[rank[0]],
                         combined[0],
@@ -1775,8 +1781,8 @@ mod tests {
             "短串深静态赤字候选（-4.70）在 +1.50 神经偏置下仍应被护栏压在首行之后: {combined:?}"
         );
 
-        // Case 2：短词组挑战者静态分低于首行时，综合分仅微弱领先 0.04 (< 0.06) 不得翻盘；
-        // 但若挑战者静态分高于首行，哪怕综合分领先 0.01 也正常胜出。
+        // Case 2：短词组挑战者静态分低于首行时，无上文场景综合分仅微弱领先 0.04 (< 0.06) 不得翻盘；
+        // 但若（a）挑战者静态分高于首行，或（b）拼入 2 字汉字上文后总长达到 6 字完整子句，均取消额外防抖门槛正常胜出。
         let jitter_texts = ["甲甲", "乙甲", "丙甲"];
         let jitter_statik = [-3.50, -3.60, -3.40];
         let jitter_neural = [-5.00f32, -4.82, -5.08];
@@ -1789,6 +1795,26 @@ mod tests {
             combined[0],
             combined[1]
         ));
+        assert!(
+            !leader_promotion_allowed(
+                4,
+                jitter_statik[0],
+                jitter_statik[1],
+                combined[0],
+                combined[1]
+            ),
+            "4 字候选在无上文（总长 4 < 6）下仍须越过 0.06 防抖门槛"
+        );
+        assert!(
+            leader_promotion_allowed(
+                2 + 4,
+                jitter_statik[0],
+                jitter_statik[1],
+                combined[0],
+                combined[1]
+            ),
+            "2 字汉字上文 + 4 字候选凑满 6 字完整子句时放开防抖门槛"
+        );
         assert!(combined[2] > combined[0] && combined[2] - combined[0] < 0.06);
         assert!(leader_promotion_allowed(
             2,

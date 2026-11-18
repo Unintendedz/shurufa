@@ -20,7 +20,7 @@ Status: implemented
 - **超额赤字惩罚（`STATIC_PRIOR_EXCESS_PENALTY = 0.50`）**：对相对同组最大静态均值分 `max_statik` 超出免费窗口的赤字 `excess`，在等权均值 `(statik + neural) * 0.5` 后再扣 `0.50 * excess`，要求深静态赤字幻觉必须具备双倍神经对数似然优势才可能竞争。`NeuralReranker::score_order_into` 在送入 `rerank_order_into` 前按 `(STATIC_PRIOR_EXCESS_PENALTY / RERANK_LAMBDA) * excess * chars` 提前折算，保持无静态重排 `rerank_order` 裸签名与零堆分配不变。
 - **首选防抖晋升阈值（`static_leader_promote_margin_mean_nats`）**：
   - 仅当挑战者的静态分严格低于首行（`statik[challenger] < statik[0]`）时检查最小净优势；若挑战者静态分高于或等于首行则门槛恒为 `0.0`（不阻碍静态更优候选翻盘）；
-  - `< 6` 字短词组首行要求挑战者综合均值分领先 `>= 0.06 nats/字`（`settled_rerank_order` 与 `score_order_into` 未达门槛时只把原首行旋回第 0 席，保留后续候选题序）；`>= 6` 字完整子句门槛为 `0.0`，避免按字倍增伤及长句单点同音纠偏。
+  - 按已清洗汉字上文字数与首行候选字数之和 `total_clause_characters = clean_context.chars().count() + leader_characters` 判定：`total_clause_characters < 6` 的无上文或极短语境要求挑战者综合均值分领先 `>= 0.06 nats/字`（`settled_rerank_order` 与 `score_order_into` 未达门槛时只把原首行旋回第 0 席，保留后续候选题序）；若已有非空汉字前文与候选凑满 `>= 6` 字完整子句，门槛降为 `0.0`，避免按字倍增压制带语境的四字同音消歧。`static_prior_free_deficit_mean_nats` 仍只按候选自身字数计算，不放松单字/短串低频幻觉拦截。
 
 ## Alternatives considered
 

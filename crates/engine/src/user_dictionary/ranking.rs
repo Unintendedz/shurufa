@@ -503,40 +503,53 @@ pub fn adjust_candidate_ranking(request: &RankingRequest<'_>) -> Result<bool> {
     if !request.force_top
         && request.mode != FrequencyAdjustmentMode::Pin
         && request.kind == PersonalDictionaryKind::Pinyin
+        && owns_entry_key(rank)
     {
-        let leader_weight = weights[0];
+        let mut own_weights = database_candidates
+            .iter()
+            .enumerate()
+            .filter(|&(index, _)| owns_entry_key(index))
+            .map(|(_, item)| item.weight);
+        let key_leader = own_weights.next();
+        let key_second = own_weights.next();
         let selected_weight = weights[rank];
-        // 超高频榜首（如 `一个`）被普通自动调频一次偶发选词击穿时，不直接写到 `leader + REBALANCE_GAP`，
-        // 而是按 3 倍 / 至少 +15,000 渐进抬升，连续多次有意选择后才跨过核心词护城河；手动置顶（Pin）仍直达榜首。
-        if target == 0
-            && leader_weight >= CORE_LEADER_MOAT_WEIGHT
-            && selected_weight >= 0
-            && selected_weight.saturating_mul(CORE_LEADER_MOAT_RATIO) < leader_weight
-        {
-            let stepped = selected_weight
-                .saturating_mul(3)
-                .max(selected_weight.saturating_add(CORE_LEADER_MIN_STEP))
-                .min(leader_weight - 1);
-            if stepped > selected_weight {
-                plan = WeightPlan {
-                    selected: clamp_managed_weight(stepped),
-                    staircase: Vec::new(),
-                };
-            }
-        } else if target == 1
-            && plan.staircase.is_empty()
-            && leader_weight >= CORE_LEADER_MOAT_WEIGHT
-            && weights[1] >= 0
-            && weights[1].saturating_mul(CORE_LEADER_MOAT_RATIO) < leader_weight
-        {
-            // 选中第三名仅需越过第二名时，不能用与榜首的中点值一步跳出 `leader / 8` 护城河。
-            let cap = (leader_weight / CORE_LEADER_MOAT_RATIO).saturating_sub(1);
-            let desired = weights[1]
-                .saturating_mul(2)
-                .max(weights[1].saturating_add(REBALANCE_GAP))
-                .min(cap);
-            if desired > weights[1] && desired < plan.selected {
-                plan.selected = clamp_managed_weight(desired);
+        // 同全拼键的核心高频榜首（如 `yi'ge` 下的 `一个 = 508,964`）即使在候选列表混有更高权重的单字行
+        // （如 `yi` 下的 `一 = 35,278,860` 令 `target == 4`）时，也不能被一次普通自动调频借单字中点一步跃过；
+        // 按 3 倍 / 至少 +15,000 渐进抬升，连续多次有意选择后才跨过护城河；手动置顶（Pin）仍直达榜首。
+        if let Some(leader_weight) = key_leader {
+            if leader_weight >= CORE_LEADER_MOAT_WEIGHT
+                && selected_weight >= 0
+                && selected_weight.saturating_mul(CORE_LEADER_MOAT_RATIO) < leader_weight
+                && plan.selected >= leader_weight
+            {
+                let stepped = selected_weight
+                    .saturating_mul(3)
+                    .max(selected_weight.saturating_add(CORE_LEADER_MIN_STEP))
+                    .min(leader_weight - 1);
+                if stepped > selected_weight {
+                    plan = WeightPlan {
+                        selected: clamp_managed_weight(stepped),
+                        staircase: Vec::new(),
+                    };
+                }
+            } else if plan.staircase.is_empty() && leader_weight >= CORE_LEADER_MOAT_WEIGHT {
+                if let Some(second_weight) = key_second {
+                    if second_weight < leader_weight
+                        && second_weight >= 0
+                        && second_weight.saturating_mul(CORE_LEADER_MOAT_RATIO) < leader_weight
+                        && selected_weight < second_weight
+                    {
+                        // 选中同键第三名及以后仅需越过同键第二名时，不能借高位中点一步跳出 `leader / 8` 护城河。
+                        let cap = (leader_weight / CORE_LEADER_MOAT_RATIO).saturating_sub(1);
+                        let desired = second_weight
+                            .saturating_mul(2)
+                            .max(second_weight.saturating_add(REBALANCE_GAP))
+                            .min(cap);
+                        if desired > second_weight && desired < plan.selected {
+                            plan.selected = clamp_managed_weight(desired);
+                        }
+                    }
+                }
             }
         }
     }
@@ -1333,5 +1346,76 @@ mod tests {
         assert!(pick(&dir, "乙", FrequencyAdjustmentMode::Pin, 1, 1).unwrap());
         assert!(dir.weight("ni", "乙").unwrap() > 508_964);
         assert_eq!(index_of(&dir, "乙"), 0);
+    }
+
+    #[test]
+    fn core_leader_moat_holds_when_heavier_single_char_rows_share_the_candidate_list() {
+        let dir = Dir::new();
+        // 真实词库里输入 `yi'ge` 时末尾混有更高权重的 `yi` 单字行，按全局权重排序会把 `yi'ge` 挤到靠后座位（target = 4）。
+        dir.pinyin(&[
+            ("yi", "一", 35_278_860),
+            ("yi", "以", 6_523_162),
+            ("yi", "已", 3_720_796),
+            ("yi", "意", 3_668_831),
+            ("yi", "衣", 974_727),
+            ("yi'ge", "一个", 508_964),
+            ("yi'ge", "一格", 20_030),
+            ("yi'ge", "一哥", 7_240),
+        ]);
+        let build_ordered = || {
+            let conn = Sqlite::open(dir.main_db()).unwrap();
+            let mut rows = Vec::new();
+            for (table, key) in [("tbl_2_y", "yi'ge"), ("tbl_1_y", "yi")] {
+                let mut stmt = conn
+                    .prepare(&format!(
+                        "SELECT value, weight FROM {table} WHERE key=?1 ORDER BY weight DESC"
+                    ))
+                    .unwrap();
+                let batch: Vec<_> = stmt
+                    .query_map([key], |row| {
+                        Ok(item(key, &row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                    })
+                    .unwrap()
+                    .collect::<rusqlite::Result<_>>()
+                    .unwrap();
+                rows.extend(batch);
+            }
+            rows
+        };
+        let rank_word = |word: &str| {
+            let ordered = build_ordered();
+            let main_db = dir.main_db();
+            let user_db = dir.journal();
+            adjust_candidate_ranking(&RankingRequest {
+                main_db: &main_db,
+                user_db: &user_db,
+                context_key: "yi'ge",
+                ordered: &ordered,
+                entry_key: "yi'ge",
+                value: word,
+                mode: FrequencyAdjustmentMode::Promote,
+                linear_step: 1,
+                trigger_count: 1,
+                force_top: false,
+                kind: PersonalDictionaryKind::Pinyin,
+            })
+            .unwrap();
+        };
+
+        // 选第三名「一哥」：单字混排令 target = 4，仍应压在 `508,964 / 8` 护城河下方，不可借单字权重跳到两百多万。
+        rank_word("一哥");
+        let third_weight = dir.weight("yi'ge", "一哥").unwrap();
+        assert!(
+            third_weight > 20_030 && third_weight < 508_964 / CORE_LEADER_MOAT_RATIO,
+            "third_weight={third_weight}"
+        );
+
+        // 选第二名「一格」：需渐进三次才能越过 `508,964` 榜首。
+        rank_word("一格");
+        assert_eq!(dir.weight("yi'ge", "一格"), Some(60_090));
+        rank_word("一格");
+        assert_eq!(dir.weight("yi'ge", "一格"), Some(180_270));
+        rank_word("一格");
+        assert!(dir.weight("yi'ge", "一格").unwrap() > 508_964);
     }
 }

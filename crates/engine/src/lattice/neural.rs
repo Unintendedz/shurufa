@@ -180,10 +180,10 @@ impl NeuralReranker {
         for (text, path) in texts[..scored].iter_mut().zip(&paths[..scored]) {
             *text = path.sentence.as_str();
         }
-        let means = self.reranker.log_probabilities(
-            last_characters(trailing_han_clause(context), CONTEXT_CHARACTERS),
-            &texts[..scored],
-        );
+        let clean_context = last_characters(trailing_han_clause(context), CONTEXT_CHARACTERS);
+        let means = self
+            .reranker
+            .log_probabilities(clean_context, &texts[..scored]);
         // 模型评分数量不完整时保持原序，避免只重排部分结果。
         if means.len() != scored {
             return None;
@@ -218,7 +218,12 @@ impl NeuralReranker {
         if order[0] != 0 && statik_mean[order[0]] < statik_mean[0] {
             let combined = |idx: usize| statik[idx] + RERANK_LAMBDA * (neural[idx] - statik[idx]);
             let winner = order[0];
-            let leader_margin = static_leader_promote_margin_mean_nats(texts[0].chars().count());
+            let leader_margin = static_leader_promote_margin_mean_nats(
+                clean_context
+                    .chars()
+                    .count()
+                    .saturating_add(texts[0].chars().count()),
+            );
             let margin = leader_margin * chars[0].max(1.0);
             if combined(winner) - combined(0) < margin {
                 if let Some(pos) = order[..ordered].iter().position(|&idx| idx == 0) {
