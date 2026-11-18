@@ -24,26 +24,27 @@ Shurufa 是我自己用的 macOS 中文输入法，结合了[水杉输入法](ht
 
 ## 它现在是什么样
 
-- 只做中文：全拼、双拼组字，神经网络排序，候选窗。英文交给系统自带的 ABC，Caps Lock 由系统切换。
-- 语音输入：按快捷键说话，本地流式识别（TextStream：Qwen3-ASR + MLX），可以接大模型整理文字；每次录音加密存档在本机。
-- 几个顺手的小功能：打完拼音按 Tab，按笔画或部件筛候选；全拼里打 `v` 再接算式、数字或日期，直接出结果、大写金额或日期格式。
-- 关掉了使用统计和云联想。
+- 专注中文打字：全拼、双拼组字，结合光标前上文、逐键神经排序、停顿后精排与万象 LTS 语法搭配模型排候选。不设内部英文模式，Caps Lock 交给系统切 ABC；中文组字里顺手带了离线英文单词与大写起手补全，日常夹几个词不用来回切。
+- 语音输入：按快捷键说话（区分左右修饰键，支持按住或切换），本地流式识别（TextStream：Qwen3-ASR-1.7B + MLX），可接大模型整理文字（支持从 OpenLess 导入配置）；每次录音加密存档在本机。
+- 几个顺手的小功能：打完拼音按 Tab，按笔顺或偏旁（首字母、全拼、部首俗称）筛候选；全拼里打小写 `v` 接算式、数字、日期或单位换算；支持导入搜狗细胞词库（`.scel`）。
+- 关掉了使用统计和云联想。详细演进见[变更记录](docs/CHANGELOG.md)。
 
 ## 自己构建
 
-只在我的环境里验证过：Apple Silicon、Command Line Tools 的 MacOSX26.5 SDK、Rust、Homebrew（CMake、Ninja、python@3.14）。
+只在我的环境里验证过：Apple Silicon、Command Line Tools 的 MacOSX26.5 SDK、Rust、Homebrew（CMake、Ninja、python@3.14、uv）。
 
 ```sh
 bash platforms/macos/build-shurufa.sh          # 构建 target/macos-isolated/Shurufa.app
 bash platforms/macos/scripts/install-shurufa.sh  # 安装到 ~/Library/Input Methods/Shurufa.app
 ```
 
-构建按登录钥匙串里的本机自签名证书「Shurufa Local Signing」签名，没有时脚本会自己建一张。换到你的机器上大概率要改点什么，这正是上面说的：fork 下来，按你自己的来。
+构建时会拉取笔画词库和 25 MB 停顿精排模型，首次安装本地缺万象语法模型时会自动下载 `wanxiang-lts-zh-hans.gram`（约 373 MB）；本地流式语音的运行环境与模型在设置窗口里按需用 `uv` 安装。构建按登录钥匙串里的本机自签名证书「Shurufa Local Signing」签名，没有时脚本会自己建一张。换到你的机器上大概率要改点什么，这正是上面说的：fork 下来，按你自己的来。
 
 ## 致谢
 
 - [水杉输入法（MSIME）](https://github.com/metasequoiaime/msime)：输入引擎、各平台宿主框架和词库都来自它。谢谢水杉的作者和贡献者，没有这么扎实的底子，就没有这个 fork。
 - [OpenLess](https://github.com/Open-Less/openless)：语音输入照着它的体验来做，本地流式识别 worker 的适配器结构、Metal 内存与 CPU 预算、VAD 门控改编自 OpenLess 的 TextStream 适配器。谢谢 OpenLess 的作者和贡献者。
+- [万象拼音（rime-wanxiang）](https://github.com/amzxyz/rime-wanxiang)：默认接入了万象 LTS 语法搭配模型（模型读取与编码逻辑移植自 `lotem/librime-octagram`）。谢谢万象与 Rime 社区的作者和贡献者。
 - 其他第三方组件见 [docs/third-party.md](docs/third-party.md) 和 [THIRD_PARTY_NOTICES.txt](platforms/macos/resources/Licenses/THIRD_PARTY_NOTICES.txt)。
 
 ## 许可证
