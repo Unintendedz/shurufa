@@ -53,7 +53,7 @@ pub use dictionary::{
     stage_dictionary_state, stream_dictionary_state, stream_learning_habits, DictionaryApplied,
     DictionaryEdit, DictionaryEntry, DictionaryKind, DictionaryPage, DictionaryStateMerge,
     DictionaryStateRecord, DictionaryTableEntry, DictionaryTablePage, LearningHabit,
-    LearningHabitsMerge, SnapshotReadError,
+    LearningHabitsMerge, PinyinWeightCalibrator, SnapshotReadError,
 };
 pub use glosses::{
     candidate_glosses, candidate_glosses_with_user, candidate_target_glosses, english_completions,

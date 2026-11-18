@@ -143,6 +143,10 @@ pub struct ImportEntry {
     pub key: String,
     pub value: String,
     pub weight: i64,
+    /// 该词条在导入文本中是否未提供显式数值/百分比权重（如省略权重列、Gboard 或 Rime 元数据列），
+    /// 供宿主层在写库前按同音键既有词频动态标定，避免默认 `10_000` 压过低频词。
+    #[serde(default)]
+    pub defaulted_weight: bool,
     /// 1-based line in the submitted text. Carried so a row the Engine refuses
     /// later can be reported by line, exactly as a parse failure is.
     #[serde(default)]
@@ -365,12 +369,14 @@ fn parse_row(
         (columns[0].trim(), columns[1].trim())
     };
     let key = key.to_ascii_lowercase();
-    let weight = match columns.get(2).map(|value| value.trim()) {
+    let (weight, defaulted_weight) = match columns.get(2).map(|value| value.trim()) {
         // Gboard 第三列是语言，不含词频，也不按目标词库过滤语言。
-        _ if format == ImportFormat::Gboard => DEFAULT_WEIGHT,
-        None | Some("") => DEFAULT_WEIGHT,
+        _ if format == ImportFormat::Gboard => (DEFAULT_WEIGHT, true),
+        None | Some("") => (DEFAULT_WEIGHT, true),
         // Rime 第三列的 `c=3` 等元数据沿用缺省权重。
-        Some(value) if format == ImportFormat::Rime && value.contains('=') => DEFAULT_WEIGHT,
+        Some(value) if format == ImportFormat::Rime && value.contains('=') => {
+            (DEFAULT_WEIGHT, true)
+        }
         Some(value) if format == ImportFormat::Rime && value.ends_with('%') => {
             let percentage = value[..value.len() - 1]
                 .parse::<f64>()
@@ -380,9 +386,12 @@ fn parse_row(
             if !scaled.is_finite() || scaled < 0.0 || scaled >= i64::MAX as f64 {
                 return Err(ImportIssue::Weight);
             }
-            scaled.round() as i64
+            (scaled.round() as i64, false)
         }
-        Some(value) => value.parse::<i64>().map_err(|_| ImportIssue::Weight)?,
+        Some(value) => (
+            value.parse::<i64>().map_err(|_| ImportIssue::Weight)?,
+            false,
+        ),
     };
 
     if key.is_empty() {
@@ -414,6 +423,7 @@ fn parse_row(
         key,
         value: word.to_owned(),
         weight,
+        defaulted_weight,
         line: 0, // Filled in by the caller, which knows the line number.
     })
 }
@@ -804,6 +814,28 @@ mod tests {
         assert_eq!(report.entries.len(), 1);
         assert_eq!(report.failed, MAX_ENTRIES - 1);
         assert!(report.truncated);
+    }
+
+    #[test]
+    fn defaulted_weight_tracks_whether_caller_supplied_an_explicit_weight() {
+        let standard = parse_ok(
+            ImportKind::Pinyin,
+            "standard",
+            "无权词\tni'hao\n显式词\tni'hao\t500\n",
+        );
+        assert!(standard.entries[0].defaulted_weight);
+        assert!(!standard.entries[1].defaulted_weight);
+
+        let rime = parse_ok(
+            ImportKind::Pinyin,
+            "rime",
+            "元数据词\tni hao\tc=3\n百分词\tni hao\t50%\n",
+        );
+        assert!(rime.entries[0].defaulted_weight);
+        assert!(!rime.entries[1].defaulted_weight);
+
+        let gboard = parse_ok(ImportKind::Pinyin, "standard", "nihao\t你好\tzh-Hans\n");
+        assert!(gboard.entries[0].defaulted_weight);
     }
 
     #[test]

@@ -151,6 +151,9 @@ struct Arguments {
     /// msime-dictionary checkout，`sources/` 和 `custom/` 下的每个路径都从这里读（msime 的锁文件不固定其中任何文件）。它的 Git 提交固定内容，manifest 会记下这个提交；msime 认定为上游数据的文件必须与 checkout 的 `upstream.lock.json` 一致，记录里的提交必须等于锁文件的 references。不传时，读 msime-dictionary 数据的阶段会失败，也不写 manifest，`--out` 里旧的 manifest 和校验和文件会被删掉。
     #[arg(long, value_name = "PATH")]
     dictionary: Option<PathBuf>,
+    /// 额外混入的现代口语或对话纯文本 N 元语料，格式 `<PATH>` 或 `<PATH>:<WEIGHT>`（默认权重 `1`，可重复指定）。
+    #[arg(long = "extra-ngram-corpus", value_name = "PATH[:WEIGHT]")]
+    extra_ngram_corpus: Vec<String>,
 }
 
 #[derive(Subcommand)]
@@ -965,6 +968,22 @@ struct Build {
     sources: Sources,
     out: PathBuf,
     complete: bool,
+    extra_ngram_corpus: Vec<(PathBuf, u32)>,
+}
+
+fn parse_extra_ngram_corpus(spec: &str) -> Result<(PathBuf, u32)> {
+    if let Some((path, suffix)) = spec.rsplit_once(':') {
+        if !path.is_empty() && !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()) {
+            let weight: u32 = suffix
+                .parse()
+                .with_context(|| format!("invalid extra ngram weight `{suffix}`"))?;
+            if weight == 0 {
+                bail!("extra ngram corpus weight must be >= 1");
+            }
+            return Ok((PathBuf::from(path), weight));
+        }
+    }
+    Ok((PathBuf::from(spec), 1))
 }
 
 impl Build {
@@ -1330,7 +1349,17 @@ impl Build {
                     .find(|file| file.path.starts_with("ngram-corpus/"))
                     .context("no ngram corpus is pinned")?;
                 let corpus = self.sources.pinned(&corpus_file.path)?;
-                let counts = ngram::count_corpus(&vocabulary, &corpus)?;
+                let mut counts = ngram::count_corpus(&vocabulary, &corpus)?;
+                for (extra_path, weight) in &self.extra_ngram_corpus {
+                    let extra_chars =
+                        counts.count_plain_corpus(&vocabulary, extra_path, *weight)?;
+                    eprintln!(
+                        "[ngram] mixed {} chars x{} from {}",
+                        extra_chars,
+                        weight,
+                        extra_path.display()
+                    );
+                }
                 std::fs::write(
                     self.out.join("msime-trigram.bin"),
                     ngram::pack(&vocabulary, &counts, 3)?,
@@ -1442,6 +1471,11 @@ fn main() -> Result<()> {
         .map(|checkout| Dictionary::open(checkout, &lock))
         .transpose()?;
     std::fs::create_dir_all(&out)?;
+    let extra_ngram_corpus = arguments
+        .extra_ngram_corpus
+        .iter()
+        .map(|spec| parse_extra_ngram_corpus(spec))
+        .collect::<Result<Vec<_>>>()?;
     let build = Build {
         sources: Sources {
             lock,
@@ -1452,6 +1486,7 @@ fn main() -> Result<()> {
         },
         out,
         complete,
+        extra_ngram_corpus,
     };
 
     let selected: Vec<Stage> = STAGES
@@ -1612,6 +1647,7 @@ mod tests {
             },
             out: out.clone(),
             complete: false,
+            extra_ngram_corpus: Vec::new(),
         };
         for stage in [Stage::Wubi, Stage::Wubi98] {
             build.run(stage).unwrap();

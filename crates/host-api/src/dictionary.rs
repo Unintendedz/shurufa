@@ -2036,25 +2036,32 @@ fn parse_import(
         msime_client_core::cloud::dictionary::MAX_IMPORT_BYTES,
     )
     .map_err(|error| error.to_string())?;
-    if matches!(kind, Kind::Pinyin) && engine_options.is_some() {
-        let mut usable = Vec::with_capacity(report.entries.len());
-        for mut entry in report.entries.drain(..) {
-            let Some(normalized) = full_pinyin_key(&entry.key, &entry.value) else {
-                report.failed += 1;
-                if report.first_failures.len() < 5 {
-                    report.first_failures.push(
-                        msime_client_services::dictionary::import::ImportFailure {
-                            line: entry.line,
-                            issue: msime_client_services::dictionary::import::ImportIssue::Pinyin,
-                        },
-                    );
+    if matches!(kind, Kind::Pinyin) {
+        if let Some(options) = engine_options {
+            let calibrator = msime_engine::host::PinyinWeightCalibrator::open(options);
+            let mut usable = Vec::with_capacity(report.entries.len());
+            for mut entry in report.entries.drain(..) {
+                let Some(normalized) = full_pinyin_key(&entry.key, &entry.value) else {
+                    report.failed += 1;
+                    if report.first_failures.len() < 5 {
+                        report.first_failures.push(
+                            msime_client_services::dictionary::import::ImportFailure {
+                                line: entry.line,
+                                issue:
+                                    msime_client_services::dictionary::import::ImportIssue::Pinyin,
+                            },
+                        );
+                    }
+                    continue;
+                };
+                if entry.defaulted_weight {
+                    entry.weight = calibrator.calibrated_weight(&normalized, &entry.value);
                 }
-                continue;
-            };
-            entry.key = normalized;
-            usable.push(entry);
+                entry.key = normalized;
+                usable.push(entry);
+            }
+            report.entries = usable;
         }
-        report.entries = usable;
     }
     let entries = report
         .entries
@@ -2082,6 +2089,7 @@ fn parse_hans_import(
     {
         return Err("invalid dictionary import".into());
     }
+    let calibrator = msime_engine::host::PinyinWeightCalibrator::open(options);
     let mut entries = Vec::with_capacity(1000);
     for line in text.lines() {
         let word = line.trim();
@@ -2095,11 +2103,12 @@ fn parse_hans_import(
         if key.is_empty() || key.len() > 256 {
             return Err("dictionary pinyin unavailable".into());
         }
+        let weight = calibrator.calibrated_weight(&key, word);
         entries.push(DictionaryEntry {
             kind: DictionaryKind::Pinyin,
             key,
             value: word.to_owned(),
-            weight: 10000,
+            weight,
         });
     }
     if entries.is_empty() {

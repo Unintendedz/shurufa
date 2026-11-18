@@ -1062,6 +1062,49 @@ fn engine_backed_pinyin_import_resolves_lengths_and_reports_invalid_rows() {
 }
 
 #[test]
+fn host_api_parse_import_and_hans_calibrate_default_weights_against_shipped_db() {
+    let root = tempfile::tempdir().unwrap();
+    for dir in ["resources", "user", "cache", "dictionaries"] {
+        std::fs::create_dir_all(root.path().join(dir)).unwrap();
+    }
+    for dir in ["resources", "dictionaries"] {
+        let db = rusqlite::Connection::open(root.path().join(dir).join("msime-pinyin.db")).unwrap();
+        db.execute_batch(
+            "CREATE TABLE tbl_1_c(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+             CREATE TABLE tbl_1_s(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+             CREATE TABLE tbl_2_c(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+             INSERT INTO tbl_1_c VALUES('ce','c','测',500000);
+             INSERT INTO tbl_1_s VALUES('shi','s','试',500000);
+             INSERT INTO tbl_2_c VALUES('ce''shi','cs','策士',3200);",
+        )
+        .unwrap();
+    }
+    let mut options = import_engine_options();
+    options.resources = root.path().join("resources").to_string_lossy().into_owned();
+    options.user_data = root.path().join("user").to_string_lossy().into_owned();
+    options.cache = root.path().join("cache").to_string_lossy().into_owned();
+    options.dictionaries = root
+        .path()
+        .join("dictionaries")
+        .to_string_lossy()
+        .into_owned();
+    let (entries, _) = parse_import(
+        &Kind::Pinyin,
+        "standard",
+        "侧室\tceshi\n册式\tce'shi\t7777\n",
+        Some(&options),
+    )
+    .unwrap();
+    assert_eq!(entries[0].key, "ce'shi");
+    assert_eq!(entries[0].weight, 3199);
+    assert_eq!(entries[1].weight, 7777);
+
+    let hans = parse_hans_import(&Kind::Pinyin, "测试\n", &options).unwrap();
+    assert_eq!(hans[0].key, "ce'shi");
+    assert_eq!(hans[0].weight, 3199);
+}
+
+#[test]
 fn personal_import_accepts_the_apple_envelope_and_rejects_duplicates() {
     let text = r#"{
           "format": "msime-personal-dictionary",

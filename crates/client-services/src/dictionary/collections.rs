@@ -240,10 +240,18 @@ pub enum DictionaryCollectionsAction {
     },
 }
 
+const DEFAULT_COLLECTION_WEIGHT: i64 = 10_000;
+
 /// `hans` 格式的读音来源。client-services 不依赖 Engine，宿主把 Engine 的「汉字转拼音」包成这个接口传进来。
 pub trait HanReadings {
     /// `word` 的拼音编码（例如 `ni'hao`），给不出时为 `None`。
     fn pinyin(&self, word: &str) -> Option<String>;
+
+    /// 未携带显式权重的拼音新词应使用的初始权重；宿主实现可按当前主词库同音键既有最高词频动态标定，
+    /// 避免缺省 `10_000` 一写入就直接压过低频内置词。
+    fn calibrated_pinyin_weight(&self, _key: &str, _word: &str) -> i64 {
+        DEFAULT_COLLECTION_WEIGHT
+    }
 }
 
 #[derive(Debug, Error)]
@@ -397,7 +405,13 @@ impl DictionaryCollectionsStore {
                 // 细胞词库只经字节送来；同时带着文本说明请求本身错了。
                 (SCEL_FORMAT, text, Some(encoded)) if text.as_deref().is_none_or(str::is_empty) => {
                     let bytes = decode_scel_base64(&encoded)?;
-                    self.import_scel(id.as_deref(), name.as_deref(), kind, &bytes)
+                    self.import_scel_with_readings(
+                        id.as_deref(),
+                        name.as_deref(),
+                        kind,
+                        &bytes,
+                        readings,
+                    )
                 }
                 (SCEL_FORMAT, _, _) => Err(DictionaryCollectionsError::Invalid),
                 // 其余格式都是文本，带字节来的不认识。
@@ -527,6 +541,18 @@ impl DictionaryCollectionsStore {
         kind: PersonalWordKind,
         bytes: &[u8],
     ) -> Result<DictionaryCollectionsView> {
+        self.import_scel_with_readings(id, name, kind, bytes, None)
+    }
+
+    /// 带可选读音与权重标定接口的搜狗细胞词库导入入口。
+    pub fn import_scel_with_readings(
+        &self,
+        id: Option<&str>,
+        name: Option<&str>,
+        kind: PersonalWordKind,
+        bytes: &[u8],
+        readings: Option<&dyn HanReadings>,
+    ) -> Result<DictionaryCollectionsView> {
         if kind != PersonalWordKind::Pinyin {
             return Err(DictionaryCollectionsError::Invalid);
         }
@@ -537,7 +563,7 @@ impl DictionaryCollectionsStore {
             kind,
             format: SCEL_FORMAT,
             text: &converted.text,
-            readings: None,
+            readings,
         })
     }
 
@@ -1752,7 +1778,7 @@ fn parse_import(
     let usable = |parsed: &(Vec<PersonalWord>, CollectionImportReport)| {
         !parsed.0.is_empty() || parsed.1.duplicates > 0 || parsed.1.truncated
     };
-    let parsed = parse_rows(kind, requested, text, existing, room);
+    let parsed = parse_rows(kind, requested, text, readings, existing, room);
     if usable(&parsed) {
         return Ok(parsed);
     }
@@ -1764,7 +1790,7 @@ fn parse_import(
         ImportFormat::Rime | ImportFormat::Gboard => None,
     };
     if let Some(other) = flipped {
-        let mut retry = parse_rows(kind, other, text, existing, room);
+        let mut retry = parse_rows(kind, other, text, readings, existing, room);
         if usable(&retry) {
             retry.1.swapped = true;
             return Ok(retry);
@@ -1834,6 +1860,7 @@ fn parse_rows(
     kind: PersonalWordKind,
     format: ImportFormat,
     text: &str,
+    readings: Option<&dyn HanReadings>,
     existing: &HashSet<String>,
     room: usize,
 ) -> (Vec<PersonalWord>, CollectionImportReport) {
@@ -1871,11 +1898,18 @@ fn parse_rows(
             );
         }
         for entry in parsed.entries {
+            let weight = if kind == PersonalWordKind::Pinyin && entry.defaulted_weight {
+                readings.map_or(entry.weight, |readings| {
+                    readings.calibrated_pinyin_weight(&entry.key, &entry.value)
+                })
+            } else {
+                entry.weight
+            };
             let word = PersonalWord {
                 kind,
                 key: entry.key,
                 value: entry.value,
-                weight: entry.weight,
+                weight,
             };
             if word.validate_new().is_err() || word.value.len() > MAX_VALUE_BYTES {
                 record_failure(
@@ -1928,11 +1962,12 @@ fn parse_hans(
             record_failure(&mut report, failure(import::ImportIssue::Pinyin));
             continue;
         };
+        let weight = readings.calibrated_pinyin_weight(&key, value);
         let word = PersonalWord {
             kind: PersonalWordKind::Pinyin,
             key,
             value: value.to_owned(),
-            weight: 10_000,
+            weight,
         };
         if word.validate_new().is_err() {
             record_failure(&mut report, failure(import::ImportIssue::Rejected));

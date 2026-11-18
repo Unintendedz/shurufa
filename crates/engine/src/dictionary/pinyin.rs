@@ -52,12 +52,20 @@ impl PinyinDatabase {
     /// READWRITE without CREATE, busy timeout 250 ms (QD:239-246). A missing file leaves the database closed and every query empty.
     pub fn open(path: &Path) -> Self {
         let mut database = Self {
-            connection: open_connection(path),
+            connection: open_connection_with_mode(path, false),
             data_version: None,
         };
         // The reference constructor records the version, so the first poll after opening already compares (QD:268).
         database.database_changed();
         database
+    }
+
+    /// 只读打开主拼音库，供词库导入等只读校准路径查询既有同音词最高权重，不写入或创建文件。
+    pub fn open_readonly(path: &Path) -> Self {
+        Self {
+            connection: open_connection_with_mode(path, true),
+            data_version: None,
+        }
     }
 
     pub fn is_open(&self) -> bool {
@@ -550,8 +558,58 @@ impl PinyinDatabase {
         column_i64(row, 0).ok()
     }
 
-    /// 插入原键、各非空段的首个字符、词值及 `INSERTED_WEIGHT`；调用方负责查重和键校验。
-    pub fn insert_word(&self, key: &str, value: &str) -> Result<()> {
+    /// 查询指定全拼键下当前词库里的最高权重；缺表或无记录返回 `None`。
+    pub fn max_weight(&self, key: &str) -> Option<i64> {
+        let connection = self.connection.as_ref()?;
+        let (table, _) = word_key_table(key)?;
+        let mut statement = connection.prepare_cached(&max_weight_sql(&table)).ok()?;
+        let mut rows = statement.query([key]).ok()?;
+        let row = rows.next().ok()??;
+        row.get::<_, Option<i64>>(0).ok()?
+    }
+
+    /// 为未指定权重的自造词或导词计算安全初始权重：
+    /// 若同全拼键已有最高权重不超过 `INSERTED_WEIGHT`（如大量三四字低频词），压在 `(max - 1).max(1)`
+    /// 以免 `10_000` 一写入就直接篡夺首位；键尚无内置词或最高权重本就大于 `10_000` 时沿用 `INSERTED_WEIGHT`。
+    pub fn calibrated_insert_weight(&self, key: &str) -> i64 {
+        match self.max_weight(key) {
+            Some(existing_max) if existing_max <= INSERTED_WEIGHT => (existing_max - 1).max(1),
+            _ => INSERTED_WEIGHT,
+        }
+    }
+
+    /// 单次查表同时完成“是否已存在 `(key, value)`”与“同键最高权重标定”：
+    /// 已存在带整数权重的同键值行时返回 `None`；否则按同键既有最高权重返回安全初始权重
+    ///（未打开、缺表或无效键均回退 `Some(INSERTED_WEIGHT)`，交由后续 `insert_word_with_weight` 报出原错误）。
+    pub fn weight_for_new_word(&self, key: &str, value: &str) -> Option<i64> {
+        let Some(connection) = self.connection.as_ref() else {
+            return Some(INSERTED_WEIGHT);
+        };
+        let Some((table, _)) = word_key_table(key) else {
+            return Some(INSERTED_WEIGHT);
+        };
+        let Ok(mut statement) = connection.prepare_cached(&existing_and_max_weight_sql(&table))
+        else {
+            return Some(INSERTED_WEIGHT);
+        };
+        let Ok(mut rows) = statement.query((key, value)) else {
+            return Some(INSERTED_WEIGHT);
+        };
+        let Ok(Some(row)) = rows.next() else {
+            return Some(INSERTED_WEIGHT);
+        };
+        if row.get::<_, Option<i64>>(0).ok().flatten().is_some() {
+            return None;
+        }
+        let calibrated = match row.get::<_, Option<i64>>(1).ok().flatten() {
+            Some(existing_max) if existing_max <= INSERTED_WEIGHT => (existing_max - 1).max(1),
+            _ => INSERTED_WEIGHT,
+        };
+        Some(calibrated)
+    }
+
+    /// 按显式权重插入原键、各非空段首字母简拼及词值；调用方负责查重和键校验。
+    pub fn insert_word_with_weight(&self, key: &str, value: &str, weight: i64) -> Result<()> {
         let connection = self.writable()?;
         let (table, syllables) =
             word_key_table(key).ok_or_else(|| EngineError::invalid(INVALID_DICTIONARY_KEY))?;
@@ -563,8 +621,14 @@ impl PinyinDatabase {
         }
         connection
             .prepare_cached(&insert_word_sql(&table))?
-            .execute((key, jp.as_str(), value, INSERTED_WEIGHT))?;
+            .execute((key, jp.as_str(), value, weight.max(1)))?;
         Ok(())
+    }
+
+    /// 插入原键、各非空段的首个字符、词值及 `INSERTED_WEIGHT`；调用方负责查重和键校验。
+    #[cfg(test)]
+    pub fn insert_word(&self, key: &str, value: &str) -> Result<()> {
+        self.insert_word_with_weight(key, value, INSERTED_WEIGHT)
     }
 
     fn writable(&self) -> Result<&Connection> {
@@ -711,18 +775,21 @@ impl PinyinDatabase {
     }
 }
 
-fn open_connection(path: &Path) -> Option<Connection> {
+fn open_connection_with_mode(path: &Path, read_only: bool) -> Option<Connection> {
     // An empty path is how `RuntimePaths` spells a missing file; SQLite would open a private temporary database for it instead.
     if path.as_os_str().is_empty() {
         return None;
     }
     // No CREATE: a missing dictionary must stay missing instead of becoming an empty file (QD:237-246).
     let path = crate::paths::sqlite_path_no_follow(path).ok()?;
+    let access_flag = if read_only {
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+    } else {
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+    };
     let connection = Connection::open_with_flags(
         &path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE
-            | OpenFlags::SQLITE_OPEN_NOFOLLOW
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        access_flag | OpenFlags::SQLITE_OPEN_NOFOLLOW | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .ok()?;
     // Learning writes briefly hold the commit lock; waiting keeps a query that lands in that window from becoming an empty page.
@@ -856,6 +923,26 @@ fn han_char_exists_sql(table: &str) -> String {
 fn find_weight_sql(table: &str) -> String {
     const PREFIX: &str = "SELECT weight FROM \"";
     const SUFFIX: &str = "\" WHERE key=?1 AND value=?2 LIMIT 1";
+    let mut sql = String::with_capacity(PREFIX.len() + table.len() + SUFFIX.len());
+    sql.push_str(PREFIX);
+    sql.push_str(table);
+    sql.push_str(SUFFIX);
+    sql
+}
+
+fn max_weight_sql(table: &str) -> String {
+    const PREFIX: &str = "SELECT MAX(weight) FROM \"";
+    const SUFFIX: &str = "\" WHERE key=?1";
+    let mut sql = String::with_capacity(PREFIX.len() + table.len() + SUFFIX.len());
+    sql.push_str(PREFIX);
+    sql.push_str(table);
+    sql.push_str(SUFFIX);
+    sql
+}
+
+fn existing_and_max_weight_sql(table: &str) -> String {
+    const PREFIX: &str = "SELECT MAX(CASE WHEN value=?2 THEN weight END), MAX(weight) FROM \"";
+    const SUFFIX: &str = "\" WHERE key=?1";
     let mut sql = String::with_capacity(PREFIX.len() + table.len() + SUFFIX.len());
     sql.push_str(PREFIX);
     sql.push_str(table);
@@ -1790,6 +1877,34 @@ mod tests {
         // No table for the key: the write fails rather than landing anywhere else.
         assert!(database.insert_word("ia", "呀").is_err());
         assert!(database.insert_word("", "呀").is_err());
+
+        // 同键已有低频词时动态标定写入权重到其下一档，高频或空键保持 `INSERTED_WEIGHT`。
+        let calib_path = pinyin_db(
+            directory.path(),
+            &[
+                ("tbl_3_s", "san'zi'ci", "三字词", 3_500),
+                ("tbl_2_g", "gao'pin", "高频", 500_000),
+                ("tbl_2_k", "kong'biao", "占位", 1),
+            ],
+        );
+        let calib_db = PinyinDatabase::open(&calib_path);
+        assert_eq!(calib_db.max_weight("san'zi'ci"), Some(3_500));
+        assert_eq!(calib_db.max_weight("wei'cun'zai"), None);
+        assert_eq!(calib_db.calibrated_insert_weight("san'zi'ci"), 3_499);
+        assert_eq!(
+            calib_db.calibrated_insert_weight("gao'pin"),
+            INSERTED_WEIGHT
+        );
+        assert_eq!(
+            calib_db.calibrated_insert_weight("wei'cun'zai"),
+            INSERTED_WEIGHT
+        );
+        calib_db
+            .insert_word_with_weight("san'zi'ci", "伞自刺", 3_499)
+            .unwrap();
+        let readonly_db = PinyinDatabase::open_readonly(&calib_path);
+        assert_eq!(readonly_db.find_weight("san'zi'ci", "伞自刺"), Some(3_499));
+        assert_eq!(readonly_db.max_weight("san'zi'ci"), Some(3_500));
     }
 
     #[test]

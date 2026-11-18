@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use crate::assets::{MAIN_DICTIONARY, NEURAL_MODEL_KEYBOARD, USER_JOURNAL};
 use crate::cache::FifoCache;
-use crate::dictionary::pinyin::{PinyinDatabase, INSERTED_WEIGHT};
+use crate::dictionary::pinyin::PinyinDatabase;
 use crate::dictionary::DictRow;
 use crate::error::{EngineError, Result};
 use crate::ime::online_batch::{
@@ -1600,22 +1600,22 @@ impl QuanpinDictionary {
         .1
     }
 
-    /// Insert a row that is not there yet and journal it as the user's own (QD:1200-1212, QD:1234-1266). A row already present is success without a journal write.
+    /// 插入尚不存在的词条并记入用户日志（QD:1200-1212, QD:1234-1266）；词条已存在时直接视作成功且不重复写日志。
     fn insert_new_word(&mut self, key: &str, word: &str) -> Result<()> {
         if !self.database.is_open() {
             return Err(EngineError::failed(DICTIONARY_UNAVAILABLE));
         }
-        if self.database.find_weight(key, word).is_some() {
+        let Some(weight) = self.database.weight_for_new_word(key, word) else {
             return Ok(());
-        }
-        self.database.insert_word(key, word)?;
-        // The reference ignored a failed journal write. The row is in the working dictionary either way, so the caches are reset first; the error still reaches the caller, because a row missing from the journal is lost at the next generation.
+        };
+        self.database.insert_word_with_weight(key, word, weight)?;
+        // 参考实现忽略日志写入失败。这里词条已落入工作词库，先清缓存；仍向调用方返回日志错误，避免丢日志导致下一代词库丢失该词。
         let journaled = record_user_insert(
             &self.paths.user(USER_JOURNAL),
             PersonalDictionaryKind::Pinyin,
             key,
             word,
-            INSERTED_WEIGHT,
+            weight,
             "",
         );
         self.reset_cache();

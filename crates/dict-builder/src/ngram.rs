@@ -7,7 +7,7 @@
 //! The corpus pass reproduces the Python builder's reading exactly (1 Mi-character chunks, the `<text>` extraction and noise stripping per chunk, the 120M Han-character stop, singleton pruning past 12M entries, and insertion-ordered tie-breaking at the 1M-entry cut), because each of those decides which entries ship.
 
 use std::collections::HashMap;
-use std::io::{BufReader, Read};
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -211,6 +211,30 @@ fn last_chars(text: &str, count: usize) -> &str {
     }
 }
 
+/// 从纯文本段中扫描长度不少于两个汉字的连续汉字片段；`visit` 返回 `false` 时提前停止。
+fn visit_han_runs(text: &str, mut visit: impl FnMut(&str) -> bool) -> bool {
+    let mut run_start = None;
+    for (index, c) in text.char_indices() {
+        if is_han(c) {
+            run_start.get_or_insert(index);
+            continue;
+        }
+        if let Some(start) = run_start.take() {
+            let run = &text[start..index];
+            if run.len() >= 6 && !visit(run) {
+                return false;
+            }
+        }
+    }
+    if let Some(start) = run_start {
+        let run = &text[start..];
+        if run.len() >= 6 && !visit(run) {
+            return false;
+        }
+    }
+    true
+}
+
 /// Calls `visit` with each maximal run of two or more Han characters in the dump's article text, stopping once `max_chars` characters have been visited.
 fn for_each_han_run(
     reader: impl Read,
@@ -238,22 +262,13 @@ fn for_each_han_run(
         };
         let mut body = pieces.join(" ");
         body.push('\n');
-        let mut run_start = None;
-        for (index, c) in body.char_indices() {
-            if is_han(c) {
-                run_start.get_or_insert(index);
-                continue;
-            }
-            if let Some(start) = run_start.take() {
-                let run = &body[start..index];
-                if run.len() >= 6 {
-                    produced += run.len() / 3;
-                    visit(run);
-                    if produced >= max_chars {
-                        return Ok(());
-                    }
-                }
-            }
+        let keep_going = visit_han_runs(&body, |run| {
+            produced += run.len() / 3;
+            visit(run);
+            produced < max_chars
+        });
+        if !keep_going {
+            return Ok(());
         }
     }
     Ok(())
@@ -277,21 +292,37 @@ impl Counts {
     }
 
     fn count_run(&mut self, vocabulary: &Vocabulary, run: &str, words: &mut Vec<Option<u32>>) {
-        self.characters += run.len() / 3;
+        self.count_weighted_run(vocabulary, run, 1, words);
+    }
+
+    fn count_weighted_run(
+        &mut self,
+        vocabulary: &Vocabulary,
+        run: &str,
+        weight: u32,
+        words: &mut Vec<Option<u32>>,
+    ) {
+        let weight = weight.max(1);
+        self.characters += (run.len() / 3).saturating_mul(weight as usize);
         let (mut before, mut previous) = (START, START);
-        self.unigrams[START as usize] += 1;
+        self.unigrams[START as usize] =
+            self.unigrams[START as usize].saturating_add(u64::from(weight));
         vocabulary.segment(run, words);
         for word in words.iter() {
             let Some(word) = *word else {
                 if previous != START {
-                    self.unigrams[START as usize] += 1;
+                    self.unigrams[START as usize] =
+                        self.unigrams[START as usize].saturating_add(u64::from(weight));
                 }
                 (before, previous) = (START, START);
                 continue;
             };
-            self.unigrams[word as usize] += 1;
-            *self.bigrams.entry((previous, word)).or_insert(0) += 1;
-            *self.trigrams.entry((before, previous, word)).or_insert(0) += 1;
+            self.unigrams[word as usize] =
+                self.unigrams[word as usize].saturating_add(u64::from(weight));
+            let bg = self.bigrams.entry((previous, word)).or_insert(0);
+            *bg = bg.saturating_add(weight);
+            let tg = self.trigrams.entry((before, previous, word)).or_insert(0);
+            *tg = tg.saturating_add(weight);
             (before, previous) = (previous, word);
         }
         // A sequence seen once will not survive the minimum count anyway, and holding all of them is what exhausts memory on a full dump.
@@ -301,6 +332,37 @@ impl Counts {
         if self.trigrams.len() > PRUNE_ABOVE {
             self.trigrams.retain(|_, count| *count > 1);
         }
+    }
+
+    /// 按指定倍数权重混入纯文本口语/现代日常语料，跳过 `#` 注释与空行，拒绝特殊/符号链接文件。
+    pub fn count_plain_corpus(
+        &mut self,
+        vocabulary: &Vocabulary,
+        corpus: &Path,
+        weight: u32,
+    ) -> Result<usize> {
+        if vocabulary.len() == 0 {
+            bail!("empty vocabulary");
+        }
+        let file =
+            crate::private_file::open_read_only(corpus, "plain ngram corpus is not a regular file")
+                .with_context(|| format!("opening {}", corpus.display()))?;
+        let reader = BufReader::new(file);
+        let mut words = Vec::new();
+        let mut raw_chars = 0usize;
+        for line in reader.lines() {
+            let line = line.with_context(|| format!("reading {}", corpus.display()))?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            visit_han_runs(trimmed, |run| {
+                raw_chars += run.len() / 3;
+                self.count_weighted_run(vocabulary, run, weight, &mut words);
+                true
+            });
+        }
+        Ok(raw_chars)
     }
 }
 
@@ -557,5 +619,61 @@ mod tests {
         let trigram = pack(&vocabulary, &counts, 3).unwrap();
         // Only (START, 配置与, 权限): a triple after two start tokens has no counted context.
         assert_eq!(u32::from_le_bytes(trigram[8..12].try_into().unwrap()), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plain_corpus_reader_rejects_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let outside = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let target = outside.path().join("seed.txt");
+        std::fs::write(&target, "培养忠实顾客\n").unwrap();
+        let linked = root.path().join("seed.txt");
+        symlink(&target, &linked).unwrap();
+
+        let vocabulary = Vocabulary::new(["培养", "忠实", "顾客"].map(str::to_owned));
+        let mut counts = Counts::new(&vocabulary);
+        assert!(counts.count_plain_corpus(&vocabulary, &linked, 10).is_err());
+    }
+
+    #[test]
+    fn weighted_plain_corpus_mix_lifts_conversational_pairs_without_altering_default_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let seed = dir.path().join("conv.txt");
+        std::fs::write(&seed, "# 合成口语搭配示例\n培养忠实顾客\n我许个愿吧\n").unwrap();
+
+        let vocabulary = Vocabulary::new(
+            ["培养", "忠实", "顾客", "我", "许个愿", "吧", "维基", "百科"].map(str::to_owned),
+        );
+        let mut base = Counts::new(&vocabulary);
+        let mut words = Vec::new();
+        for _ in 0..8 {
+            base.count_run(&vocabulary, "维基百科", &mut words);
+        }
+        let baseline_bigram = pack(&vocabulary, &base, 2).unwrap();
+        assert_eq!(baseline_bigram, pack(&vocabulary, &base, 2).unwrap());
+
+        let mut mixed = base;
+        let read_chars = mixed.count_plain_corpus(&vocabulary, &seed, 6).unwrap();
+        assert_eq!(read_chars, 11);
+        let mixed_bigram = pack(&vocabulary, &mixed, 2).unwrap();
+        let entries = u32::from_le_bytes(mixed_bigram[8..12].try_into().unwrap()) as usize;
+        let keys: Vec<u64> = (0..entries)
+            .map(|i| u64::from_le_bytes(mixed_bigram[16 + i * 8..24 + i * 8].try_into().unwrap()))
+            .collect();
+        let lookup_bonus = |pair: &[&str]| -> f32 {
+            let key = fnv1a64(pair);
+            let idx = keys.iter().position(|candidate| *candidate == key).unwrap();
+            f32::from_le_bytes(
+                mixed_bigram[16 + entries * 8 + idx * 4..][..4]
+                    .try_into()
+                    .unwrap(),
+            )
+        };
+        assert!(lookup_bonus(&["培养", "忠实"]) > 0.0);
+        assert!(lookup_bonus(&["忠实", "顾客"]) > 0.0);
+        assert!(lookup_bonus(&["我", "许个愿"]) > 0.0);
     }
 }

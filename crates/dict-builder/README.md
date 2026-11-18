@@ -6,6 +6,7 @@
 cargo build --release -p msime-dict-builder
 target/release/msime-dict-build --dictionary <msime-dictionary checkout> --cache <sources-cache> --out <output>                # every stage, about a minute
 target/release/msime-dict-build --dictionary <msime-dictionary checkout> --cache <sources-cache> --out <output> --skip ngram   # without the zhwiki pass
+target/release/msime-dict-build --dictionary <msime-dictionary checkout> --cache <sources-cache> --out <output> --extra-ngram-corpus resources/dictionary-sources/cn/conversational-ngram-seed.txt:50  # mix weighted conversational plain-text corpus into ngram counts
 target/release/msime-dict-build languages --dictionary <msime-dictionary checkout> --cache <sources-cache> --out <output>
 target/release/msime-dict-build --list
 target/release/msime-dict-build places --cache <sources-cache>                        # the @ place table the engine embeds

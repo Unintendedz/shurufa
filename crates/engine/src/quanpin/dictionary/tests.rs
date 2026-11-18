@@ -4,6 +4,7 @@ use rusqlite::params;
 use std::borrow::Cow;
 
 use super::*;
+use crate::dictionary::pinyin::INSERTED_WEIGHT;
 
 #[test]
 fn active_dictionary_reuses_ngram_tables_after_shared_eviction() {
@@ -1184,6 +1185,46 @@ fn canonical_writer_keeps_the_given_boundaries() {
         .unwrap();
     assert_eq!(fixture.weight("guan'xi", "关系"), Some(5));
     assert_eq!(journal_row(&fixture, "guan'xi", "关系"), None);
+}
+
+#[test]
+fn canonical_writer_calibrates_new_word_weight_below_low_frequency_peers() {
+    let fixture = Fixture::new();
+    fixture.table("kong'jian");
+    fixture.insert("di'pin'ci", "低频词", 3_500);
+    fixture.insert("gao'pin'ci", "高频词", 500_000);
+    let mut dictionary = QuanpinDictionary::new(&fixture.paths);
+
+    // 1. 空键继续写入 `INSERTED_WEIGHT`（10_000）。
+    dictionary
+        .create_word_from_canonical_pinyin("kong'jian", "空键")
+        .unwrap();
+    assert_eq!(fixture.weight("kong'jian", "空键"), Some(INSERTED_WEIGHT));
+    assert_eq!(
+        journal_row(&fixture, "kong'jian", "空键"),
+        Some(("upsert".to_string(), INSERTED_WEIGHT, 1))
+    );
+
+    // 2. 同键已有权重 3_500（<= 10_000）的既有词时，自造词落在 3_499，工作库与日志严格一致且不抢首选。
+    dictionary
+        .create_word_from_canonical_pinyin("di'pin'ci", "敌品词")
+        .unwrap();
+    assert_eq!(fixture.weight("di'pin'ci", "敌品词"), Some(3_499));
+    assert_eq!(
+        journal_row(&fixture, "di'pin'ci", "敌品词"),
+        Some(("upsert".to_string(), 3_499, 1))
+    );
+    let listed = query(&mut dictionary, "dipinci", "di'pin'ci", NONE);
+    assert_eq!(listed[0].word, "低频词");
+
+    // 3. 同键已有高频词（500_000）时继续写入 10_000。
+    dictionary
+        .create_word_from_canonical_pinyin("gao'pin'ci", "搞品词")
+        .unwrap();
+    assert_eq!(
+        fixture.weight("gao'pin'ci", "搞品词"),
+        Some(INSERTED_WEIGHT)
+    );
 }
 
 #[test]

@@ -280,6 +280,36 @@ pub fn count_learning_habits(options: &EngineOptions) -> Result<usize> {
     released(habits::count_learning_habits(&runtime_paths(options)))
 }
 
+/// 按同音键既有最高词频为无权重导词标定初始权重的只读查询器：
+/// 整批导入共享同一个 SQLite 连接与语句缓存，优先读取工作代次词库并兜底到内置只读资源库。
+pub struct PinyinWeightCalibrator(crate::dictionary::pinyin::PinyinDatabase);
+
+impl PinyinWeightCalibrator {
+    pub fn open(options: &EngineOptions) -> Self {
+        let paths = runtime_paths(options);
+        let primary = paths.dictionary(crate::assets::MAIN_DICTIONARY);
+        let mut database = crate::dictionary::pinyin::PinyinDatabase::open_readonly(&primary);
+        if !database.is_open() {
+            database = crate::dictionary::pinyin::PinyinDatabase::open_readonly(
+                &paths.resource(crate::assets::MAIN_DICTIONARY),
+            );
+        }
+        Self(database)
+    }
+
+    /// 先将 `"nihao"` / `"ni hao"` / `"ni'hao"` 统一规范成带撇号的全拼键，
+    /// 再返回不压过既有低频同音词的建议初始权重。
+    pub fn calibrated_weight(&self, key: &str, word: &str) -> i64 {
+        let normalized = crate::pinyin::normalize::normalize_full_pinyin(key, word.chars().count());
+        let canonical = if normalized.is_empty() {
+            std::borrow::Cow::Owned(key.replace(' ', "'"))
+        } else {
+            std::borrow::Cow::Borrowed(normalized.as_str())
+        };
+        self.0.calibrated_insert_weight(&canonical)
+    }
+}
+
 /// 把一串输入习惯合并进本机正在用的日志，计数取大、置顶保留本机，写完压回各表的上限（规则见 `habits::merge_learning_habits`）。读流失败报 `SNAPSHOT_STREAM_FAILED`，整体回滚。调用方必须持有独占维护权。
 pub fn merge_learning_habits(
     options: &EngineOptions,

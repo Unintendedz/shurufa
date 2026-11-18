@@ -879,3 +879,106 @@ fn synthetic_rime_import_throughput() {
         longest.as_millis()
     );
 }
+
+#[test]
+fn scoped_collection_and_personal_import_calibrate_defaulted_pinyin_weights() {
+    let root = tempfile::tempdir().unwrap();
+    let options = host_options_with_main_dictionary(root.path());
+    // 预置两条内置参考词：同音键 `ni'hao` 最高仅 3_200（<= 10_000），`an'wei'ji` 高达 50_000；
+    // 另外写入 `tbl_1_*` 单字以支持 `hans` 格式经 Engine 反推全拼。
+    for dir in ["resources", "dictionaries"] {
+        let db = rusqlite::Connection::open(root.path().join(dir).join("msime-pinyin.db")).unwrap();
+        db.execute_batch(
+            "CREATE TABLE IF NOT EXISTS tbl_1_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+             CREATE TABLE IF NOT EXISTS tbl_1_h(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+             CREATE TABLE IF NOT EXISTS tbl_2_h(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+             INSERT INTO tbl_1_n VALUES('ni','n','泥',500000);
+             INSERT INTO tbl_1_h VALUES('hao','h','好',500000);
+             INSERT INTO tbl_2_n VALUES('ni''hao','nh','你好',3200);
+             INSERT INTO tbl_3_a VALUES('an''wei''ji','awj','安慰剂',50000);",
+        )
+        .unwrap();
+    }
+
+    // 1. 命名词库导入：无权重 TSV 落到 3_199，显式权重保持 7_777，高频键维持 10_000；
+    //    `hans` 纯汉词条（由单字拼回 `ni'hao`）同步校准到 3_199。
+    let tsv_import = call_android_data(
+        msime_client_dictionary_collections,
+        json!({
+            "options": options,
+            "action": {
+                "operation": "import",
+                "name": "动态校准测试",
+                "kind": "pinyin",
+                "format": "standard",
+                "text": "拟好\tni'hao\n尼豪\tni'hao\t7777\n按位记\tan'wei'ji\n"
+            }
+        }),
+    );
+    assert_eq!(tsv_import["ok"], true, "{tsv_import}");
+    let collection_id = tsv_import["value"]["collections"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let hans_import = call_android_data(
+        msime_client_dictionary_collections,
+        json!({
+            "options": options,
+            "action": {
+                "operation": "import",
+                "name": "纯汉校准测试",
+                "kind": "pinyin",
+                "format": "hans",
+                "text": "泥好\n"
+            }
+        }),
+    );
+    assert_eq!(hans_import["ok"], true, "{hans_import}");
+
+    loop {
+        let synced = synchronize_collection(&options);
+        assert_eq!(synced["ok"], true, "{synced}");
+        assert_eq!(synced["value"]["failed_count"], 0, "{synced}");
+        if synced["value"]["pending_count"] == 0 {
+            break;
+        }
+    }
+
+    let db = rusqlite::Connection::open(root.path().join("dictionaries/msime-pinyin.db")).unwrap();
+    let weight_of = |table: &str, key: &str, value: &str| -> i64 {
+        db.query_row(
+            &format!("SELECT weight FROM {table} WHERE key=?1 AND value=?2"),
+            [key, value],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(weight_of("tbl_2_n", "ni'hao", "拟好"), 3199);
+    assert_eq!(weight_of("tbl_2_n", "ni'hao", "泥好"), 3199);
+    assert_eq!(weight_of("tbl_2_n", "ni'hao", "尼豪"), 7777);
+    assert_eq!(weight_of("tbl_3_a", "an'wei'ji", "按位记"), 10_000);
+
+    // 2. 删除该集合并同步，应精确删除写入且零 ENTRY_CHANGED 失败。
+    let deleted = call_android_data(
+        msime_client_dictionary_collections,
+        json!({"options": options, "action": {"operation": "delete", "id": collection_id}}),
+    );
+    assert_eq!(deleted["ok"], true, "{deleted}");
+    loop {
+        let synced = synchronize_collection(&options);
+        assert_eq!(synced["ok"], true, "{synced}");
+        assert_eq!(synced["value"]["failed_count"], 0, "{synced}");
+        if synced["value"]["pending_count"] == 0 {
+            break;
+        }
+    }
+    let remaining: i64 = db
+        .query_row(
+            "SELECT count(*) FROM tbl_2_n WHERE key='ni''hao' AND value='拟好'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(remaining, 0);
+}

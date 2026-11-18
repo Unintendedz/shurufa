@@ -128,13 +128,31 @@ fn default_collection_sync_budget() -> u16 {
     2000
 }
 
-/// `hans` 导入的读音，来自 Engine 的汉字转拼音。
-struct EngineReadings<'a>(&'a EngineOptions);
+/// `hans` 导入的读音与无权重拼音导词的权重标定来源，按需懒加载只读主词库句柄。
+struct EngineReadings<'a> {
+    options: &'a EngineOptions,
+    calibrator: std::sync::OnceLock<msime_engine::host::PinyinWeightCalibrator>,
+}
+
+impl<'a> EngineReadings<'a> {
+    fn new(options: &'a EngineOptions) -> Self {
+        Self {
+            options,
+            calibrator: std::sync::OnceLock::new(),
+        }
+    }
+}
 
 impl HanReadings for EngineReadings<'_> {
     fn pinyin(&self, word: &str) -> Option<String> {
-        let key = msime_engine::host::hanzi_to_pinyin(self.0, word);
+        let key = msime_engine::host::hanzi_to_pinyin(self.options, word);
         (!key.is_empty()).then_some(key)
+    }
+
+    fn calibrated_pinyin_weight(&self, key: &str, word: &str) -> i64 {
+        self.calibrator
+            .get_or_init(|| msime_engine::host::PinyinWeightCalibrator::open(self.options))
+            .calibrated_weight(key, word)
     }
 }
 
@@ -190,7 +208,7 @@ pub unsafe extern "C" fn msime_client_dictionary_collections(
                         directory,
                         PersonalDictionaryStore::new(directory.join("PersonalDictionary")),
                     );
-                    let readings = EngineReadings(&options);
+                    let readings = EngineReadings::new(&options);
                     let view = store
                         .perform(action, Some(&readings))
                         .map_err(|error| error.code().to_owned())?;

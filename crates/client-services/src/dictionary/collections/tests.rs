@@ -1372,3 +1372,104 @@ fn third_party_matches_without_collections_is_empty() {
         .unwrap();
     assert_eq!(view.third_party_matches, Some(Vec::new()));
 }
+
+#[test]
+fn collection_import_calibrates_defaulted_scel_hans_and_tsv_weights_preserving_explicit() {
+    use crate::dictionary::scel::tests::{group, ScelBuilder};
+
+    struct CalibratingReadings;
+    impl HanReadings for CalibratingReadings {
+        fn pinyin(&self, word: &str) -> Option<String> {
+            match word {
+                "低频纯汉" => Some("ce'shi".into()),
+                _ => None,
+            }
+        }
+        fn calibrated_pinyin_weight(&self, key: &str, _word: &str) -> i64 {
+            if key == "ce'shi" {
+                3_199
+            } else {
+                10_000
+            }
+        }
+    }
+
+    let mut fixture = Fixture::new();
+    let scel_bytes = ScelBuilder::new(vec![group(&[0, 1], &["侧室"])]).build();
+    let scel_view = fixture
+        .store
+        .import_scel_with_readings(
+            None,
+            Some("校准细胞"),
+            PersonalWordKind::Pinyin,
+            &scel_bytes,
+            Some(&CalibratingReadings),
+        )
+        .unwrap();
+    let scel_id = id_of(&scel_view, "校准细胞");
+
+    fixture
+        .store
+        .import(ImportRequest {
+            id: None,
+            name: Some("校准纯汉"),
+            kind: PersonalWordKind::Pinyin,
+            format: "hans",
+            text: "低频纯汉\n",
+            readings: Some(&CalibratingReadings),
+        })
+        .unwrap();
+
+    fixture
+        .store
+        .import(ImportRequest {
+            id: None,
+            name: Some("校准文本"),
+            kind: PersonalWordKind::Pinyin,
+            format: "standard",
+            text: "侧石\tce'shi\n显式词\tce'shi\t7777\n新键词\tshi'li\n",
+            readings: Some(&CalibratingReadings),
+        })
+        .unwrap();
+
+    fixture.drain();
+    let id = |key: &str, value: &str| {
+        PersonalWord {
+            kind: PersonalWordKind::Pinyin,
+            key: key.into(),
+            value: value.into(),
+            weight: 0,
+        }
+        .identity()
+    };
+    assert_eq!(
+        fixture.dictionary.get(&id("ce'shi", "侧室")),
+        Some(&3_199),
+        ".scel 无权重词条应按同音键校准"
+    );
+    assert_eq!(
+        fixture.dictionary.get(&id("ce'shi", "低频纯汉")),
+        Some(&3_199),
+        "hans 纯汉词条应按同音键校准"
+    );
+    assert_eq!(
+        fixture.dictionary.get(&id("ce'shi", "侧石")),
+        Some(&3_199),
+        "无权重 TSV 词条应按同音键校准"
+    );
+    assert_eq!(
+        fixture.dictionary.get(&id("ce'shi", "显式词")),
+        Some(&7_777),
+        "显式带权重的 TSV 词条必须保留用户权重"
+    );
+    assert_eq!(
+        fixture.dictionary.get(&id("shi'li", "新键词")),
+        Some(&10_000),
+        "高权或未记录同音键保持缺省 10_000"
+    );
+
+    // 停用集合后，标定权重与索引及同步对账完全一致，可干净撤回。
+    fixture.store.set_enabled(&scel_id, false).unwrap();
+    fixture.drain();
+    assert!(!fixture.dictionary.contains_key(&id("ce'shi", "侧室")));
+}
