@@ -1,0 +1,123 @@
+# Shurufa Stage 0 现代口语、短词、语境同音与历史回归评测集（全合成，无真实隐私数据）。
+# 列：id / 拼音 / 金标准 / 音节数 / 标签 / 上文（可选）
+id	input	gold	syllables	tags	context
+sp-001	sikao	思考	2	spoken-short,emoji-anchor	
+sp-002	kaixin	开心	2	spoken-short,emoji-anchor	
+sp-003	wuyu	无语	2	spoken-short,emoji-anchor	
+sp-004	ganga	尴尬	2	spoken-short,emoji-anchor	
+sp-005	dianzan	点赞	2	spoken-short,emoji-anchor	
+sp-006	jiayou	加油	2	spoken-short,emoji-anchor	
+sp-007	moyu	摸鱼	2	spoken-short,emoji-anchor	
+sp-008	pofang	破防	2	spoken-short,emoji-anchor	
+sp-009	wanan	晚安	2	spoken-short,emoji-anchor	
+sp-010	zaoan	早安	2	spoken-short,emoji-anchor	
+sp-011	shoudao	收到	2	spoken-short,emoji-anchor	
+sp-012	wulian	捂脸	2	spoken-short,emoji-anchor	
+sp-013	chigua	吃瓜	2	spoken-short,emoji-anchor	
+sp-014	xiaoku	笑哭	2	spoken-short,emoji-anchor	
+sp-015	goutou	狗头	2	spoken-short,emoji-anchor	
+sp-016	tangping	躺平	2	spoken-short,emoji-anchor	
+sp-017	bailan	摆烂	2	spoken-short,emoji-anchor	
+sp-018	liekai	裂开	2	spoken-short,emoji-anchor	
+sp-019	bixin	比心	2	spoken-short,emoji-anchor	
+sp-020	naicha	奶茶	2	spoken-short,emoji-anchor	
+sp-021	xinkule	辛苦了	3	spoken-short	
+sp-022	meiwenti	没问题	3	spoken-short	
+sp-023	buhaoyisi	不好意思	4	spoken-short	
+sp-024	bengbuzhu	绷不住	3	spoken-short	
+sp-025	taihaole	太好了	3	spoken-short	
+sp-026	zhenbucuo	真不错	3	spoken-short	
+sp-027	laoban	老板	2	spoken-short	
+sp-028	xiaban	下班	2	spoken-short	
+sp-029	jiaban	加班	2	spoken-short	
+sp-030	daka	打卡	2	spoken-short	
+sp-031	zhidao	知道	2	spoken-short	
+sp-032	zhende	真的	2	spoken-short	
+sp-033	zenme	怎么	2	spoken-short	
+sp-034	zheyang	这样	2	spoken-short	
+sp-035	zhege	这个	2	spoken-short	
+sp-036	zijie	字节	2	spoken-short,tech-work	
+sp-037	doubao	豆包	2	spoken-short,tech-work	
+sp-038	sougou	搜狗	2	spoken-short,tech-work	
+sp-039	weixin	微信	2	spoken-short,tech-work	
+sp-040	shurufa	输入法	3	spoken-short,tech-work	
+sp-041	xugeyuan	许个愿	3	separable-vo	
+sp-042	qinggejia	请个假	3	separable-vo	
+sp-043	jiageban	加个班	3	separable-vo	
+sp-044	chonggedian	充个电	3	separable-vo	
+sp-045	paigedui	排个队	3	separable-vo	
+sp-046	zhuangge	装个	2	spoken-short	
+sp-047	shuilegejiao	睡了个觉	4	separable-vo	
+sp-048	xilegezao	洗了个澡	4	separable-vo	
+sp-049	banglegemang	帮了个忙	4	separable-vo	
+sp-050	zhuangezhang	转个账	3	separable-vo	
+sp-051	tuigekuan	退个款	3	separable-vo	
+sp-052	beigefen	备个份	3	separable-vo	
+sp-053	chiguofan	吃过饭	3	separable-vo	
+sp-054	xiguolian	洗过脸	3	separable-vo	
+sp-055	lougelian	露个脸	3	separable-vo	
+sp-056	huiyi	会议	2	context-homophone	今天下午三点有个重要
+sp-057	huiyi	回忆	2	context-homophone	那段大学时光真是美好的
+sp-058	denglu	登录	2	context-homophone	请先用手机号和验证码
+sp-059	denglu	登陆	2	context-homophone	超强台风预计明天在沿海
+sp-060	zhiding	制定	2	context-homophone	我们需要尽快把今年的工作计划
+sp-061	zhiding	指定	2	context-homophone	你可以选择默认路径或者自己
+sp-062	quanli	权利	2	context-homophone	每个公民都依法享有这项基本
+sp-063	quanli	权力	2	context-homophone	不能把公共资源变成个人手里的
+sp-064	bixu	必须	2	context-homophone	这个安全漏洞今天下班前
+sp-065	bixu	必需	2	context-homophone	水和氧气是人类生存的
+sp-066	qiyong	启用	2	context-homophone	新版本发布后就可以在设置里
+sp-067	fanying	反应	2	context-homophone	按下回车之后界面完全没有
+sp-068	fanying	反映	2	context-homophone	大家最近在群里频繁
+sp-069	duguo	度过	2	context-homophone	祝大家在这里愉快地
+sp-070	duguo	渡过	2	context-homophone	只要团队齐心协力就能顺利
+sp-071	zhongshiguke	重视顾客	4	context-homophone	服务行业最重要的是
+sp-072	zhongshiguke	忠实顾客	4	context-homophone	他来这家店吃了十年算是我们的
+sp-073	tazai	它在	2	pronoun-ta	那台旧电脑已经开机了
+sp-074	tade	它的	2	pronoun-ta	这个输入法很好用但是
+sp-075	tagei	它给	2	pronoun-ta	这个算法太慢了导致
+sp-076	tamen	它们	2	pronoun-ta	这两份配置文件格式一致
+sp-077	bata	把它	2	pronoun-ta	这个临时分支已经合并完了
+sp-078	duita	对它	2	pronoun-ta	这批数据噪声太大我
+sp-079	jintianwanshangchishenme	今天晚上吃什么	7	spoken-sentence	
+sp-080	nidengwoyixiawomashangdao	你等我一下我马上到	9	spoken-sentence	
+sp-081	zhegeshiqingwomenmingtianzailiao	这个事情我们明天再聊	10	spoken-sentence	
+sp-082	wogangcaikanleyixiazhegewenjian	我刚才看了一下这个文件	11	spoken-sentence	
+sp-083	nimennabiantianqizenmeyang	你们那边天气怎么样	9	spoken-sentence	
+sp-084	zhegegongnengyongqilaihaishihenguai	这个功能用起来还是很怪	11	spoken-sentence	
+sp-085	woganjuetabushiyicidaoweide	我感觉它不是一次到位的	11	spoken-sentence	
+sp-086	zheyanggaixiaquzongshidajia	这样改下去总是打架	9	spoken-sentence	
+sp-087	nikanzhegehouxuancipaideyoudianluan	你看这个候选词排得有点乱	12	spoken-sentence	
+sp-088	youshihouyaofanhaojiyecainengzhaodao	有时候要翻好几页才能找到	12	spoken-sentence	
+sp-089	danshiyouyixieshihouyoupaidehenzhun	但是有一些时候又排得很准	12	spoken-sentence	
+sp-090	womenbuxiangzheyangxiuxiububule	我们不想这样修修补补了	11	spoken-sentence	
+sp-091	xianbadicengluojishuliqingchu	先把底层逻辑梳理清楚	10	spoken-sentence	
+sp-092	ranhouyijieduanyijieduantui	然后一阶段一阶段推	9	spoken-sentence	
+sp-093	zhegejiagoutuhaishibijiaoqingxide	这个架构图还是比较清晰的	12	spoken-sentence	
+sp-094	nidexiangfahenyoudaoli	你的想法很有道理	8	spoken-sentence	
+sp-095	woxianqugeishoujichonggedian	我先去给手机充个电	9	spoken-sentence,separable-vo	
+sp-096	mingtianxianggenlaobanqinggejia	明天想跟老板请个假	9	spoken-sentence,separable-vo	
+sp-097	wanshanghepengyouyiqichigefan	晚上和朋友一起吃个饭	10	spoken-sentence,separable-vo	
+sp-098	xiabanhouquchaoshimaidiandongxi	下班后去超市买点东西	10	spoken-sentence	
+sp-099	zhegezhoumowomenqupashanba	这个周末我们去爬山吧	10	spoken-sentence	
+sp-100	biegaodetaiwanlezaodianxiuxi	别搞得太晚了早点休息	10	spoken-sentence	
+sp-101	wobazhegedaimahebingle	我把这个代码合并了	9	spoken-sentence,tech-work	
+sp-102	dengyixiawopaoyixiaceshi	等一下我跑一下测试	9	spoken-sentence,tech-work	
+sp-103	zhegejiekoudebaocuoyoudianqiguai	这个接口的报错有点奇怪	11	spoken-sentence,tech-work	
+sp-104	neicunzhanyongkanqilaihaikeyi	内存占用看起来还可以	10	spoken-sentence,tech-work	
+sp-105	yanchibixukongzhizaishiliuhaomiaoyinei	延迟必须控制在十六毫秒以内	13	spoken-sentence,tech-work	
+sp-106	buxuyaozaitianjiaxindeyuzhile	不需要再添加新的阈值了	11	spoken-sentence,tech-work	
+sp-107	xianzaizhegebanbenmianqiangnengyong	现在这个版本勉强能用	10	spoken-sentence	
+sp-108	woyaoshuruyigebiaoqingfuhao	我要输入一个表情符号	10	spoken-sentence	
+sp-109	zhegecikuqueshiquelejigechangyongci	这个词库确实缺了几个常用词	13	spoken-sentence	
+sp-110	wogangcaidayigeciquefanleliangye	我刚才打一个词却翻了两页	12	spoken-sentence	
+sp-111	zhegedifangkenenghaiyouyigebuding	这个地方可能还有一个补丁	12	spoken-sentence	
+sp-112	niyoumeiyoukandaozuixindefankui	你有没有看到最新的反馈	11	spoken-sentence	
+sp-113	zhegefangankanqilaiwanquankexing	这个方案看起来完全可行	11	spoken-sentence	
+sp-114	womenxianpaoyixiazhibiao	我们先跑一下指标	8	spoken-sentence,tech-work	
+sp-115	kanzheyicigaidongdaodiyoumeiyouxiaoguo	看这一次改动到底有没有效果	13	spoken-sentence,tech-work	
+sp-116	dajiamingtianzaiyiqitaolunyixia	大家明天再一起讨论一下	11	spoken-sentence	
+sp-117	haodewoshoudaolemashangchuli	好的我收到了马上处理	10	spoken-sentence	
+sp-118	buhaoyisigangcaimeikandaoxiaoxi	不好意思刚才没看到消息	11	spoken-sentence	
+sp-119	jintianxinkudajialezaodianhuijia	今天辛苦大家了早点回家	11	spoken-sentence	
+sp-120	meiguanxixiacizhuyijiuxingle	没关系下次注意就行了	10	spoken-sentence	

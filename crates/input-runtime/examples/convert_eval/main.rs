@@ -16,7 +16,7 @@ use metrics::{Bucket, Observation, Report};
 use msime_engine::host::{Command, Session};
 use msime_engine::KeyGrid;
 use msime_input_runtime::{Action, Reranker, Runtime, SentenceModel};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 struct Case {
@@ -46,6 +46,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut segmentation_filter: Option<KeyGrid> = None;
     let mut keyboard_neural = false;
     let mut autocorrect = false;
+    let mut attribution = false;
+    let mut no_settled = false;
+    let mut grammar_model: Option<PathBuf> = None;
+    let mut page_size: u8 = 9;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut index = 0;
@@ -68,6 +72,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--grid" => grid = Some(grid_keys::parse_grid(&take(&mut index)?)?),
             "--keyboard-neural" => keyboard_neural = true,
             "--autocorrect" => autocorrect = true,
+            "--attribution" => attribution = true,
+            "--no-settled" => no_settled = true,
+            "--grammar-model" => grammar_model = Some(PathBuf::from(take(&mut index)?)),
+            "--page-size" => page_size = take(&mut index)?.parse()?,
             // `--grid nine` 的旧写法，verify-local.sh 和笔记里都用过。
             "--nine-key" => grid = Some(KeyGrid::NineKey),
             // 只留全拼切成音节只有一种切法的用例，与九键双拼量的是同一批。
@@ -120,11 +128,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             grid,
             keyboard_neural,
             autocorrect,
+            attribution,
+            no_settled,
+            grammar_model: grammar_model.as_deref(),
+            page_size,
             source_commit: &verified.source_commit,
         },
         &cases,
     )?;
-    let json = render(&report, &cases);
+    let json = render(&report, &cases, attribution);
 
     if let Some(path) = &report_path {
         if let Some(parent) = path.parent() {
@@ -193,7 +205,38 @@ struct EvalConfig<'a> {
     grid: Option<KeyGrid>,
     keyboard_neural: bool,
     autocorrect: bool,
+    attribution: bool,
+    no_settled: bool,
+    grammar_model: Option<&'a Path>,
+    page_size: u8,
     source_commit: &'a str,
+}
+
+/// 一次性读取 `msime-pinyin.db` 所有单字表 `tbl_1_*` 中的汉字集合，供归因区分「字表缺失 OOV」与「可拼出但搜索被剪」。
+fn load_single_chars(resources: &Path) -> Result<HashSet<char>, Box<dyn std::error::Error>> {
+    let path = resources.join("msime-pinyin.db");
+    let conn = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    let mut table_stmt =
+        conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'tbl_1_%'")?;
+    let tables: Vec<String> = table_stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<_, _>>()?;
+    let mut chars = HashSet::new();
+    for table in tables {
+        let mut stmt = conn.prepare(&format!("SELECT value FROM {table}"))?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        for value in rows {
+            let value = value?;
+            let mut iter = value.chars();
+            if let (Some(ch), None) = (iter.next(), iter.next()) {
+                chars.insert(ch);
+            }
+        }
+    }
+    Ok(chars)
 }
 
 fn run(config: &EvalConfig<'_>, cases: &[Case]) -> Result<Report, Box<dyn std::error::Error>> {
@@ -204,8 +247,17 @@ fn run(config: &EvalConfig<'_>, cases: &[Case]) -> Result<Report, Box<dyn std::e
         grid,
         keyboard_neural,
         autocorrect,
+        attribution,
+        no_settled,
+        grammar_model,
+        page_size,
         source_commit,
     } = *config;
+    let single_chars = if attribution {
+        Some(load_single_chars(resources)?)
+    } else {
+        None
+    };
     // Optional JSONL of the real candidate lists, for offline experiments that must not be able
     // to change what the harness measures.
     let mut dumped = String::new();
@@ -240,24 +292,31 @@ fn run(config: &EvalConfig<'_>, cases: &[Case]) -> Result<Report, Box<dyn std::e
     // Measure the shipped path: the host asks for every reading and crops the list itself.
     options.sentence_alternatives = true;
     options.sentence_association.neural_keyboard = keyboard_neural;
+    if let Some(grammar_path) = grammar_model {
+        options.sentence_association.collocation_model = grammar_path.to_path_buf();
+        options.sentence_association.collocation_rerank = true;
+        eprintln!("collocation grammar: {}", grammar_path.display());
+    }
 
     let engine = Session::new(&options)?;
     // page_size is capped at 9 by the runtime, but all_candidates() is not paginated.
-    let mut runtime = Runtime::new(engine, 9)?;
+    let mut runtime = Runtime::new(engine, page_size.clamp(1, 9))?;
     // Measuring the shipped path means measuring it with whatever the resource set contains. The
     // model is optional there, so its absence has to leave these numbers exactly as they were.
     // The settled model, when the resource set ships one. Attaching it here is what lets the eval
     // measure the shipped pair rather than either model alone: the fast one ranks every keystroke
     // and this one ranks once at the end, which is exactly what a host does with its settle timer.
-    let settled_path = resources.join("sentence-model-desktop.safetensors");
-    match std::fs::read(&settled_path) {
-        Ok(bytes) => {
-            runtime.set_settled_reranker(Some(Reranker::new(std::sync::Arc::new(
-                SentenceModel::load(&bytes)?,
-            ))));
-            eprintln!("settling with {}", settled_path.display());
+    if !no_settled {
+        let settled_path = resources.join("sentence-model-desktop.safetensors");
+        match std::fs::read(&settled_path) {
+            Ok(bytes) => {
+                runtime.set_settled_reranker(Some(Reranker::new(std::sync::Arc::new(
+                    SentenceModel::load(&bytes)?,
+                ))));
+                eprintln!("settling with {}", settled_path.display());
+            }
+            Err(_) => eprintln!("no settled model at {}", settled_path.display()),
         }
-        Err(_) => eprintln!("no settled model at {}", settled_path.display()),
     }
     let model_path = resources.join("sentence-model.safetensors");
     match std::fs::read(&model_path) {
@@ -295,6 +354,11 @@ fn run(config: &EvalConfig<'_>, cases: &[Case]) -> Result<Report, Box<dyn std::e
         for byte in input {
             runtime.dispatch(key_action(grid, byte))?;
         }
+        let immediate_candidates = if attribution {
+            Some(runtime.visible_candidates_snapshot())
+        } else {
+            None
+        };
         // The user has stopped typing by the time a case is read, which is when a host fires its
         // settle timer.
         runtime.rerank_settled();
@@ -304,6 +368,15 @@ fn run(config: &EvalConfig<'_>, cases: &[Case]) -> Result<Report, Box<dyn std::e
             .iter()
             .map(|c| (c.text.clone(), c.source))
             .collect();
+        if let (Some(immediate), Some(chars)) =
+            (immediate_candidates.as_deref(), single_chars.as_ref())
+        {
+            let raw_engine = runtime.raw_engine_candidates();
+            let spellable = case.gold.chars().all(|ch| chars.contains(&ch));
+            report
+                .attribution
+                .observe(&case.gold, immediate, &candidates, &raw_engine, spellable);
+        }
         if dump.is_some() {
             let rows: Vec<serde_json::Value> = candidates
                 .iter()
@@ -338,7 +411,7 @@ fn run(config: &EvalConfig<'_>, cases: &[Case]) -> Result<Report, Box<dyn std::e
     Ok(report)
 }
 
-fn render(report: &Report, cases: &[Case]) -> String {
+fn render(report: &Report, cases: &[Case], attribution: bool) -> String {
     let bucket = |b: &Bucket| {
         serde_json::json!({
             "cases": b.cases,
@@ -361,7 +434,7 @@ fn render(report: &Report, cases: &[Case]) -> String {
         .map(|(k, v)| (k.clone(), bucket(v)))
         .collect();
 
-    let value = serde_json::json!({
+    let mut value = serde_json::json!({
         "cases": cases.len(),
         "overall": bucket(&report.overall),
         "by_syllables": by_syllables,
@@ -372,6 +445,42 @@ fn render(report: &Report, cases: &[Case]) -> String {
             "id": f.id, "input": f.input, "gold": f.gold, "top1": f.got, "rank": f.rank,
         })).collect::<Vec<_>>(),
     });
+    if attribution {
+        let a = &report.attribution;
+        let pct = a.percentiles().map(|p| {
+            serde_json::json!({
+                "p50": p.p50,
+                "p90": p.p90,
+                "p95": p.p95,
+                "max": p.max,
+            })
+        });
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert(
+                "attribution".to_string(),
+                serde_json::json!({
+                    "cases": a.cases,
+                    "top1": a.top1,
+                    "page1_not_top1": a.page1_not_top1,
+                    "presentation_demoted_off_page1": a.presentation_demoted_off_page1,
+                    "engine_rank_gt6": a.engine_rank_gt6,
+                    "search_pruned": a.search_pruned,
+                    "dict_oov": a.dict_oov,
+                    "immediate_top1": round(Bucket::rate(a.immediate_top1, a.cases)),
+                    "immediate_top6": round(Bucket::rate(a.immediate_top6, a.cases)),
+                    "settled_top6": round(Bucket::rate(a.settled_top6, a.cases)),
+                    "settled_jitter": {
+                        "flips": a.settled_top1_flips,
+                        "flip_rate": round(Bucket::rate(a.settled_top1_flips, a.cases)),
+                        "rescues": a.settled_top1_rescues,
+                        "regressions": a.settled_top1_regressions,
+                        "lateral": a.settled_top1_lateral,
+                    },
+                    "rank_percentiles": pct,
+                }),
+            );
+        }
+    }
     serde_json::to_string_pretty(&value).unwrap_or_default()
 }
 

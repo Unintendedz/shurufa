@@ -20,7 +20,142 @@ pub fn source_name(source: u8) -> &'static str {
         9 => "fallback",
         10 => "neural-desktop",
         11 => "neural-keyboard",
+        17 => "collocation",
         _ => "unknown",
+    }
+}
+
+/// 分阶段失败归因类别：定位目标词是在词表、搜索还是呈现排座环节掉出首屏（前 6 格）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttributionStage {
+    Top1,
+    Page1NotTop1,
+    PresentationDemotedOffPage1,
+    EngineRankGt6,
+    SearchPruned,
+    DictOov,
+}
+
+#[derive(Default, Clone)]
+pub struct AttributionSummary {
+    pub cases: usize,
+    pub top1: usize,
+    pub page1_not_top1: usize,
+    pub presentation_demoted_off_page1: usize,
+    pub engine_rank_gt6: usize,
+    pub search_pruned: usize,
+    pub dict_oov: usize,
+    pub immediate_top1: usize,
+    pub immediate_top6: usize,
+    pub settled_top6: usize,
+    pub settled_top1_flips: usize,
+    pub settled_top1_rescues: usize,
+    pub settled_top1_regressions: usize,
+    pub settled_top1_lateral: usize,
+    /// 已找到用例的名次样本，用于计算 p50 / p90 / p95 / max。
+    pub found_ranks: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RankPercentiles {
+    pub p50: usize,
+    pub p90: usize,
+    pub p95: usize,
+    pub max: usize,
+}
+
+impl AttributionSummary {
+    pub fn observe(
+        &mut self,
+        gold: &str,
+        immediate: &[(String, u8)],
+        settled: &[(String, u8)],
+        raw_engine: &[(String, u8)],
+        gold_in_dictionary: bool,
+    ) -> AttributionStage {
+        self.cases += 1;
+        let immediate_top1_text = immediate.first().map(|(t, _)| t.as_str()).unwrap_or("");
+        let settled_top1_text = settled.first().map(|(t, _)| t.as_str()).unwrap_or("");
+        let immediate_rank = immediate
+            .iter()
+            .position(|(text, _)| text == gold)
+            .map(|i| i + 1);
+        let settled_rank = settled
+            .iter()
+            .position(|(text, _)| text == gold)
+            .map(|i| i + 1);
+        let raw_rank = raw_engine
+            .iter()
+            .position(|(text, _)| text == gold)
+            .map(|i| i + 1);
+
+        if immediate_rank == Some(1) {
+            self.immediate_top1 += 1;
+        }
+        if immediate_rank.is_some_and(|r| r <= 6) {
+            self.immediate_top6 += 1;
+        }
+        if settled_rank.is_some_and(|r| r <= 6) {
+            self.settled_top6 += 1;
+        }
+        if let Some(rank) = settled_rank {
+            self.found_ranks.push(rank);
+        }
+        if immediate_top1_text != settled_top1_text {
+            self.settled_top1_flips += 1;
+            match (immediate_top1_text == gold, settled_top1_text == gold) {
+                (false, true) => self.settled_top1_rescues += 1,
+                (true, false) => self.settled_top1_regressions += 1,
+                _ => self.settled_top1_lateral += 1,
+            }
+        }
+
+        match settled_rank {
+            Some(1) => {
+                self.top1 += 1;
+                AttributionStage::Top1
+            }
+            Some(2..=6) => {
+                self.page1_not_top1 += 1;
+                AttributionStage::Page1NotTop1
+            }
+            Some(_) => {
+                if raw_rank.is_some_and(|r| r <= 6) {
+                    self.presentation_demoted_off_page1 += 1;
+                    AttributionStage::PresentationDemotedOffPage1
+                } else {
+                    self.engine_rank_gt6 += 1;
+                    AttributionStage::EngineRankGt6
+                }
+            }
+            None => {
+                if gold_in_dictionary {
+                    self.search_pruned += 1;
+                    AttributionStage::SearchPruned
+                } else {
+                    self.dict_oov += 1;
+                    AttributionStage::DictOov
+                }
+            }
+        }
+    }
+
+    pub fn percentiles(&self) -> Option<RankPercentiles> {
+        if self.found_ranks.is_empty() {
+            return None;
+        }
+        let mut sorted = self.found_ranks.clone();
+        sorted.sort_unstable();
+        let at = |pct: usize| -> usize {
+            let idx = (sorted.len() * pct).div_ceil(100).saturating_sub(1);
+            sorted[idx.min(sorted.len() - 1)]
+        };
+        Some(RankPercentiles {
+            p50: at(50),
+            p90: at(90),
+            p95: at(95),
+            max: *sorted.last().unwrap(),
+        })
     }
 }
 
@@ -82,6 +217,7 @@ pub struct Report {
     /// What sat at position 1, by source, whether or not it was correct.
     pub top1_source: BTreeMap<&'static str, usize>,
     pub failures: Vec<Failure>,
+    pub attribution: AttributionSummary,
 }
 
 pub struct Failure {
@@ -248,5 +384,56 @@ mod tests {
         assert_eq!(report.top1_source.get("fallback"), Some(&1));
         assert_eq!(report.overall.top1, 0);
         assert_eq!(report.overall.top5, 1);
+    }
+
+    #[test]
+    fn attribution_classifies_stages_percentiles_and_settled_flips() {
+        let mut summary = AttributionSummary::default();
+        let row = |text: &str| (text.to_string(), 0u8);
+        // 1. 停顿精排把错误首位救回正确首位
+        assert_eq!(
+            summary.observe(
+                "正解",
+                &[row("误选"), row("正解")],
+                &[row("正解"), row("误选")],
+                &[row("误选"), row("正解")],
+                true,
+            ),
+            AttributionStage::Top1
+        );
+        // 2. 引擎原本排在首屏第 2 位，却被呈现排座挤到第 7 位
+        let mut demoted: Vec<(String, u8)> = (1..=6).map(|i| row(&format!("干扰{i}"))).collect();
+        demoted.push(row("掉位"));
+        assert_eq!(
+            summary.observe(
+                "掉位",
+                &demoted,
+                &demoted,
+                &[row("干扰1"), row("掉位")],
+                true,
+            ),
+            AttributionStage::PresentationDemotedOffPage1
+        );
+        // 3. 词表可拼出但被搜索剪掉
+        assert_eq!(
+            summary.observe("被剪", &[row("甲")], &[row("甲")], &[row("甲")], true),
+            AttributionStage::SearchPruned
+        );
+        // 4. 词表缺失
+        assert_eq!(
+            summary.observe("缺词", &[row("甲")], &[row("甲")], &[row("甲")], false),
+            AttributionStage::DictOov
+        );
+        assert_eq!(summary.cases, 4);
+        assert_eq!(summary.top1, 1);
+        assert_eq!(summary.presentation_demoted_off_page1, 1);
+        assert_eq!(summary.search_pruned, 1);
+        assert_eq!(summary.dict_oov, 1);
+        assert_eq!(summary.settled_top1_flips, 1);
+        assert_eq!(summary.settled_top1_rescues, 1);
+        assert_eq!(summary.settled_top1_regressions, 0);
+        let pct = summary.percentiles().unwrap();
+        assert_eq!(pct.p50, 1);
+        assert_eq!(pct.max, 7);
     }
 }

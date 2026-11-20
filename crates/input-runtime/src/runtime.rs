@@ -1671,6 +1671,42 @@ impl<E: InputEngine> Runtime<E> {
         }
     }
 
+    /// 返回当前可见呈现顺序下的候选文本与来源，不触发引擎尾页展开或状态变更，供离线评测记录首绘结果。
+    pub fn visible_candidates_snapshot(&self) -> Vec<(String, u8)> {
+        let visible = self.visible_len();
+        self.cached
+            .candidates
+            .iter()
+            .zip(&self.cached.candidate_sources)
+            .take(visible)
+            .map(|(text, source)| (text.clone(), *source))
+            .collect()
+    }
+
+    /// 还原最近一次快照在引擎侧的原始候选顺序（早于 runtime 逐键重排、次选降位与停顿精排），供离线归因评测定位掉位阶段。
+    pub fn raw_engine_candidates(&self) -> Vec<(String, u8)> {
+        let count = self.cached.candidates.len();
+        if self.engine_order.len() != count {
+            return self
+                .cached
+                .candidates
+                .iter()
+                .zip(&self.cached.candidate_sources)
+                .map(|(text, source)| (text.clone(), *source))
+                .collect();
+        }
+        let mut raw = vec![(String::new(), 0u8); count];
+        for (seat, &engine_index) in self.engine_order.iter().enumerate() {
+            if let Some(slot) = raw.get_mut(engine_index) {
+                *slot = (
+                    self.cached.candidates[seat].clone(),
+                    self.cached.candidate_sources[seat],
+                );
+            }
+        }
+        raw
+    }
+
     /// 视图里这一行的文字：光标后编辑的首选前面接上固定的那段（`EngineSnapshot::caret_edit_prefix`），其余照旧。runtime 在本模式里不重排，所以首位就是引擎的首行。
     fn displayed_candidate_text(&self, index: usize, text: &str) -> String {
         let text = self.multilingual_candidate(index, text);
