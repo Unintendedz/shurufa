@@ -73,7 +73,13 @@ count INTEGER NOT NULL CHECK(count>0),\
 PRIMARY KEY(earlier,previous,word)) WITHOUT ROWID;\
 CREATE INDEX IF NOT EXISTS personal_trigram_word ON personal_trigram(word);\
 CREATE TABLE IF NOT EXISTS quick_phrase_slots(\
-code TEXT PRIMARY KEY,slot INTEGER NOT NULL CHECK(slot>=0));";
+code TEXT PRIMARY KEY,slot INTEGER NOT NULL CHECK(slot>=0));\
+CREATE TABLE IF NOT EXISTS personal_selection_events(\
+id INTEGER PRIMARY KEY AUTOINCREMENT,\
+entry_key TEXT NOT NULL,\
+value TEXT NOT NULL,\
+selected_at INTEGER NOT NULL DEFAULT(unixepoch()));\
+CREATE INDEX IF NOT EXISTS personal_selection_events_key ON personal_selection_events(entry_key,value);";
 
 /// J:96-102. A ranking change on a user word keeps `user_inserted = 1`, so the conflict branch leaves that column alone.
 pub(crate) const UPSERT_JOURNAL_SQL: &str = "INSERT INTO user_dictionary_operations(dictionary,key,value,operation,weight,display) VALUES(?1,?2,?3,'upsert',?4,?5) ON CONFLICT(dictionary,key,value) DO UPDATE SET operation='upsert',weight=excluded.weight, display=excluded.display,updated_at=unixepoch()";
@@ -376,7 +382,7 @@ pub fn record_user_insert(
 }
 
 /// The existing journal, or `None` when there is none yet; for lookups that must answer false rather than create the file.
-fn existing_journal(user_db: &Path) -> Option<JournalConnection> {
+pub(super) fn existing_journal(user_db: &Path) -> Option<JournalConnection> {
     if !user_db.try_exists().unwrap_or(false) {
         return None;
     }

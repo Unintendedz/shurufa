@@ -47,6 +47,13 @@ use crate::zhuyin::scheme::ZhuyinKey;
 /// The weight an English word typed out and committed raw enters `msime-english.db` with (user_dictionary_journal.h:137).
 const ENTERED_ENGLISH_WORD_WEIGHT: i64 = 10;
 
+/// 最近一次写入独立个人叠加层事件表的记录，供上屏后紧接退格删光整段词时确定性回滚。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct LastOverlayLearning {
+    pub event_id: i64,
+    pub remaining_chars: usize,
+}
+
 /// A phrase being composed from consecutive partial selections.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(super) struct CreatingWordProgress {
@@ -84,6 +91,10 @@ pub(super) struct InputSession {
     pub chinese_punctuation_enabled: bool,
     pub punctuation_lock: i32,
     pub learning_enabled: bool,
+    /// Shurufa 独立个人学习叠加层：用衰减事件表替代直接改写主词库静态权重。
+    pub decoupled_personal_learning: bool,
+    /// 最近一次刚写入独立事件表的选词记录，紧接退格删光后立即删除该事件。
+    pub last_overlay_learning: Option<LastOverlayLearning>,
     /// 回车上屏英文拼写时是否学进英文词库（`SessionOptions::learn_english_on_enter`）。
     pub learn_english_on_enter: bool,
     pub personal_context_enabled: bool,
@@ -206,6 +217,8 @@ impl InputSession {
             chinese_punctuation_enabled: true,
             punctuation_lock: 0,
             learning_enabled: true,
+            decoupled_personal_learning: options.decoupled_personal_learning,
+            last_overlay_learning: None,
             learn_english_on_enter: options.learn_english_on_enter,
             personal_context_enabled: true,
             punctuation: PunctuationPolicy::default(),
@@ -341,8 +354,9 @@ impl InputSession {
 
     /// input_session.cpp:88-245: caret insertion, dedicated English, local modes and their Shift entries, the acceptance gate, then the scheme. Handled iff the preedit changed.
     pub fn handle_character(&mut self, value: u8, shift_only: bool) -> KeyResult {
-        // 任何实际字符输入都会使“退格撤销最近引号”失效；否则引号后输入一段拼音再退格，可能误撤销更早的引号。
+        // 任何实际字符输入都会使“退格撤销最近引号”与“退格回滚刚上屏学习事件”失效。
         self.punctuation.clear_quote_undo();
+        self.last_overlay_learning = None;
         self.exit_date_time_menu();
         let result = self
             .stroke_filter_character(value)
@@ -974,8 +988,14 @@ impl InputSession {
         self.end_uppercase_run();
         if !self.has_composition() {
             match command {
-                Command::Backspace => self.punctuation.undo_last_quote(),
-                _ => self.punctuation.clear_quote_undo(),
+                Command::Backspace => {
+                    self.punctuation.undo_last_quote();
+                    self.step_overlay_learning_backspace();
+                }
+                _ => {
+                    self.punctuation.clear_quote_undo();
+                    self.last_overlay_learning = None;
+                }
             }
             // With nothing composed every command is left to the host, which edits the text, moves the caret or inserts a newline, so the chain no longer ends where the host's text does.
             self.chain.reset();
@@ -1183,6 +1203,7 @@ impl InputSession {
 
     /// 组字接收的符号先回到字符入口；`/` 和 `@` 仅经字符入口开启模式，避免 runtime 结束组字后的空状态被误当成空闲输入。
     pub fn handle_punctuation(&mut self, value: u8) -> KeyResult {
+        self.last_overlay_learning = None;
         self.exit_date_time_menu();
         if let Some(result) = self.helpcode_character(value) {
             return result;

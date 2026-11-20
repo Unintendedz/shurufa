@@ -7,6 +7,7 @@ pub mod generation;
 pub mod habits;
 pub mod journal;
 pub mod ngram_store;
+pub mod overlay;
 pub mod personal;
 pub mod picks;
 pub mod positions;

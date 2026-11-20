@@ -222,17 +222,16 @@ pub(crate) fn pinned_value(journal: &Connection, context: &str) -> Result<Option
 
 /// Never creates the journal (J:682-694).
 pub fn is_pinned_candidate(user_db: &Path, context: &str, value: &str) -> bool {
-    // A lookup must not create the journal.
-    if !user_db.try_exists().unwrap_or(false) {
-        return false;
+    pinned_candidate_for(user_db, context).as_deref() == Some(value)
+}
+
+/// 读取当前上下文手动置顶的词；日志不存在或读取失败时返回 `None`，绝不创建日志文件。
+pub fn pinned_candidate_for(user_db: &Path, context: &str) -> Option<String> {
+    if context.is_empty() || !user_db.try_exists().unwrap_or(false) {
+        return None;
     }
-    let Ok(journal) = open_journal(user_db) else {
-        return false;
-    };
-    journal
-        .prepare_cached("SELECT 1 FROM pinned_candidates WHERE context_key=?1 AND value=?2")
-        .and_then(|mut statement| statement.exists(params![context, value]))
-        .unwrap_or(false)
+    let journal = open_journal(user_db).ok()?;
+    pinned_value(&journal, context).ok().flatten()
 }
 
 #[cfg(test)]

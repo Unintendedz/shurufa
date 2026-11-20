@@ -5384,6 +5384,7 @@ fn real_engine_options(root: &std::path::Path) -> msime_engine::host::EngineOpti
         caret_edit_suffix: false,
         tab_stroke_filter: false,
         learning: false,
+        decoupled_personal_learning: false,
         learn_english_on_enter: true,
         next_word_prediction: false,
         autocorrect_transposition: true,

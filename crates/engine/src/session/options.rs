@@ -63,6 +63,9 @@ pub struct SessionOptions {
     /// 中文标点下引号键和方头括号键出哪一组字，缺省是弯引号、实心括号。
     pub punctuation_marks: PunctuationMarks,
     pub learning: bool,
+    /// Shurufa 独立个人学习叠加层（Stage 4）：绝不改写主词库静态 `weight`，
+    /// 改为在 `msime_user.db` 记录 30 天半衰期衰减事件并按贝叶斯后验实时叠加排序。
+    pub decoupled_personal_learning: bool,
     /// 回车上屏英文拼写时是否把它学进英文词库（Windows `input.enter_learns_english_word`，出厂为开）。
     pub learn_english_on_enter: bool,
     /// Hand back every whole-sentence reading instead of only the best. A host that sets this must reorder and crop them itself.
@@ -141,6 +144,7 @@ impl SessionOptions {
             punctuation_lock: 0,
             punctuation_marks: PunctuationMarks::default(),
             learning: true,
+            decoupled_personal_learning: false,
             learn_english_on_enter: true,
             sentence_alternatives: false,
             first_page_rows: DEFAULT_FIRST_PAGE_ROWS,

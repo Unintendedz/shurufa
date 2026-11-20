@@ -69,6 +69,8 @@ pub struct EngineOptions {
     /// 独立粤语双拼入口强制解释同形两键码；其余入口为 false。
     pub force_cantonese_shuangpin: bool,
     pub learning: bool,
+    /// Shurufa 独立个人学习叠加层（`SessionOptions::decoupled_personal_learning`）。
+    pub decoupled_personal_learning: bool,
     /// 回车上屏英文拼写时是否学进英文词库（`SessionOptions::learn_english_on_enter`）。参照实现出厂为开。
     pub learn_english_on_enter: bool,
     /// 上屏后联想；默认关闭，宿主只在支持空闲候选的键盘上启用。
@@ -241,6 +243,7 @@ pub fn prepare_options_for(
         caret_edit_suffix: false,
         tab_stroke_filter: false,
         learning: false,
+        decoupled_personal_learning: false,
         learn_english_on_enter: true,
         next_word_prediction: false,
         autocorrect_transposition: false,
@@ -370,6 +373,7 @@ pub fn session_options(options: &EngineOptions) -> Result<SessionOptions> {
     session.stroke_dictionary = PathBuf::from(&options.stroke_dictionary);
     session.japanese_dictionary = PathBuf::from(&options.japanese_dictionary);
     session.learning = options.learning;
+    session.decoupled_personal_learning = options.decoupled_personal_learning;
     session.learn_english_on_enter = options.learn_english_on_enter;
     session.next_word_prediction = options.next_word_prediction;
     session.autocorrect_types = autocorrect_types;

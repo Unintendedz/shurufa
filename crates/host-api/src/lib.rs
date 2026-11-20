@@ -869,6 +869,7 @@ impl HostSession {
         options.caret_edit_suffix = caret_edit_suffix_applies(&preferences);
         options.tab_stroke_filter = tab_stroke_filter_applies(&preferences, self.edition);
         options.learning = preferences.learning;
+        options.decoupled_personal_learning = self.edition.id == "shurufa";
         options.next_word_prediction =
             preferences.next_word_prediction && cfg!(target_os = "android");
         options.learn_english_on_enter = preferences.enter_learns_english_word;
@@ -2256,6 +2257,7 @@ impl HostOptions {
             caret_edit_suffix: caret_edit_suffix_applies(&self.preferences),
             tab_stroke_filter: tab_stroke_filter_applies(&self.preferences, edition),
             learning: self.preferences.learning,
+            decoupled_personal_learning: edition.id == "shurufa",
             learn_english_on_enter: self.preferences.enter_learns_english_word,
             next_word_prediction: self.preferences.next_word_prediction
                 && cfg!(target_os = "android"),

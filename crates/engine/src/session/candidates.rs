@@ -19,9 +19,10 @@ use crate::types::{
     LocalInputMode, PersonalDictionaryKind, SchemeType, WordItem,
 };
 use crate::user_dictionary::journal::has_matching_user_weight;
+use crate::user_dictionary::overlay::{apply_personal_overlay, unix_now_seconds};
 use crate::user_dictionary::positions::{
     apply_fixed_positions_with_state, clear_fixed_position, is_pinned_candidate,
-    record_pinned_candidate, set_fixed_position,
+    pinned_candidate_for, record_pinned_candidate, set_fixed_position,
 };
 use crate::user_dictionary::ranking::candidate_dictionary_key;
 use crate::user_dictionary::removal::delete_dictionary_candidate;
@@ -144,6 +145,26 @@ impl InputSession {
             }
         }
         self.personal_reranked = false;
+        let mut overlay_leader_protected = false;
+        // Shurufa 独立个人学习叠加层（Stage 4）：在不修改静态权重的前提下，按 30 天衰减明确选择事件与
+        // 贝叶斯平滑先验重排同音词典行，并把 `pinned_candidates` 作为 L4 硬约束锁定在第 0 位。
+        if self.decoupled_personal_learning
+            && self.local_mode == LocalInputMode::None
+            && !self.dedicated_english
+            && !self.prefix_active
+            && self.scheme().is_pinyin()
+        {
+            let entry_key = self.pinyin_ranking_context();
+            let pinned = pinned_candidate_for(self.journal_path(), &entry_key);
+            let outcome = apply_personal_overlay(
+                self.journal_path(),
+                &entry_key,
+                pinned.as_deref(),
+                &mut decoded,
+                unix_now_seconds(),
+            );
+            overlay_leader_protected = outcome.leader_protected;
+        }
         // 日文整段转换只算一次：个人上下文重排生效时下面要混排两张表。
         let japanese = self.mixed_japanese_conversion();
         self.multilingual_conversion = self.query_multilingual();
@@ -162,13 +183,14 @@ impl InputSession {
                         self.prefix_active || self.selection_completes_composition(row)
                     },
                     &mut |leader: &str| {
-                        Self::leader_is_pinned_or_user_weighted(
-                            journal,
-                            &context,
-                            self.frequency.mode,
-                            &decoded,
-                            leader,
-                        )
+                        overlay_leader_protected
+                            || Self::leader_is_pinned_or_user_weighted(
+                                journal,
+                                &context,
+                                self.frequency.mode,
+                                &decoded,
+                                leader,
+                            )
                     },
                 )
             }

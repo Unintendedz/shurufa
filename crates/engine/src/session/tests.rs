@@ -14213,5 +14213,102 @@ fn shurufa_short_prefix_completion_handles_uppercase_lowercase_and_helpcode_boun
     );
 }
 
+#[test]
+fn decoupled_personal_learning_overlay_protects_static_weights_recalls_rare_nouns_and_undoes_on_backspace(
+) {
+    let fixture = Fixture::new(
+        "CREATE TABLE tbl_2_y(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_2_y VALUES('yi''ge','yg','一个',508964);\
+         INSERT INTO tbl_2_y VALUES('yi''ge','yg','一格',20030);\
+         INSERT INTO tbl_2_y VALUES('yi''ge','yg','一哥',15000);\
+         INSERT INTO tbl_2_y VALUES('yi''ge','yg','衣阁',5000);\
+         INSERT INTO tbl_2_y VALUES('yi''ge','yg','移格',3000);\
+         INSERT INTO tbl_2_y VALUES('yi''ge','yg','艺阁',2000);\
+         INSERT INTO tbl_2_y VALUES('yi''ge','yg','依格',1000);\
+         INSERT INTO tbl_2_y VALUES('yi''ge','yg','义戈',50);",
+    );
+    let mut session = fixture.session_with(|options| {
+        options.learning = true;
+        options.decoupled_personal_learning = true;
+        options.frequency.mode = FrequencyAdjustmentMode::Promote;
+        options.frequency.trigger_count = 1;
+    });
+
+    let static_weight_of = |word: &str| -> i64 {
+        let conn =
+            rusqlite::Connection::open(fixture.path().join(assets::MAIN_DICTIONARY)).unwrap();
+        conn.query_row(
+            "SELECT weight FROM tbl_2_y WHERE key='yi''ge' AND value=?1",
+            [word],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+
+    // 1. 空格接受原首位「一个」不记录明确改选事件，静态权重保持不变。
+    type_text(&mut session, "yige");
+    assert_eq!(words(&session)[0], "一个");
+    assert_eq!(words(&session)[7], "义戈");
+    assert_eq!(session.select(0).commit.as_deref(), Some("一个"));
+    assert_eq!(static_weight_of("一个"), 508_964);
+    assert_eq!(static_weight_of("义戈"), 50);
+
+    // 2. 首次明确选择冷门专名「义戈」：不击穿高频核心词「一个」，且下次同码「义戈」立即升入首屏第 2 位。
+    type_text(&mut session, "yige");
+    assert_eq!(
+        select_word(&mut session, "义戈").commit.as_deref(),
+        Some("义戈")
+    );
+    // 紧接退格删光刚上屏的 2 个字：确定性回滚该次学习事件！
+    assert!(!session.command(Command::Backspace).handled);
+    assert!(!session.command(Command::Backspace).handled);
+    type_text(&mut session, "yige");
+    assert_eq!(words(&session)[0], "一个");
+    assert_eq!(words(&session)[7], "义戈");
+    session.command(Command::Cancel);
+
+    // 3. 再次明确选择「义戈」一次且不退格：「一个」仍守第 1 位，「义戈」首屏召回到第 2 位，且主库静态权重纹丝不动。
+    type_text(&mut session, "yige");
+    assert_eq!(
+        select_word(&mut session, "义戈").commit.as_deref(),
+        Some("义戈")
+    );
+    type_text(&mut session, "yige");
+    assert_eq!(&words(&session)[..2], ["一个", "义戈"]);
+    assert_eq!(static_weight_of("义戈"), 50);
+    session.command(Command::Cancel);
+
+    // 4. 累计 3 次明确选择「义戈」后，后验质量超过「一个」并自然升至首位；再显式置顶「一个」作为 L4 硬约束立即锁定首位。
+    for _ in 0..2 {
+        type_text(&mut session, "yige");
+        assert_eq!(
+            select_word(&mut session, "义戈").commit.as_deref(),
+            Some("义戈")
+        );
+    }
+    type_text(&mut session, "yige");
+    assert_eq!(words(&session)[0], "义戈");
+    assert_eq!(static_weight_of("义戈"), 50);
+    // 显式置顶「一个」（此刻在第 2 位，下标 1）作为 L4 硬约束。
+    let pin_idx = words(&session).iter().position(|w| w == "一个").unwrap();
+    session.pin(pin_idx);
+    session.command(Command::Cancel);
+    type_text(&mut session, "yige");
+    assert_eq!(words(&session)[0], "一个");
+    // 主词库静态权重全程零改写！
+    assert_eq!(static_weight_of("一个"), 508_964);
+    assert_eq!(static_weight_of("义戈"), 50);
+
+    // 5. 显式撤销接口可立刻撤销最近一次明确选词事件。
+    session.command(Command::Cancel);
+    type_text(&mut session, "yige");
+    assert_eq!(
+        select_word(&mut session, "一格").commit.as_deref(),
+        Some("一格")
+    );
+    assert!(session.undo_last_personal_learning());
+    assert!(!session.undo_last_personal_learning());
+}
+
 mod caret_suffix;
 mod stroke_filter;

@@ -23,6 +23,9 @@ use crate::types::{
     PersonalDictionaryKind, WordItem,
 };
 use crate::user_dictionary::journal::is_user_deleted;
+use crate::user_dictionary::overlay::{
+    delete_personal_selection_event, record_personal_selection, unix_now_seconds,
+};
 use crate::user_dictionary::picks::{clear_pick_transition, record_pick_transition};
 use crate::user_dictionary::ranking::{
     adjust_candidate_ranking, adjust_english_candidate_ranking, learn_quick_phrase_bypass,
@@ -88,6 +91,28 @@ fn clone_matching_rows(
 }
 
 impl InputSession {
+    /// 上屏后紧接空闲退格时递减刚上屏字数；删光整段即确定性回滚对应的个人学习事件。
+    pub(super) fn step_overlay_learning_backspace(&mut self) {
+        let Some(mut last) = self.last_overlay_learning else {
+            return;
+        };
+        last.remaining_chars = last.remaining_chars.saturating_sub(1);
+        if last.remaining_chars == 0 {
+            let _ = delete_personal_selection_event(self.journal_path(), last.event_id);
+            self.last_overlay_learning = None;
+        } else {
+            self.last_overlay_learning = Some(last);
+        }
+    }
+
+    /// 显式撤销最近一次独立个人学习叠加层写入的选词事件。
+    pub(super) fn undo_last_personal_learning(&mut self) -> bool {
+        let Some(last) = self.last_overlay_learning.take() else {
+            return false;
+        };
+        delete_personal_selection_event(self.journal_path(), last.event_id).unwrap_or(false)
+    }
+
     /// input_session.cpp:1274-1319; `index` is in ranking order.
     pub(super) fn learn_candidate(&mut self, index: usize) -> Option<String> {
         // 五笔的临时拼音反查只是查编码：选中的拼音词不调词频、不记整句，免得一次查询改了拼音的排序。
@@ -276,6 +301,35 @@ impl InputSession {
         } else {
             selected.canonical_pinyin.as_str()
         };
+        // Shurufa 独立个人学习叠加层（Stage 4）：绝不改写主词库 `msime-pinyin.db` 静态权重；
+        // 显式手动置顶仅由调用方写 `pinned_candidates` 作为 L4 硬约束；
+        // 普通明确改选则追加一条带时间戳的事件至 `personal_selection_events` 并登记紧接退格回滚句柄。
+        if self.decoupled_personal_learning && !wubi_row && !super_jianpin {
+            if force_top || options.mode == FrequencyAdjustmentMode::Pin {
+                return None;
+            }
+            if options.mode == FrequencyAdjustmentMode::Disabled {
+                return None;
+            }
+            let selected_word = selected.word.clone();
+            let entry_key_owned = entry_key.to_owned();
+            let user_db_owned = user_db.to_path_buf();
+            match record_personal_selection(
+                &user_db_owned,
+                &entry_key_owned,
+                &selected_word,
+                unix_now_seconds(),
+            ) {
+                Ok(event_id) => {
+                    self.last_overlay_learning = Some(super::input::LastOverlayLearning {
+                        event_id,
+                        remaining_chars: count_utf8_chars(&selected_word).max(1),
+                    });
+                    return None;
+                }
+                Err(_) => return Some(diagnostics::FREQUENCY_NOT_PERSISTED.to_owned()),
+            }
+        }
         let mixed_wubi = self.is_wubi();
         let ranked_storage;
         let ranked = if mixed_wubi {

@@ -534,7 +534,13 @@ impl Session {
     /// Forget the committed-word context (focus or application change, host-inserted text).
     pub fn reset_context(&mut self) {
         self.prediction.clear();
+        self.input.last_overlay_learning = None;
         self.input.reset_commit_context();
+    }
+
+    /// 显式撤销最近一次独立个人学习叠加层记录的选词事件；无待撤销记录时返回 `false`。
+    pub fn undo_last_personal_learning(&mut self) -> bool {
+        self.input.undo_last_personal_learning()
     }
 
     /// 宿主的即时隐私门禁；关闭时清掉建议，用户偏好仍保留。
