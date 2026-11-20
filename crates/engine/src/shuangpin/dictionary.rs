@@ -442,9 +442,8 @@ impl ShuangpinDictionary {
         if has_collocation {
             let db = self.collocation_db.as_ref().expect("collocation db loaded");
             let config = association.collocation_grammar;
-            scorer = move |tail: &str, word: &str, is_rear: bool| {
-                db.query(tail, word, is_rear, &config) * std::f64::consts::LOG10_E
-            };
+            scorer =
+                move |tail: &str, word: &str, is_rear: bool| db.query(tail, word, is_rear, &config);
             options.collocation_scorer = Some(&scorer);
             options.collocation_weight = association.collocation_weight;
         }
@@ -507,9 +506,8 @@ impl ShuangpinDictionary {
         if has_collocation {
             let db = self.collocation_db.as_ref().expect("collocation db loaded");
             let config = association.collocation_grammar;
-            scorer = move |tail: &str, word: &str, is_rear: bool| {
-                db.query(tail, word, is_rear, &config) * std::f64::consts::LOG10_E
-            };
+            scorer =
+                move |tail: &str, word: &str, is_rear: bool| db.query(tail, word, is_rear, &config);
             options.collocation_scorer = Some(&scorer);
             options.collocation_weight = association.collocation_weight;
         }

@@ -49,9 +49,7 @@ fn a_gram_model_corrects_the_frequency_winner() {
 
     let db = fixture_db(dir.path());
     let config = GramConfig::default();
-    let scorer = |tail: &str, word: &str, is_rear: bool| {
-        db.query(tail, word, is_rear, &config) * std::f64::consts::LOG10_E
-    };
+    let scorer = |tail: &str, word: &str, is_rear: bool| db.query(tail, word, is_rear, &config);
     let scored = decode_with(&rows, Some(&scorer), 1.0);
     assert_eq!(
         scored[0].sentence, "一名医生",
@@ -91,9 +89,7 @@ fn missing_or_corrupt_gram_falls_back_to_baseline() {
     let db = GramDb::shared(&missing);
     let config = GramConfig::default();
     let scorer = db.map(|db| {
-        move |tail: &str, word: &str, is_rear: bool| {
-            db.query(tail, word, is_rear, &config) * std::f64::consts::LOG10_E
-        }
+        move |tail: &str, word: &str, is_rear: bool| db.query(tail, word, is_rear, &config)
     });
     let scorer = scorer.as_ref().map(|f| f as &CollocationScorer<'_>);
     let fallen = decode_with(&rows, scorer, 1.0);
@@ -152,9 +148,7 @@ fn a_real_baguwen_model_corrects_the_frequency_winner() {
     }
     let db = GramDb::shared(Path::new(path)).expect("real .gram loads");
     let config = GramConfig::default();
-    let scorer = |tail: &str, word: &str, is_rear: bool| {
-        db.query(tail, word, is_rear, &config) * std::f64::consts::LOG10_E
-    };
+    let scorer = |tail: &str, word: &str, is_rear: bool| db.query(tail, word, is_rear, &config);
     let rows = table(&[
         ("bei'jing", &[("北京", 10_000)]),
         ("da'xue", &[("大学", 1_000), ("大雪", 2_000)]),
@@ -190,9 +184,7 @@ fn a_stiffer_collocation_penalty_surrenders_to_the_frequency_winner() {
         collocation_penalty: -30.0,
         ..GramConfig::default()
     };
-    let scorer = |tail: &str, word: &str, is_rear: bool| {
-        db.query(tail, word, is_rear, &config) * std::f64::consts::LOG10_E
-    };
+    let scorer = |tail: &str, word: &str, is_rear: bool| db.query(tail, word, is_rear, &config);
     let scored = decode_with(&rows, Some(&scorer), 1.0);
     assert_eq!(
         scored[0].sentence, "一名一生",

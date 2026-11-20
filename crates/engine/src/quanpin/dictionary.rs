@@ -1327,14 +1327,13 @@ impl QuanpinDictionary {
             options.preceding_context = crate::text::trailing_han_clause(&self.rescoring_context);
         }
         // 搭配项逐边叠加字级搭配分，与二元/三元在同一 Viterbi 里竞争；
-        // query() 是自然对数域，乘 LN_TO_LOG10 换到主分的域。
+        // `GramDb::query()` 与词网格主分同为自然对数域，直接相加不再乘 `LOG10_E`。
         let scorer;
         if has_collocation {
             let db = self.collocation_db.as_ref().expect("collocation db loaded");
             let config = association.collocation_grammar;
-            scorer = move |tail: &str, word: &str, is_rear: bool| {
-                db.query(tail, word, is_rear, &config) * std::f64::consts::LOG10_E
-            };
+            scorer =
+                move |tail: &str, word: &str, is_rear: bool| db.query(tail, word, is_rear, &config);
             options.collocation_scorer = Some(&scorer);
             options.collocation_weight = association.collocation_weight;
         }

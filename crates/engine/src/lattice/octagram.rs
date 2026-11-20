@@ -27,8 +27,8 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use lru::LruCache;
 use memmap2::{Mmap, MmapOptions};
 
-/// `query` 返回自然对数域的搭配强度；词格主分是 log10 口径，装配方乘
-/// `f64::consts::LOG10_E`（= 1/ln(10)）换域，weight 才是纯标定系数。
+/// `query` 返回自然对数域的搭配强度，与词网格的自然对数主分同域；
+/// `collocation_weight` 为纯标定系数，不再乘 `LOG10_E`。
 /// 打分参数。默认 = 万象现行（`wanxiang.schema.yaml` 的 6/2/-14/-6/-100/-18），
 /// 与旧版出厂模板 `config.default.toml` 的 `[association]` 键一致。octagram
 /// 自身默认 `collocation_max_length=4`、`collocation_min_length=3`、

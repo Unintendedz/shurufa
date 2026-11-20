@@ -48,7 +48,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut autocorrect = false;
     let mut attribution = false;
     let mut no_settled = false;
+    let mut no_neural = false;
     let mut grammar_model: Option<PathBuf> = None;
+    let mut collocation_weight: Option<f64> = None;
     let mut page_size: u8 = 9;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -74,7 +76,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--autocorrect" => autocorrect = true,
             "--attribution" => attribution = true,
             "--no-settled" => no_settled = true,
+            "--no-neural" => no_neural = true,
             "--grammar-model" => grammar_model = Some(PathBuf::from(take(&mut index)?)),
+            "--collocation-weight" => collocation_weight = Some(take(&mut index)?.parse()?),
             "--page-size" => page_size = take(&mut index)?.parse()?,
             // `--grid nine` 的旧写法，verify-local.sh 和笔记里都用过。
             "--nine-key" => grid = Some(KeyGrid::NineKey),
@@ -129,8 +133,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             keyboard_neural,
             autocorrect,
             attribution,
-            no_settled,
+            no_settled: no_settled || no_neural,
+            no_neural,
             grammar_model: grammar_model.as_deref(),
+            collocation_weight,
             page_size,
             source_commit: &verified.source_commit,
         },
@@ -207,7 +213,9 @@ struct EvalConfig<'a> {
     autocorrect: bool,
     attribution: bool,
     no_settled: bool,
+    no_neural: bool,
     grammar_model: Option<&'a Path>,
+    collocation_weight: Option<f64>,
     page_size: u8,
     source_commit: &'a str,
 }
@@ -249,7 +257,9 @@ fn run(config: &EvalConfig<'_>, cases: &[Case]) -> Result<Report, Box<dyn std::e
         autocorrect,
         attribution,
         no_settled,
+        no_neural,
         grammar_model,
+        collocation_weight,
         page_size,
         source_commit,
     } = *config;
@@ -291,11 +301,18 @@ fn run(config: &EvalConfig<'_>, cases: &[Case]) -> Result<Report, Box<dyn std::e
     options.local_temporary_japanese = false;
     // Measure the shipped path: the host asks for every reading and crops the list itself.
     options.sentence_alternatives = true;
-    options.sentence_association.neural_keyboard = keyboard_neural;
+    options.sentence_association.neural_keyboard = keyboard_neural && !no_neural;
     if let Some(grammar_path) = grammar_model {
         options.sentence_association.collocation_model = grammar_path.to_path_buf();
         options.sentence_association.collocation_rerank = true;
-        eprintln!("collocation grammar: {}", grammar_path.display());
+        if let Some(w) = collocation_weight {
+            options.sentence_association.collocation_weight = w;
+        }
+        eprintln!(
+            "collocation grammar: {} (weight={})",
+            grammar_path.display(),
+            options.sentence_association.collocation_weight
+        );
     }
 
     let engine = Session::new(&options)?;
@@ -318,17 +335,19 @@ fn run(config: &EvalConfig<'_>, cases: &[Case]) -> Result<Report, Box<dyn std::e
             Err(_) => eprintln!("no settled model at {}", settled_path.display()),
         }
     }
-    let model_path = resources.join("sentence-model.safetensors");
-    match std::fs::read(&model_path) {
-        Ok(bytes) => {
-            let model = SentenceModel::load(&bytes)?;
-            eprintln!("reranking with {}", model_path.display());
-            runtime.set_reranker(Some(Reranker::new(std::sync::Arc::new(model))));
+    if !no_neural {
+        let model_path = resources.join("sentence-model.safetensors");
+        match std::fs::read(&model_path) {
+            Ok(bytes) => {
+                let model = SentenceModel::load(&bytes)?;
+                eprintln!("reranking with {}", model_path.display());
+                runtime.set_reranker(Some(Reranker::new(std::sync::Arc::new(model))));
+            }
+            Err(_) => eprintln!(
+                "no model at {}, measuring the engine alone",
+                model_path.display()
+            ),
         }
-        Err(_) => eprintln!(
-            "no model at {}, measuring the engine alone",
-            model_path.display()
-        ),
     }
     // dispatch() drops every action while unfocused, which yields an empty candidate list rather
     // than an error.

@@ -69,8 +69,7 @@ pub struct LatticeOptions<'a> {
     /// With neural rerankers: take a source's next distinct path when its first pick is already listed.
     pub show_next_on_duplicate: bool,
     /// 字级搭配打分（octagram `.gram`）：入参是路径已累计文本的尾窗、候选词、
-    /// 是否句尾词，返回解码主分同域的搭配分；`None`（默认）= 关闭。
-    /// 装配方把 `octagram::GramDb::query` 的自然对数域结果乘 `LOG10_E` 换算。
+    /// 是否句尾词，返回自然对数域的搭配分（与词网格主分同域）；`None`（默认）= 关闭。
     pub collocation_scorer: Option<&'a CollocationScorer<'a>>,
     /// 搭配项的标定系数：scorer 存在且它大于 0 时，逐边叠加 `weight * scorer(...)` 到路径分。
     pub collocation_weight: f64,
