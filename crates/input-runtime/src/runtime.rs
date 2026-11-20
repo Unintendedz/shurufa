@@ -6,6 +6,17 @@ use msime_engine::ordering::{
     apply_order_with, ensure_engine_order, rerank_needs_model, rerank_pick, rotate_to_front,
     runner_up_order, settled_rerank_order, ParallelOrderRows, StaticEvidence,
 };
+use msime_engine::slot_allocator::{
+    allocate_slots, AllocatedSlot, SlotBudget, SlotCandidate, SlotCandidateKind,
+};
+
+/// 经 `SlotAllocator` 投影到展示列表中的单个内联 Emoji 席位。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProjectedEmojiSeat {
+    pub(crate) seat: usize,
+    pub(crate) anchor_word: String,
+    pub(crate) emoji: &'static str,
+}
 // 排序决策搬进了 `msime_engine::ordering`；`tests.rs` 仍按原来的 crate 内名字引用这几项，这里为它们重新导出。
 #[cfg(test)]
 pub(crate) use msime_engine::ordering::{
@@ -105,6 +116,12 @@ pub struct Runtime<E: InputEngine = Session> {
     pub(crate) online_fixed_english_scratch: Vec<usize>,
     /// 落定重排重放插件操作时的座位顺序比较缓冲，跨次调用保留容量。
     pub(crate) settled_order_scratch: Vec<usize>,
+    /// Shurufa 重排后内联 Emoji 投影开关（启用后由 `SlotAllocator` 在全部重排之后投影）。
+    pub(crate) inline_emoji_projection: bool,
+    /// 内联 Emoji 独立本地 MRU 偏好表，与主拼音词频严格隔离。
+    pub(crate) emoji_mru: crate::emoji_mru::EmojiMruStore,
+    /// 当前可见快照里经 `SlotAllocator` 投影出的 Emoji 席位（按 `seat` 升序）。
+    pub(crate) projected_emojis: Vec<ProjectedEmojiSeat>,
     pub(crate) snapshot_valid: bool,
     pub(crate) character_width: CharacterWidth,
     pub(crate) punctuation_marks: PunctuationMarks,
@@ -1107,6 +1124,9 @@ impl<E: InputEngine> Runtime<E> {
             online_order_scratch: Vec::new(),
             online_fixed_english_scratch: Vec::new(),
             settled_order_scratch: Vec::new(),
+            inline_emoji_projection: false,
+            emoji_mru: crate::emoji_mru::EmojiMruStore::default(),
+            projected_emojis: Vec::new(),
             cached,
             snapshot_valid: true,
             character_width: CharacterWidth::Halfwidth,
@@ -1164,6 +1184,17 @@ impl<E: InputEngine> Runtime<E> {
         self.reranker = reranker;
     }
 
+    /// 启用或关闭重排后内联 Emoji 投影（Shurufa 路径），并配置本地 MRU 偏好存储路径。
+    pub fn set_inline_emoji_projection(&mut self, enabled: bool, mru_path: Option<PathBuf>) {
+        self.inline_emoji_projection = enabled;
+        self.emoji_mru.configure(mru_path);
+        if !enabled && !self.projected_emojis.is_empty() {
+            self.strip_projected_emojis();
+            let _ = self.advance();
+            self.bump_candidates_epoch();
+        }
+    }
+
     /// Whether a per-keystroke reranker is attached, so a host can attach or drop it when the preference that governs it changes.
     pub fn has_reranker(&self) -> bool {
         self.reranker.is_some()
@@ -1199,13 +1230,19 @@ impl<E: InputEngine> Runtime<E> {
         if self.settled_rerank_blocked() {
             return false;
         }
+        let had_projected = self.strip_projected_emojis();
         self.snapshot_settled_seats();
         let marked = self.settled_highlight();
         let order = self.settled_model_order();
         let moved = order
             .as_deref()
             .is_some_and(|order| self.apply_settled_order(order));
-        self.finish_settled_presentation(moved, marked)
+        let changed = self.finish_settled_presentation(moved, marked);
+        if !changed && had_projected {
+            // 未触发重排时把之前剥离的投影行原样恢复，不推进代次。
+            self.apply_slot_allocator();
+        }
+        changed
     }
 
     /// 后台评分可能改变顺序时取出停顿模型。
@@ -1222,15 +1259,29 @@ impl<E: InputEngine> Runtime<E> {
         let context = self.ai_context.clone();
         let scheme = self.cached.scheme;
         let answered_by_pinyin_fallback = self.cached.answered_by_pinyin_fallback;
-        let texts = self.cached.candidates.clone();
-        let sources = self.cached.candidate_sources.clone();
-        let answers_key = self.cached.candidate_answers_key.clone();
-        let corrected = self.cached.candidate_corrected.clone();
-        let static_evidence = if self.cached.candidate_static_evidence.len() == texts.len() {
-            self.cached.candidate_static_evidence.clone()
+        let has_static =
+            self.cached.candidate_static_evidence.len() == self.cached.candidates.len();
+        let mut texts = Vec::with_capacity(self.cached.candidates.len());
+        let mut sources = Vec::with_capacity(self.cached.candidates.len());
+        let mut answers_key = Vec::with_capacity(self.cached.candidates.len());
+        let mut corrected = Vec::with_capacity(self.cached.candidates.len());
+        let mut static_evidence = if has_static {
+            Vec::with_capacity(self.cached.candidates.len())
         } else {
             Vec::new()
         };
+        for seat in 0..self.cached.candidates.len() {
+            if self.is_projected_emoji(seat) {
+                continue;
+            }
+            texts.push(self.cached.candidates[seat].clone());
+            sources.push(self.cached.candidate_sources[seat]);
+            answers_key.push(self.cached.candidate_answers_key[seat]);
+            corrected.push(self.cached.candidate_corrected[seat]);
+            if has_static {
+                static_evidence.push(self.cached.candidate_static_evidence[seat]);
+            }
+        }
         let reranker = self.settled_reranker.take()?;
         Some(SettledRerankRequest {
             generation,
@@ -1272,12 +1323,17 @@ impl<E: InputEngine> Runtime<E> {
         }
         // 评分期间用户仍可移动高亮，按发布前的实际选择恢复。
         let marked = self.settled_highlight();
+        let had_projected = self.strip_projected_emojis();
         let moved = order
             .as_deref()
             .is_some_and(|order| self.apply_settled_order(order));
+        let changed = self.finish_settled_presentation(moved, marked);
+        if !changed && had_projected {
+            self.apply_slot_allocator();
+        }
         SettledRerankApplied {
             current: true,
-            moved: self.finish_settled_presentation(moved, marked),
+            moved: changed,
         }
     }
 
@@ -1360,6 +1416,7 @@ impl<E: InputEngine> Runtime<E> {
             moved = marks_changed || !self.seat_order_matches(&self.settled_order_scratch);
         }
         if moved {
+            self.apply_slot_allocator();
             self.snapshot_valid = true;
             // 用户还停在第一条时，落定重排换上来的词就是新的第一条。已经翻页或移动过高亮时，
             // 停在原来那一条上，不能弹回第一页。
@@ -1692,11 +1749,21 @@ impl<E: InputEngine> Runtime<E> {
                 .candidates
                 .iter()
                 .zip(&self.cached.candidate_sources)
-                .map(|(text, source)| (text.clone(), *source))
+                .enumerate()
+                .filter(|(seat, _)| !self.is_projected_emoji(*seat))
+                .map(|(_, (text, source))| (text.clone(), *source))
                 .collect();
         }
-        let mut raw = vec![(String::new(), 0u8); count];
+        let base_count = self
+            .engine_order
+            .iter()
+            .filter(|&&idx| idx != usize::MAX)
+            .count();
+        let mut raw = vec![(String::new(), 0u8); base_count];
         for (seat, &engine_index) in self.engine_order.iter().enumerate() {
+            if engine_index == usize::MAX {
+                continue;
+            }
             if let Some(slot) = raw.get_mut(engine_index) {
                 *slot = (
                     self.cached.candidates[seat].clone(),
@@ -2149,6 +2216,7 @@ impl<E: InputEngine> Runtime<E> {
         // An empty mapping means the cached order is the Engine's order; build it lazily only if
         // one of the presentation reorderings below actually moves a candidate.
         self.engine_order.clear();
+        self.projected_emojis.clear();
         self.cached = snapshot;
         self.forget_inserted_rows();
     }
@@ -2427,12 +2495,21 @@ impl<E: InputEngine> Runtime<E> {
             local_mode: self.cached.local_mode.clone(),
             script_conversion: script_conversion(self.cached.scheme, &self.cached.local_mode)
                 && !self.commits_mixed_japanese()
-                && !self.commits_multilingual(),
+                && !self.commits_multilingual()
+                && !self.commits_emoji_only(),
             // 插件给的行（`/` 指令行、插入普通候选的行）不是用户打的字，不计打字统计。
             typing_statistics: local_mode_counts_as_typing(&self.cached.local_mode)
                 && !self.commits_plugin_row(),
             plugin_row: self.commits_plugin_row(),
         }
+    }
+
+    fn commits_emoji_only(&self) -> bool {
+        const EMOJI: u8 = msime_engine::CandidateSource::Emoji as u8;
+        self.phrase_prefix.is_empty()
+            && self.facts.selection.is_some_and(|selection| {
+                selection.source == EMOJI && selection.outcome == SelectionOutcome::Committed
+            })
     }
 
     /// 这次上屏的是脚本插件给的行（`CandidateSource::Plugin`，`/` 指令里的行或插进普通候选的行）：它不进 AI 上文、不计打字统计，宿主也不把它转成全角。
@@ -2465,16 +2542,36 @@ impl<E: InputEngine> Runtime<E> {
         Ok(result)
     }
 
-    /// 选中 `seat` 上的候选：插入的行由 runtime 上屏，其余交给引擎。
+    /// 上屏经 `SlotAllocator` 投影出的内联 Emoji：不污染主拼音词频与语言模型，仅记录独立的本地 MRU 偏好。
+    fn commit_projected_emoji(
+        &mut self,
+        anchor_word: &str,
+        emoji: &str,
+    ) -> Result<EngineResult, RuntimeError> {
+        self.emoji_mru.record(anchor_word, emoji);
+        let mut result = self.discard_composition()?;
+        result.handled = true;
+        result.has_commit = !emoji.is_empty();
+        result.commit = emoji.to_owned();
+        Ok(result)
+    }
+
+    /// 选中 `seat` 上的候选：投影 Emoji 与插件插入行由 runtime 直接上屏，其余交给引擎。
     fn select_seat(&mut self, seat: usize) -> Result<EngineResult, RuntimeError> {
+        if let Some((anchor_word, emoji)) = self.projected_emoji_at(seat) {
+            return self.commit_projected_emoji(&anchor_word, emoji);
+        }
         if self.is_inserted(seat) {
             return self.commit_inserted(seat);
         }
         self.engine.select(self.engine_index(seat))
     }
 
-    /// 从 `seat` 上的候选结束组字：插入的行由 runtime 上屏，其余交给引擎。
+    /// 从 `seat` 上的候选结束组字：投影 Emoji 与插件插入行由 runtime 直接上屏，其余交给引擎。
     fn finish_seat(&mut self, seat: usize) -> Result<EngineResult, RuntimeError> {
+        if let Some((anchor_word, emoji)) = self.projected_emoji_at(seat) {
+            return self.commit_projected_emoji(&anchor_word, emoji);
+        }
         if self.is_inserted(seat) {
             return self.commit_inserted(seat);
         }
@@ -2774,7 +2871,8 @@ impl<E: InputEngine> Runtime<E> {
         true
     }
 
-    /// 内置的呈现排序：逐键重排、整句读法降位、在线候选的座位。refresh、展开和落定重排三处都走这里，免得三处的步骤漂移。返回是否挪动了候选。
+    /// 内置的呈现排序：逐键重排、整句读法降位、在线候选座位，以及末步 `SlotAllocator` 投影。
+    /// refresh、展开和落定重排三处都走同一纯函数，免得三处的步骤漂移。返回是否挪动了候选。
     fn order_presentation(&mut self) -> bool {
         if self.cached.prediction {
             return false;
@@ -2782,7 +2880,223 @@ impl<E: InputEngine> Runtime<E> {
         let mut moved = self.rerank();
         moved |= self.demote_runner_up_readings();
         moved |= self.normalize_online_slots();
+        moved |= self.apply_slot_allocator();
         moved
+    }
+
+    pub(crate) fn is_projected_emoji(&self, seat: usize) -> bool {
+        self.projected_emojis
+            .binary_search_by_key(&seat, |entry| entry.seat)
+            .is_ok()
+    }
+
+    fn projected_emoji_at(&self, seat: usize) -> Option<(String, &'static str)> {
+        let index = self
+            .projected_emojis
+            .binary_search_by_key(&seat, |entry| entry.seat)
+            .ok()?;
+        let entry = &self.projected_emojis[index];
+        Some((entry.anchor_word.clone(), entry.emoji))
+    }
+
+    /// 剥离此前投影进缓存快照的内联 Emoji 席位，还原干净的主候选列表供停顿精排或重新投影使用。
+    fn strip_projected_emojis(&mut self) -> bool {
+        if self.projected_emojis.is_empty() {
+            return false;
+        }
+        let projected = std::mem::take(&mut self.projected_emojis);
+        let count = self.cached.candidates.len();
+        let keep: Vec<bool> = (0..count)
+            .map(|seat| {
+                projected
+                    .binary_search_by_key(&seat, |entry| entry.seat)
+                    .is_err()
+            })
+            .collect();
+        let removed_before_highlight = projected
+            .iter()
+            .filter(|entry| entry.seat < self.highlighted)
+            .count();
+        fn retain_seats<T>(values: &mut Vec<T>, keep: &[bool]) {
+            if values.len() != keep.len() {
+                return;
+            }
+            let mut seat = 0;
+            values.retain(|_| {
+                let kept = keep[seat];
+                seat += 1;
+                kept
+            });
+        }
+        let snapshot = &mut self.cached;
+        retain_seats(&mut snapshot.candidates, &keep);
+        retain_seats(&mut snapshot.candidate_codes, &keep);
+        retain_seats(&mut snapshot.candidate_annotations, &keep);
+        retain_seats(&mut snapshot.candidate_sources, &keep);
+        retain_seats(&mut snapshot.candidate_positions, &keep);
+        retain_seats(&mut snapshot.candidate_corrected, &keep);
+        retain_seats(&mut snapshot.candidate_answers_key, &keep);
+        retain_seats(&mut snapshot.candidate_static_evidence, &keep);
+        retain_seats(&mut snapshot.candidate_keyboard_runner_up, &keep);
+        retain_seats(&mut self.engine_order, &keep);
+        self.highlighted = self.highlighted.saturating_sub(removed_before_highlight);
+        true
+    }
+
+    /// 调用 `msime_engine::slot_allocator::allocate_slots` 纯函数，在全部重排完成后把精选内联 Emoji 投影到固定槽位。
+    fn apply_slot_allocator(&mut self) -> bool {
+        self.strip_projected_emojis();
+        if !self.inline_emoji_projection
+            || self.cached.local_mode != "none"
+            || self.cached.dedicated_english
+            || self.cached.prediction
+            || !self.cached.conversion.is_empty()
+            || self.cached.caret_edit_suffix
+            || self.cached.caret_position != self.cached.editing_text.len()
+            || self.cached.editing_text.len() < 2
+            || self
+                .cached
+                .editing_text
+                .bytes()
+                .any(|byte| byte.is_ascii_uppercase())
+            || self.cached.preedit.contains('｜')
+            || !self.cached.nine_key_strokes.is_empty()
+            || self.cached.nine_key_single_character
+            || self.cached.candidates.is_empty()
+        {
+            return false;
+        }
+        let count = self.cached.candidates.len();
+        if self.cached.candidate_sources.len() != count
+            || self.cached.candidate_answers_key.len() != count
+        {
+            return false;
+        }
+        self.emoji_mru.ensure_loaded();
+        let base: Vec<SlotCandidate<'_>> = (0..count)
+            .map(|index| SlotCandidate {
+                id: index,
+                text: self.cached.candidates[index].as_str(),
+                kind: SlotCandidateKind::from_source(self.cached.candidate_sources[index]),
+                answers_key: self.cached.candidate_answers_key[index],
+            })
+            .collect();
+        let budget = SlotBudget {
+            page_size: self.page_size,
+            ..SlotBudget::default()
+        };
+        let allocated = allocate_slots(&base, budget, true, |word| self.emoji_mru.preferred(word));
+        if allocated.len() == count {
+            return false;
+        }
+
+        ensure_engine_order(&mut self.engine_order, count);
+        let old_candidates = std::mem::take(&mut self.cached.candidates);
+        let old_codes = std::mem::take(&mut self.cached.candidate_codes);
+        let old_annotations = std::mem::take(&mut self.cached.candidate_annotations);
+        let old_sources = std::mem::take(&mut self.cached.candidate_sources);
+        let old_positions = std::mem::take(&mut self.cached.candidate_positions);
+        let old_corrected = std::mem::take(&mut self.cached.candidate_corrected);
+        let old_answers_key = std::mem::take(&mut self.cached.candidate_answers_key);
+        let old_static_evidence = std::mem::take(&mut self.cached.candidate_static_evidence);
+        let old_keyboard_runner_up = std::mem::take(&mut self.cached.candidate_keyboard_runner_up);
+        let old_engine_order = std::mem::take(&mut self.engine_order);
+        let has_codes = old_codes.len() == count;
+        let has_annotations = old_annotations.len() == count;
+        let has_positions = old_positions.len() == count;
+        let has_corrected = old_corrected.len() == count;
+        let has_static = old_static_evidence.len() == count;
+        let has_runner_up = old_keyboard_runner_up.len() == count;
+        const EMOJI_SOURCE: u8 = msime_engine::CandidateSource::Emoji as u8;
+
+        let total = allocated.len();
+        self.cached.candidates.reserve(total);
+        if has_codes {
+            self.cached.candidate_codes.reserve(total);
+        }
+        if has_annotations {
+            self.cached.candidate_annotations.reserve(total);
+        }
+        self.cached.candidate_sources.reserve(total);
+        if has_positions {
+            self.cached.candidate_positions.reserve(total);
+        }
+        if has_corrected {
+            self.cached.candidate_corrected.reserve(total);
+        }
+        self.cached.candidate_answers_key.reserve(total);
+        if has_static {
+            self.cached.candidate_static_evidence.reserve(total);
+        }
+        if has_runner_up {
+            self.cached.candidate_keyboard_runner_up.reserve(total);
+        }
+        self.engine_order.reserve(total);
+
+        for (seat, slot) in allocated.into_iter().enumerate() {
+            match slot {
+                AllocatedSlot::Base(id) => {
+                    self.cached.candidates.push(old_candidates[id].clone());
+                    if has_codes {
+                        self.cached.candidate_codes.push(old_codes[id].clone());
+                    }
+                    if has_annotations {
+                        self.cached
+                            .candidate_annotations
+                            .push(old_annotations[id].clone());
+                    }
+                    self.cached.candidate_sources.push(old_sources[id]);
+                    if has_positions {
+                        self.cached.candidate_positions.push(old_positions[id]);
+                    }
+                    if has_corrected {
+                        self.cached.candidate_corrected.push(old_corrected[id]);
+                    }
+                    self.cached.candidate_answers_key.push(old_answers_key[id]);
+                    if has_static {
+                        self.cached
+                            .candidate_static_evidence
+                            .push(old_static_evidence[id]);
+                    }
+                    if has_runner_up {
+                        self.cached
+                            .candidate_keyboard_runner_up
+                            .push(old_keyboard_runner_up[id]);
+                    }
+                    self.engine_order.push(old_engine_order[id]);
+                }
+                AllocatedSlot::ProjectedEmoji { anchor_word, emoji } => {
+                    self.cached.candidates.push(emoji.to_owned());
+                    if has_codes {
+                        self.cached.candidate_codes.push(String::new());
+                    }
+                    if has_annotations {
+                        self.cached.candidate_annotations.push(String::new());
+                    }
+                    self.cached.candidate_sources.push(EMOJI_SOURCE);
+                    if has_positions {
+                        self.cached.candidate_positions.push(0);
+                    }
+                    if has_corrected {
+                        self.cached.candidate_corrected.push(false);
+                    }
+                    self.cached.candidate_answers_key.push(false);
+                    if has_static {
+                        self.cached.candidate_static_evidence.push(None);
+                    }
+                    if has_runner_up {
+                        self.cached.candidate_keyboard_runner_up.push(false);
+                    }
+                    self.engine_order.push(usize::MAX);
+                    self.projected_emojis.push(ProjectedEmojiSeat {
+                        seat,
+                        anchor_word,
+                        emoji,
+                    });
+                }
+            }
+        }
+        true
     }
 
     fn rerank(&mut self) -> bool {
@@ -3712,13 +4026,13 @@ impl<E: InputEngine> Runtime<E> {
                 pick = Some((SelectionHow::AnyCandidate, id.index));
                 self.select_seat(id.index)
             }
-            // 插件插入的行不是词库里的词：以词定字、置顶、删除、固定位置对它什么都不做。
+            // 插件插入的行与投影 Emoji 不是词库里的词：以词定字、置顶、删除、固定位置对它什么都不做。
             Action::SelectEdge(id, _)
             | Action::PinCandidate(id)
             | Action::RemoveCandidate(id)
             | Action::FixCandidatePosition(id, _)
             | Action::ClearCandidatePosition(id)
-                if self.is_inserted(id.index) =>
+                if self.is_inserted(id.index) || self.is_projected_emoji(id.index) =>
             {
                 Ok(empty_result(true))
             }

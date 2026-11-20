@@ -7,6 +7,7 @@ pub mod database;
 pub mod date_time;
 pub mod emoji;
 pub mod expression;
+pub mod inline_emoji;
 pub mod jianpin;
 pub mod mention;
 pub mod places;

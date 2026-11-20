@@ -4429,7 +4429,7 @@ impl Preferences {
             preferences.english_online_candidates = false;
             preferences.sentence_association.neural_keyboard = true;
             preferences.sentence_association.neural_desktop = false;
-            preferences.mixed_input.emoji = false;
+            preferences.mixed_input.emoji = true;
             preferences.mixed_input.kaomoji = false;
             preferences.mixed_input.japanese = false;
             preferences.local_modes.emoji = false;

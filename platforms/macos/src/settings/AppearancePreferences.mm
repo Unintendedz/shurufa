@@ -792,6 +792,7 @@ static BOOL ShurufaSettingsPageVisible(NSInteger page) {
 }
 static BOOL ShurufaHiddenSetting(NSString *title) {
     if (!MSIMEEditionIsShurufa()) return NO;
+    if ([title isEqual:@"候选中显示 Emoji"]) return NO;
     if ([@[@"切换中英文时显示提示", @"菜单栏显示中/英状态"] containsObject:title]) return YES;
     for (NSString *word in @[@"云候选", @"翻译", @"释义", @"五笔", @"日语", @"日文", @"粤拼",
             @"注音", @"越南", @"藏文", @"韩语", @"Emoji", @"表情", @"颜文字", @"剪贴板",
@@ -2796,8 +2797,8 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
 }
 - (BOOL)mixedEnglishInput { if (MSIMEEditionIsShurufa()) return NO; id value = [self mixedInputValues][@"english"]; return LocalModeBoolean(value) ? [value boolValue] : YES; }
 - (void)setMixedEnglishInput:(BOOL)value { [self setMixedInputValue:@(value) forKey:@"english"]; }
-// Falls back to on, matching `source_mixed_emoji_default` in client-core and the source's `emoji_mixed_input = true`.
-- (BOOL)mixedEmojiInput { if (MSIMEEditionIsShurufa()) return NO; id value = [self mixedInputValues][@"emoji"]; return LocalModeBoolean(value) ? [value boolValue] : YES; }
+// Falls back to on, matching `source_mixed_emoji_default` in client-core and Shurufa's post-rerank inline Emoji projection.
+- (BOOL)mixedEmojiInput { id value = [self mixedInputValues][@"emoji"]; return LocalModeBoolean(value) ? [value boolValue] : YES; }
 - (void)setMixedEmojiInput:(BOOL)value { [self setMixedInputValue:@(value) forKey:@"emoji"]; }
 - (BOOL)mixedKaomojiInput { if (MSIMEEditionIsShurufa()) return NO; id value = [self mixedInputValues][@"kaomoji"]; return LocalModeBoolean(value) ? [value boolValue] : NO; }
 - (void)setMixedKaomojiInput:(BOOL)value { [self setMixedInputValue:@(value) forKey:@"kaomoji"]; }
@@ -4409,6 +4410,9 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
         [self settingRow:@"固定标点" control:_punctuationLockButton],
         [self settingRow:@"全角输入" control:_fullWidthToggle],
         [self settingRow:@"简繁输入" control:_traditionalOutputToggle aka:@[@"繁体", @"繁體"]],
+        [self settingRow:@"候选中显示 Emoji"
+                  detail:@"打中文词时在第 3 位提供对应 Emoji，如思考 → 🤔。"
+                 control:_mixedEmojiToggle],
     ] : @[
         [self settingRow:@"中文标点" detail:@"Control + . 切换中英文标点。" control:_punctuationToggle],
         [self settingRow:@"智能标点"
@@ -4435,7 +4439,11 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
                      aka:@[@"繁体", @"繁體"]],
     ], 0.0);
     punctuationCard.accessibilityLabel = @"标点与字符卡片";
-    NSBox *mixedCard = MSIMECardWithViews(@[
+    NSBox *mixedCard = MSIMECardWithViews(MSIMEEditionIsShurufa() ? @[
+        [self settingRow:@"中英混输" detail:@"在中文组词中允许英文候选。" control:_mixedEnglishToggle],
+        [self settingRow:@"符号混输" detail:@"打出符号名称时在候选中提供对应符号，如 zhengfu → ±。" control:_mixedSymbolToggle aka:@[@"特殊符号"]],
+        [self settingRow:@"颜文字混输" detail:@"在中文组词中提供颜文字候选。" control:_mixedKaomojiToggle],
+    ] : @[
         [self settingRow:@"中英混输" detail:@"在中文组词中允许英文候选。" control:_mixedEnglishToggle],
         [self settingRow:@"符号混输" detail:@"打出符号名称时在候选中提供对应符号，如 zhengfu → ±。" control:_mixedSymbolToggle aka:@[@"特殊符号"]],
         [self settingRow:@"Emoji 混输" detail:@"在中文组词中提供 Emoji 候选。" control:_mixedEmojiToggle aka:@[@"表情"]],

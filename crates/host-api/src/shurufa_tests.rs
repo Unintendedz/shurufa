@@ -453,3 +453,111 @@ fn shurufa_english_autocomplete_gestures_and_helpcode_gate() {
         .any(|row| row["text"].as_str().unwrap().eq_ignore_ascii_case("nice")));
     value(msime_client_destroy(handle));
 }
+
+#[test]
+fn shurufa_slot_allocator_projects_curated_inline_emoji_with_mru_and_clean_toggle() {
+    let root = tempfile::tempdir().unwrap();
+    let path = |name| {
+        let path = root.path().join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    };
+    let resources = path("resources");
+    let dictionaries = path("dictionaries");
+    let user_data = path("user");
+    for directory in [&resources, &dictionaries] {
+        rusqlite::Connection::open(directory.join("msime-pinyin.db"))
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE tbl_1_b(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+                 INSERT INTO tbl_1_b VALUES('bu','b','不',900000);
+                 INSERT INTO tbl_1_b VALUES('bu','b','步',50000);
+                 CREATE TABLE tbl_2_s(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+                 INSERT INTO tbl_2_s VALUES('si''kao','sk','思考',600000);
+                 INSERT INTO tbl_2_s VALUES('si''kao','sk','思靠',20000);
+                 INSERT INTO tbl_2_s VALUES('si''kao','sk','私考',10000);
+                 CREATE TABLE tbl_2_d(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+                 INSERT INTO tbl_2_d VALUES('da''xiao','dx','大小',600000);
+                 INSERT INTO tbl_2_d VALUES('da''xiao','dx','大笑',500000);
+                 INSERT INTO tbl_2_d VALUES('da''xiao','dx','打小',20000);
+                 INSERT INTO tbl_2_d VALUES('da''xiao','dx','打消',10000);
+                 INSERT INTO tbl_2_d VALUES('da''xiao','dx','大校',9000);
+                 INSERT INTO tbl_2_d VALUES('da''xiao','dx','大孝',8000);
+                 CREATE TABLE quick_parases(key TEXT,value TEXT,weight INTEGER);",
+            )
+            .unwrap();
+    }
+    let preferences = Preferences::for_edition(Edition::by_id("shurufa").unwrap());
+    assert!(preferences.mixed_input.emoji);
+    let request = json!({
+        "api_version": 1,
+        "edition": "shurufa",
+        "resources": resources,
+        "dictionaries": dictionaries,
+        "user_data": user_data,
+        "cache": path("cache"),
+        "preferences": preferences,
+    })
+    .to_string();
+    // SAFETY: 合成配置缓冲区在同步调用期间有效。
+    let created = value(unsafe { msime_client_create(request.as_ptr(), request.len()) });
+    let handle = created["session"].as_u64().unwrap();
+    value(msime_client_focus(handle, true));
+
+    // 引擎旧 queries.rs 混排仍关闭，内联 Emoji 完全经 SlotAllocator 投影。
+    SESSIONS.with(|sessions| {
+        let sessions = sessions.borrow();
+        assert!(!sessions[&handle].options.mixed_emoji);
+    });
+
+    // `sikao` -> 第 1 位「思考」，第 3 位（下标 2）「🤔」，点选「🤔」直接上屏。
+    let sikao = type_keys(handle, "sikao");
+    assert_eq!(sikao["candidates"][0]["text"], "思考");
+    assert_eq!(sikao["candidates"][1]["text"], "思靠");
+    assert_eq!(sikao["candidates"][2]["text"], "🤔");
+    assert_eq!(sikao["candidates"][2]["source"], 6);
+    assert_eq!(choose(handle, &sikao, "🤔")["commit"], "🤔");
+
+    // 高频虚字 `bu`（「不」）绝不触发内联 Emoji。
+    let bu = type_keys(handle, "bu");
+    assert!(!bu["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["source"] == 6));
+
+    // `daxiao`：Top-2「大笑」在第 3 位投「😂」，第 2 页开头提供备选「🤣」；选中「🤣」后本地 MRU 升至第 3 位。
+    let daxiao = type_keys(handle, "daxiao");
+    assert_eq!(daxiao["candidates"][0]["text"], "大小");
+    assert_eq!(daxiao["candidates"][1]["text"], "大笑");
+    assert_eq!(daxiao["candidates"][2]["text"], "😂");
+    let page2 = value(msime_client_command(handle, 100))["view"].clone();
+    assert_eq!(page2["candidates"][0]["text"], "🤣");
+    assert_eq!(choose(handle, &page2, "🤣")["commit"], "🤣");
+
+    let daxiao_after = type_keys(handle, "daxiao");
+    assert_eq!(daxiao_after["candidates"][0]["text"], "大小");
+    assert_eq!(daxiao_after["candidates"][1]["text"], "大笑");
+    assert_eq!(daxiao_after["candidates"][2]["text"], "🤣");
+
+    // 关闭开关后，Emoji 立即消失，中文候选相对顺序与关闭前主序逐条一致。
+    let mut disabled = Preferences::for_edition(Edition::by_id("shurufa").unwrap());
+    disabled.mixed_input.emoji = false;
+    let snapshot = json!({
+        "format_version": 1,
+        "revision": 1,
+        "preferences": disabled,
+    })
+    .to_string();
+    // SAFETY: 合成偏好缓冲区在同步调用期间有效。
+    value(unsafe { msime_client_update_preferences(handle, snapshot.as_ptr(), snapshot.len()) });
+    let sikao_off = type_keys(handle, "sikao");
+    let words_off: Vec<&str> = sikao_off["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(words_off, vec!["思考", "思靠", "私考"]);
+    value(msime_client_destroy(handle));
+}

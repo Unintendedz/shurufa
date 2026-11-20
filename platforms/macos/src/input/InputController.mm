@@ -466,8 +466,8 @@ static NSString *CandidateDisplayWithBadges(NSDictionary *candidate, BOOL tradit
     const BOOL integerSource = [source isKindOfClass:NSNumber.class] &&
                                CFGetTypeID((__bridge CFTypeRef)source) != CFBooleanGetTypeID() &&
                                !CFNumberIsFloatType((__bridge CFNumberRef)source);
-    // 来源 13 是日文，来源 18 已由运行时逐段转换；两者都不能再次整行简转繁。
-    if (!(integerSource && ([source isEqual:@13] || [source isEqual:@18]))) text = MSIMEChineseOutputString(text, traditional);
+    // 来源 6 是 Emoji/符号，来源 13 是日文，来源 18 已由运行时逐段转换；都不应再次整行简转繁。
+    if (!(integerSource && ([source isEqual:@6] || [source isEqual:@13] || [source isEqual:@18]))) text = MSIMEChineseOutputString(text, traditional);
     // 来源与固定排位角标只参与显示，不改变候选身份或上屏内容。
     NSString *badge = CandidateSourceBadge(candidate, aiBadge);
     if (fixedBadge.length && MSIMECandidateIsFixedPosition(candidate[@"fixed_position"]))

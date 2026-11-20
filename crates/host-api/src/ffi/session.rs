@@ -174,6 +174,12 @@ pub(crate) fn create_session(bytes: &[u8], usage: SessionUse) -> Result<Value, S
     );
     // Loaded whenever it is installed, run only while the desktop model preference is on; `apply_pending` follows later changes of the switch.
     runtime.set_settled_rerank_enabled(applied.sentence_association.neural_desktop);
+    let emoji_mru = (!options.user_data.is_empty())
+        .then(|| std::path::PathBuf::from(&options.user_data).join("emoji_mru.json"));
+    runtime.set_inline_emoji_projection(
+        edition.id == "shurufa" && applied.mixed_input.emoji,
+        emoji_mru,
+    );
 
     let view = runtime.view();
     let output = serde_json::to_value(&view).map_err(|e| e.to_string())?;

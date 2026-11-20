@@ -104,6 +104,19 @@ int main() {
         assert(MSIMEMigrateShurufaGrammarModel(defaults, load, save) && saves == 1);
         assert(![defaults boolForKey:@"MSIMEClientSentenceAssociationWanxiangGrammar"]);
         assert([document[@"preferences"][@"sentence_association"][@"grammar_model"] isEqual:@"baguwen_compact"]);
+        // 内联 Emoji 一次性启用迁移：将旧 false 迁至 true，之后用户手动关闭不再改回。
+        [defaults removePersistentDomainForName:suite];
+        document = @{@"revision":@7,@"preferences":@{@"mixed_input":@{@"emoji":@NO,@"english":@YES}}};
+        saves = 0;
+        assert(!MSIMEMigrateShurufaInlineEmoji(defaults, load, ^NSDictionary *(uint64_t, NSDictionary *) { return nil; }));
+        assert(![defaults boolForKey:@"ShurufaInlineEmojiMigrationV1"]);
+        assert(MSIMEMigrateShurufaInlineEmoji(defaults, load, save));
+        assert(saves == 1 && [document[@"preferences"][@"mixed_input"][@"emoji"] isEqual:@YES]);
+        assert([document[@"preferences"][@"mixed_input"][@"english"] isEqual:@YES]);
+        assert([[defaults dictionaryForKey:@"MSIMEClientMixedInput"][@"emoji"] isEqual:@YES]);
+        document = @{@"revision":@7,@"preferences":@{@"mixed_input":@{@"emoji":@NO}}};
+        assert(MSIMEMigrateShurufaInlineEmoji(defaults, load, save) && saves == 1);
+        assert([document[@"preferences"][@"mixed_input"][@"emoji"] isEqual:@NO]);
         [defaults removePersistentDomainForName:suite];
     }
 }

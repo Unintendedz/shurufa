@@ -33,6 +33,7 @@ mod quanpin;
 mod session;
 mod shared_string;
 mod shuangpin;
+pub mod slot_allocator;
 pub mod stroke;
 mod text;
 mod tibetan;

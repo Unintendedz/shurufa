@@ -428,11 +428,11 @@ fn apply_shurufa_input_policy(preferences: &mut Preferences, edition: &Edition) 
     preferences.english_online_candidates = false;
     preferences.enter_learns_english_word = false;
     preferences.multilingual_input.enabled = false;
-    // Shurufa 仅放开英文单词自动补全，首页保留 3 个英文席位；其余混输分成员全部关闭。
+    // Shurufa 放开英文单词自动补全（首页保留 3 席）与经 SlotAllocator 投影的精选内联 Emoji（尊重用户开关，默认开）；
+    // 引擎旧 queries.rs 路径的 mixed_emoji 固定关闭，其余混输分成员全部关闭。
     preferences.mixed_input.enabled = true;
     preferences.mixed_input.english = true;
     preferences.mixed_input.first_page_count = 3;
-    preferences.mixed_input.emoji = false;
     preferences.mixed_input.kaomoji = false;
     preferences.mixed_input.symbols = false;
     preferences.mixed_input.japanese = false;
@@ -886,7 +886,8 @@ impl HostSession {
         options.english_minimum_prefix =
             host_english_minimum_prefix(preferences.mixed_input.minimum_prefix);
         options.english_first_page_count = preferences.mixed_input.first_page_count;
-        options.mixed_emoji = preferences.mixed_input.emoji;
+        // Shurufa 内联 Emoji 改由重排后纯函数 SlotAllocator 投影，绕开旧 queries.rs 混排。
+        options.mixed_emoji = self.edition.id != "shurufa" && preferences.mixed_input.emoji;
         options.mixed_kaomoji = preferences.mixed_input.kaomoji;
         options.mixed_symbols = preferences.mixed_input.symbols;
         options.mixed_japanese = preferences.mixed_input.japanese;
@@ -1028,6 +1029,12 @@ impl HostSession {
             .map_err(|e| e.to_string())?;
         self.runtime
             .set_settled_rerank_enabled(preferences.sentence_association.neural_desktop);
+        let emoji_mru = (!options.user_data.is_empty())
+            .then(|| std::path::PathBuf::from(&options.user_data).join("emoji_mru.json"));
+        self.runtime.set_inline_emoji_projection(
+            self.edition.id == "shurufa" && preferences.mixed_input.emoji,
+            emoji_mru,
+        );
         self.runtime
             .set_punctuation_marks(msime_client_core::punctuation::punctuation_marks(
                 &preferences,
@@ -2266,7 +2273,7 @@ impl HostOptions {
             ),
             english_first_page_count: self.preferences.mixed_input.first_page_count,
             english_short_prefix_completion: edition.id == "shurufa",
-            mixed_emoji: self.preferences.mixed_input.emoji,
+            mixed_emoji: edition.id != "shurufa" && self.preferences.mixed_input.emoji,
             mixed_kaomoji: self.preferences.mixed_input.kaomoji,
             mixed_symbols: self.preferences.mixed_input.symbols,
             mixed_japanese: self.preferences.mixed_input.japanese,

@@ -110,3 +110,25 @@ static inline BOOL MSIMEMigrateShurufaGrammarModel(NSUserDefaults *defaults,
     [defaults synchronize];
     return YES;
 }
+
+// 为 Shurufa 一次性启用经 SlotAllocator 投影的内联 Emoji；迁移完成后永久尊重用户在设置页的开关选择。
+static inline BOOL MSIMEMigrateShurufaInlineEmoji(NSUserDefaults *defaults,
+    NSDictionary *(^load)(void), NSDictionary *(^save)(uint64_t, NSDictionary *)) {
+    NSString *marker = @"ShurufaInlineEmojiMigrationV1";
+    if ([defaults boolForKey:marker]) return YES;
+    NSDictionary *snapshot = load();
+    if (![snapshot[@"preferences"] isKindOfClass:NSDictionary.class] || ![snapshot[@"revision"] isKindOfClass:NSNumber.class]) return NO;
+    NSMutableDictionary *updated = [snapshot mutableCopy];
+    NSMutableDictionary *preferences = [snapshot[@"preferences"] mutableCopy];
+    NSMutableDictionary *mixed = [preferences[@"mixed_input"] mutableCopy] ?: [NSMutableDictionary dictionary];
+    mixed[@"emoji"] = @YES;
+    preferences[@"mixed_input"] = mixed;
+    updated[@"preferences"] = preferences;
+    if (!save([snapshot[@"revision"] unsignedLongLongValue], updated)) return NO;
+    NSMutableDictionary *localMixed = [[defaults dictionaryForKey:@"MSIMEClientMixedInput"] mutableCopy] ?: [NSMutableDictionary dictionary];
+    localMixed[@"emoji"] = @YES;
+    [defaults setObject:localMixed forKey:@"MSIMEClientMixedInput"];
+    [defaults setBool:YES forKey:marker];
+    [defaults synchronize];
+    return YES;
+}

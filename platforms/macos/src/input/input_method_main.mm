@@ -148,6 +148,16 @@ int main(int argc, const char *argv[]) {
                     });
                 return migrated ? 0 : 1;
             }
+            if (strcmp(argv[index], "--migrate-inline-emoji") == 0) {
+                if (!MSIMEEditionIsShurufa()) return 1;
+                NSString *directory = MSIMEDefaultClientStateDirectory(NSFileManager.defaultManager).path;
+                const BOOL migrated = MSIMEMigrateShurufaInlineEmoji(NSUserDefaults.standardUserDefaults,
+                    ^NSDictionary *{ return [MSIMEClientSession loadPreferencesInDirectory:directory error:nil]; },
+                    ^NSDictionary *(uint64_t revision, NSDictionary *snapshot) {
+                        return [MSIMEClientSession savePreferencesInDirectory:directory expectedRevision:revision snapshot:snapshot error:nil];
+                    });
+                return migrated ? 0 : 1;
+            }
             if (strcmp(argv[index], "--migrate-voice-presentation") == 0) {
                 if (!MSIMEEditionIsShurufa()) return 1;
                 NSString *directory = MSIMEDefaultClientStateDirectory(NSFileManager.defaultManager).path;
