@@ -4,7 +4,7 @@
 use super::*;
 use msime_engine::ordering::{
     apply_order_with, ensure_engine_order, rerank_needs_model, rerank_pick, rotate_to_front,
-    runner_up_order, settled_rerank_order, ParallelOrderRows, StaticEvidence,
+    runner_up_order, settled_rerank_order_with_options, ParallelOrderRows, StaticEvidence,
 };
 use msime_engine::slot_allocator::{
     allocate_slots, AllocatedSlot, SlotBudget, SlotCandidate, SlotCandidateKind,
@@ -197,6 +197,8 @@ pub struct Runtime<E: InputEngine = Session> {
     pub(crate) settled_reranker: Option<Reranker>,
     /// Whether [`Runtime::rerank_settled`] runs the settled model: the product's desktop sentence model switch. On unless a host turns it off, so a caller that attaches a model and says nothing else gets it.
     pub(crate) settled_rerank_enabled: bool,
+    /// 停顿精排是否锁定第 1 槽并在高亮离开首位后冻结页序（Shurufa 策略）。
+    pub(crate) settled_lock_leader: bool,
     // 开关和模型分别拥有不复用的身份，防止在途评分跨配置发布或恢复旧模型。
     settled_settings_epoch: Arc<()>,
     settled_model_epoch: Arc<()>,
@@ -336,6 +338,7 @@ pub struct SettledRerankRequest {
     context: String,
     scheme: u8,
     answered_by_pinyin_fallback: bool,
+    lock_leader: bool,
     rows: SettledRerankRows,
     reranker: Reranker,
 }
@@ -369,12 +372,13 @@ pub fn score_settled_rerank(mut request: SettledRerankRequest) -> SettledRerankS
             &request.rows.corrected,
         )
         .with_static_evidence(&request.rows.static_evidence);
-        settled_rerank_order(
+        settled_rerank_order_with_options(
             &mut request.reranker,
             &request.context,
             request.scheme,
             request.answered_by_pinyin_fallback,
             &rows,
+            request.lock_leader,
         )
     };
     SettledRerankScore {
@@ -1108,6 +1112,7 @@ impl<E: InputEngine> Runtime<E> {
             reranker: None,
             settled_reranker: None,
             settled_rerank_enabled: true,
+            settled_lock_leader: false,
             settled_settings_epoch: Arc::new(()),
             settled_model_epoch: Arc::new(()),
             focused: false,
@@ -1218,6 +1223,18 @@ impl<E: InputEngine> Runtime<E> {
         self.settled_rerank_enabled
     }
 
+    /// 停顿精排是否锁定第 1 槽（并在用户翻页/移动高亮后冻结页序），彻底消除停顿翻脸。
+    pub fn set_settled_lock_leader(&mut self, locked: bool) {
+        if self.settled_lock_leader != locked {
+            self.settled_settings_epoch = Arc::new(());
+            self.settled_lock_leader = locked;
+        }
+    }
+
+    pub fn settled_lock_leader(&self) -> bool {
+        self.settled_lock_leader
+    }
+
     /// Re-rank the current candidates with the settled model, reporting whether the order moved. Nothing happens without an attached model or while the settled rerank is switched off.
     ///
     /// The host decides when this is: it owns the clock and already runs a settle timer for cloud candidates. The runtime has no timer of its own and should not grow one — a keystroke that arrives while this is deciding makes the whole answer stale, and only the host knows that a keystroke arrived.
@@ -1290,6 +1307,7 @@ impl<E: InputEngine> Runtime<E> {
             context,
             scheme,
             answered_by_pinyin_fallback,
+            lock_leader: self.settled_lock_leader,
             rows: SettledRerankRows {
                 texts,
                 sources,
@@ -1315,9 +1333,9 @@ impl<E: InputEngine> Runtime<E> {
             && Arc::ptr_eq(&settings_epoch, &self.settled_settings_epoch)
             && Arc::ptr_eq(&model_epoch, &self.settled_model_epoch);
         self.restore_settled_reranker(reranker, &model_epoch);
-        if !current {
+        if !current || (self.settled_lock_leader && self.highlighted > 0) {
             return SettledRerankApplied {
-                current: false,
+                current,
                 moved: false,
             };
         }
@@ -1344,10 +1362,12 @@ impl<E: InputEngine> Runtime<E> {
 
     fn settled_rerank_blocked(&self) -> bool {
         // 重排必须推进候选代次，避免旧身份选到新座位；代次耗尽时不得重排。
+        // 开启首选锁定时，一旦用户开始移动高亮或翻页即冻结页序，不再在眼皮底下改排候选。
         !self.settled_rerank_enabled
             || self.settled_reranker.is_none()
             || self.is_idle()
             || self.generation.checked_add(1).is_none()
+            || (self.settled_lock_leader && self.highlighted > 0)
             // 落定重排按座位挪行，插件插入的行没有引擎下标，会被当成引擎的候选挪走；有插入的行时不做。
             || self.has_inserted_rows()
     }
@@ -3153,12 +3173,13 @@ impl<E: InputEngine> Runtime<E> {
         {
             return None;
         }
-        settled_rerank_order(
+        settled_rerank_order_with_options(
             reranker,
             &self.ai_context,
             snapshot.scheme,
             snapshot.answered_by_pinyin_fallback,
             &order_rows(snapshot),
+            self.settled_lock_leader,
         )
     }
 

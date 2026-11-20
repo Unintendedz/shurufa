@@ -206,6 +206,14 @@ pub(crate) fn keyboard_reranker(
     if !options.sentence_association.neural_keyboard {
         return None;
     }
+    // 使用随包默认键盘模型时复用引擎的共享 `Arc<SentenceModel>`，既省去一份 4.5MB 权重副本，
+    // 也让运行时逐键重排通过同一模型实例标识直接复用引擎已算出的逐字分，消除单键双跑推理。
+    if configured.is_none() {
+        let path = sentence_model_path(&options.resources, None);
+        if let Some(model) = msime_engine::shared_sentence_model(&path) {
+            return Some(Reranker::new(model));
+        }
+    }
     sentence_model(&options.resources, configured).map(Reranker::new)
 }
 

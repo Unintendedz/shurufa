@@ -155,6 +155,9 @@ fn cached_and_owned_projection_match_the_frozen_merge() {
                                         )
                                     }
                                 });
+                                for item in &mut actual {
+                                    item.keyboard_neural = None;
+                                }
                                 assert_eq!(
                                     actual, expected,
                                     "{paths}/{shape}/{emit}/{flags}/{mode}/{typo}/{borrowed}"

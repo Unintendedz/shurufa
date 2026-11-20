@@ -64,10 +64,10 @@ fn parallel_candidate_order_keeps_all_metadata_and_composes_engine_seats() {
         // 使用不同的合成字段值，避免不变的布尔或来源掩盖漏交换。
         runtime.cached.candidate_static_evidence = (0..rows)
             .map(|row| {
-                (row % 2 == 0).then_some(msime_engine::ordering::StaticEvidence {
-                    log_prob_milli_nats: -(row as i64),
-                    characters: row + 1,
-                })
+                (row % 2 == 0).then_some(msime_engine::ordering::StaticEvidence::new(
+                    -(row as i64),
+                    row + 1,
+                ))
             })
             .collect();
         for row in 0..rows {

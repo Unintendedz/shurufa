@@ -78,12 +78,7 @@ fn async_score_matches_the_synchronous_settled_rerank() {
 fn async_score_keeps_static_evidence_on_the_promoted_row() {
     let mut synchronous = lattice_runtime();
     let mut asynchronous = lattice_runtime();
-    let evidence = |total: i64| {
-        Some(msime_engine::ordering::StaticEvidence {
-            log_prob_milli_nats: total,
-            characters: 1,
-        })
-    };
+    let evidence = |total: i64| Some(msime_engine::ordering::StaticEvidence::new(total, 1));
     synchronous.cached.candidate_static_evidence = vec![evidence(-40000), evidence(-1000)];
     asynchronous.cached.candidate_static_evidence = vec![evidence(-40000), evidence(-1000)];
     assert!(synchronous.rerank_settled());
@@ -304,4 +299,37 @@ fn a_highlight_moved_during_scoring_stays_on_the_selected_word() {
     assert!(applied.current && applied.moved);
     assert_eq!(runtime.cached.candidates[0], "乙");
     assert_eq!(runtime.cached.candidates[runtime.highlighted], "丙");
+}
+
+#[test]
+fn settled_lock_leader_locks_slot_zero_and_freezes_after_navigation() {
+    let mut runtime = Runtime::new(
+        Fixture {
+            words: vec!["甲".into(), "丙".into(), "乙".into()],
+            codes: vec!["a".into(); 3],
+            sources: vec![LATTICE_SOURCE; 3],
+            text: "a".into(),
+            ..Fixture::default()
+        },
+        5,
+    )
+    .unwrap();
+    runtime.focus(true).unwrap();
+    type_key(&mut runtime);
+    runtime.set_settled_lock_leader(true);
+    runtime.set_settled_reranker(Some(Reranker::new(std::sync::Arc::new(favouring_model(
+        &['甲', '乙', '丙'],
+        &['乙'],
+    )))));
+    let request = runtime.begin_settled_rerank().unwrap();
+    let applied = runtime.apply_settled_rerank(score_settled_rerank(request));
+    assert!(applied.current && applied.moved);
+    // 停顿精排锁定第 1 槽甲，仅把更优次选乙提到第 2 槽。
+    assert_eq!(runtime.cached.candidates, ["甲", "乙", "丙"]);
+
+    // 用户移动高亮后页序彻底冻结，不再发起也不再应用停顿精排。
+    runtime.dispatch(Action::NextCandidate).unwrap();
+    assert!(runtime.highlighted > 0);
+    assert!(runtime.begin_settled_rerank().is_none());
+    assert!(!runtime.rerank_settled());
 }

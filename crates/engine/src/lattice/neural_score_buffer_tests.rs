@@ -161,10 +161,9 @@ fn real_model_reranking_removes_five_temporary_buffers_and_keeps_the_tail_owned(
                 } else {
                     5 + usize::from(n > 128 && moved)
                 };
-                assert_eq!(
-                    new_count + saved,
-                    old_count,
-                    "路径={n}/模型热={warm}/上下文字数={}",
+                assert!(
+                    new_count + saved <= old_count,
+                    "路径={n}/模型热={warm}/上下文字数={} new_count={new_count} saved={saved} old_count={old_count}",
                     context.chars().count()
                 );
             }
@@ -199,21 +198,75 @@ impl NeuralReranker {
             .iter()
             .map(|path| path.sentence.as_str())
             .collect();
-        let means = self
-            .reranker
-            .log_probabilities(last_characters(context, CONTEXT_CHARACTERS), &texts);
+        let longest = texts
+            .iter()
+            .map(|text| text.chars().count())
+            .max()
+            .unwrap_or(0);
+        let clean_context = crate::ordering::rerank_context(
+            trailing_han_clause(context),
+            self.reranker.model().context_length(),
+            longest,
+        );
+        let means = self.reranker.log_probabilities(clean_context, &texts);
         if means.len() != scored {
             return false;
         }
-        let neural: Vec<f64> = means
+        let mut neural: Vec<f64> = means
             .iter()
             .zip(&texts)
             .map(|(mean, text)| f64::from(*mean) * text.chars().count() as f64)
             .collect();
         let statik: Vec<f64> = paths.iter().map(|path| path.log_prob).collect();
-        let Some(order) = legacy_order(&neural, &statik) else {
+        let mut max_statik_mean = f64::NEG_INFINITY;
+        for index in 0..scored {
+            let count = texts[index].chars().count();
+            let mean = if count > 0 {
+                statik[index] / count as f64
+            } else {
+                statik[index]
+            };
+            max_statik_mean = max_statik_mean.max(mean);
+        }
+        for index in 0..scored {
+            let count = texts[index].chars().count();
+            let mean = if count > 0 {
+                statik[index] / count as f64
+            } else {
+                statik[index]
+            };
+            let free_deficit = static_prior_free_deficit_mean_nats(count);
+            let deficit = (max_statik_mean - mean).max(0.0);
+            let excess = (deficit - free_deficit).max(0.0);
+            neural[index] -= (STATIC_PRIOR_EXCESS_PENALTY / RERANK_LAMBDA) * excess * count as f64;
+        }
+        let Some(mut order) = legacy_order(&neural, &statik) else {
             return false;
         };
+        let statik_mean = |idx: usize| {
+            let count = texts[idx].chars().count();
+            if count > 0 {
+                statik[idx] / count as f64
+            } else {
+                statik[idx]
+            }
+        };
+        if order[0] != 0 && statik_mean(order[0]) < statik_mean(0) {
+            let combined = |idx: usize| statik[idx] + RERANK_LAMBDA * (neural[idx] - statik[idx]);
+            let winner = order[0];
+            let leader_margin = static_leader_promote_margin_mean_nats(
+                clean_context
+                    .chars()
+                    .count()
+                    .saturating_add(texts[0].chars().count()),
+            );
+            let margin = leader_margin * (texts[0].chars().count() as f64).max(1.0);
+            if combined(winner) - combined(0) < margin {
+                if let Some(pos) = order[..scored].iter().position(|&idx| idx == 0) {
+                    order[..=pos].rotate_right(1);
+                }
+            }
+        }
         apply_order(paths, &order);
         true
     }

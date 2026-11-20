@@ -802,6 +802,8 @@ pub struct WordItem {
     pub keyboard_runner_up: bool,
     /// 比主切分多拆出的字面隔音音节数；静态证据按该数额外扣除词长奖励，不改动原始 `weight`。
     pub extra_syllables: u8,
+    /// 引擎逐键 4.5MB 模型对同一整句路径已算出的 `(模型实例标识, 逐字均值毫 nat)`；供运行时单遍复用。
+    pub keyboard_neural: Option<(usize, i32)>,
 }
 
 impl WordItem {
@@ -833,6 +835,7 @@ impl WordItem {
                 .saturating_sub(bonus)
                 .saturating_sub(extra_hiatus_penalty),
             characters: self.word.chars().count(),
+            keyboard_neural: self.keyboard_neural,
         })
     }
 
@@ -2282,6 +2285,7 @@ mod tests {
         let expected = Some(crate::ordering::StaticEvidence {
             log_prob_milli_nats: -4000,
             characters: 2,
+            keyboard_neural: None,
         });
         assert_eq!(item.static_evidence(), expected);
         item.source = CandidateSource::NeuralKeyboard;

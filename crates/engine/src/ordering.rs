@@ -194,9 +194,20 @@ pub struct OrderRow<'a> {
 pub struct StaticEvidence {
     pub log_prob_milli_nats: i64,
     pub characters: usize,
+    /// 引擎逐键 4.5MB 模型已对同一路径与同一上文算出的 `(模型实例标识, 逐字均值毫 nat)`。
+    /// `rerank_pick` 在全部参与比较的候选均命中同一模型实例时直接复用该分值，消除单键双跑 4.5MB 推理。
+    pub keyboard_neural: Option<(usize, i32)>,
 }
 
 impl StaticEvidence {
+    pub const fn new(log_prob_milli_nats: i64, characters: usize) -> Self {
+        Self {
+            log_prob_milli_nats,
+            characters,
+            keyboard_neural: None,
+        }
+    }
+
     fn mean(self) -> Option<f64> {
         (self.characters > 0)
             .then(|| self.log_prob_milli_nats as f64 / 1000.0 / self.characters as f64)
@@ -465,14 +476,39 @@ pub fn rerank_pick<'a, R: OrderRowSource<'a> + ?Sized>(
             &mut statik,
             &mut subset,
         ) {
-            let neural = reranker.log_probabilities(context, &subset[..count]);
+            // 若全部参与比较的候选均已由引擎同源 4.5MB 模型在同一上文窗口下算出逐字分，
+            // 直接复用缓存分值，省去本轮重复的 4.5MB Transformer 前向计算。
+            let model_id = std::ptr::from_ref(reranker.model()) as usize;
+            let mut cached_neural = [0.0f32; STATIC_RERANK_LIMIT];
+            let mut all_cached = true;
+            for index in 0..count {
+                match rows
+                    .static_evidence(considered[index])
+                    .and_then(|ev| ev.keyboard_neural)
+                {
+                    Some((id, mean_milli_nats)) if id == model_id => {
+                        cached_neural[index] = mean_milli_nats as f32 / 1000.0;
+                    }
+                    _ => {
+                        all_cached = false;
+                        break;
+                    }
+                }
+            }
+            let owned_neural;
+            let neural: &[f32] = if all_cached {
+                &cached_neural[..count]
+            } else {
+                owned_neural = reranker.log_probabilities(context, &subset[..count]);
+                &owned_neural
+            };
             if neural.len() == count {
                 // 模型逐字分与词网格逐字分等权混合，并叠加静态先验赤字护栏与低频翻盘阈值。
                 let mut combined = [0.0; STATIC_RERANK_LIMIT];
                 fill_guarded_combined_scores(
                     &subset[..count],
                     &statik[..count],
-                    &neural,
+                    neural,
                     &mut combined[..count],
                 );
                 let mut best = 0;
@@ -517,6 +553,26 @@ pub fn settled_rerank_order<'a, R: OrderRowSource<'a> + ?Sized>(
     answered_by_pinyin_fallback: bool,
     rows: &'a R,
 ) -> Option<Vec<usize>> {
+    settled_rerank_order_with_options(
+        reranker,
+        context,
+        scheme,
+        answered_by_pinyin_fallback,
+        rows,
+        false,
+    )
+}
+
+/// 停顿后精排的可选策略版本：`lock_leader = true` 时锁定首选槽位（`order[0] == 0` 恒成立），
+/// 仅对第 2 名及以后的次选整句按停顿大模型排序，彻底消除盲打时空格首选延迟翻脸。
+pub fn settled_rerank_order_with_options<'a, R: OrderRowSource<'a> + ?Sized>(
+    reranker: &mut Reranker,
+    context: &str,
+    scheme: u8,
+    answered_by_pinyin_fallback: bool,
+    rows: &'a R,
+    lock_leader: bool,
+) -> Option<Vec<usize>> {
     if !rerank_needs_model(scheme, answered_by_pinyin_fallback, rows) {
         return None;
     }
@@ -544,6 +600,9 @@ pub fn settled_rerank_order<'a, R: OrderRowSource<'a> + ?Sized>(
             &mut statik,
             &mut subset,
         ) {
+            if lock_leader && compared_count < 3 {
+                return None;
+            }
             let neural = reranker.log_probabilities(context, &subset[..compared_count]);
             if neural.len() == compared_count {
                 let mut combined = [0.0f64; SETTLED_STATIC_RERANK_LIMIT];
@@ -557,24 +616,29 @@ pub fn settled_rerank_order<'a, R: OrderRowSource<'a> + ?Sized>(
                 for (seat, entry) in rank[..compared_count].iter_mut().enumerate() {
                     *entry = seat;
                 }
-                // 降序排列，平分时保持比较集合内的原有先后次序。
-                rank[..compared_count].sort_by(|&a, &b| combined[b].total_cmp(&combined[a]));
-                if rank[0] != 0
-                    && !leader_promotion_allowed(
-                        context
-                            .chars()
-                            .count()
-                            .saturating_add(subset[0].chars().count()),
-                        statik[0],
-                        statik[rank[0]],
-                        combined[0],
-                        combined[rank[0]],
-                    )
-                {
-                    if let Some(leader_seat) =
-                        rank[..compared_count].iter().position(|&idx| idx == 0)
+                if lock_leader {
+                    // 锁定第 1 槽：仅重排第 2 名及以后的次选，保证停顿后空格首选零翻脸。
+                    rank[1..compared_count].sort_by(|&a, &b| combined[b].total_cmp(&combined[a]));
+                } else {
+                    // 降序排列，平分时保持比较集合内的原有先后次序。
+                    rank[..compared_count].sort_by(|&a, &b| combined[b].total_cmp(&combined[a]));
+                    if rank[0] != 0
+                        && !leader_promotion_allowed(
+                            context
+                                .chars()
+                                .count()
+                                .saturating_add(subset[0].chars().count()),
+                            statik[0],
+                            statik[rank[0]],
+                            combined[0],
+                            combined[rank[0]],
+                        )
                     {
-                        rank[..=leader_seat].rotate_right(1);
+                        if let Some(leader_seat) =
+                            rank[..compared_count].iter().position(|&idx| idx == 0)
+                        {
+                            rank[..=leader_seat].rotate_right(1);
+                        }
                     }
                 }
                 if (0..compared_count).all(|seat| rank[seat] == seat) {
@@ -587,6 +651,53 @@ pub fn settled_rerank_order<'a, R: OrderRowSource<'a> + ?Sized>(
                 return Some(order);
             }
         }
+    }
+    if lock_leader {
+        // 无静态证据分支在锁定首选时，仍用大模型对第 2 名及以后的可比候选排序，不触碰第 0 位。
+        let mut considered = [0usize; SETTLED_STATIC_RERANK_LIMIT];
+        let mut subset = [""; SETTLED_STATIC_RERANK_LIMIT];
+        let mut compared_count = 0usize;
+        for index in 0..count {
+            if !compared(index) {
+                continue;
+            }
+            if compared_count == SETTLED_STATIC_RERANK_LIMIT {
+                break;
+            }
+            considered[compared_count] = index;
+            subset[compared_count] = rows.get(index).text;
+            compared_count += 1;
+        }
+        if compared_count < 3 {
+            return None;
+        }
+        let longest = subset[1..compared_count]
+            .iter()
+            .map(|text| text.chars().count())
+            .max()
+            .unwrap_or(0);
+        let context = rerank_context(
+            crate::text::trailing_han_clause(context),
+            reranker.model().context_length(),
+            longest,
+        );
+        let neural = reranker.log_probabilities(context, &subset[1..compared_count]);
+        if neural.len() != compared_count - 1 {
+            return None;
+        }
+        let mut rank = [0usize; SETTLED_STATIC_RERANK_LIMIT];
+        for (seat, entry) in rank[..compared_count].iter_mut().enumerate() {
+            *entry = seat;
+        }
+        rank[1..compared_count].sort_by(|&a, &b| neural[b - 1].total_cmp(&neural[a - 1]));
+        if (0..compared_count).all(|seat| rank[seat] == seat) {
+            return None;
+        }
+        let mut order: Vec<usize> = (0..count).collect();
+        for seat in 1..compared_count {
+            order[considered[seat]] = considered[rank[seat]];
+        }
+        return Some(order);
     }
     let longest = longest_rerank_candidate::<STATIC_RERANK_LIMIT, _, _>(rows, &compared);
     let context = rerank_context(
@@ -1092,10 +1203,12 @@ mod tests {
             Some(StaticEvidence {
                 log_prob_milli_nats: -1000,
                 characters: 1,
+                keyboard_neural: None,
             }),
             Some(StaticEvidence {
                 log_prob_milli_nats: -2000,
                 characters: 1,
+                keyboard_neural: None,
             }),
         ];
         let scored = ScoredOrderRows::new(&rows, &scores);
@@ -1336,6 +1449,7 @@ mod tests {
                 Some(StaticEvidence {
                     log_prob_milli_nats: milli,
                     characters: rows[index].text.chars().count(),
+                    keyboard_neural: None,
                 })
             })
             .collect();
@@ -1414,19 +1528,23 @@ mod tests {
             Some(StaticEvidence {
                 log_prob_milli_nats: -15_000,
                 characters: 3,
+                keyboard_neural: None,
             }),
             Some(StaticEvidence {
                 log_prob_milli_nats: -1_000,
                 characters: 3,
+                keyboard_neural: None,
             }),
             None,
             Some(StaticEvidence {
                 log_prob_milli_nats: -14_000,
                 characters: 3,
+                keyboard_neural: None,
             }),
             Some(StaticEvidence {
                 log_prob_milli_nats: -16_000,
                 characters: 3,
+                keyboard_neural: None,
             }),
             None,
         ];
@@ -1483,12 +1601,14 @@ mod tests {
             Some(StaticEvidence {
                 log_prob_milli_nats: -12_000,
                 characters: 2,
+                keyboard_neural: None,
             }),
             None,
             None,
             Some(StaticEvidence {
                 log_prob_milli_nats: -8_000,
                 characters: 2,
+                keyboard_neural: None,
             }),
         ];
         let scored = ScoredOrderRows::new(&mixed_rows, &scores);
@@ -1526,6 +1646,7 @@ mod tests {
             Some(StaticEvidence {
                 log_prob_milli_nats: -15_000,
                 characters: 3,
+                keyboard_neural: None,
             }),
             None,
             None,
@@ -1536,10 +1657,12 @@ mod tests {
             Some(StaticEvidence {
                 log_prob_milli_nats: -30_500,
                 characters: 3,
+                keyboard_neural: None,
             }),
             Some(StaticEvidence {
                 log_prob_milli_nats: -30_400,
                 characters: 3,
+                keyboard_neural: None,
             }),
         ];
         let scored = ScoredOrderRows::new(&rows, &scores);
@@ -1568,16 +1691,19 @@ mod tests {
             Some(StaticEvidence {
                 log_prob_milli_nats: -15_000,
                 characters: 3,
+                keyboard_neural: None,
             }),
             None,
             None,
             Some(StaticEvidence {
                 log_prob_milli_nats: -21_000,
                 characters: 3,
+                keyboard_neural: None,
             }),
             Some(StaticEvidence {
                 log_prob_milli_nats: -22_000,
                 characters: 3,
+                keyboard_neural: None,
             }),
             None,
         ];
@@ -1600,16 +1726,19 @@ mod tests {
             Some(StaticEvidence {
                 log_prob_milli_nats: -16_000,
                 characters: 4,
+                keyboard_neural: None,
             }),
             None,
             None,
             Some(StaticEvidence {
                 log_prob_milli_nats: -18_000,
                 characters: 4,
+                keyboard_neural: None,
             }),
             Some(StaticEvidence {
                 log_prob_milli_nats: -40_000,
                 characters: 4,
+                keyboard_neural: None,
             }),
             None,
         ];
@@ -1717,10 +1846,12 @@ mod tests {
             Some(StaticEvidence {
                 log_prob_milli_nats: -10_000,
                 characters: 1,
+                keyboard_neural: None,
             }),
             Some(StaticEvidence {
                 log_prob_milli_nats: -10_000,
                 characters: 1,
+                keyboard_neural: None,
             }),
         ];
         let scored = ScoredOrderRows::new(&rows, &scores);
@@ -1854,10 +1985,12 @@ mod tests {
             Some(StaticEvidence {
                 log_prob_milli_nats: -10_000,
                 characters: 2,
+                keyboard_neural: None,
             }),
             Some(StaticEvidence {
                 log_prob_milli_nats: -13_000,
                 characters: 2,
+                keyboard_neural: None,
             }),
         ];
         let weak_scored = ScoredOrderRows::new(&rows, &weak_scores);
@@ -1867,6 +2000,89 @@ mod tests {
             settled_rerank_order(&mut reranker, "", 0, false, &weak_scored),
             Some(vec![1, 0]),
             "favouring_model 给出远超 0.06 的神经增益时应正常重排"
+        );
+    }
+
+    #[test]
+    fn settled_lock_leader_preserves_slot_zero_and_reorders_runners_up() {
+        let rows = [
+            row("甲甲", LATTICE_SOURCE),
+            row("丙丙", LATTICE_SOURCE),
+            row("乙乙", LATTICE_SOURCE),
+        ];
+        let scores = [
+            Some(StaticEvidence::new(-10_000, 2)),
+            Some(StaticEvidence::new(-10_200, 2)),
+            Some(StaticEvidence::new(-10_200, 2)),
+        ];
+        let scored = ScoredOrderRows::new(&rows, &scores);
+        let mut reranker = Reranker::new(std::sync::Arc::new(favouring_model(
+            &['甲', '乙', '丙'],
+            &['乙'],
+        )));
+        // 未锁首选时，乙乙升至第 0 位。
+        assert_eq!(
+            settled_rerank_order_with_options(&mut reranker, "", 0, false, &scored, false),
+            Some(vec![2, 0, 1])
+        );
+        // 锁定首选时，第 0 位恒为甲甲，仅把更优次选乙乙提到第 1 位。
+        assert_eq!(
+            settled_rerank_order_with_options(&mut reranker, "", 0, false, &scored, true),
+            Some(vec![0, 2, 1])
+        );
+    }
+
+    #[test]
+    fn rerank_pick_reuses_same_model_cached_keyboard_neural_score() {
+        let rows = [row("甲甲", LATTICE_SOURCE), row("乙乙", LATTICE_SOURCE)];
+        // 模型本身偏好甲，但缓存的同源模型分标明乙乙大幅领先：验证命中缓存时直接采用缓存分而不重跑模型。
+        let model = std::sync::Arc::new(favouring_model(&['甲', '乙'], &['甲']));
+        let model_id = std::sync::Arc::as_ptr(&model) as usize;
+        let cached_scores = [
+            Some(StaticEvidence {
+                log_prob_milli_nats: -10_000,
+                characters: 2,
+                keyboard_neural: Some((model_id, -6_000)),
+            }),
+            Some(StaticEvidence {
+                log_prob_milli_nats: -10_000,
+                characters: 2,
+                keyboard_neural: Some((model_id, -1_000)),
+            }),
+        ];
+        let mut reranker = Reranker::new(std::sync::Arc::clone(&model));
+        assert_eq!(
+            rerank_pick(
+                &mut reranker,
+                "",
+                0,
+                false,
+                &ScoredOrderRows::new(&rows, &cached_scores),
+            ),
+            Some(1)
+        );
+        // 模型实例标识不同时必须丢弃缓存并回退到真实模型推理（此处模型偏好甲，不晋升乙）。
+        let mismatched_scores = [
+            Some(StaticEvidence {
+                log_prob_milli_nats: -10_000,
+                characters: 2,
+                keyboard_neural: Some((model_id.wrapping_add(1), -6_000)),
+            }),
+            Some(StaticEvidence {
+                log_prob_milli_nats: -10_000,
+                characters: 2,
+                keyboard_neural: Some((model_id.wrapping_add(1), -1_000)),
+            }),
+        ];
+        assert_eq!(
+            rerank_pick(
+                &mut reranker,
+                "",
+                0,
+                false,
+                &ScoredOrderRows::new(&rows, &mismatched_scores),
+            ),
+            None
         );
     }
 }

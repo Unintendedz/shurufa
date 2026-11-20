@@ -160,6 +160,9 @@ fn neural_merge_eliminates_path_copies_without_changing_candidates_or_typo() {
                                         rerankers,
                                         context,
                                     );
+                                    for item in &mut candidates {
+                                        item.keyboard_neural = None;
+                                    }
                                     (candidates, typo, literal)
                                 };
                                 if warm {

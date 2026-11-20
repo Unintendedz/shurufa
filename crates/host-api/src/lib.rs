@@ -1029,6 +1029,8 @@ impl HostSession {
             .map_err(|e| e.to_string())?;
         self.runtime
             .set_settled_rerank_enabled(preferences.sentence_association.neural_desktop);
+        self.runtime
+            .set_settled_lock_leader(self.edition.id == "shurufa");
         let emoji_mru = (!options.user_data.is_empty())
             .then(|| std::path::PathBuf::from(&options.user_data).join("emoji_mru.json"));
         self.runtime.set_inline_emoji_projection(

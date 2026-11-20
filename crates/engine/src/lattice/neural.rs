@@ -165,28 +165,46 @@ impl NeuralReranker {
         Some(order)
     }
 
-    /// 只读路径并把评分前缀排列写入调用方的固定缓冲；不为索引向量申请堆内存。
-    pub(super) fn score_order_into(
+    /// 返回底层 `SentenceModel` 实例的稳定指针标识，供运行时判断单遍复用的逐键模型是否同源。
+    pub(super) fn model_id(&self) -> usize {
+        std::ptr::from_ref(self.reranker.model()) as usize
+    }
+
+    /// 只读路径并把评分前缀排列写入调用方的固定缓冲；同时可选写出每条路径的逐字模型均值（毫 nat），
+    /// 供运行时在单键重排阶段直接复用，避免同一 4.5MB 模型单键双跑。
+    pub(super) fn score_order_with_means_into(
         &mut self,
         paths: &[SentencePath],
         context: &str,
         order: &mut [usize],
+        means_milli_nats: Option<&mut [i32]>,
     ) -> Option<usize> {
         if paths.len() < 2 {
             return None;
         }
         let scored = paths.len().min(MAX_RERANK_PATHS);
         let mut texts = [""; MAX_RERANK_PATHS];
+        let mut longest = 0usize;
         for (text, path) in texts[..scored].iter_mut().zip(&paths[..scored]) {
             *text = path.sentence.as_str();
+            longest = longest.max(text.chars().count());
         }
-        let clean_context = last_characters(trailing_han_clause(context), CONTEXT_CHARACTERS);
+        let clean_context = crate::ordering::rerank_context(
+            trailing_han_clause(context),
+            self.reranker.model().context_length(),
+            longest,
+        );
         let means = self
             .reranker
             .log_probabilities(clean_context, &texts[..scored]);
         // 模型评分数量不完整时保持原序，避免只重排部分结果。
         if means.len() != scored {
             return None;
+        }
+        if let Some(out) = means_milli_nats {
+            for (slot, &mean) in out[..scored].iter_mut().zip(&means) {
+                *slot = (f64::from(mean) * 1000.0).round() as i32;
+            }
         }
         let mut neural = [0.0; MAX_RERANK_PATHS];
         let mut statik = [0.0; MAX_RERANK_PATHS];
@@ -234,17 +252,29 @@ impl NeuralReranker {
         Some(ordered)
     }
 
+    /// 只读路径并把评分前缀排列写入调用方的固定缓冲；不为索引向量申请堆内存。
+    pub(super) fn score_order_into(
+        &mut self,
+        paths: &[SentencePath],
+        context: &str,
+        order: &mut [usize],
+    ) -> Option<usize> {
+        self.score_order_with_means_into(paths, context, order, None)
+    }
+
     /// 按 `context` 最后 64 字的模型评分在多字同音词切片中挑选唯一更贴合语境的首选下标。
     ///
     /// 单字没有词内搭配约束，不同读音简拼的静态权重也不可直接互比；因此调用方只传入字数 `>= 2`
-    /// 且完整读音一致的同音词引用。仅当最佳同音词相对原首选的 `ln(weight) + neural_nats` 总分优势
-    /// 不少于 `1.5` nats（等价于 `0.5` 等权融合下领先 `0.75` nat）时返回其下标，否则返回 `None`。
+    /// 且完整读音一致的同音词引用。神经条件对数概率 `ln P_LM(w | context)` 本身已包含语料先验，
+    /// 旧词库分档权重又存在人工倍数断崖（如「登录 502k / 登陆 5k」「把他 319k / 把它 4.6k」），
+    /// 因此仅以 `0.25 * ln(weight)` 作为低频防噪稳定项，当最佳同音词相对原首选净领先不少于 `0.35` nats 时返回其下标。
     pub fn pick_dictionary_homophone(
         &mut self,
         items: &[&crate::types::WordItem],
         context: &str,
     ) -> Option<usize> {
-        const HOMOPHONE_PROMOTE_SUM_MARGIN_NATS: f64 = 1.5;
+        const HOMOPHONE_STATIC_PRIOR_WEIGHT: f64 = 0.25;
+        const HOMOPHONE_PROMOTE_SUM_MARGIN_NATS: f64 = 0.35;
         let trimmed = last_characters(trailing_han_clause(context), CONTEXT_CHARACTERS);
         let scored = items.len().min(MAX_RERANK_PATHS);
         if scored < 2 || trimmed.is_empty() {
@@ -262,7 +292,8 @@ impl NeuralReranker {
         }
         let chars = texts[0].chars().count() as f64;
         let score_of = |index: usize| {
-            (items[index].weight.max(1) as f64).ln() + f64::from(means[index]) * chars
+            HOMOPHONE_STATIC_PRIOR_WEIGHT * (items[index].weight.max(1) as f64).ln()
+                + f64::from(means[index]) * chars
         };
         let leader_score = score_of(0);
         let mut best = 0;

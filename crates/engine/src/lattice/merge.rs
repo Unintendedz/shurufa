@@ -332,17 +332,28 @@ fn merge_decoded_paths(
         }
     } else {
         let mut keyboard_order = [0; MAX_RERANK_PATHS];
+        let mut keyboard_means = [0i32; MAX_RERANK_PATHS];
         let mut keyboard = None;
+        let mut keyboard_model_id = 0usize;
         for reranker in rerankers
             .iter_mut()
             .filter(|reranker| reranker.source == CandidateSource::NeuralKeyboard)
         {
-            if let Some(scored) =
-                reranker.score_order_into(&paths, rescoring_context, &mut keyboard_order)
-            {
+            if let Some(scored) = reranker.score_order_with_means_into(
+                &paths,
+                rescoring_context,
+                &mut keyboard_order,
+                Some(&mut keyboard_means),
+            ) {
                 keyboard = Some(scored);
+                keyboard_model_id = reranker.model_id();
             }
         }
+        let cached_neural = |index: usize| -> Option<(usize, i32)> {
+            keyboard
+                .filter(|&scored| index < scored && keyboard_model_id != 0)
+                .map(|_| (keyboard_model_id, keyboard_means[index]))
+        };
         // 所有模型处理完后确认没有可输出来源，保留已完成的纠错结果。
         if !options.include_lattice_best && !options.include_collocation_best && keyboard.is_none()
         {
@@ -359,35 +370,43 @@ fn merge_decoded_paths(
         });
         if let (Some(runner_ups), Some(ranked)) = (runner_ups, ranked.clone()) {
             let rows = match already.as_ref() {
-                Some(already) => {
-                    keyboard_runner_up_rows(&paths, ranked, options, typed_pinyin, |sentence| {
-                        already.contains(sentence)
-                    })
-                }
-                None => {
-                    keyboard_runner_up_rows(&paths, ranked, options, typed_pinyin, |sentence| {
-                        candidates.iter().any(|item| item.word == sentence)
-                    })
-                }
+                Some(already) => keyboard_runner_up_rows_with_neural(
+                    &paths,
+                    ranked,
+                    options,
+                    typed_pinyin,
+                    &cached_neural,
+                    |sentence| already.contains(sentence),
+                ),
+                None => keyboard_runner_up_rows_with_neural(
+                    &paths,
+                    ranked,
+                    options,
+                    typed_pinyin,
+                    &cached_neural,
+                    |sentence| candidates.iter().any(|item| item.word == sentence),
+                ),
             };
             runner_ups.extend(rows);
         }
         if let Some(already) = already.as_ref() {
-            reranked_block(
+            reranked_block_with_neural(
                 paths,
                 0..path_count,
                 ranked,
                 options,
                 typed_pinyin,
+                &cached_neural,
                 |sentence| already.contains(sentence),
             )
         } else {
-            reranked_block(
+            reranked_block_with_neural(
                 paths,
                 0..path_count,
                 ranked,
                 options,
                 typed_pinyin,
+                &cached_neural,
                 |sentence| candidates.iter().any(|item| item.word == sentence),
             )
         }
@@ -519,11 +538,23 @@ fn take_sentence_index(
 /// 键盘模型给出的其余路径：`reranked_block` 放进整句块的两条（词格首选和键盘模型选中的那条）以外、还没有出现在候选里的路径，按键盘模型的顺序成为 `Generated` 行，标上 `keyboard_runner_up`。
 ///
 /// 两条的上限让正确整句经常根本不在列表里（`daoshikan` 的「到时看」排在 12 条路径里，但上文是「其他」时键盘模型挑的是「导师看」）；全部丢掉时，停顿后精排也只能在已有候选之间挪。调用方把这些行接在整张候选列表的末尾，由 `ordering::runner_up_order` 决定哪几条回到第一页。它们刚被同一个模型排在选中那条之后，所以逐键重排不再比较它们（`ordering::rerank_pick`）。
+#[cfg(test)]
 fn keyboard_runner_up_rows(
     paths: &[SentencePath],
     ranked: impl IntoIterator<Item = usize> + Clone,
     options: &LatticeOptions<'_>,
     typed_pinyin: &str,
+    is_listed: impl Fn(&str) -> bool,
+) -> Vec<WordItem> {
+    keyboard_runner_up_rows_with_neural(paths, ranked, options, typed_pinyin, &|_| None, is_listed)
+}
+
+fn keyboard_runner_up_rows_with_neural(
+    paths: &[SentencePath],
+    ranked: impl IntoIterator<Item = usize> + Clone,
+    options: &LatticeOptions<'_>,
+    typed_pinyin: &str,
+    cached_neural: &impl Fn(usize) -> Option<(usize, i32)>,
     is_listed: impl Fn(&str) -> bool,
 ) -> Vec<WordItem> {
     let literal = (options.include_lattice_best || options.include_collocation_best)
@@ -542,18 +573,40 @@ fn keyboard_runner_up_rows(
                 CandidateSource::Generated,
             );
             row.keyboard_runner_up = true;
+            row.keyboard_neural = cached_neural(index);
             row
         })
         .collect()
 }
 
-/// 两个来源先按旧规则选索引，再把字段交给输出槽；槽顺序始终是字面、键盘。
+#[cfg(test)]
 fn reranked_block<'a>(
     paths: impl Into<Cow<'a, [SentencePath]>>,
     lattice: impl IntoIterator<Item = usize>,
     keyboard: Option<impl IntoIterator<Item = usize>>,
     options: &LatticeOptions<'_>,
     typed_pinyin: &str,
+    is_listed: impl Fn(&str) -> bool,
+) -> Vec<WordItem> {
+    reranked_block_with_neural(
+        paths,
+        lattice,
+        keyboard,
+        options,
+        typed_pinyin,
+        &|_| None,
+        is_listed,
+    )
+}
+
+/// 两个来源先按旧规则选索引，再把字段交给输出槽；槽顺序始终是字面、键盘。
+fn reranked_block_with_neural<'a>(
+    paths: impl Into<Cow<'a, [SentencePath]>>,
+    lattice: impl IntoIterator<Item = usize>,
+    keyboard: Option<impl IntoIterator<Item = usize>>,
+    options: &LatticeOptions<'_>,
+    typed_pinyin: &str,
+    cached_neural: &impl Fn(usize) -> Option<(usize, i32)>,
     is_listed: impl Fn(&str) -> bool,
 ) -> Vec<WordItem> {
     let paths = paths.into();
@@ -567,7 +620,7 @@ fn reranked_block<'a>(
     let mut rows = [None, None];
     for (index, path) in sentence_path_iter(paths).enumerate() {
         if literal == Some(index) {
-            rows[0] = Some(owned_sentence_row(
+            let mut row = owned_sentence_row(
                 typed_pinyin,
                 path.into_owned(),
                 if options.include_collocation_best {
@@ -575,13 +628,17 @@ fn reranked_block<'a>(
                 } else {
                     CandidateSource::Generated
                 },
-            ));
+            );
+            row.keyboard_neural = cached_neural(index);
+            rows[0] = Some(row);
         } else if pick == Some(index) {
-            rows[1] = Some(owned_sentence_row(
+            let mut row = owned_sentence_row(
                 typed_pinyin,
                 path.into_owned(),
                 CandidateSource::NeuralKeyboard,
-            ));
+            );
+            row.keyboard_neural = cached_neural(index);
+            rows[1] = Some(row);
         }
     }
     let mut block = Vec::new();

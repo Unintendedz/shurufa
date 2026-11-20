@@ -313,6 +313,9 @@ fn real_merge_preserves_nonempty_and_neural_rows_with_typo_return() {
                                 &mut rerankers,
                                 "",
                             );
+                            for item in &mut candidates {
+                                item.keyboard_neural = None;
+                            }
                             (candidates, typo)
                         };
                         assert_eq!(run(true), run(false));

@@ -32,7 +32,7 @@ mod grid_keys;
 
 use msime_engine::host::{Command, Session};
 use msime_engine::KeyGrid;
-use msime_input_runtime::{Action, Reranker, Runtime, SentenceModel};
+use msime_input_runtime::{Action, Reranker, Runtime};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -242,13 +242,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     options.sentence_association.neural_keyboard = keyboard_neural;
 
     let model_path = resources.join("sentence-model.safetensors");
-    let bytes = std::fs::read(&model_path).map_err(|error| {
-        format!(
-            "{}: {error}. This measures what the reranker costs, so it needs one to measure.",
-            model_path.display()
-        )
-    })?;
-    let model = std::sync::Arc::new(SentenceModel::load(&bytes)?);
+    let model = msime_engine::shared_sentence_model(&model_path).ok_or_else(
+        || {
+            format!(
+                "{}: failed to load. This measures what the reranker costs, so it needs one to measure.",
+                model_path.display()
+            )
+        },
+    )?;
 
     let mut plain = Runtime::new(Session::new(&options)?, 9)?;
     plain.focus(true)?;

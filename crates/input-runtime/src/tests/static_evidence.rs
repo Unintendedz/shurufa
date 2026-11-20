@@ -2,10 +2,7 @@ use super::*;
 use msime_engine::ordering::{rerank_pick, OrderRow, ScoredOrderRows, StaticEvidence};
 
 fn evidence(total: i64, characters: usize) -> Option<StaticEvidence> {
-    Some(StaticEvidence {
-        log_prob_milli_nats: total,
-        characters,
-    })
+    Some(StaticEvidence::new(total, characters))
 }
 
 fn row(text: &str) -> OrderRow<'_> {

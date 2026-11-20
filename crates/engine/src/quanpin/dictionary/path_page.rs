@@ -106,6 +106,7 @@ fn ordinary_row(row: &WordItem, reading: &str) -> bool {
         sentence_words,
         keyboard_runner_up,
         extra_syllables,
+        keyboard_neural,
     } = row;
     pinyin == reading
         && *source == CandidateSource::Database
@@ -117,6 +118,7 @@ fn ordinary_row(row: &WordItem, reading: &str) -> bool {
         && sentence_words.is_empty()
         && !keyboard_runner_up
         && *extra_syllables == 0
+        && keyboard_neural.is_none()
 }
 
 fn copy_row(row: &DictRow, pinyin: &str) -> WordItem {

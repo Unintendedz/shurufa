@@ -49,6 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut attribution = false;
     let mut no_settled = false;
     let mut no_neural = false;
+    let mut settled_lock_leader = false;
     let mut grammar_model: Option<PathBuf> = None;
     let mut collocation_weight: Option<f64> = None;
     let mut page_size: u8 = 9;
@@ -77,6 +78,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--attribution" => attribution = true,
             "--no-settled" => no_settled = true,
             "--no-neural" => no_neural = true,
+            "--settled-lock-leader" => settled_lock_leader = true,
             "--grammar-model" => grammar_model = Some(PathBuf::from(take(&mut index)?)),
             "--collocation-weight" => collocation_weight = Some(take(&mut index)?.parse()?),
             "--page-size" => page_size = take(&mut index)?.parse()?,
@@ -135,6 +137,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             attribution,
             no_settled: no_settled || no_neural,
             no_neural,
+            settled_lock_leader,
             grammar_model: grammar_model.as_deref(),
             collocation_weight,
             page_size,
@@ -214,6 +217,7 @@ struct EvalConfig<'a> {
     attribution: bool,
     no_settled: bool,
     no_neural: bool,
+    settled_lock_leader: bool,
     grammar_model: Option<&'a Path>,
     collocation_weight: Option<f64>,
     page_size: u8,
@@ -258,6 +262,7 @@ fn run(config: &EvalConfig<'_>, cases: &[Case]) -> Result<Report, Box<dyn std::e
         attribution,
         no_settled,
         no_neural,
+        settled_lock_leader,
         grammar_model,
         collocation_weight,
         page_size,
@@ -335,15 +340,17 @@ fn run(config: &EvalConfig<'_>, cases: &[Case]) -> Result<Report, Box<dyn std::e
             Err(_) => eprintln!("no settled model at {}", settled_path.display()),
         }
     }
+    if settled_lock_leader {
+        runtime.set_settled_lock_leader(true);
+    }
     if !no_neural {
         let model_path = resources.join("sentence-model.safetensors");
-        match std::fs::read(&model_path) {
-            Ok(bytes) => {
-                let model = SentenceModel::load(&bytes)?;
+        match msime_engine::shared_sentence_model(&model_path) {
+            Some(model) => {
                 eprintln!("reranking with {}", model_path.display());
-                runtime.set_reranker(Some(Reranker::new(std::sync::Arc::new(model))));
+                runtime.set_reranker(Some(Reranker::new(model)));
             }
-            Err(_) => eprintln!(
+            None => eprintln!(
                 "no model at {}, measuring the engine alone",
                 model_path.display()
             ),

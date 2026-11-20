@@ -237,6 +237,9 @@ fn absent_sentence_sources_skip_only_the_unused_large_dedup_table() {
                                                     models,
                                                     if warm { "合成😀上下文" } else { "" },
                                                 );
+                                                for item in &mut candidates {
+                                                    item.keyboard_neural = None;
+                                                }
                                                 (candidates, typo, literal)
                                             };
                                         if warm {
