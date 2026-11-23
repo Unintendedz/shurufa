@@ -127,6 +127,30 @@ int main() {
             MSIMEConfiguredVoiceShortcut legacy;
             MSIMEConfiguredVoiceShortcut::Options either{@{@"key_code":@123, @"modifiers":@2}, @"toggle", false, false, false, false};
             assert(legacy.observe(Event(123, left, NSEventTypeKeyDown, 50), either, false).action == Action::Toggle);
+            // IMK 的 KeyDown 剥离设备侧别位时，依赖已追踪侧别或物理状态仍必须拒绝左 Option+←、只放行右 Option+←。
+            {
+                MSIMEConfiguredVoiceShortcut tracked;
+                const auto plainOptionArrow = arrow | NSEventModifierFlagOption;
+                assert(tracked.observe(Event(58, NSEventModifierFlagOption | NX_DEVICELALTKEYMASK, NSEventTypeFlagsChanged, 60), config, false).action == Action::None);
+                const auto rejectedByTracked = tracked.observe(Event(123, plainOptionArrow, NSEventTypeKeyDown, 60.1), config, false);
+                assert(!rejectedByTracked.consumed && rejectedByTracked.action == Action::None);
+                assert(tracked.observe(Event(58, 0, NSEventTypeFlagsChanged, 60.2), config, false).action == Action::None);
+                assert(tracked.observe(Event(61, NSEventModifierFlagOption | NX_DEVICERALTKEYMASK, NSEventTypeFlagsChanged, 61), config, false).action == Action::None);
+                const auto acceptedByTracked = tracked.observe(Event(123, plainOptionArrow, NSEventTypeKeyDown, 61.1), config, false);
+                assert(acceptedByTracked.consumed && acceptedByTracked.action == Action::Toggle);
+            }
+            {
+                MSIMEConfiguredVoiceShortcut physical;
+                const auto plainOptionArrow = arrow | NSEventModifierFlagOption;
+                const auto rejectedByPhysical = physical.observe(
+                    Event(123, plainOptionArrow, NSEventTypeKeyDown, 70), config, false,
+                    NSEventModifierFlagOption | NX_DEVICELALTKEYMASK);
+                assert(!rejectedByPhysical.consumed && rejectedByPhysical.action == Action::None);
+                const auto acceptedByPhysical = physical.observe(
+                    Event(123, plainOptionArrow, NSEventTypeKeyDown, 71), config, false,
+                    NSEventModifierFlagOption | NX_DEVICERALTKEYMASK);
+                assert(acceptedByPhysical.consumed && acceptedByPhysical.action == Action::Toggle);
+            }
         }
         // 按住模式先松开修饰键：自动重复的 KeyDown 仍被吞掉，新的一次按下照常开始。
         {

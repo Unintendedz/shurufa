@@ -4356,7 +4356,9 @@ static const NSTimeInterval kSettledRerankPoll = 1.0 / 60.0;
         [defaults boolForKey:@"MSIMEClientVoiceHotkeyCtrlCommand"] != NO,
         [defaults boolForKey:@"MSIMEClientVoiceHotkeyCtrlOption"] != NO,
         event.type == NSEventTypeKeyDown && [self matchesVoiceToggleHotkey:event] != NO
-    }, _voiceService.active, event.type == NSEventTypeFlagsChanged ? MSIMEPhysicalModifierFlagsState(kCGEventSourceStateHIDSystemState) : 0);
+    }, _voiceService.active,
+        (event.type == NSEventTypeFlagsChanged || event.type == NSEventTypeKeyDown)
+            ? MSIMEPhysicalModifierFlagsState(kCGEventSourceStateHIDSystemState) : 0);
     if (eventSlot) MSIMEVoiceEventReceipts[*eventSlot] = {event.timestamp, result.consumed};
     if (_configuredVoiceShortcut.began()) _voiceHoldGeneration = _voiceGeneration;
     if (result.consumed || result.action != MSIMEVoiceHoldShortcut::Action::None) [self resetModifierTap];

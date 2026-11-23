@@ -55,6 +55,24 @@ static inline bool MSIMEVoiceSidesMatch(NSEventModifierFlags flags, unsigned req
     if (![right isKindOfClass:NSNumber.class]) return true;
     return MSIMEVoiceSidesMatchBits(flags, required, (int)[right unsignedIntValue]);
 }
+// 为每个需要的修饰键组补齐缺失的左右侧标志：优先取事件自带侧别；
+// IMK 的 KeyDown 常剥离低 16 位设备侧别，此时按物理状态 -> 已追踪侧别顺序回补，
+// 防止绑定了「右 Option+←」却被「左 Option+←」在 IMK 入口误触发。
+static inline NSEventModifierFlags MSIMEVoiceMergeSideFlags(
+    NSEventModifierFlags eventFlags,
+    NSEventModifierFlags physicalFlags,
+    NSEventModifierFlags trackedSides,
+    unsigned required) {
+    NSEventModifierFlags merged = eventFlags;
+    for (unsigned group : {1u, 2u, 4u, 8u}) {
+        if (!(required & group)) continue;
+        const NSEventModifierFlags sides = MSIMEVoiceModifierGroupSides(group);
+        if (merged & sides) continue;
+        if (physicalFlags & sides) merged |= (physicalFlags & sides);
+        else if (trackedSides & sides) merged |= (trackedSides & sides);
+    }
+    return merged;
+}
 // 非修饰键主键的按下判定；状态机和事件 tap 共用，保证两边认定的是同一个组合。
 static inline bool MSIMEVoiceComboMatches(unsigned short key, NSEventModifierFlags flags, unsigned short code, unsigned required, int wantRight) {
     return key == code && MSIMEVoiceModifierBits(flags) == required && MSIMEVoiceSidesMatchBits(flags, required, wantRight);
@@ -143,11 +161,12 @@ public:
             const auto primarySide = MSIMEVoiceSideFlag(code);
             const auto primaryGroup = MSIMEVoiceModifierGroupSides(MSIMEVoiceModifierBitForKey(code));
             id right = options.custom[@"right_modifiers"];
+            const auto effectiveFlags = MSIMEVoiceMergeSideFlags(event.modifierFlags, physicalFlags, sides_, required);
             if (modifier)
-                match = key == code && MSIMEVoiceSidesMatch(event.modifierFlags, required, right) &&
+                match = key == code && MSIMEVoiceSidesMatch(effectiveFlags, required, right) &&
                     type == NSEventTypeFlagsChanged && (sides_ & primaryGroup) == primarySide && modifiers == (required | MSIMEVoiceModifierBitForKey(code));
             else
-                match = type == NSEventTypeKeyDown && MSIMEVoiceComboMatches(key, event.modifierFlags, code, required,
+                match = type == NSEventTypeKeyDown && MSIMEVoiceComboMatches(key, effectiveFlags, code, required,
                     [right isKindOfClass:NSNumber.class] ? (int)[right unsignedIntValue] : -1);
         } else if (type == NSEventTypeKeyDown && options.toggleMatch) {
             match = true;
