@@ -5872,7 +5872,12 @@ static NSString *MSIMEVoiceArchiveFailureReason(MSIMEVoiceFailure failure, NSStr
     return MSIMEEditionIsShurufa() && (_voiceOverlay == nil || [_voiceOverlay isKindOfClass:MSIMEVoiceWaveOverlay.class]);
 }
 - (MSIMEVoiceTargetEditableState)voiceTargetEditabilityForClient:(id)client {
-    return MSIMEProbeVoiceTargetEditability(client);
+    const MSIMEVoiceTargetEditabilityProbeResult probe = MSIMEProbeVoiceTargetEditabilityDetailed(client);
+    os_log(MSIMEUILog(),
+           "voice_target_editability state=%ld ax_trusted=%d front_match=%d focus_err=%d role=%{public}@",
+           (long)probe.state, probe.axTrusted ? 1 : 0, probe.frontmostMatchesClient ? 1 : 0,
+           (int)probe.focusError, probe.axRole ?: @"none");
+    return probe.state;
 }
 - (void)showVoiceHistoryFromRecoveryToast {
     [[MSIMEPreferencesWindowController sharedController] showAndActivateWithPageIdentifier:@"voice-history"];
@@ -6160,6 +6165,8 @@ static NSString *MSIMEVoiceArchiveFailureReason(MSIMEVoiceFailure failure, NSStr
                                detail:detail
                          retryHandler:^{ [weakSelf retryArchivedVoiceRecording:failedRecordingID]; }
                        historyHandler:^{ [weakSelf showVoiceHistoryFromRecoveryToast]; }];
+        // 恢复卡片已在屏幕底部居中完整承接失败提示与重试按钮，不再在同一位置叠一层纯文本失败条。
+        return;
     }
     if (!_activeClient && !persistent) return;
     if (!_voiceOverlay) {
@@ -9431,11 +9438,11 @@ static NSRange MSIMEVoiceReplacementRangeForClient(id client, BOOL replaceSelect
             [destination beginVoiceEditTrackingForText:text preferencesDirectory:prefsDir];
         } else {
             const BOOL copied = [self copyVoiceText:text];
-            _voiceCopiedResult = @(copied);
             _lastUndeliveredVoiceText = [text copy];
-            if (polishFailed && copied) _voicePolishFallbackNotice = @"整理失败，已复制原文";
-            else if (_voiceSalvageNotice.length && copied) _voicePolishFallbackNotice = @"麦克风断开 · 已保留并复制结果";
             if ([self shouldShowVoiceRecoveryToast]) {
+                // 底部居中已由毛玻璃预览卡片完整展示结果与“再次复制”，不再同时叠加 3 秒的纯文字“已复制”条。
+                _voiceCopiedResult = nil;
+                _voicePolishFallbackNotice = nil;
                 NSString *toastTitle = nil;
                 if (polishFailed) {
                     toastTitle = copied ? @"整理失败且焦点不可输入 · 已复制原文" : @"整理失败且焦点不可输入 · 请点击复制";
@@ -9452,6 +9459,10 @@ static NSRange MSIMEVoiceReplacementRangeForClient(id client, BOOL replaceSelect
                     MSIMEInputController *inner = weakSelf;
                     return inner ? [inner copyVoiceText:copyTarget] : MSIMEWriteVoiceClipboard(copyTarget, NSPasteboard.generalPasteboard);
                 }];
+            } else {
+                _voiceCopiedResult = @(copied);
+                if (polishFailed && copied) _voicePolishFallbackNotice = @"整理失败，已复制原文";
+                else if (_voiceSalvageNotice.length && copied) _voicePolishFallbackNotice = @"麦克风断开 · 已保留并复制结果";
             }
         }
         _voiceSalvageNotice = nil;

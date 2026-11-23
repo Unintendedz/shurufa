@@ -1,11 +1,11 @@
 #import "VoiceRecoveryToast.h"
+#import "../candidate/CandidateWindowLevel.h"
 
 namespace {
 
-constexpr CGFloat kCardWidth = 360.0;
+constexpr CGFloat kCardWidth = 376.0;
 constexpr CGFloat kCardCornerRadius = 14.0;
-constexpr CGFloat kCardEdgeInsetRight = 18.0;
-constexpr CGFloat kCardEdgeInsetTop = 18.0;
+constexpr CGFloat kCardBottomGap = 16.0;
 constexpr NSTimeInterval kUndeliveredCopiedDelaySec = 12.0;
 constexpr NSTimeInterval kUndeliveredNotCopiedDelaySec = 18.0;
 constexpr NSTimeInterval kRetryableFailureDelaySec = 15.0;
@@ -118,20 +118,31 @@ constexpr NSTimeInterval kPostCopyDismissDelaySec = 1.8;
     return _currentBody ?: @"";
 }
 
+- (NSRect)panelFrame {
+    return _panel ? _panel.frame : NSZeroRect;
+}
+
+- (NSWindowLevel)panelLevel {
+    return _panel ? _panel.level : 0;
+}
+
 - (void)ensurePanel {
     if (_panel) return;
     _panel = [[MSIMEVoiceRecoveryToastPanel alloc]
         initWithContentRect:NSMakeRect(0, 0, kCardWidth, 96.0)
                   styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
                     backing:NSBackingStoreBuffered
-                      defer:YES];
+                      defer:NO];
     _panel.opaque = NO;
     _panel.backgroundColor = NSColor.clearColor;
     _panel.hasShadow = YES;
-    _panel.level = NSStatusWindowLevel;
+    _panel.floatingPanel = YES;
+    // 采用与候选窗和模式提示一致的 IMK 顶层窗口层级，确保从后台输入法进程弹出时始终位于所有全屏/浮层窗口之上。
+    _panel.level = MSIMECandidateWindowLevel();
     _panel.hidesOnDeactivate = NO;
     _panel.ignoresMouseEvents = NO;
     _panel.releasedWhenClosed = NO;
+    _panel.animationBehavior = NSWindowAnimationBehaviorNone;
     _panel.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces |
                                 NSWindowCollectionBehaviorFullScreenAuxiliary |
                                 NSWindowCollectionBehaviorTransient |
@@ -224,6 +235,7 @@ constexpr NSTimeInterval kPostCopyDismissDelaySec = 1.8;
     [_effectView addSubview:column];
 
     [NSLayoutConstraint activateConstraints:@[
+        [column.widthAnchor constraintEqualToConstant:kCardWidth - 28.0],
         [column.leadingAnchor constraintEqualToAnchor:_effectView.leadingAnchor constant:14.0],
         [column.trailingAnchor constraintEqualToAnchor:_effectView.trailingAnchor constant:-14.0],
         [column.topAnchor constraintEqualToAnchor:_effectView.topAnchor constant:12.0],
@@ -277,9 +289,12 @@ constexpr NSTimeInterval kPostCopyDismissDelaySec = 1.8;
     const CGFloat height = MAX(56.0, MIN(176.0, ceil(fitting.height)));
 
     NSScreen *screen = [self targetScreen];
-    const NSRect visible = screen ? screen.visibleFrame : NSMakeRect(0, 0, 1440, 900);
-    const CGFloat x = NSMaxX(visible) - kCardWidth - kCardEdgeInsetRight;
-    const CGFloat y = NSMaxY(visible) - height - kCardEdgeInsetTop;
+    const NSRect full = screen ? screen.frame : NSMakeRect(0, 0, 1440, 900);
+    const NSRect visible = screen ? screen.visibleFrame : full;
+    // 贴合屏幕底部居中（与录音条视觉落点一致），录音结束无法直插时卡片就出现在用户视线焦点处，不再偏到右上角被忽略。
+    CGFloat x = NSMidX(full) - kCardWidth * 0.5;
+    x = MIN(MAX(x, NSMinX(visible) + 12.0), MAX(NSMinX(visible) + 12.0, NSMaxX(visible) - kCardWidth - 12.0));
+    const CGFloat y = NSMinY(visible) + kCardBottomGap;
 
     [_panel setFrame:NSMakeRect(x, y, kCardWidth, height) display:YES];
     _effectView.frame = NSMakeRect(0, 0, kCardWidth, height);

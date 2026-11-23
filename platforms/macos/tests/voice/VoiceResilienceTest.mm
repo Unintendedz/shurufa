@@ -4,6 +4,7 @@
 #import "../../src/voice/VoiceTargetEditability.h"
 #import "../../src/voice/VoiceTextCommit.h"
 #import "../../src/voice/VoiceRecoveryToast.h"
+#import "../../src/candidate/CandidateWindowLevel.h"
 #include <cassert>
 #include <cmath>
 #include <cstring>
@@ -356,7 +357,7 @@ static void TestTargetEditabilityClassification() {
         in.axTrusted = NO;
         assert(MSIMEClassifyVoiceTargetEditability(in) == MSIMEVoiceTargetEditableStateUnknown);
     }
-    // 4. AX 已授权但无焦点元素 / 按钮 / 静态文本 / 无可编辑祖先的空白网页 -> 明确不可编辑。
+    // 4. AX 已授权但无焦点元素 / 按钮 / 静态文本 / 只读网页（即使带 AXSelectedTextRange）/ 禁用输入框 / 非文本值控件 -> 明确不可编辑。
     {
         MSIMEVoiceTargetEditableInput in;
         in.frontmostBundleID = @"com.google.Chrome";
@@ -370,27 +371,51 @@ static void TestTargetEditabilityClassification() {
         assert(MSIMEClassifyVoiceTargetEditability(in) == MSIMEVoiceTargetEditableStateNotEditable);
 
         in.axRole = @"AXStaticText";
+        in.axHasSelectedTextRange = YES;
         assert(MSIMEClassifyVoiceTargetEditability(in) == MSIMEVoiceTargetEditableStateNotEditable);
 
+        // 关键回归：Chromium/Electron/Safari 只读网页常暴露 AXSelectedTextRange 供划词复制，必须判定为不可编辑！
         in.axRole = @"AXWebArea";
         in.axHasEditableAncestor = NO;
         in.axValueSettable = NO;
-        in.axHasSelectedTextRange = NO;
+        in.axHasSelectedTextRange = YES;
+        assert(MSIMEClassifyVoiceTargetEditability(in) == MSIMEVoiceTargetEditableStateNotEditable);
+
+        in.axRole = @"AXDocument";
+        assert(MSIMEClassifyVoiceTargetEditability(in) == MSIMEVoiceTargetEditableStateNotEditable);
+
+        in.axRole = @"AXGroup";
+        assert(MSIMEClassifyVoiceTargetEditability(in) == MSIMEVoiceTargetEditableStateNotEditable);
+
+        // 滑块/复选框虽然 AXValue 可写，但不是文本输入框。
+        in.axRole = @"AXSlider";
+        in.axValueSettable = YES;
+        assert(MSIMEClassifyVoiceTargetEditability(in) == MSIMEVoiceTargetEditableStateNotEditable);
+
+        // 禁用态的输入框不可编辑。
+        in.axRole = @"AXTextField";
+        in.axValueSettable = YES;
+        in.axEnabled = NO;
         assert(MSIMEClassifyVoiceTargetEditability(in) == MSIMEVoiceTargetEditableStateNotEditable);
     }
     // 5. 真正可编辑元素（AXTextArea / AXEditableAncestor / settable AXValue）-> 可编辑。
     {
         MSIMEVoiceTargetEditableInput in;
-        in.frontmostBundleID = @"com.google.Chrome";
-        in.clientBundleID = @"com.google.Chrome";
+        in.frontmostBundleID = @"com.t3tools.t3code";
+        in.clientBundleID = @"com.t3tools.t3code";
         in.axTrusted = YES;
         in.hasFocusedAXElement = YES;
+        in.axEnabled = YES;
         in.axRole = @"AXWebArea";
         in.axHasEditableAncestor = YES;
         assert(MSIMEClassifyVoiceTargetEditability(in) == MSIMEVoiceTargetEditableStateEditable);
 
         in.axHasEditableAncestor = NO;
         in.axRole = @"AXTextArea";
+        assert(MSIMEClassifyVoiceTargetEditability(in) == MSIMEVoiceTargetEditableStateEditable);
+
+        in.axRole = @"AXGroup";
+        in.axValueSettable = YES;
         assert(MSIMEClassifyVoiceTargetEditability(in) == MSIMEVoiceTargetEditableStateEditable);
     }
     // 6. 无 bundleIdentifier 的合成测试客户端 -> Unknown（不碰真实 GUI）。
@@ -439,6 +464,8 @@ static void TestRecoveryToastFormattingAndLifecycle() {
     }];
     assert([toast.currentTitle isEqualToString:@"当前位置不可输入 · 结果已复制"]);
     assert([toast.currentBody isEqualToString:@"“刚刚说出的测试文本”"]);
+    assert(toast.panelLevel == MSIMECandidateWindowLevel());
+    assert(NSWidth(toast.panelFrame) == 376.0 && NSHeight(toast.panelFrame) >= 70.0);
 
     [toast showRetryableFailureTitle:@"语音识别失败 · 录音已保留" detail:@"连接超时" retryHandler:^{} historyHandler:^{}];
     assert([toast.currentTitle isEqualToString:@"语音识别失败 · 录音已保留"]);

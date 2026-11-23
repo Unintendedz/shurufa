@@ -1,4 +1,5 @@
 #import "VoiceLearnedToast.h"
+#import "../candidate/CandidateWindowLevel.h"
 
 namespace {
 
@@ -100,15 +101,18 @@ constexpr CGFloat kToastEdgeInsetTop = 18.0;
         initWithContentRect:NSMakeRect(0, 0, 280, kToastHeight)
                   styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
                     backing:NSBackingStoreBuffered
-                      defer:YES];
+                      defer:NO];
     _panel.opaque = NO;
     _panel.backgroundColor = NSColor.clearColor;
     _panel.hasShadow = YES;
-    _panel.level = NSStatusWindowLevel;
+    _panel.floatingPanel = YES;
+    _panel.level = MSIMECandidateWindowLevel();
     _panel.hidesOnDeactivate = NO;
     _panel.ignoresMouseEvents = NO;
     _panel.releasedWhenClosed = NO;
+    _panel.animationBehavior = NSWindowAnimationBehaviorNone;
     _panel.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces |
+                                NSWindowCollectionBehaviorFullScreenAuxiliary |
                                 NSWindowCollectionBehaviorTransient |
                                 NSWindowCollectionBehaviorIgnoresCycle;
 

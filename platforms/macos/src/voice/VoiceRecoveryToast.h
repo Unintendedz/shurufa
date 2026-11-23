@@ -14,6 +14,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, readonly, getter=isVisible) BOOL visible;
 @property(nonatomic, readonly, copy) NSString *currentTitle;
 @property(nonatomic, readonly, copy) NSString *currentBody;
+@property(nonatomic, readonly) NSRect panelFrame;
+@property(nonatomic, readonly) NSWindowLevel panelLevel;
 
 + (instancetype)sharedToast;
 
