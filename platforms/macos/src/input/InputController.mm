@@ -40,6 +40,7 @@
 #import "../voice/LocalPolishServer.h"
 #import "../voice/VoicePolishClient.h"
 #import "../voice/VoicePipelineHelper.h"
+#import "../voice/VoiceEditTracker.h"
 #include <time.h>
 #import "../voice/VoiceFailureMessages.h"
 #import "../core/SupportWindowController.h"
@@ -1729,6 +1730,7 @@ static NSImage *MSIMECandidateLogoImage() {
     dispatch_queue_t _voicePipelineQueue;
     MSIMEVoicePolishClient *_voicePolishClient;
     MSIMEVoicePolishTask *_voicePolishTask;
+    MSIMEVoiceEditTracker *_voiceEditTracker;
     BOOL _voicePolishPending;
     MSIMEVoiceContextSnapshot *_voiceContextSnapshot;
     NSDictionary *_voiceOptionsSnapshot;
@@ -5612,6 +5614,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     [_desktopInputSession stop]; [_httpVoiceRequest cancel]; [_doubaoVoiceRequest cancel];
     [_doubaoPolishRequest cancel]; [_livePolishRequest cancel];
     [_voicePolishTask cancel]; _voicePolishTask = nil; _voicePolishPending = NO;
+    [_voiceEditTracker cancel]; _voiceEditTracker = nil;
     // A client that dies without deactivateServer: leaves the repeating timer on the run loop, and its candidate window on screen.
     [_preferencesTimer invalidate];
     [self flushKeyPresses];
@@ -5626,6 +5629,26 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
 - (MSIMEVoicePolishClient *)sharedVoicePolishClient {
     if (!_voicePolishClient) _voicePolishClient = [[MSIMEVoicePolishClient alloc] init];
     return _voicePolishClient;
+}
+- (MSIMEVoiceEditTracker *)sharedVoiceEditTracker {
+    if (!_voiceEditTracker) _voiceEditTracker = [[MSIMEVoiceEditTracker alloc] init];
+    return _voiceEditTracker;
+}
+- (void)beginVoiceEditTrackingForText:(NSString *)text preferencesDirectory:(NSString *)prefsDir {
+    if (![text isKindOfClass:NSString.class] || !text.length) return;
+    if (![prefsDir isKindOfClass:NSString.class] || !prefsDir.length) return;
+    MSIMEVoiceContextSnapshot *snapshot = _voiceContextSnapshot;
+    if (!MSIMEVoiceOptionsContextAware(_voiceOptionsSnapshot)) return;
+    if (snapshot.isSecureField || snapshot.axBlacklisted) return;
+    NSRunningApplication *front = NSWorkspace.sharedWorkspace.frontmostApplication;
+    const pid_t targetPID = front ? front.processIdentifier : 0;
+    NSString *bundleID = snapshot.appBundleID.length ? snapshot.appBundleID : front.bundleIdentifier;
+    [[self sharedVoiceEditTracker] beginTrackingInsertedText:text
+                                        preferencesDirectory:prefsDir
+                                                   targetPID:targetPID
+                                                    bundleID:bundleID
+                                               isSecureField:snapshot.isSecureField
+                                               axBlacklisted:snapshot.axBlacklisted];
 }
 // 仅采纳测试子类覆写返回的非 MSIMEHTTPVoiceRequest 夹具；生产路径统一交由 MSIMEVoicePolishClient 处理。
 - (id)injectedLegacyPolisherForSelector:(SEL)selector options:(NSDictionary *)options {
@@ -5643,6 +5666,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     return candidate;
 }
 - (void)prepareVoicePipelineForOptions:(NSDictionary *)options {
+    [_voiceEditTracker cancel];
     [_voicePolishTask cancel];
     _voicePolishTask = nil;
     _voicePolishPending = NO;
@@ -5654,14 +5678,31 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     _voiceVocabularyGeneration = vocabGen;
     NSDictionary *hostOptions = [_session respondsToSelector:@selector(hostOptions)]
         ? [_session.hostOptions copy] : nil;
-    if (hostOptions.count) {
+    const BOOL captureVisible = MSIMEVoiceOptionsContextAware(options) &&
+                                !_voiceContextSnapshot.isSecureField &&
+                                !_voiceContextSnapshot.axBlacklisted;
+    NSRunningApplication *front = captureVisible ? NSWorkspace.sharedWorkspace.frontmostApplication : nil;
+    const pid_t frontPID = front ? front.processIdentifier : 0;
+    NSString *frontBundleID = _voiceContextSnapshot.appBundleID.length
+        ? [_voiceContextSnapshot.appBundleID copy]
+        : [front.bundleIdentifier copy];
+    if (hostOptions.count || (captureVisible && frontPID > 0)) {
         __weak MSIMEInputController *weakSelf = self;
         dispatch_async([self voicePipelineQueue], ^{
-            MSIMEVoiceVocabularyBundle *bundle = MSIMEVoiceLoadVocabulary(hostOptions, nil, nil);
+            MSIMEVoiceVocabularyBundle *bundle = hostOptions.count
+                ? MSIMEVoiceLoadVocabulary(hostOptions, nil, nil) : nil;
+            NSString *visibleScreen = (captureVisible && frontPID > 0)
+                ? MSIMECaptureVisibleScreenTextForPID(
+                      frontPID, frontBundleID, MSIMEVoiceContextMaxVisibleScreenTextUTF16, 0.22)
+                : @"";
             dispatch_async(dispatch_get_main_queue(), ^{
                 MSIMEInputController *controller = weakSelf;
                 if (!controller || controller->_voiceVocabularyGeneration != vocabGen) return;
-                controller->_voiceVocabularyTerms = bundle.terms;
+                if (bundle) controller->_voiceVocabularyTerms = bundle.terms;
+                if (visibleScreen.length && controller->_voiceContextSnapshot) {
+                    controller->_voiceContextSnapshot =
+                        [controller->_voiceContextSnapshot snapshotWithVisibleScreenText:visibleScreen];
+                }
             });
         });
     }
@@ -7590,6 +7631,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     [self clearSmartPunctuationSpaceRevert];
     [self invalidateSmartPunctuationShadow];
     msime_macos_diagnostic_write("focus_out");
+    [_voiceEditTracker noteClientDeactivated];
     [self suspendVoiceForFocusChange];
     if (![self ownsPersistentVoiceRecording])
         MSIMEDeactivateVoice(_voiceService, _session, _voiceAudioMuter, _voiceOverlay,
@@ -8260,6 +8302,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         return YES;
     }
     if (event.type != NSEventTypeKeyDown) return NO;
+    [_voiceEditTracker noteKeyEvent:event];
     if (MSIMEEditionIsShurufa()) {
         const auto flags = event.modifierFlags & (NSEventModifierFlagShift | NSEventModifierFlagControl |
             NSEventModifierFlagOption | NSEventModifierFlagCommand);
@@ -9065,8 +9108,9 @@ static NSRange MSIMEVoiceReplacementRangeForClient(id client, BOOL replaceSelect
             [(id<MSIMETextClient>)destination->_activeClient insertText:text replacementRange:replacement];
             destination->_clientHasMarkedText = NO;
             if (polishFailed) _voicePolishFallbackNotice = @"整理失败，已输入原文";
-            MSIMERecordTypingStatistics(destination->_preferencesDirectory ?: MSIMEStatisticsHostOptions(destination->_session)[@"preferences_directory"],
-                                        text, msime::mac::TypingSource::Voice);
+            NSString *prefsDir = destination->_preferencesDirectory ?: MSIMEStatisticsHostOptions(destination->_session)[@"preferences_directory"];
+            MSIMERecordTypingStatistics(prefsDir, text, msime::mac::TypingSource::Voice);
+            [destination beginVoiceEditTrackingForText:text preferencesDirectory:prefsDir];
         } else {
             _voiceCopiedResult = @([self copyVoiceText:text]);
             if (polishFailed && _voiceCopiedResult.boolValue) _voicePolishFallbackNotice = @"整理失败，已复制原文";
@@ -9084,8 +9128,9 @@ static NSRange MSIMEVoiceReplacementRangeForClient(id client, BOOL replaceSelect
                 [self noteSmartPunctuationShadow:[replacementText characterAtIndex:replacementText.length - 1]];
                 [(id<MSIMETextClient>)_activeClient insertText:replacementText replacementRange:selected];
                 _clientHasMarkedText = NO;
-                MSIMERecordTypingStatistics(_preferencesDirectory ?: MSIMEStatisticsHostOptions(_session)[@"preferences_directory"],
-                                            replacementText, msime::mac::TypingSource::Voice);
+                NSString *prefsDir = _preferencesDirectory ?: MSIMEStatisticsHostOptions(_session)[@"preferences_directory"];
+                MSIMERecordTypingStatistics(prefsDir, replacementText, msime::mac::TypingSource::Voice);
+                [self beginVoiceEditTrackingForText:replacementText preferencesDirectory:prefsDir];
                 NSMutableDictionary *remaining = [transition mutableCopy];
                 [remaining removeObjectForKey:@"commit"];
                 [self apply:remaining];
@@ -9095,6 +9140,10 @@ static NSRange MSIMEVoiceReplacementRangeForClient(id client, BOOL replaceSelect
         _typingSourceOverride = @(static_cast<NSInteger>(msime::mac::TypingSource::Voice));
         [self apply:transition];
         _typingSourceOverride = nil;
+        if ([text isKindOfClass:NSString.class] && text.length) {
+            NSString *prefsDir = _preferencesDirectory ?: MSIMEStatisticsHostOptions(_session)[@"preferences_directory"];
+            [self beginVoiceEditTrackingForText:text preferencesDirectory:prefsDir];
+        }
         return;
     }
     if (_appearance.traditionalOutput && MSIMEScriptConversionApplies(transition[@"commit_context"]))
@@ -9105,10 +9154,15 @@ static NSRange MSIMEVoiceReplacementRangeForClient(id client, BOOL replaceSelect
         _typingSourceOverride = @(static_cast<NSInteger>(msime::mac::TypingSource::Voice));
         [self apply:transition];
         _typingSourceOverride = nil;
+        if ([text isKindOfClass:NSString.class] && text.length) {
+            NSString *prefsDir = _preferencesDirectory ?: MSIMEStatisticsHostOptions(_session)[@"preferences_directory"];
+            [self beginVoiceEditTrackingForText:text preferencesDirectory:prefsDir];
+        }
         return;
     }
-    MSIMERecordTypingStatistics(_preferencesDirectory ?: MSIMEStatisticsHostOptions(_session)[@"preferences_directory"], text,
-                                msime::mac::TypingSource::Voice);
+    NSString *postedPrefsDir = _preferencesDirectory ?: MSIMEStatisticsHostOptions(_session)[@"preferences_directory"];
+    MSIMERecordTypingStatistics(postedPrefsDir, text, msime::mac::TypingSource::Voice);
+    [self beginVoiceEditTrackingForText:text preferencesDirectory:postedPrefsDir];
     NSMutableDictionary *remaining = [transition mutableCopy];
     [remaining removeObjectForKey:@"commit"];
     [self apply:remaining];

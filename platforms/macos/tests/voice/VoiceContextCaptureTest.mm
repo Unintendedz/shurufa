@@ -248,7 +248,52 @@ void TestBoundsAndJSONSerialization() {
 
     // 5) 实时采集在空客户端下必须安全返回非空对象，不弹窗、不崩溃。
     MSIMEVoiceContextSnapshot *live = MSIMECaptureVoiceContext(nil);
-    require(live != nil, "MSIMECaptureVoiceContext(nil) 必须返回有效快照");
+    require(live != nil, "空客户端实时采集必须返回非空快照");
+
+    // 6) 扩展快照：光标后文、屏幕可见文本、腾讯文档黑名单与密码框全清零。
+    require(MSIMEIsAXBlacklistedURLString(@"https://docs.qq.com/doc/D1234567890"),
+            "腾讯文档 doc 页面必须命中 AX 黑名单");
+    require(MSIMEIsAXBlacklistedURLString(@"https://docs.qq.com/sheet/S1234567890"),
+            "腾讯文档 sheet 页面必须命中 AX 黑名单");
+
+    MSIMEVoiceContextSnapshot *extended = MSIMEBuildVoiceContextSnapshotExtended(
+        NO,
+        NO,
+        @"com.google.Chrome",
+        @"Google Chrome",
+        @"Cloudflare Dashboard",
+        @"https://dash.cloudflare.com/workers",
+        @"前缀",
+        @"后缀文本\u200B",
+        @"",
+        @"WorkerTimeoutError\nWorkerTimeoutError\nDeploy succeeded");
+    require([extended.followingText isEqualToString:@"后缀文本"], "followingText 应剥离零宽字符并保留");
+    require([extended.visibleScreenText isEqualToString:@"WorkerTimeoutError\nDeploy succeeded"],
+            "visibleScreenText 应去重相邻重复行并保留可见上下文");
+    NSDictionary *extJSON = [extended toJSONDictionary];
+    require([extJSON[@"following_text"] isEqualToString:@"后缀文本"], "JSON 必须包含 following_text");
+    require([extJSON[@"visible_screen_text"] isEqualToString:@"WorkerTimeoutError\nDeploy succeeded"],
+            "JSON 必须包含 visible_screen_text");
+
+    MSIMEVoiceContextSnapshot *backfilled = [extended snapshotWithVisibleScreenText:@"UpdatedVisibleTerm"];
+    require([backfilled.visibleScreenText isEqualToString:@"UpdatedVisibleTerm"],
+            "snapshotWithVisibleScreenText 应返回更新后的不可变副本");
+
+    MSIMEVoiceContextSnapshot *secureExt = MSIMEBuildVoiceContextSnapshotExtended(
+        YES,
+        NO,
+        @"com.google.Chrome",
+        @"Google Chrome",
+        @"Secret",
+        @"https://example.test",
+        @"SecretPre",
+        @"SecretPost",
+        @"SecretSel",
+        @"SecretScreen");
+    require(secureExt.isSecureField && secureExt.followingText.length == 0 && secureExt.visibleScreenText.length == 0,
+            "密码框扩展快照必须强制清空 followingText 与 visibleScreenText");
+    require([secureExt snapshotWithVisibleScreenText:@"ShouldDrop"].visibleScreenText.length == 0,
+            "密码框快照回填可见文本也必须保持清空");
 }
 
 } // 匿名命名空间

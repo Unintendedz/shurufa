@@ -9,7 +9,9 @@ static const NSUInteger MSIMEVoiceContextMaxAppNameBytes = 128;
 static const NSUInteger MSIMEVoiceContextMaxWindowTitleUTF16 = 200;
 static const NSUInteger MSIMEVoiceContextMaxWebDomainBytes = 253;
 static const NSUInteger MSIMEVoiceContextMaxPrecedingTextUTF16 = 500;
+static const NSUInteger MSIMEVoiceContextMaxFollowingTextUTF16 = 500;
 static const NSUInteger MSIMEVoiceContextMaxSelectedTextUTF16 = 4000;
+static const NSUInteger MSIMEVoiceContextMaxVisibleScreenTextUTF16 = 1600;
 
 /// 录音启动瞬间抓取的脱敏宿主上下文快照（不可变纯数据对象）。
 /// 绝不携带完整 URL 路径、查询参数、片段或密码框内容。
@@ -20,7 +22,9 @@ static const NSUInteger MSIMEVoiceContextMaxSelectedTextUTF16 = 4000;
 @property(nonatomic, copy, readonly) NSString *windowTitle;
 @property(nonatomic, copy, readonly) NSString *webDomain;
 @property(nonatomic, copy, readonly) NSString *precedingText;
+@property(nonatomic, copy, readonly) NSString *followingText;
 @property(nonatomic, copy, readonly) NSString *selectedText;
+@property(nonatomic, copy, readonly) NSString *visibleScreenText;
 @property(nonatomic, readonly) BOOL isSecureField;
 @property(nonatomic, readonly) BOOL axBlacklisted;
 
@@ -29,9 +33,23 @@ static const NSUInteger MSIMEVoiceContextMaxSelectedTextUTF16 = 4000;
                         windowTitle:(nullable NSString *)windowTitle
                           webDomain:(nullable NSString *)webDomain
                       precedingText:(nullable NSString *)precedingText
+                      followingText:(nullable NSString *)followingText
                        selectedText:(nullable NSString *)selectedText
+                  visibleScreenText:(nullable NSString *)visibleScreenText
                       isSecureField:(BOOL)isSecureField
                       axBlacklisted:(BOOL)axBlacklisted NS_DESIGNATED_INITIALIZER;
+
+- (instancetype)initWithAppBundleID:(nullable NSString *)appBundleID
+                            appName:(nullable NSString *)appName
+                        windowTitle:(nullable NSString *)windowTitle
+                          webDomain:(nullable NSString *)webDomain
+                      precedingText:(nullable NSString *)precedingText
+                       selectedText:(nullable NSString *)selectedText
+                      isSecureField:(BOOL)isSecureField
+                      axBlacklisted:(BOOL)axBlacklisted;
+
+/// 返回附加了后台深采屏幕可见文本的新不可变快照；密码框与黑名单快照保持清空不变。
+- (instancetype)snapshotWithVisibleScreenText:(nullable NSString *)visibleScreenText;
 
 /// 构造全空上下文快照；密码框场景传入 `YES`，确保任何文本字段均为空串。
 + (instancetype)emptySnapshotWithSecureField:(BOOL)isSecureField;
@@ -71,6 +89,19 @@ NSString *MSIMEClampUTF16String(NSString * _Nullable text, NSUInteger maxUTF16Un
 /// 按 UTF-8 字节上限安全截断，保证不截断多字节字符。
 NSString *MSIMEClampUTF8BytesString(NSString * _Nullable text, NSUInteger maxUTF8Bytes);
 
+/// 统一的纯函数快照装配器（扩展版）：包含光标后文与屏幕可见文本。
+MSIMEVoiceContextSnapshot *MSIMEBuildVoiceContextSnapshotExtended(
+    BOOL isSecureEventInput,
+    BOOL isSecureAXField,
+    NSString * _Nullable appBundleID,
+    NSString * _Nullable appName,
+    NSString * _Nullable windowTitle,
+    NSString * _Nullable rawURLString,
+    NSString * _Nullable precedingText,
+    NSString * _Nullable followingText,
+    NSString * _Nullable selectedText,
+    NSString * _Nullable visibleScreenText);
+
 /// 统一的纯函数快照装配器：集中执行密码框硬屏蔽、AX 黑名单降级、终端跳过前文、
 /// 浏览器域名剥离与假选区清洗，实时采集与单元测试共用同一份逻辑。
 MSIMEVoiceContextSnapshot *MSIMEBuildVoiceContextSnapshot(
@@ -86,6 +117,14 @@ MSIMEVoiceContextSnapshot *MSIMEBuildVoiceContextSnapshot(
 /// 在录音启动瞬间同步抓取当前焦点应用的受保护上下文快照。
 /// `client` 为当前 `IMKTextInput` 客户端（可为 nil）；总 AX 预算严格控制在 25ms 内，不弹窗请求权限。
 MSIMEVoiceContextSnapshot *MSIMECaptureVoiceContext(id _Nullable client);
+
+/// 在后台串行队列执行的有界屏幕可见文本采集（对标 Chromium/Electron `AXEnhancedUserInterface` + 焦点窗口可见节点遍历）。
+/// 绝不在主线程调用；严格执行时间预算（默认 <=220ms）、节点上限、密码框跳过与黑名单跳过。
+NSString *MSIMECaptureVisibleScreenTextForPID(
+    pid_t processIdentifier,
+    NSString * _Nullable bundleID,
+    NSUInteger maxUTF16Units,
+    NSTimeInterval budgetSeconds);
 
 #ifdef __cplusplus
 }

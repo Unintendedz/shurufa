@@ -447,7 +447,9 @@ MSIMEVoicePolishContext * _Nullable MSIMEVoicePolishContextFromSnapshot(
         blocked.windowTitle = @"";
         blocked.webDomain = @"";
         blocked.precedingText = @"";
+        blocked.followingText = @"";
         blocked.selectedText = @"";
+        blocked.visibleScreenText = @"";
         blocked.axBlacklisted = NO;
         return blocked;
     }
@@ -458,7 +460,9 @@ MSIMEVoicePolishContext * _Nullable MSIMEVoicePolishContextFromSnapshot(
     context.windowTitle = snapshot.windowTitle;
     context.webDomain = snapshot.webDomain;
     context.precedingText = snapshot.precedingText;
+    context.followingText = snapshot.followingText;
     context.selectedText = snapshot.selectedText;
+    context.visibleScreenText = snapshot.visibleScreenText;
     context.isSecureField = NO;
     context.axBlacklisted = snapshot.axBlacklisted;
     return context;

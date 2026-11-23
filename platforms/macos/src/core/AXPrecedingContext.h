@@ -98,6 +98,69 @@ inline NSString *ReadAXPrecedingContextFromElement(AXUIElementRef focus, NSUInte
     return TrimSurrogateEdges([fullText substringWithRange:NSMakeRange(nsStart, location - nsStart)]);
 }
 
+/// 直接从已验证并配置好超时的焦点 AX 元素读取光标后文本（用于双向上下文补全）；安全密码框一律拒绝。
+inline NSString *ReadAXFollowingContextFromElement(AXUIElementRef focus, NSUInteger maxUTF16Units) {
+    if (!focus || !maxUTF16Units || IsAXElementSecureTextField(focus)) return nil;
+
+    CFTypeRef rawRange = nullptr;
+    if (AXUIElementCopyAttributeValue(focus, kAXSelectedTextRangeAttribute, &rawRange) != kAXErrorSuccess || !rawRange) {
+        if (rawRange) CFRelease(rawRange);
+        return nil;
+    }
+    id rangeObj = CFBridgingRelease(rawRange);
+    if (CFGetTypeID((__bridge CFTypeRef)rangeObj) != AXValueGetTypeID()) return nil;
+    CFRange selected = CFRangeMake(0, 0);
+    if (!AXValueGetValue((__bridge AXValueRef)rangeObj, static_cast<AXValueType>(kAXValueCFRangeType), &selected) ||
+        selected.location < 0 || selected.length < 0)
+        return nil;
+
+    const CFIndex afterStart = selected.location + selected.length;
+    const CFIndex limit = static_cast<CFIndex>(maxUTF16Units);
+    CFRange slice = CFRangeMake(afterStart, limit);
+    AXValueRef sliceParam = AXValueCreate(static_cast<AXValueType>(kAXValueCFRangeType), &slice);
+    if (sliceParam) {
+        CFTypeRef rawSlice = nullptr;
+        const AXError sliceErr = AXUIElementCopyParameterizedAttributeValue(
+            focus, kAXStringForRangeParameterizedAttribute, sliceParam, &rawSlice);
+        CFRelease(sliceParam);
+        if (sliceErr == kAXErrorSuccess && rawSlice) {
+            id sliceObj = CFBridgingRelease(rawSlice);
+            if ([sliceObj isKindOfClass:NSString.class])
+                return TrimSurrogateEdges((NSString *)sliceObj);
+        } else if (rawSlice) {
+            CFRelease(rawSlice);
+        }
+    }
+
+    CFTypeRef rawValue = nullptr;
+    if (AXUIElementCopyAttributeValue(focus, kAXValueAttribute, &rawValue) != kAXErrorSuccess || !rawValue) {
+        if (rawValue) CFRelease(rawValue);
+        return nil;
+    }
+    id valueObj = CFBridgingRelease(rawValue);
+    if (![valueObj isKindOfClass:NSString.class]) return nil;
+    NSString *fullText = (NSString *)valueObj;
+    const NSUInteger nsStart = static_cast<NSUInteger>(afterStart);
+    if (nsStart >= fullText.length) return @"";
+    const NSUInteger nsLen = MIN(maxUTF16Units, fullText.length - nsStart);
+    return TrimSurrogateEdges([fullText substringWithRange:NSMakeRange(nsStart, nsLen)]);
+}
+
+/// 读取焦点 AX 输入框的完整文本（带硬长度上限，供事后编辑追踪使用）；安全密码框一律拒绝。
+inline NSString *ReadAXFullFieldTextFromElement(AXUIElementRef focus, NSUInteger maxUTF16Units) {
+    if (!focus || !maxUTF16Units || IsAXElementSecureTextField(focus)) return nil;
+    CFTypeRef rawValue = nullptr;
+    if (AXUIElementCopyAttributeValue(focus, kAXValueAttribute, &rawValue) != kAXErrorSuccess || !rawValue) {
+        if (rawValue) CFRelease(rawValue);
+        return nil;
+    }
+    id valueObj = CFBridgingRelease(rawValue);
+    if (![valueObj isKindOfClass:NSString.class]) return nil;
+    NSString *fullText = (NSString *)valueObj;
+    if (fullText.length <= maxUTF16Units) return TrimSurrogateEdges(fullText);
+    return TrimSurrogateEdges([fullText substringToIndex:maxUTF16Units]);
+}
+
 /// 当客户端未通过 `IMKTextInput` 返回文档文本（典型如 Electron / Chromium 输入框）时，
 /// 在已获辅助功能授权的前提下以 20 毫秒超时读取焦点控件光标前的文本；不弹窗请求权限，安全密码框一律拒绝。
 inline NSString *ReadAXPrecedingContext(NSString *clientBundle, NSUInteger maxUTF16Units) {

@@ -170,7 +170,9 @@ MSIMEVoicePolishBridge MSIMEVoicePolishDefaultBridge(void) {
     copy.windowTitle = self.windowTitle;
     copy.webDomain = self.webDomain;
     copy.precedingText = self.precedingText;
+    copy.followingText = self.followingText;
     copy.selectedText = self.selectedText;
+    copy.visibleScreenText = self.visibleScreenText;
     copy.isSecureField = self.isSecureField;
     copy.axBlacklisted = self.axBlacklisted;
     return copy;
@@ -183,7 +185,9 @@ MSIMEVoicePolishBridge MSIMEVoicePolishDefaultBridge(void) {
     if (self.windowTitle.length) dict[@"window_title"] = self.windowTitle;
     if (self.webDomain.length) dict[@"web_domain"] = self.webDomain;
     if (self.precedingText.length) dict[@"preceding_text"] = self.precedingText;
+    if (self.followingText.length) dict[@"following_text"] = self.followingText;
     if (self.selectedText.length) dict[@"selected_text"] = self.selectedText;
+    if (self.visibleScreenText.length) dict[@"visible_screen_text"] = self.visibleScreenText;
     dict[@"is_secure_field"] = @(self.isSecureField);
     dict[@"ax_blacklisted"] = @(self.axBlacklisted);
     return dict;

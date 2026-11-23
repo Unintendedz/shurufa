@@ -42,7 +42,9 @@ FOUNDATION_EXPORT MSIMEVoicePolishBridge MSIMEVoicePolishDefaultBridge(void);
 @property(nonatomic, copy, nullable) NSString *windowTitle;
 @property(nonatomic, copy, nullable) NSString *webDomain;
 @property(nonatomic, copy, nullable) NSString *precedingText;
+@property(nonatomic, copy, nullable) NSString *followingText;
 @property(nonatomic, copy, nullable) NSString *selectedText;
+@property(nonatomic, copy, nullable) NSString *visibleScreenText;
 @property(nonatomic, assign) BOOL isSecureField;
 @property(nonatomic, assign) BOOL axBlacklisted;
 

@@ -17,6 +17,7 @@ NSNotificationName const MSIMEVoiceProviderSettingsDidChangeNotification = @"MSI
 #import "../core/WindowPresentation.h"
 #import "../core/EditionIdentity.h"
 #import "../core/AIEndpointPolicy.h"
+#include <cstring>
 #include <sys/stat.h>
 #include "../../../../shared/voice/VoiceProviderCatalog.h"
 
@@ -553,7 +554,7 @@ static NSString *SharedSetting(NSString *key, NSString *fallback)
 // the settings window and the contents of the standalone window the input method's toolbar opens.
 // Upstream laid it out in absolute coordinates inside a fixed 610x580 window, which is why it could
 // only ever be a window.
-@interface MetasequoiaVoiceProviderSettingsView () <NSTextFieldDelegate>
+@interface MetasequoiaVoiceProviderSettingsView () <NSTextFieldDelegate, NSTableViewDataSource, NSTableViewDelegate>
 @end
 @implementation MetasequoiaVoiceProviderSettingsView
 {
@@ -590,6 +591,12 @@ static NSString *SharedSetting(NSString *key, NSString *fallback)
     NSTextField *_permissionStatus;
     NSButton *_grantPermissions;
     id _permissionKeyObserver;
+    // 个人语音词表管理控件与内存快照（对应 <preferences_directory>/voice-vocabulary.json）。
+    NSTableView *_vocabTable;
+    NSTextField *_vocabCanonicalField, *_vocabAliasesField, *_vocabNotice;
+    NSButton *_vocabAddButton, *_vocabRemoveButton;
+    NSArray<NSDictionary<NSString *, id> *> *_vocabTerms;
+    id _vocabChangeObserver;
 }
 
 /// A message on the card it belongs to, or nothing at all. The window has no separate error style — MSIMEDetailLabel is the one quieter line under a row, and what distinguishes a failure from an aside is its colour.
@@ -754,6 +761,72 @@ static void ShowNotice(NSTextField *label, NSString *message, NSColor *color)
     ], 0.0);
     polishCard.accessibilityLabel = @"文本整理卡片";
 
+    _vocabTerms = @[];
+    _vocabTable = [[NSTableView alloc] initWithFrame:NSZeroRect];
+    _vocabTable.dataSource = self;
+    _vocabTable.delegate = self;
+    _vocabTable.usesAlternatingRowBackgroundColors = YES;
+    _vocabTable.allowsEmptySelection = YES;
+    _vocabTable.allowsMultipleSelection = NO;
+    _vocabTable.rowHeight = 22.0;
+    _vocabTable.accessibilityLabel = @"个人语音词表列表";
+    NSTableColumn *canonicalCol = [[NSTableColumn alloc] initWithIdentifier:@"canonical"];
+    canonicalCol.title = @"标准写法";
+    canonicalCol.width = 160.0;
+    canonicalCol.minWidth = 90.0;
+    NSTableColumn *aliasesCol = [[NSTableColumn alloc] initWithIdentifier:@"aliases"];
+    aliasesCol.title = @"误识别别名";
+    aliasesCol.width = 230.0;
+    aliasesCol.minWidth = 100.0;
+    NSTableColumn *sourceCol = [[NSTableColumn alloc] initWithIdentifier:@"source"];
+    sourceCol.title = @"来源";
+    sourceCol.width = 76.0;
+    sourceCol.minWidth = 60.0;
+    [_vocabTable addTableColumn:canonicalCol];
+    [_vocabTable addTableColumn:aliasesCol];
+    [_vocabTable addTableColumn:sourceCol];
+
+    NSScrollView *vocabScroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+    vocabScroll.documentView = _vocabTable;
+    vocabScroll.hasVerticalScroller = YES;
+    vocabScroll.autohidesScrollers = YES;
+    vocabScroll.borderType = NSBezelBorder;
+    vocabScroll.translatesAutoresizingMaskIntoConstraints = NO;
+    [vocabScroll.heightAnchor constraintEqualToConstant:136.0].active = YES;
+
+    _vocabCanonicalField = [NSTextField textFieldWithString:@""];
+    _vocabCanonicalField.placeholderString = @"标准写法，如 T3 Code";
+    _vocabCanonicalField.accessibilityLabel = @"新增词条标准写法";
+    _vocabCanonicalField.translatesAutoresizingMaskIntoConstraints = NO;
+    _vocabAliasesField = [NSTextField textFieldWithString:@""];
+    _vocabAliasesField.placeholderString = @"可选误识别别名（逗号分隔）";
+    _vocabAliasesField.accessibilityLabel = @"新增词条误识别别名";
+    _vocabAliasesField.translatesAutoresizingMaskIntoConstraints = NO;
+    _vocabAddButton = [NSButton buttonWithTitle:@"添加" target:self action:@selector(addVocabularyTerm:)];
+    _vocabRemoveButton = [NSButton buttonWithTitle:@"删除" target:self action:@selector(removeSelectedVocabularyTerm:)];
+    _vocabRemoveButton.enabled = NO;
+    [_vocabAddButton setContentCompressionResistancePriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [_vocabRemoveButton setContentCompressionResistancePriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+
+    NSStackView *vocabEditorRow = [NSStackView stackViewWithViews:@[
+        _vocabCanonicalField, _vocabAliasesField, _vocabAddButton, _vocabRemoveButton
+    ]];
+    vocabEditorRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    vocabEditorRow.spacing = 8.0;
+    vocabEditorRow.translatesAutoresizingMaskIntoConstraints = NO;
+    [_vocabCanonicalField.widthAnchor constraintGreaterThanOrEqualToConstant:140.0].active = YES;
+    [_vocabAliasesField.widthAnchor constraintGreaterThanOrEqualToConstant:160.0].active = YES;
+
+    _vocabNotice = MSIMEDetailLabel(@"");
+    _vocabNotice.hidden = YES;
+    NSBox *vocabularyCard = MSIMECardWithViews(@[
+        vocabScroll,
+        vocabEditorRow,
+        MSIMEDetailLabel(@"语音上屏后 15 秒内手动改错并发送，会自动把纠错词学进这里；同时也自动融合你的输入法用户词库。"),
+        _vocabNotice,
+    ], 0.0);
+    vocabularyCard.accessibilityLabel = @"个人语音词表卡片";
+
     NSTextField *hint = [NSTextField
         wrappingLabelWithString:@"云端识别会发送本次录音；本地识别使用所选模型。密钥保存在系统钥匙串中。"
                                 @"本地流式识别在本机运行，不上传录音；整理支持云端 HTTPS 以及本机/局域网 HTTP 服务，失败或超时时直接输入原文。"];
@@ -764,6 +837,7 @@ static void ShowNotice(NSTextField *label, NSString *message, NSColor *color)
         MSIMESectionLabel(@"语音快捷键"), shortcutCard,
         MSIMESectionLabel(@"语音识别"), recognitionCard,
         MSIMESectionLabel(@"文本整理"), polishCard,
+        MSIMESectionLabel(@"个人语音词表"), vocabularyCard,
         hint,
     ]];
     stack.orientation = NSUserInterfaceLayoutOrientationVertical;
@@ -782,6 +856,15 @@ static void ShowNotice(NSTextField *label, NSString *message, NSColor *color)
         [stack.topAnchor constraintEqualToAnchor:self.topAnchor],
         [stack.bottomAnchor constraintEqualToAnchor:self.bottomAnchor],
     ]];
+    __weak MetasequoiaVoiceProviderSettingsView *weakSelf = self;
+    _vocabChangeObserver = [NSNotificationCenter.defaultCenter
+        addObserverForName:@"MSIMEVoiceVocabularyDidChangeNotification"
+                    object:nil
+                     queue:NSOperationQueue.mainQueue
+                usingBlock:^(NSNotification * _Nonnull note) {
+                    (void)note;
+                    [weakSelf reloadVocabularyTerms];
+                }];
     [self reloadSettings];
     return self;
 }
@@ -850,6 +933,7 @@ static void ShowNotice(NSTextField *label, NSString *message, NSColor *color)
     _polishPromptSelection = [value.polishPromptID copy];
     _polishPrompt.stringValue = [self polishPromptForPreset:value.polishPromptID];
     [self updateEnabled:nil];
+    [self reloadVocabularyTerms];
     ShowNotice(_recognitionNotice, nil, NSColor.systemRedColor);
     ShowNotice(_polishNotice, nil, NSColor.systemRedColor);
     _loading = NO;
@@ -1053,7 +1137,184 @@ static void ShowNotice(NSTextField *label, NSString *message, NSColor *color)
     if (!newWindow) [self stopRecordingHotkey];
     [super viewWillMoveToWindow:newWindow];
 }
-- (void)dealloc { [self stopRecordingHotkey]; }
+- (void)dealloc {
+    [self stopRecordingHotkey];
+    if (_vocabChangeObserver) {
+        [NSNotificationCenter.defaultCenter removeObserver:_vocabChangeObserver];
+        _vocabChangeObserver = nil;
+    }
+}
+
+- (NSString *)voiceVocabularyPreferencesDirectory {
+    return MSIMEDefaultClientStateDirectory(NSFileManager.defaultManager).path ?: @"";
+}
+
+- (id)callVoiceVocabularyManage:(NSDictionary<NSString *, id> *)payload errorMessage:(NSString * _Nullable * _Nullable)errorOut {
+    if (errorOut) *errorOut = nil;
+    if (![NSJSONSerialization isValidJSONObject:payload]) {
+        if (errorOut) *errorOut = @"词表请求格式无效。";
+        return nil;
+    }
+    NSData *body = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
+    if (!body.length) return nil;
+    auto owned = msime::host_api::own_string(
+        msime_client_voice_vocabulary_manage(static_cast<const uint8_t *>(body.bytes), body.length));
+    if (!owned) {
+        if (errorOut) *errorOut = @"词表服务不可用。";
+        return nil;
+    }
+    NSData *raw = [NSData dataWithBytes:owned.get() length:std::strlen(owned.get())];
+    NSDictionary *envelope = [NSJSONSerialization JSONObjectWithData:raw options:0 error:nil];
+    if (![envelope isKindOfClass:NSDictionary.class] || ![envelope[@"ok"] isEqual:@YES]) {
+        if (errorOut) *errorOut = @"词表读写失败，请检查输入格式。";
+        return nil;
+    }
+    return envelope[@"value"];
+}
+
+- (void)reloadVocabularyTerms {
+    NSString *dir = [self voiceVocabularyPreferencesDirectory];
+    if (!dir.length) return;
+    __weak MetasequoiaVoiceProviderSettingsView *weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *errMsg = nil;
+        id value = [weakSelf callVoiceVocabularyManage:@{
+            @"action" : @"list",
+            @"preferences_directory" : dir,
+        } errorMessage:&errMsg];
+        NSArray *terms = [value isKindOfClass:NSDictionary.class] && [value[@"terms"] isKindOfClass:NSArray.class]
+            ? value[@"terms"] : @[];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            MetasequoiaVoiceProviderSettingsView *strongSelf = weakSelf;
+            if (!strongSelf) return;
+            strongSelf->_vocabTerms = [terms copy];
+            [strongSelf->_vocabTable reloadData];
+            strongSelf->_vocabRemoveButton.enabled = strongSelf->_vocabTable.selectedRow >= 0 &&
+                strongSelf->_vocabTable.selectedRow < static_cast<NSInteger>(strongSelf->_vocabTerms.count);
+        });
+    });
+}
+
+- (void)addVocabularyTerm:(id)sender {
+    (void)sender;
+    NSString *canonical = Trimmed(_vocabCanonicalField.stringValue);
+    if (!canonical.length) {
+        ShowNotice(_vocabNotice, @"请输入要添加的标准写法。", NSColor.systemRedColor);
+        return;
+    }
+    NSString *rawAliases = _vocabAliasesField.stringValue ?: @"";
+    NSCharacterSet *seps = [NSCharacterSet characterSetWithCharactersInString:@",，、;"];
+    NSMutableArray<NSString *> *aliases = [NSMutableArray array];
+    for (NSString *part in [rawAliases componentsSeparatedByCharactersInSet:seps]) {
+        NSString *trimmed = Trimmed(part);
+        if (trimmed.length && [trimmed caseInsensitiveCompare:canonical] != NSOrderedSame) {
+            [aliases addObject:trimmed];
+        }
+    }
+    NSString *dir = [self voiceVocabularyPreferencesDirectory];
+    if (!dir.length) return;
+    __weak MetasequoiaVoiceProviderSettingsView *weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *errMsg = nil;
+        id value = [weakSelf callVoiceVocabularyManage:@{
+            @"action" : @"upsert",
+            @"preferences_directory" : dir,
+            @"term" : @{
+                @"canonical" : canonical,
+                @"aliases" : aliases,
+                @"source" : @"manual",
+                @"weight" : @1000,
+            },
+        } errorMessage:&errMsg];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            MetasequoiaVoiceProviderSettingsView *strongSelf = weakSelf;
+            if (!strongSelf) return;
+            if (!value) {
+                ShowNotice(strongSelf->_vocabNotice, errMsg ?: @"添加失败。", NSColor.systemRedColor);
+                return;
+            }
+            strongSelf->_vocabCanonicalField.stringValue = @"";
+            strongSelf->_vocabAliasesField.stringValue = @"";
+            ShowNotice(strongSelf->_vocabNotice,
+                       [NSString stringWithFormat:@"已保存词条「%@」", canonical],
+                       NSColor.secondaryLabelColor);
+            [strongSelf reloadVocabularyTerms];
+            [NSNotificationCenter.defaultCenter postNotificationName:@"MSIMEVoiceVocabularyDidChangeNotification"
+                                                              object:strongSelf];
+        });
+    });
+}
+
+- (void)removeSelectedVocabularyTerm:(id)sender {
+    (void)sender;
+    const NSInteger row = _vocabTable.selectedRow;
+    if (row < 0 || row >= static_cast<NSInteger>(_vocabTerms.count)) return;
+    NSDictionary *term = _vocabTerms[static_cast<NSUInteger>(row)];
+    NSString *canonical = [term[@"canonical"] isKindOfClass:NSString.class] ? term[@"canonical"] : @"";
+    if (!canonical.length) return;
+    NSString *dir = [self voiceVocabularyPreferencesDirectory];
+    if (!dir.length) return;
+    __weak MetasequoiaVoiceProviderSettingsView *weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *errMsg = nil;
+        id value = [weakSelf callVoiceVocabularyManage:@{
+            @"action" : @"remove",
+            @"preferences_directory" : dir,
+            @"canonical" : canonical,
+        } errorMessage:&errMsg];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            MetasequoiaVoiceProviderSettingsView *strongSelf = weakSelf;
+            if (!strongSelf) return;
+            if (!value) {
+                ShowNotice(strongSelf->_vocabNotice, errMsg ?: @"删除失败。", NSColor.systemRedColor);
+                return;
+            }
+            ShowNotice(strongSelf->_vocabNotice,
+                       [NSString stringWithFormat:@"已删除词条「%@」", canonical],
+                       NSColor.secondaryLabelColor);
+            [strongSelf reloadVocabularyTerms];
+            [NSNotificationCenter.defaultCenter postNotificationName:@"MSIMEVoiceVocabularyDidChangeNotification"
+                                                              object:strongSelf];
+        });
+    });
+}
+
+- (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView {
+    (void)tableView;
+    return static_cast<NSInteger>(_vocabTerms.count);
+}
+
+- (NSView *)tableView:(NSTableView *)tableView viewForTableColumn:(NSTableColumn *)tableColumn row:(NSInteger)row {
+    if (row < 0 || row >= static_cast<NSInteger>(_vocabTerms.count)) return nil;
+    NSDictionary *term = _vocabTerms[static_cast<NSUInteger>(row)];
+    NSString *ident = tableColumn.identifier ?: @"";
+    NSTextField *cell = [tableView makeViewWithIdentifier:ident owner:self];
+    if (!cell) {
+        cell = [NSTextField labelWithString:@""];
+        cell.identifier = ident;
+        cell.font = [NSFont systemFontOfSize:12.0];
+        cell.lineBreakMode = NSLineBreakByTruncatingTail;
+    }
+    if ([ident isEqualToString:@"canonical"]) {
+        cell.stringValue = [term[@"canonical"] isKindOfClass:NSString.class] ? term[@"canonical"] : @"";
+        cell.textColor = NSColor.labelColor;
+    } else if ([ident isEqualToString:@"aliases"]) {
+        NSArray *aliases = [term[@"aliases"] isKindOfClass:NSArray.class] ? term[@"aliases"] : @[];
+        cell.stringValue = [aliases componentsJoinedByString:@"、"];
+        cell.textColor = NSColor.secondaryLabelColor;
+    } else {
+        NSString *source = [term[@"source"] isKindOfClass:NSString.class] ? term[@"source"] : @"";
+        cell.stringValue = [source isEqualToString:@"auto_learned"] ? @"自动学习" : @"手动";
+        cell.textColor = [source isEqualToString:@"auto_learned"] ? NSColor.controlAccentColor : NSColor.secondaryLabelColor;
+    }
+    return cell;
+}
+
+- (void)tableViewSelectionDidChange:(NSNotification *)notification {
+    (void)notification;
+    const NSInteger row = _vocabTable.selectedRow;
+    _vocabRemoveButton.enabled = row >= 0 && row < static_cast<NSInteger>(_vocabTerms.count);
+}
 
 /// What the prompt field shows for a preset: a custom preset's own slot, and nothing for a built-in one, whose wording is not editable. An empty slot tells the recogniser to use the built-in default.
 - (NSString *)polishPromptForPreset:(NSString *)identifier
@@ -1351,12 +1612,26 @@ static void ShowNotice(NSTextField *label, NSString *message, NSColor *color)
         window.title = [MSIMEEditionDisplayName() stringByAppendingString:@" · 语音输入设置"];
         window.releasedWhenClosed = NO;
         _form = [[MetasequoiaVoiceProviderSettingsView alloc] initWithFrame:NSZeroRect];
-        [window.contentView addSubview:_form];
+        NSView *document = [[NSView alloc] initWithFrame:NSZeroRect];
+        document.translatesAutoresizingMaskIntoConstraints = NO;
+        [document addSubview:_form];
+        NSScrollView *scrollView = [[NSScrollView alloc] initWithFrame:window.contentView.bounds];
+        scrollView.hasVerticalScroller = YES;
+        scrollView.autohidesScrollers = YES;
+        scrollView.drawsBackground = NO;
+        scrollView.documentView = document;
+        scrollView.translatesAutoresizingMaskIntoConstraints = NO;
+        [window.contentView addSubview:scrollView];
         [NSLayoutConstraint activateConstraints:@[
-            [_form.leadingAnchor constraintEqualToAnchor:window.contentView.leadingAnchor constant:20.0],
-            [_form.trailingAnchor constraintEqualToAnchor:window.contentView.trailingAnchor constant:-20.0],
-            [_form.topAnchor constraintEqualToAnchor:window.contentView.topAnchor constant:20.0],
-            [_form.bottomAnchor constraintLessThanOrEqualToAnchor:window.contentView.bottomAnchor constant:-20.0],
+            [scrollView.leadingAnchor constraintEqualToAnchor:window.contentView.leadingAnchor],
+            [scrollView.trailingAnchor constraintEqualToAnchor:window.contentView.trailingAnchor],
+            [scrollView.topAnchor constraintEqualToAnchor:window.contentView.topAnchor],
+            [scrollView.bottomAnchor constraintEqualToAnchor:window.contentView.bottomAnchor],
+            [document.widthAnchor constraintEqualToAnchor:scrollView.contentView.widthAnchor],
+            [_form.leadingAnchor constraintEqualToAnchor:document.leadingAnchor constant:20.0],
+            [_form.trailingAnchor constraintEqualToAnchor:document.trailingAnchor constant:-20.0],
+            [_form.topAnchor constraintEqualToAnchor:document.topAnchor constant:20.0],
+            [_form.bottomAnchor constraintEqualToAnchor:document.bottomAnchor constant:-20.0],
         ]];
         [window center];
     }

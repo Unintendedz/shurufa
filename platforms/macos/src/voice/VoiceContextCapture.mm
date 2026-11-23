@@ -20,6 +20,9 @@ namespace {
 constexpr NSTimeInterval kCaptureTotalAXBudgetSec = 0.025;
 constexpr float kPerCallAXTimeoutSec = 0.010f;
 constexpr int kMaxWebAreaParentDepth = 12;
+constexpr int kVisibleTextMaxDepth = 14;
+constexpr NSUInteger kVisibleTextMaxNodes = 320;
+constexpr NSUInteger kVisibleTextMaxChildrenPerNode = 48;
 
 using ScopedAXElement = std::unique_ptr<const __AXUIElement, decltype(&CFRelease)>;
 
@@ -164,6 +167,173 @@ NSString *FallbackIMKSelectedText(id<MSIMEVoiceContextTextClient> client, NSUInt
     }
 }
 
+/// 为已知浏览器与 Electron/Chromium 桌面应用安全启用 `AXEnhancedUserInterface`，使无障碍树暴露完整网页/视图文本。
+void EnableEnhancedUIForAppIfSupported(AXUIElementRef app, NSString * _Nullable bundleID) {
+    if (!app || !bundleID.length || MSIMEIsAXBlacklistedBundleIdentifier(bundleID)) return;
+    NSString *lower = bundleID.lowercaseString;
+    const BOOL supported = MSIMEIsBrowserBundleIdentifier(lower) ||
+                           [lower containsString:@"electron"] ||
+                           [lower isEqualToString:@"com.microsoft.vscode"] ||
+                           [lower isEqualToString:@"com.microsoft.vscodeinsiders"] ||
+                           [lower isEqualToString:@"com.todesktop.230313mzl4w4u92"] ||
+                           [lower isEqualToString:@"com.exafunction.windsurf"] ||
+                           [lower isEqualToString:@"com.tinyspeck.slackmacgap"] ||
+                           [lower isEqualToString:@"com.hnc.discord"] ||
+                           [lower isEqualToString:@"com.anthropic.claudefordesktop"] ||
+                           [lower isEqualToString:@"com.openai.chat"] ||
+                           [lower isEqualToString:@"com.openai.codex"] ||
+                           [lower isEqualToString:@"notion.id"] ||
+                           [lower isEqualToString:@"md.obsidian"] ||
+                           [lower isEqualToString:@"com.linear"] ||
+                           [lower isEqualToString:@"com.bytedance.feishu"] ||
+                           [lower isEqualToString:@"com.larksuite.larkapp"] ||
+                           [lower isEqualToString:@"com.kangfenmao.cherrystudio"];
+    if (!supported) return;
+    (void)AXUIElementSetAttributeValue(app, CFSTR("AXEnhancedUserInterface"), kCFBooleanTrue);
+}
+
+/// 通过 IMKTextInput 客户端兜底读取光标后文（原生 AppKit 编辑器在不依赖 AX 时亦可用）。
+NSString *FallbackIMKFollowingText(id<MSIMEVoiceContextTextClient> client, NSUInteger maxUTF16Units) {
+    if (!client || !maxUTF16Units) return nil;
+    if (![client respondsToSelector:@selector(selectedRange)] ||
+        ![client respondsToSelector:@selector(attributedSubstringFromRange:)]) {
+        return nil;
+    }
+    @try {
+        const NSRange selection = [client selectedRange];
+        if (selection.location == NSNotFound) return @"";
+        const NSUInteger afterStart = selection.location + selection.length;
+        NSAttributedString *attributed =
+            [client attributedSubstringFromRange:NSMakeRange(afterStart, maxUTF16Units)];
+        return attributed.string;
+    } @catch (NSException *) {
+        return nil;
+    }
+}
+
+/// 清洗并规整屏幕可见文本（剥离占位符/非法控制符、折叠冗余空行并按头截断）。
+NSString *SanitizeVisibleScreenText(NSString * _Nullable rawText, NSUInteger maxUTF16Units) {
+    if (![rawText isKindOfClass:NSString.class] || !rawText.length || !maxUTF16Units) return @"";
+    NSString *stripped = StripPlaceholderAndDisallowedControls(rawText);
+    if (!stripped.length) return @"";
+    NSString *normalized = [[stripped stringByReplacingOccurrencesOfString:@"\r\n" withString:@"\n"]
+        stringByReplacingOccurrencesOfString:@"\r" withString:@"\n"];
+    NSArray<NSString *> *lines = [normalized componentsSeparatedByString:@"\n"];
+    NSMutableArray<NSString *> *out = [NSMutableArray array];
+    NSString *lastLine = nil;
+    NSUInteger totalLen = 0;
+    for (NSString *line in lines) {
+        NSString *trimmed = [line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (!trimmed.length) continue;
+        if (lastLine && [lastLine isEqualToString:trimmed]) continue;
+        [out addObject:trimmed];
+        lastLine = trimmed;
+        totalLen += trimmed.length + 1;
+        if (totalLen >= maxUTF16Units + 64) break;
+    }
+    if (!out.count) return @"";
+    return MSIMEClampUTF16String([out componentsJoinedByString:@"\n"], maxUTF16Units);
+}
+
+/// 跳过对文本上下文无意义的装饰/导航角色，同时强制跳过任何密码框子树。
+BOOL ShouldSkipVisibleAXRole(NSString * _Nullable role) {
+    if (!role.length) return NO;
+    return [role isEqualToString:@"AXMenuBar"] ||
+           [role isEqualToString:@"AXMenu"] ||
+           [role isEqualToString:@"AXScrollBar"] ||
+           [role isEqualToString:@"AXToolbar"] ||
+           [role isEqualToString:@"AXImage"] ||
+           [role isEqualToString:@"AXSplitter"] ||
+           [role isEqualToString:@"AXBusyIndicator"] ||
+           [role isEqualToString:@"AXProgressIndicator"];
+}
+
+/// 广度优先扫描焦点窗口/网页的可见文本节点（严格时间预算与节点数上限，绝不触碰密码框）。
+void CollectVisibleTextsFromAXRoot(
+    id rootObj,
+    NSUInteger maxUTF16Units,
+    NSTimeInterval deadline,
+    NSMutableArray<NSString *> *collected) {
+    if (!rootObj || !maxUTF16Units) return;
+    struct QueueItem {
+        __strong id element;
+        int depth;
+    };
+    std::vector<QueueItem> queue;
+    queue.reserve(128);
+    queue.push_back({rootObj, 0});
+
+    NSUInteger head = 0;
+    NSUInteger visited = 0;
+    NSUInteger charsCount = 0;
+    NSString *lastPiece = nil;
+
+    while (head < queue.size() && visited < kVisibleTextMaxNodes && charsCount < maxUTF16Units) {
+        if (NSProcessInfo.processInfo.systemUptime >= deadline) break;
+        id currentObj = queue[head].element;
+        const int depth = queue[head].depth;
+        queue[head].element = nil;
+        ++head;
+        ++visited;
+
+        AXUIElementRef node = (__bridge AXUIElementRef)currentObj;
+        if (msime::mac::IsAXElementSecureTextField(node)) continue;
+
+        NSString *role = CopyAXStringAttribute(node, kAXRoleAttribute);
+        if (ShouldSkipVisibleAXRole(role)) continue;
+
+        // 对叶子文本节点读取正文/标题，避免对整窗容器读取巨大 AXValue 引发卡顿。
+        if ([role isEqualToString:@"AXStaticText"] ||
+            [role isEqualToString:@"AXTextArea"] ||
+            [role isEqualToString:@"AXTextField"] ||
+            [role isEqualToString:@"AXHeading"] ||
+            [role isEqualToString:@"AXLink"] ||
+            [role isEqualToString:@"AXCell"]) {
+            NSString *piece = CopyAXStringAttribute(node, kAXValueAttribute);
+            if (!piece.length) piece = CopyAXStringAttribute(node, kAXTitleAttribute);
+            if (!piece.length && [role isEqualToString:@"AXHeading"]) {
+                piece = CopyAXStringAttribute(node, kAXDescriptionAttribute);
+            }
+            NSString *clean = SanitizeSingleLine(piece);
+            if (clean.length >= 2 && (!lastPiece || ![lastPiece isEqualToString:clean])) {
+                NSString *bounded = MSIMEClampUTF16String(clean, MIN(clean.length, (NSUInteger)300));
+                [collected addObject:bounded];
+                lastPiece = bounded;
+                charsCount += bounded.length + 1;
+                if (charsCount >= maxUTF16Units) break;
+            }
+            if ([role isEqualToString:@"AXStaticText"] || [role isEqualToString:@"AXTextField"]) {
+                continue;
+            }
+        }
+
+        if (depth >= kVisibleTextMaxDepth) continue;
+        CFTypeRef rawChildren = nullptr;
+        // 优先使用 AXVisibleChildren 仅抓屏幕可见区域，回退到 AXChildren。
+        AXError err = AXUIElementCopyAttributeValue(node, CFSTR("AXVisibleChildren"), &rawChildren);
+        if (err != kAXErrorSuccess || !rawChildren) {
+            if (rawChildren) { CFRelease(rawChildren); rawChildren = nullptr; }
+            err = AXUIElementCopyAttributeValue(node, kAXChildrenAttribute, &rawChildren);
+        }
+        if (err != kAXErrorSuccess || !rawChildren) {
+            if (rawChildren) CFRelease(rawChildren);
+            continue;
+        }
+        id childrenObj = CFBridgingRelease(rawChildren);
+        if (![childrenObj isKindOfClass:NSArray.class]) continue;
+        NSArray *children = (NSArray *)childrenObj;
+        const NSUInteger limit = MIN(children.count, kVisibleTextMaxChildrenPerNode);
+        for (NSUInteger i = 0; i < limit; ++i) {
+            if (queue.size() >= kVisibleTextMaxNodes) break;
+            id child = children[i];
+            if (!child || CFGetTypeID((__bridge CFTypeRef)child) != AXUIElementGetTypeID()) continue;
+            AXUIElementRef childRef = (__bridge AXUIElementRef)child;
+            if (AXUIElementSetMessagingTimeout(childRef, kPerCallAXTimeoutSec) != kAXErrorSuccess) continue;
+            queue.push_back({child, depth + 1});
+        }
+    }
+}
+
 } // 匿名命名空间
 
 @implementation MSIMEVoiceContextSnapshot
@@ -174,7 +344,9 @@ NSString *FallbackIMKSelectedText(id<MSIMEVoiceContextTextClient> client, NSUInt
                          windowTitle:@""
                            webDomain:@""
                        precedingText:@""
+                       followingText:@""
                         selectedText:@""
+                   visibleScreenText:@""
                        isSecureField:NO
                        axBlacklisted:NO];
 }
@@ -187,6 +359,28 @@ NSString *FallbackIMKSelectedText(id<MSIMEVoiceContextTextClient> client, NSUInt
                        selectedText:(nullable NSString *)selectedText
                       isSecureField:(BOOL)isSecureField
                       axBlacklisted:(BOOL)axBlacklisted {
+    return [self initWithAppBundleID:appBundleID
+                             appName:appName
+                         windowTitle:windowTitle
+                           webDomain:webDomain
+                       precedingText:precedingText
+                       followingText:@""
+                        selectedText:selectedText
+                   visibleScreenText:@""
+                       isSecureField:isSecureField
+                       axBlacklisted:axBlacklisted];
+}
+
+- (instancetype)initWithAppBundleID:(nullable NSString *)appBundleID
+                            appName:(nullable NSString *)appName
+                        windowTitle:(nullable NSString *)windowTitle
+                          webDomain:(nullable NSString *)webDomain
+                      precedingText:(nullable NSString *)precedingText
+                      followingText:(nullable NSString *)followingText
+                       selectedText:(nullable NSString *)selectedText
+                  visibleScreenText:(nullable NSString *)visibleScreenText
+                      isSecureField:(BOOL)isSecureField
+                      axBlacklisted:(BOOL)axBlacklisted {
     self = [super init];
     if (!self) return nil;
     if (isSecureField) {
@@ -195,7 +389,9 @@ NSString *FallbackIMKSelectedText(id<MSIMEVoiceContextTextClient> client, NSUInt
         _windowTitle = @"";
         _webDomain = @"";
         _precedingText = @"";
+        _followingText = @"";
         _selectedText = @"";
+        _visibleScreenText = @"";
         _isSecureField = YES;
         _axBlacklisted = NO;
     } else {
@@ -204,11 +400,28 @@ NSString *FallbackIMKSelectedText(id<MSIMEVoiceContextTextClient> client, NSUInt
         _windowTitle = [windowTitle isKindOfClass:NSString.class] ? [windowTitle copy] : @"";
         _webDomain = [webDomain isKindOfClass:NSString.class] ? [webDomain copy] : @"";
         _precedingText = [precedingText isKindOfClass:NSString.class] ? [precedingText copy] : @"";
+        _followingText = [followingText isKindOfClass:NSString.class] ? [followingText copy] : @"";
         _selectedText = [selectedText isKindOfClass:NSString.class] ? [selectedText copy] : @"";
+        _visibleScreenText = [visibleScreenText isKindOfClass:NSString.class] ? [visibleScreenText copy] : @"";
         _isSecureField = NO;
         _axBlacklisted = axBlacklisted;
     }
     return self;
+}
+
+- (instancetype)snapshotWithVisibleScreenText:(nullable NSString *)visibleScreenText {
+    if (self.isSecureField || self.axBlacklisted) return [self copy];
+    NSString *cleanVisible = SanitizeVisibleScreenText(visibleScreenText, MSIMEVoiceContextMaxVisibleScreenTextUTF16);
+    return [[MSIMEVoiceContextSnapshot alloc] initWithAppBundleID:self.appBundleID
+                                                          appName:self.appName
+                                                      windowTitle:self.windowTitle
+                                                        webDomain:self.webDomain
+                                                    precedingText:self.precedingText
+                                                    followingText:self.followingText
+                                                     selectedText:self.selectedText
+                                                visibleScreenText:cleanVisible
+                                                    isSecureField:NO
+                                                    axBlacklisted:NO];
 }
 
 + (instancetype)emptySnapshotWithSecureField:(BOOL)isSecureField {
@@ -217,7 +430,9 @@ NSString *FallbackIMKSelectedText(id<MSIMEVoiceContextTextClient> client, NSUInt
                                  windowTitle:@""
                                    webDomain:@""
                                precedingText:@""
+                               followingText:@""
                                 selectedText:@""
+                           visibleScreenText:@""
                                isSecureField:isSecureField
                                axBlacklisted:NO];
 }
@@ -228,7 +443,9 @@ NSString *FallbackIMKSelectedText(id<MSIMEVoiceContextTextClient> client, NSUInt
                                                                    windowTitle:self.windowTitle
                                                                      webDomain:self.webDomain
                                                                  precedingText:self.precedingText
+                                                                 followingText:self.followingText
                                                                   selectedText:self.selectedText
+                                                             visibleScreenText:self.visibleScreenText
                                                                  isSecureField:self.isSecureField
                                                                  axBlacklisted:self.axBlacklisted];
 }
@@ -240,7 +457,9 @@ NSString *FallbackIMKSelectedText(id<MSIMEVoiceContextTextClient> client, NSUInt
         @"window_title" : self.windowTitle ?: @"",
         @"web_domain" : self.webDomain ?: @"",
         @"preceding_text" : self.precedingText ?: @"",
+        @"following_text" : self.followingText ?: @"",
         @"selected_text" : self.selectedText ?: @"",
+        @"visible_screen_text" : self.visibleScreenText ?: @"",
         @"is_secure_field" : @(self.isSecureField),
         @"ax_blacklisted" : @(self.axBlacklisted),
     };
@@ -294,11 +513,19 @@ BOOL MSIMEIsAXBlacklistedURLString(NSString * _Nullable urlString) {
     if (![scheme isEqualToString:@"http"] && ![scheme isEqualToString:@"https"]) return NO;
     NSString *host = components.host.lowercaseString;
     while ([host hasSuffix:@"."]) host = [host substringToIndex:host.length - 1];
-    if (![host isEqualToString:@"docs.google.com"]) return NO;
     NSString *path = components.path.lowercaseString;
-    if ([path isEqualToString:@"/document/d"] || [path hasPrefix:@"/document/d/"]) return YES;
-    // 兼容 Google 多账号路径 `/document/u/<index>/d/...`。
-    if ([path hasPrefix:@"/document/u/"] && [path containsString:@"/d/"]) return YES;
+    if ([host isEqualToString:@"docs.google.com"]) {
+        if ([path isEqualToString:@"/document/d"] || [path hasPrefix:@"/document/d/"]) return YES;
+        // 兼容 Google 多账号路径 `/document/u/<index>/d/...`。
+        if ([path hasPrefix:@"/document/u/"] && [path containsString:@"/d/"]) return YES;
+        return NO;
+    }
+    if ([host isEqualToString:@"docs.qq.com"]) {
+        if ([path isEqualToString:@"/doc"] || [path hasPrefix:@"/doc/"] ||
+            [path isEqualToString:@"/sheet"] || [path hasPrefix:@"/sheet/"]) {
+            return YES;
+        }
+    }
     return NO;
 }
 
@@ -393,7 +620,7 @@ NSString *MSIMESanitizeSelectedText(NSString * _Nullable rawText, NSUInteger max
     return MSIMEClampUTF16String(trimmed, maxUTF16Units);
 }
 
-MSIMEVoiceContextSnapshot *MSIMEBuildVoiceContextSnapshot(
+MSIMEVoiceContextSnapshot *MSIMEBuildVoiceContextSnapshotExtended(
     BOOL isSecureEventInput,
     BOOL isSecureAXField,
     NSString * _Nullable appBundleID,
@@ -401,7 +628,9 @@ MSIMEVoiceContextSnapshot *MSIMEBuildVoiceContextSnapshot(
     NSString * _Nullable windowTitle,
     NSString * _Nullable rawURLString,
     NSString * _Nullable precedingText,
-    NSString * _Nullable selectedText) {
+    NSString * _Nullable followingText,
+    NSString * _Nullable selectedText,
+    NSString * _Nullable visibleScreenText) {
     // 最高优先级隐私闸门：只要处于安全输入态或密码框，立即返回全空快照。
     if (isSecureEventInput || isSecureAXField) {
         return [MSIMEVoiceContextSnapshot emptySnapshotWithSecureField:YES];
@@ -416,14 +645,16 @@ MSIMEVoiceContextSnapshot *MSIMEBuildVoiceContextSnapshot(
     NSString *safeWebDomain = isBrowser ? MSIMEExtractWebDomainFromURLString(effectiveURL) : @"";
     const BOOL axBlacklisted = MSIMEIsAXBlacklistedContext(safeBundleID, effectiveURL);
 
-    // 命中 AX 黑名单时，保留应用标识、域名与轻量标题供场景分类，强制跳过前文与选区。
+    // 命中 AX 黑名单时，保留应用标识、域名与轻量标题供场景分类，强制跳过前文、后文、选区与可见屏。
     if (axBlacklisted) {
         return [[MSIMEVoiceContextSnapshot alloc] initWithAppBundleID:safeBundleID
                                                               appName:safeAppName
                                                           windowTitle:safeWindowTitle
                                                             webDomain:safeWebDomain
                                                         precedingText:@""
+                                                        followingText:@""
                                                          selectedText:@""
+                                                    visibleScreenText:@""
                                                         isSecureField:NO
                                                         axBlacklisted:YES];
     }
@@ -435,16 +666,47 @@ MSIMEVoiceContextSnapshot *MSIMEBuildVoiceContextSnapshot(
         safePreceding = ClampTailUTF16(cleaned, MSIMEVoiceContextMaxPrecedingTextUTF16);
     }
 
+    NSString *safeFollowing = @"";
+    if (!isTerminal && [followingText isKindOfClass:NSString.class] && followingText.length) {
+        NSString *cleaned = StripPlaceholderAndDisallowedControls(followingText);
+        safeFollowing = MSIMEClampUTF16String(cleaned, MSIMEVoiceContextMaxFollowingTextUTF16);
+    }
+
     NSString *safeSelected = MSIMESanitizeSelectedText(selectedText, MSIMEVoiceContextMaxSelectedTextUTF16);
+    NSString *safeVisible = SanitizeVisibleScreenText(visibleScreenText, MSIMEVoiceContextMaxVisibleScreenTextUTF16);
 
     return [[MSIMEVoiceContextSnapshot alloc] initWithAppBundleID:safeBundleID
                                                           appName:safeAppName
                                                       windowTitle:safeWindowTitle
                                                         webDomain:safeWebDomain
                                                     precedingText:safePreceding
+                                                    followingText:safeFollowing
                                                      selectedText:safeSelected
+                                                visibleScreenText:safeVisible
                                                     isSecureField:NO
                                                     axBlacklisted:NO];
+}
+
+MSIMEVoiceContextSnapshot *MSIMEBuildVoiceContextSnapshot(
+    BOOL isSecureEventInput,
+    BOOL isSecureAXField,
+    NSString * _Nullable appBundleID,
+    NSString * _Nullable appName,
+    NSString * _Nullable windowTitle,
+    NSString * _Nullable rawURLString,
+    NSString * _Nullable precedingText,
+    NSString * _Nullable selectedText) {
+    return MSIMEBuildVoiceContextSnapshotExtended(
+        isSecureEventInput,
+        isSecureAXField,
+        appBundleID,
+        appName,
+        windowTitle,
+        rawURLString,
+        precedingText,
+        @"",
+        selectedText,
+        @"");
 }
 
 MSIMEVoiceContextSnapshot *MSIMECaptureVoiceContext(id _Nullable client) {
@@ -473,7 +735,7 @@ MSIMEVoiceContextSnapshot *MSIMECaptureVoiceContext(id _Nullable client) {
 
     // Bundle 级 AX 黑名单（微信、Sublime Text 4）：零 AX 调用直接返回，彻底规避卡死风险。
     if (MSIMEIsAXBlacklistedBundleIdentifier(bundleID)) {
-        return MSIMEBuildVoiceContextSnapshot(NO, NO, bundleID, appName, @"", @"", @"", @"");
+        return MSIMEBuildVoiceContextSnapshotExtended(NO, NO, bundleID, appName, @"", @"", @"", @"", @"", @"");
     }
 
     const NSTimeInterval deadline = NSProcessInfo.processInfo.systemUptime + kCaptureTotalAXBudgetSec;
@@ -489,6 +751,7 @@ MSIMEVoiceContextSnapshot *MSIMECaptureVoiceContext(id _Nullable client) {
     NSString *windowTitle = @"";
     NSString *rawURL = @"";
     NSString *precedingText = @"";
+    NSString *followingText = @"";
     NSString *selectedText = @"";
     const BOOL isBrowser = MSIMEIsBrowserBundleIdentifier(bundleID);
     const BOOL isTerminal = msime::mac::IsTerminalBundleIdentifier(bundleID);
@@ -496,6 +759,7 @@ MSIMEVoiceContextSnapshot *MSIMECaptureVoiceContext(id _Nullable client) {
     if (canQueryAX) {
         ScopedAXElement app(AXUIElementCreateApplication(front.processIdentifier), CFRelease);
         if (app && AXUIElementSetMessagingTimeout(app.get(), kPerCallAXTimeoutSec) == kAXErrorSuccess) {
+            EnableEnhancedUIForAppIfSupported(app.get(), bundleID);
             id focusObj = CopyAXElementAttribute(app.get(), kAXFocusedUIElementAttribute);
             AXUIElementRef focus = focusObj ? (__bridge AXUIElementRef)focusObj : nullptr;
             if (focus) {
@@ -521,9 +785,9 @@ MSIMEVoiceContextSnapshot *MSIMECaptureVoiceContext(id _Nullable client) {
 
             if (isBrowser && NSProcessInfo.processInfo.systemUptime < deadline) {
                 rawURL = BestEffortBrowserURL(focusObj, focusedWindowObj, deadline) ?: @"";
-                // 页面级 AX 黑名单（如 Google Docs）：保留域名与标题，跳过所有深层正文与选区查询。
+                // 页面级 AX 黑名单（Google Docs / 腾讯文档）：保留域名与标题，跳过所有深层正文与选区查询。
                 if (MSIMEIsAXBlacklistedURLString(rawURL)) {
-                    return MSIMEBuildVoiceContextSnapshot(NO, NO, bundleID, appName, windowTitle, rawURL, @"", @"");
+                    return MSIMEBuildVoiceContextSnapshotExtended(NO, NO, bundleID, appName, windowTitle, rawURL, @"", @"", @"", @"");
                 }
             }
 
@@ -531,11 +795,16 @@ MSIMEVoiceContextSnapshot *MSIMECaptureVoiceContext(id _Nullable client) {
                 selectedText = CopyAXStringAttribute(focus, kAXSelectedTextAttribute) ?: @"";
             }
 
-            // 直接复用已验证且已设 10ms 超时的 focus 读取前文，避免重复跨进程 AX IPC 突破 25ms 预算。
+            // 直接复用已验证且已设 10ms 超时的 focus 读取光标前后文，避免重复跨进程 AX IPC 突破 25ms 预算。
             if (!isTerminal && focus && NSProcessInfo.processInfo.systemUptime < deadline) {
                 NSString *axPreceding = msime::mac::ReadAXPrecedingContextFromElement(
                     focus, MSIMEVoiceContextMaxPrecedingTextUTF16);
                 if (axPreceding.length) precedingText = axPreceding;
+            }
+            if (!isTerminal && focus && NSProcessInfo.processInfo.systemUptime < deadline) {
+                NSString *axFollowing = msime::mac::ReadAXFollowingContextFromElement(
+                    focus, MSIMEVoiceContextMaxFollowingTextUTF16);
+                if (axFollowing.length) followingText = axFollowing;
             }
         }
     }
@@ -545,11 +814,69 @@ MSIMEVoiceContextSnapshot *MSIMECaptureVoiceContext(id _Nullable client) {
         NSString *imkPreceding = FallbackIMKPrecedingText(textClient, MSIMEVoiceContextMaxPrecedingTextUTF16);
         if (imkPreceding.length) precedingText = imkPreceding;
     }
+    if (!isTerminal && !followingText.length && textClient) {
+        NSString *imkFollowing = FallbackIMKFollowingText(textClient, MSIMEVoiceContextMaxFollowingTextUTF16);
+        if (imkFollowing.length) followingText = imkFollowing;
+    }
     if (!selectedText.length && textClient) {
         NSString *imkSelected = FallbackIMKSelectedText(textClient, MSIMEVoiceContextMaxSelectedTextUTF16);
         if (imkSelected.length) selectedText = imkSelected;
     }
 
-    return MSIMEBuildVoiceContextSnapshot(
-        NO, NO, bundleID, appName, windowTitle, rawURL, precedingText, selectedText);
+    return MSIMEBuildVoiceContextSnapshotExtended(
+        NO, NO, bundleID, appName, windowTitle, rawURL, precedingText, followingText, selectedText, @"");
+}
+
+NSString *MSIMECaptureVisibleScreenTextForPID(
+    pid_t processIdentifier,
+    NSString * _Nullable bundleID,
+    NSUInteger maxUTF16Units,
+    NSTimeInterval budgetSeconds) {
+    if (IsSecureEventInputEnabled() || !AXIsProcessTrusted()) return @"";
+    const pid_t selfPID = NSProcessInfo.processInfo.processIdentifier;
+    if (processIdentifier <= 0 || processIdentifier == selfPID || !maxUTF16Units) return @"";
+    if (MSIMEIsAXBlacklistedBundleIdentifier(bundleID)) return @"";
+
+    const NSTimeInterval clampedBudget = MIN(MAX(budgetSeconds, 0.02), 0.35);
+    const NSTimeInterval deadline = NSProcessInfo.processInfo.systemUptime + clampedBudget;
+
+    ScopedAXElement app(AXUIElementCreateApplication(processIdentifier), CFRelease);
+    if (!app || AXUIElementSetMessagingTimeout(app.get(), kPerCallAXTimeoutSec) != kAXErrorSuccess) {
+        return @"";
+    }
+    EnableEnhancedUIForAppIfSupported(app.get(), bundleID);
+
+    id focusObj = CopyAXElementAttribute(app.get(), kAXFocusedUIElementAttribute);
+    AXUIElementRef focus = focusObj ? (__bridge AXUIElementRef)focusObj : nullptr;
+    if (focus && msime::mac::IsAXElementSecureTextField(focus)) {
+        return @"";
+    }
+
+    id focusedWindowObj = CopyAXElementAttribute(app.get(), kAXFocusedWindowAttribute);
+    if (!focusedWindowObj) return @"";
+
+    if (MSIMEIsBrowserBundleIdentifier(bundleID)) {
+        NSString *rawURL = BestEffortBrowserURL(focusObj, focusedWindowObj, deadline);
+        if (MSIMEIsAXBlacklistedURLString(rawURL)) return @"";
+    }
+
+    // 若焦点位于浏览器/Electron 的 AXWebArea 内，优先以 AXWebArea 为根节点，跳过浏览器书签栏/标签栏噪声。
+    id scanRoot = focusedWindowObj;
+    if (focusObj) {
+        id cursor = focusObj;
+        for (int depth = 0; depth < kMaxWebAreaParentDepth && cursor; ++depth) {
+            if (NSProcessInfo.processInfo.systemUptime >= deadline) break;
+            NSString *role = CopyAXStringAttribute((__bridge AXUIElementRef)cursor, kAXRoleAttribute);
+            if ([role isEqualToString:@"AXWebArea"]) {
+                scanRoot = cursor;
+                break;
+            }
+            cursor = CopyAXElementAttribute((__bridge AXUIElementRef)cursor, kAXParentAttribute);
+        }
+    }
+
+    NSMutableArray<NSString *> *collected = [NSMutableArray array];
+    CollectVisibleTextsFromAXRoot(scanRoot, maxUTF16Units, deadline, collected);
+    if (!collected.count) return @"";
+    return SanitizeVisibleScreenText([collected componentsJoinedByString:@"\n"], maxUTF16Units);
 }
