@@ -105,7 +105,11 @@ pub struct VoiceContextSnapshot {
     #[serde(deserialize_with = "deserialize_null_default")]
     pub preceding_text: String,
     #[serde(deserialize_with = "deserialize_null_default")]
+    pub following_text: String,
+    #[serde(deserialize_with = "deserialize_null_default")]
     pub selected_text: String,
+    #[serde(deserialize_with = "deserialize_null_default")]
+    pub visible_screen_text: String,
     #[serde(deserialize_with = "deserialize_null_default")]
     pub is_secure_field: bool,
     #[serde(deserialize_with = "deserialize_null_default")]

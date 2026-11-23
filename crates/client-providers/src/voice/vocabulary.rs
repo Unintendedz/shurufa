@@ -12,9 +12,11 @@ use msime_client_base::text::{has_disallowed_control_with_options, is_han_charac
 use pinyin::ToPinyinMulti;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::fs::File;
-use std::io;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// 个人语音词表默认条数上限。
 pub const DEFAULT_VOCABULARY_LIMIT: usize = 300;
@@ -36,7 +38,7 @@ fn default_vocabulary_version() -> u32 {
     1
 }
 
-/// 单条跨语种语音术语，支持规范词、音近/错写别名、无声调拼音、场景分类与权重。
+/// 单条跨语种语音术语，支持规范词、音近/错写别名、无声调拼音、场景分类、权重与来源标记。
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VocabularyTerm {
     pub canonical: String,
@@ -48,6 +50,41 @@ pub struct VocabularyTerm {
     pub category: String,
     #[serde(default)]
     pub weight: i64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source: String,
+}
+
+/// 从语音上屏后用户手动修改中提取出的单条候选纠错词。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LearnedCorrection {
+    pub canonical: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub alias: String,
+}
+
+/// 单条已落盘的自动学习记录，附带修改前快照以支持气泡一键撤销。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LearnedTermRecord {
+    pub canonical: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub alias: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_term: Option<VocabularyTerm>,
+}
+
+/// 单次词条写入（新增或合并更新）结果。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpsertTermOutcome {
+    pub term: VocabularyTerm,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_term: Option<VocabularyTerm>,
+    pub changed: bool,
+}
+
+/// 事后编辑自动学词报告。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LearnCorrectionsReport {
+    pub learned: Vec<LearnedTermRecord>,
 }
 
 /// 跨语种个人语音词表文档，与 `<preferences_directory>/voice-vocabulary.json` 结构一致。
@@ -136,6 +173,465 @@ pub fn load_from_preferences_dir(preferences_dir: &Path) -> Result<VoiceVocabula
     load_vocabulary_file(&preferences_dir.join(VOCABULARY_FILE_NAME))
 }
 
+static VOCAB_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn normalize_term_source(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "manual" => "manual".to_owned(),
+        "auto_learned" => "auto_learned".to_owned(),
+        _ => String::new(),
+    }
+}
+
+/// 原子写入自定义语音词表文件：写同目录独立临时文件并 `sync_all` 后 `rename` 覆盖，不加文件锁。
+pub fn save_vocabulary_file(path: &Path, vocab: &VoiceVocabulary) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "invalid voice vocabulary path".to_owned())?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("failed to create voice vocabulary directory: {error}"))?;
+
+    let normalized = VoiceVocabulary {
+        version: if vocab.version == 0 {
+            default_vocabulary_version()
+        } else {
+            vocab.version
+        },
+        terms: sanitize_terms(vocab.terms.clone(), MAX_VOCABULARY_LIMIT),
+    };
+    let bytes = serde_json::to_vec_pretty(&normalized)
+        .map_err(|error| format!("failed to serialize voice vocabulary: {error}"))?;
+    if bytes.len() as u64 > MAX_VOCABULARY_FILE_BYTES {
+        return Err("voice vocabulary file exceeds size limit".to_owned());
+    }
+
+    let pid = std::process::id();
+    let seq = VOCAB_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp_path = parent.join(format!(".voice-vocabulary.{pid}.{stamp}.{seq}.tmp"));
+
+    let write_result = (|| -> io::Result<()> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp_path)?;
+        file.write_all(&bytes)?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!("failed to write voice vocabulary: {error}"));
+    }
+    if let Err(error) = fs::rename(&tmp_path, path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!("failed to replace voice vocabulary: {error}"));
+    }
+    Ok(())
+}
+
+/// 原子写入 `<preferences_directory>/voice-vocabulary.json`。
+pub fn save_to_preferences_dir(
+    preferences_dir: &Path,
+    vocab: &VoiceVocabulary,
+) -> Result<(), String> {
+    save_vocabulary_file(&preferences_dir.join(VOCABULARY_FILE_NAME), vocab)
+}
+
+/// 向 `<preferences_directory>/voice-vocabulary.json` 新增或合并更新单条术语。
+pub fn upsert_term_in_preferences_dir(
+    preferences_dir: &Path,
+    raw_term: VocabularyTerm,
+) -> Result<UpsertTermOutcome, String> {
+    let mut sanitized = sanitize_terms(vec![raw_term], 1);
+    let incoming = sanitized
+        .pop()
+        .ok_or_else(|| "invalid voice vocabulary term".to_owned())?;
+
+    let mut vocab = load_from_preferences_dir(preferences_dir)?;
+    let key = incoming.canonical.to_ascii_lowercase();
+    if let Some(pos) = vocab
+        .terms
+        .iter()
+        .position(|existing| existing.canonical.to_ascii_lowercase() == key)
+    {
+        let previous = vocab.terms[pos].clone();
+        let mut updated = previous.clone();
+        updated.canonical = incoming.canonical.clone();
+        merge_aliases(&mut updated.aliases, &incoming.aliases, &updated.canonical);
+        if !incoming.pinyin.is_empty() {
+            updated.pinyin = incoming.pinyin.clone();
+        } else if updated.pinyin.is_empty() {
+            updated.pinyin = derive_han_pinyin(&updated.canonical).unwrap_or_default();
+        }
+        if !incoming.category.is_empty() {
+            updated.category = incoming.category.clone();
+        }
+        updated.weight = updated.weight.max(incoming.weight);
+        // 手动词条升级优先于自动学习标记；仅在原本无来源时补写新来源。
+        if incoming.source == "manual" || updated.source.is_empty() {
+            updated.source = incoming.source.clone();
+        }
+        let changed = updated != previous;
+        if changed {
+            vocab.terms[pos] = updated.clone();
+            save_to_preferences_dir(preferences_dir, &vocab)?;
+        }
+        return Ok(UpsertTermOutcome {
+            term: updated,
+            previous_term: Some(previous),
+            changed,
+        });
+    }
+
+    vocab.terms.insert(0, incoming.clone());
+    vocab.terms.truncate(MAX_VOCABULARY_LIMIT);
+    save_to_preferences_dir(preferences_dir, &vocab)?;
+    Ok(UpsertTermOutcome {
+        term: incoming,
+        previous_term: None,
+        changed: true,
+    })
+}
+
+/// 从 `<preferences_directory>/voice-vocabulary.json` 删除指定规范词（忽略 ASCII 大小写）。
+pub fn remove_term_in_preferences_dir(
+    preferences_dir: &Path,
+    canonical: &str,
+) -> Result<bool, String> {
+    let target = canonical.trim();
+    if target.is_empty() {
+        return Ok(false);
+    }
+    let mut vocab = load_from_preferences_dir(preferences_dir)?;
+    let before = vocab.terms.len();
+    let target_lower = target.to_ascii_lowercase();
+    vocab
+        .terms
+        .retain(|term| term.canonical.to_ascii_lowercase() != target_lower);
+    let removed = vocab.terms.len() != before;
+    if removed {
+        save_to_preferences_dir(preferences_dir, &vocab)?;
+    }
+    Ok(removed)
+}
+
+/// 撤销一次词条写入：若 `previous_term` 为空则删除该词条，否则精确恢复为修改前的原词条。
+pub fn restore_term_in_preferences_dir(
+    preferences_dir: &Path,
+    canonical: &str,
+    previous_term: Option<VocabularyTerm>,
+) -> Result<(), String> {
+    let target = canonical.trim();
+    if target.is_empty() {
+        return Ok(());
+    }
+    let mut vocab = load_from_preferences_dir(preferences_dir)?;
+    let target_lower = target.to_ascii_lowercase();
+    let existing_pos = vocab
+        .terms
+        .iter()
+        .position(|term| term.canonical.to_ascii_lowercase() == target_lower);
+
+    match (existing_pos, previous_term) {
+        (Some(pos), Some(prev)) => {
+            if let Some(restored) = sanitize_terms(vec![prev], 1).pop() {
+                vocab.terms[pos] = restored;
+                save_to_preferences_dir(preferences_dir, &vocab)?;
+            }
+        }
+        (None, Some(prev)) => {
+            if let Some(restored) = sanitize_terms(vec![prev], 1).pop() {
+                vocab.terms.insert(0, restored);
+                vocab.terms.truncate(MAX_VOCABULARY_LIMIT);
+                save_to_preferences_dir(preferences_dir, &vocab)?;
+            }
+        }
+        (Some(pos), None) => {
+            vocab.terms.remove(pos);
+            save_to_preferences_dir(preferences_dir, &vocab)?;
+        }
+        (None, None) => {}
+    }
+    Ok(())
+}
+
+fn normalize_edit_box_text(raw: &str) -> String {
+    raw.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .chars()
+        .filter(|&ch| {
+            !matches!(
+                ch,
+                '\u{FFFC}' | '\u{FEFF}' | '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{2060}'
+            )
+        })
+        .collect()
+}
+
+fn is_ascii_term_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.')
+}
+
+fn is_edge_trim_punct(ch: char) -> bool {
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            ',' | '.'
+                | '!'
+                | '?'
+                | ';'
+                | ':'
+                | '"'
+                | '\''
+                | '`'
+                | '('
+                | ')'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '，'
+                | '。'
+                | '！'
+                | '？'
+                | '；'
+                | '：'
+                | '、'
+                | '“'
+                | '”'
+                | '‘'
+                | '’'
+                | '（'
+                | '）'
+                | '【'
+                | '】'
+                | '《'
+                | '》'
+                | '…'
+        )
+}
+
+fn has_meaningful_letter_or_han(text: &str) -> bool {
+    text.chars()
+        .any(|ch| ch.is_ascii_alphabetic() || is_han_character(ch))
+}
+
+fn trim_edge_punct(text: &str) -> &str {
+    text.trim_matches(is_edge_trim_punct)
+}
+
+/// 从语音上屏后用户的局部手动修改中提取高置信度纠错词条（纯函数，无网络、无 I/O）。
+///
+/// 内置严格误收护栏：忽略清空发送、大段重写、纯句尾续写、纯删除、纯标点/纯数字改动与单字汉字替换。
+pub fn extract_edit_corrections(
+    inserted_text: &str,
+    original_box: &str,
+    edited_box: &str,
+) -> Vec<LearnedCorrection> {
+    let inserted = normalize_edit_box_text(inserted_text);
+    let inserted_trimmed = inserted.trim();
+    if inserted_trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    let edited = normalize_edit_box_text(edited_box);
+    if edited.trim().is_empty() {
+        return Vec::new();
+    }
+
+    let original = if original_box.trim().is_empty() {
+        inserted.clone()
+    } else {
+        normalize_edit_box_text(original_box)
+    };
+    if original == edited {
+        return Vec::new();
+    }
+
+    // 确认 `inserted` 确实位于原始输入框内，防止把用户在别处段落的编辑误当成语音纠错。
+    let Some(ins_byte_start) = original.find(inserted_trimmed) else {
+        return Vec::new();
+    };
+    let ins_char_start = original[..ins_byte_start].chars().count();
+    let ins_char_len = inserted_trimmed.chars().count();
+    let ins_char_end = ins_char_start + ins_char_len;
+
+    let orig_chars: Vec<char> = original.chars().collect();
+    let edit_chars: Vec<char> = edited.chars().collect();
+
+    let mut prefix = 0usize;
+    let min_len = orig_chars.len().min(edit_chars.len());
+    while prefix < min_len && orig_chars[prefix] == edit_chars[prefix] {
+        prefix += 1;
+    }
+
+    let mut suffix = 0usize;
+    while suffix < (min_len - prefix)
+        && orig_chars[orig_chars.len() - 1 - suffix] == edit_chars[edit_chars.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+
+    let mut old_start = prefix;
+    let mut old_end = orig_chars.len() - suffix;
+    let mut new_start = prefix;
+    let mut new_end = edit_chars.len() - suffix;
+
+    // 改动必须与刚语音上屏的文本区间相交。
+    if old_end < ins_char_start || old_start > ins_char_end {
+        return Vec::new();
+    }
+
+    // 若改动落在 ASCII 词内部（如 `claude`→`Claude`、`Shurfa`→`Shurufa`、`Claudee`→`Claude`），
+    // 对称向外扩展到完整 ASCII 词边界。
+    let touches_ascii = orig_chars[old_start..old_end]
+        .iter()
+        .chain(edit_chars[new_start..new_end].iter())
+        .any(|&ch| ch.is_ascii_alphanumeric())
+        || (old_start > 0
+            && orig_chars[old_start - 1].is_ascii_alphanumeric()
+            && old_end < orig_chars.len()
+            && orig_chars[old_end].is_ascii_alphanumeric());
+    if touches_ascii {
+        while old_start > 0
+            && new_start > 0
+            && is_ascii_term_char(orig_chars[old_start - 1])
+            && orig_chars[old_start - 1] == edit_chars[new_start - 1]
+        {
+            old_start -= 1;
+            new_start -= 1;
+        }
+        while old_end < orig_chars.len()
+            && new_end < edit_chars.len()
+            && is_ascii_term_char(orig_chars[old_end])
+            && orig_chars[old_end] == edit_chars[new_end]
+        {
+            old_end += 1;
+            new_end += 1;
+        }
+    }
+
+    // 拦截纯续写、纯删除及大段重写。
+    let old_span_len = old_end.saturating_sub(old_start);
+    let new_span_len = new_end.saturating_sub(new_start);
+    if old_span_len == 0 || new_span_len == 0 || old_span_len > 24 || new_span_len > 36 {
+        return Vec::new();
+    }
+    if ins_char_len > 12 && old_span_len * 2 > ins_char_len {
+        return Vec::new();
+    }
+
+    let raw_old: String = orig_chars[old_start..old_end].iter().collect();
+    let raw_new: String = edit_chars[new_start..new_end].iter().collect();
+    if raw_old.contains('\n') || raw_new.contains('\n') {
+        return Vec::new();
+    }
+
+    let old_token = trim_edge_punct(&raw_old);
+    let new_token = trim_edge_punct(&raw_new);
+    if old_token.is_empty()
+        || new_token.is_empty()
+        || old_token == new_token
+        || new_token.contains("://")
+        || !has_meaningful_letter_or_han(old_token)
+        || !has_meaningful_letter_or_han(new_token)
+    {
+        return Vec::new();
+    }
+
+    let new_has_ascii = new_token.chars().any(|ch| ch.is_ascii_alphabetic());
+    let old_chars_count = old_token.chars().count();
+    let new_chars_count = new_token.chars().count();
+
+    if new_has_ascii {
+        if !(2..=40).contains(&new_chars_count)
+            || !(2..=40).contains(&old_chars_count)
+            || new_token.split_whitespace().count() > 3
+            || old_token.split_whitespace().count() > 4
+        {
+            return Vec::new();
+        }
+        let alias = if old_token.eq_ignore_ascii_case(new_token) {
+            String::new()
+        } else {
+            old_token.to_owned()
+        };
+        return vec![LearnedCorrection {
+            canonical: new_token.to_owned(),
+            alias,
+        }];
+    }
+
+    // 纯中文/非 ASCII 纠错采用更严格门控：必须 2..=8 字完整词、不含空白和内部标点、不互为简单删增子串。
+    let is_clean_han_term = |s: &str| {
+        let count = s.chars().count();
+        (2..=8).contains(&count)
+            && s.chars()
+                .all(|ch| is_han_character(ch) || ch.is_ascii_digit())
+            && s.chars().any(is_han_character)
+    };
+    if !is_clean_han_term(old_token) || !is_clean_han_term(new_token) {
+        return Vec::new();
+    }
+    if old_token.contains(new_token) || new_token.contains(old_token) {
+        return Vec::new();
+    }
+
+    vec![LearnedCorrection {
+        canonical: new_token.to_owned(),
+        alias: old_token.to_owned(),
+    }]
+}
+
+/// 从一次事后编辑提取纠错词、去重并原子写入 `<preferences_directory>/voice-vocabulary.json`。
+pub fn learn_corrections_in_preferences_dir(
+    preferences_dir: &Path,
+    inserted_text: &str,
+    original_box: &str,
+    edited_box: &str,
+) -> Result<LearnCorrectionsReport, String> {
+    let candidates = extract_edit_corrections(inserted_text, original_box, edited_box);
+    if candidates.is_empty() {
+        return Ok(LearnCorrectionsReport::default());
+    }
+
+    let mut report = LearnCorrectionsReport::default();
+    for candidate in candidates.into_iter().take(2) {
+        let mut aliases = Vec::new();
+        if !candidate.alias.is_empty() {
+            aliases.push(candidate.alias.clone());
+        }
+        let outcome = upsert_term_in_preferences_dir(
+            preferences_dir,
+            VocabularyTerm {
+                canonical: candidate.canonical.clone(),
+                aliases,
+                pinyin: String::new(),
+                category: String::new(),
+                weight: 800,
+                source: "auto_learned".to_owned(),
+            },
+        )?;
+        if outcome.changed {
+            report.learned.push(LearnedTermRecord {
+                canonical: outcome.term.canonical,
+                alias: candidate.alias,
+                previous_term: outcome.previous_term,
+            });
+        }
+    }
+    Ok(report)
+}
+
 /// 融合自定义语音词表、用户拼音词库、英文词库与快捷短语，去重并按优先级排序截断。
 ///
 /// 自定义 `voice-vocabulary.json` 享有最高合并优先级，同词形（忽略 ASCII 大小写）合并时保留自定义规范写法与别名。
@@ -215,6 +711,7 @@ pub fn build_vocabulary(
                         pinyin: hotword.pinyin,
                         category: "pinyin".to_owned(),
                         weight,
+                        source: String::new(),
                     },
                 )
             });
@@ -243,6 +740,7 @@ pub fn build_vocabulary(
                         pinyin: String::new(),
                         category: "english".to_owned(),
                         weight: entry.weight,
+                        source: String::new(),
                     },
                 )
             });
@@ -276,6 +774,7 @@ pub fn build_vocabulary(
                         pinyin: derived_pinyin,
                         category: "quick_phrase".to_owned(),
                         weight: entry.weight,
+                        source: String::new(),
                     },
                 )
             });
@@ -492,12 +991,14 @@ fn sanitize_terms(terms: Vec<VocabularyTerm>, limit: usize) -> Vec<VocabularyTer
         let category = clean_single_line_token(&term.category)
             .map(|cat| cat.to_ascii_lowercase())
             .unwrap_or_default();
+        let source = normalize_term_source(&term.source);
         result.push(VocabularyTerm {
             canonical,
             aliases,
             pinyin,
             category,
             weight: term.weight,
+            source,
         });
     }
     result
@@ -916,6 +1417,7 @@ mod tests {
             pinyin: String::new(),
             category: category.to_owned(),
             weight,
+            source: String::new(),
         }
     }
 
@@ -1059,5 +1561,149 @@ mod tests {
         assert!(top4.contains(&"Django".to_owned()), "top4={top4:?}");
         assert!(top4.contains(&"Cloudflare".to_owned()), "top4={top4:?}");
         assert!(top4.contains(&"水杉输入法".to_owned()), "top4={top4:?}");
+    }
+
+    #[test]
+    fn extract_edit_corrections_captures_high_precision_replacements_and_filters_noise() {
+        // 1. 中文音译错词改英文专有名词
+        assert_eq!(
+            extract_edit_corrections(
+                "我觉得用可劳德写代码很快",
+                "早安，我觉得用可劳德写代码很快",
+                "早安，我觉得用Claude写代码很快"
+            ),
+            vec![LearnedCorrection {
+                canonical: "Claude".to_owned(),
+                alias: "可劳德".to_owned(),
+            }]
+        );
+
+        // 2. 英文漏字/拼写纠错（自动按 ASCII 词边界展开）
+        assert_eq!(
+            extract_edit_corrections("测试 Shurfa 语音", "测试 Shurfa 语音", "测试 Shurufa 语音"),
+            vec![LearnedCorrection {
+                canonical: "Shurufa".to_owned(),
+                alias: "Shurfa".to_owned(),
+            }]
+        );
+
+        // 3. 英文大小写规范纠错（alias 置空，不写冗余同拼写别名）
+        assert_eq!(
+            extract_edit_corrections("打开 claude 看看", "打开 claude 看看", "打开 Claude 看看"),
+            vec![LearnedCorrection {
+                canonical: "Claude".to_owned(),
+                alias: String::new(),
+            }]
+        );
+
+        // 4. 多词英文产品名纠错
+        assert_eq!(
+            extract_edit_corrections(
+                "看看 t3cod 的结果",
+                "看看 t3cod 的结果",
+                "看看 T3 Code 的结果"
+            ),
+            vec![LearnedCorrection {
+                canonical: "T3 Code".to_owned(),
+                alias: "t3cod".to_owned(),
+            }]
+        );
+
+        // 5. 2~8 字纯中文完整词替换（无单字截断歧义）
+        assert_eq!(
+            extract_edit_corrections(
+                "帮我装一下舒鲁法看看",
+                "帮我装一下舒鲁法看看",
+                "帮我装一下水杉看看"
+            ),
+            vec![LearnedCorrection {
+                canonical: "水杉".to_owned(),
+                alias: "舒鲁法".to_owned(),
+            }]
+        );
+
+        // 6. 护栏：清空发送、纯续写、纯删除、整句重写、单字替换、纯标点改动均必须忽略
+        assert!(extract_edit_corrections("测试句子", "测试句子", "").is_empty());
+        assert!(
+            extract_edit_corrections("帮我跑单测", "帮我跑单测", "帮我跑单测顺便看看日志")
+                .is_empty()
+        );
+        assert!(extract_edit_corrections(
+            "我觉得这个方案很不错",
+            "我觉得这个方案很不错",
+            "我觉得这个方案不错"
+        )
+        .is_empty());
+        assert!(extract_edit_corrections(
+            "今天下午两点钟我们开个会同步一下下周排期",
+            "今天下午两点钟我们开个会同步一下下周排期",
+            "明天上午直接上线吧"
+        )
+        .is_empty());
+        assert!(extract_edit_corrections("你做的很好", "你做的很好", "你做得很好").is_empty());
+        assert!(extract_edit_corrections("好的", "好的", "好的！").is_empty());
+    }
+
+    #[test]
+    fn vocabulary_persistence_learn_dedup_and_undo_restore_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        // 首次自动学词写入 voice-vocabulary.json
+        let first = learn_corrections_in_preferences_dir(
+            dir.path(),
+            "用可劳德跑一次回归",
+            "用可劳德跑一次回归",
+            "用Claude跑一次回归",
+        )
+        .unwrap();
+        assert_eq!(first.learned.len(), 1);
+        assert_eq!(first.learned[0].canonical, "Claude");
+        assert_eq!(first.learned[0].alias, "可劳德");
+        assert!(first.learned[0].previous_term.is_none());
+
+        let loaded = load_from_preferences_dir(dir.path()).unwrap();
+        assert_eq!(loaded.terms.len(), 1);
+        assert_eq!(loaded.terms[0].source, "auto_learned");
+        assert_eq!(loaded.terms[0].aliases, ["可劳德"]);
+
+        // 同一词条+别名重复学词不再重复触发提示
+        let dup = learn_corrections_in_preferences_dir(
+            dir.path(),
+            "用可劳德跑一次回归",
+            "用可劳德跑一次回归",
+            "用Claude跑一次回归",
+        )
+        .unwrap();
+        assert!(dup.learned.is_empty());
+
+        // 再学同一个词的新别名：记录 previous_term，撤销可精确还原旧状态而非误删整条
+        let second = learn_corrections_in_preferences_dir(
+            dir.path(),
+            "用克劳德跑一次回归",
+            "用克劳德跑一次回归",
+            "用Claude跑一次回归",
+        )
+        .unwrap();
+        assert_eq!(second.learned.len(), 1);
+        assert!(second.learned[0].previous_term.is_some());
+        let after_second = load_from_preferences_dir(dir.path()).unwrap();
+        assert_eq!(after_second.terms[0].aliases, ["可劳德", "克劳德"]);
+
+        restore_term_in_preferences_dir(
+            dir.path(),
+            &second.learned[0].canonical,
+            second.learned[0].previous_term.clone(),
+        )
+        .unwrap();
+        let after_undo_second = load_from_preferences_dir(dir.path()).unwrap();
+        assert_eq!(after_undo_second.terms[0].aliases, ["可劳德"]);
+
+        // 撤销首次新增：彻底移除词条
+        restore_term_in_preferences_dir(
+            dir.path(),
+            &first.learned[0].canonical,
+            first.learned[0].previous_term.clone(),
+        )
+        .unwrap();
+        assert!(load_from_preferences_dir(dir.path()).unwrap().is_empty());
     }
 }

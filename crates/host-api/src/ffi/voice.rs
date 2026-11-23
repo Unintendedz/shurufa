@@ -1069,6 +1069,7 @@ fn valid_vocabulary_terms(
         is_bounded_text(&term.canonical, MAX_VOICE_CORRECTION_HOTWORD_TEXT_BYTES)
             && is_bounded_text(&term.pinyin, MAX_VOICE_CORRECTION_HOTWORD_PINYIN_BYTES)
             && is_bounded_text(&term.category, 64)
+            && is_bounded_text(&term.source, 32)
             && term.aliases.len() <= 32
             && term
                 .aliases
@@ -1251,6 +1252,111 @@ pub unsafe extern "C" fn msime_client_voice_vocabulary(
             value["prompt_hints"] = json!(hints);
         }
         Ok(value)
+    })
+}
+
+/// 管理 `<preferences_directory>/voice-vocabulary.json` 并支持事后编辑自动学词与撤销。
+///
+/// 请求 JSON 上限 256 KiB：
+/// - `action = "list"`: 返回自定义词表 `{version, terms}`；
+/// - `action = "upsert"`: 新增或合并更新 `term`，返回 `{term, previous_term, changed}`；
+/// - `action = "remove"`: 删除 `canonical`，返回 `{removed}`；
+/// - `action = "restore"`: 按 `canonical` 与 `previous_term` 精确撤销上次写入；
+/// - `action = "learn"`: 从 `{inserted_text, original_box, edited_box}` 提取纠错词并原子落盘，返回 `{learned}`。
+///
+/// # Safety
+/// `request` 必须指向本次调用期间可读的 `length` 个字节；空指针或超限会被拒绝。
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_voice_vocabulary_manage(
+    request: *const u8,
+    length: usize,
+) -> *mut c_char {
+    response(|| {
+        #[derive(Deserialize)]
+        struct VocabularyManageRequest {
+            action: String,
+            preferences_directory: String,
+            #[serde(default)]
+            term: Option<msime_client_providers::voice::vocabulary::VocabularyTerm>,
+            #[serde(default)]
+            canonical: Option<String>,
+            #[serde(default)]
+            previous_term: Option<msime_client_providers::voice::vocabulary::VocabularyTerm>,
+            #[serde(default)]
+            inserted_text: Option<String>,
+            #[serde(default)]
+            original_box: Option<String>,
+            #[serde(default)]
+            edited_box: Option<String>,
+        }
+        let req: VocabularyManageRequest = local_voice_request(request, length, 256 * 1024)?;
+        let pref_dir = local_model_root(&req.preferences_directory)
+            .map_err(|_| "invalid voice vocabulary preferences directory".to_owned())?;
+        match req.action.trim() {
+            "list" => {
+                let vocab =
+                    msime_client_providers::voice::vocabulary::load_from_preferences_dir(pref_dir)?;
+                serde_json::to_value(vocab).map_err(|error| error.to_string())
+            }
+            "upsert" => {
+                let term = req
+                    .term
+                    .ok_or_else(|| "missing vocabulary term".to_owned())?;
+                if !valid_vocabulary_terms(std::slice::from_ref(&term)) {
+                    return Err("invalid voice vocabulary term".into());
+                }
+                let outcome =
+                    msime_client_providers::voice::vocabulary::upsert_term_in_preferences_dir(
+                        pref_dir, term,
+                    )?;
+                serde_json::to_value(outcome).map_err(|error| error.to_string())
+            }
+            "remove" => {
+                let canonical = req.canonical.as_deref().unwrap_or("");
+                if !is_bounded_text(canonical, MAX_VOICE_CORRECTION_HOTWORD_TEXT_BYTES) {
+                    return Err("invalid voice vocabulary canonical".into());
+                }
+                let removed =
+                    msime_client_providers::voice::vocabulary::remove_term_in_preferences_dir(
+                        pref_dir, canonical,
+                    )?;
+                Ok(json!({"removed": removed}))
+            }
+            "restore" => {
+                let canonical = req.canonical.as_deref().unwrap_or("");
+                if !is_bounded_text(canonical, MAX_VOICE_CORRECTION_HOTWORD_TEXT_BYTES) {
+                    return Err("invalid voice vocabulary canonical".into());
+                }
+                if let Some(prev) = req.previous_term.as_ref() {
+                    if !valid_vocabulary_terms(std::slice::from_ref(prev)) {
+                        return Err("invalid voice vocabulary term".into());
+                    }
+                }
+                msime_client_providers::voice::vocabulary::restore_term_in_preferences_dir(
+                    pref_dir,
+                    canonical,
+                    req.previous_term,
+                )?;
+                Ok(json!({"restored": true}))
+            }
+            "learn" => {
+                let inserted = req.inserted_text.as_deref().unwrap_or("");
+                let original = req.original_box.as_deref().unwrap_or("");
+                let edited = req.edited_box.as_deref().unwrap_or("");
+                if !is_bounded_chars_without_nul(inserted, MAX_VOICE_CORRECTION_TEXT_CHARS)
+                    || !is_bounded_chars_without_nul(original, MAX_VOICE_CORRECTION_TEXT_CHARS)
+                    || !is_bounded_chars_without_nul(edited, MAX_VOICE_CORRECTION_TEXT_CHARS)
+                {
+                    return Err("invalid voice vocabulary learn payload".into());
+                }
+                let report =
+                    msime_client_providers::voice::vocabulary::learn_corrections_in_preferences_dir(
+                        pref_dir, inserted, original, edited,
+                    )?;
+                serde_json::to_value(report).map_err(|error| error.to_string())
+            }
+            _ => Err("unknown voice vocabulary manage action".into()),
+        }
     })
 }
 
@@ -1626,5 +1732,80 @@ mod wave2_voice_abi_tests {
         assert_eq!(sse_parsed["ok"], true);
         assert_eq!(sse_parsed["value"]["text"], "合成");
         assert_eq!(sse_parsed["value"]["done"], true);
+    }
+
+    #[test]
+    fn vocabulary_manage_abi_supports_crud_learn_and_undo_restore() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir_str = dir.path().to_str().unwrap();
+
+        let upsert_req = serde_json::to_vec(&json!({
+            "action": "upsert",
+            "preferences_directory": dir_str,
+            "term": {
+                "canonical": "T3 Code",
+                "aliases": ["t3code"],
+                "source": "manual",
+                "weight": 1000
+            }
+        }))
+        .unwrap();
+        let upsert_resp = take_json(unsafe {
+            msime_client_voice_vocabulary_manage(upsert_req.as_ptr(), upsert_req.len())
+        });
+        assert_eq!(upsert_resp["ok"], true);
+        assert_eq!(upsert_resp["value"]["changed"], true);
+
+        let learn_req = serde_json::to_vec(&json!({
+            "action": "learn",
+            "preferences_directory": dir_str,
+            "inserted_text": "用可劳德检查一下",
+            "original_box": "用可劳德检查一下",
+            "edited_box": "用Claude检查一下"
+        }))
+        .unwrap();
+        let learn_resp = take_json(unsafe {
+            msime_client_voice_vocabulary_manage(learn_req.as_ptr(), learn_req.len())
+        });
+        assert_eq!(learn_resp["ok"], true);
+        let learned = learn_resp["value"]["learned"].as_array().unwrap();
+        assert_eq!(learned.len(), 1);
+        assert_eq!(learned[0]["canonical"], "Claude");
+        assert_eq!(learned[0]["alias"], "可劳德");
+
+        let list_req = serde_json::to_vec(&json!({
+            "action": "list",
+            "preferences_directory": dir_str
+        }))
+        .unwrap();
+        let list_resp = take_json(unsafe {
+            msime_client_voice_vocabulary_manage(list_req.as_ptr(), list_req.len())
+        });
+        assert_eq!(list_resp["ok"], true);
+        assert_eq!(list_resp["value"]["terms"].as_array().unwrap().len(), 2);
+
+        let restore_req = serde_json::to_vec(&json!({
+            "action": "restore",
+            "preferences_directory": dir_str,
+            "canonical": "Claude",
+            "previous_term": learned[0]["previous_term"]
+        }))
+        .unwrap();
+        let restore_resp = take_json(unsafe {
+            msime_client_voice_vocabulary_manage(restore_req.as_ptr(), restore_req.len())
+        });
+        assert_eq!(restore_resp["ok"], true);
+
+        let remove_req = serde_json::to_vec(&json!({
+            "action": "remove",
+            "preferences_directory": dir_str,
+            "canonical": "T3 Code"
+        }))
+        .unwrap();
+        let remove_resp = take_json(unsafe {
+            msime_client_voice_vocabulary_manage(remove_req.as_ptr(), remove_req.len())
+        });
+        assert_eq!(remove_resp["ok"], true);
+        assert_eq!(remove_resp["value"]["removed"], true);
     }
 }

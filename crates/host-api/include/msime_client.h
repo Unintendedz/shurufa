@@ -681,6 +681,9 @@ char *msime_client_voice_postprocess(const uint8_t *request, size_t length);
  * 传 cached_terms 时仅做纯内存 prompt_hints 筛选；否则合并用户词库（pinyin/english/quick_phrase，单类不可用时局部降级）与 <preferences_directory>/voice-vocabulary.json；
  * 响应 value：{version, terms:[{canonical,aliases,pinyin,category,weight}], prompt_hints?:[string]}（prompt_hints 至多 60 条）。 */
 char *msime_client_voice_vocabulary(const uint8_t *request, size_t length);
+/* 管理 <preferences_directory>/voice-vocabulary.json（list / upsert / remove / restore / learn）。
+ * 请求 <=256 KiB；采用临时文件原子替换落盘，不加文件锁，应在工作线程调用。 */
+char *msime_client_voice_vocabulary_manage(const uint8_t *request, size_t length);
 /* LLM 润色/改写/翻译输出清洗与防幻觉门控（纯函数）。请求 <=1 MiB：{raw_text, polished_text, selected_text?, mode?,
  * expect_action_tag?, app_category?, enable_pangu_spacing?, enforce_simplified_chinese?, trailing_period_policy?, vocabulary?}。
  * 响应 value：{accepted, text, resolved_action:"replace_selection"|"insert", rejection_reason}；accepted 为 false 时宿主应降级到确定性后处理原文。 */

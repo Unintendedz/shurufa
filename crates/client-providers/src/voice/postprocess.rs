@@ -2802,6 +2802,7 @@ mod tests {
             pinyin: String::new(),
             category: "product".to_owned(),
             weight: 200,
+            ..Default::default()
         }];
         let out = postprocess(&req);
         assert_eq!(
