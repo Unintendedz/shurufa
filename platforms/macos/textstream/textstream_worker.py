@@ -46,8 +46,8 @@ PREROLL_MS = 256
 PREROLL_SAMPLES = SAMPLE_RATE * PREROLL_MS // 1000  # 4096 采样 = 256 ms
 PAUSE_SKIP_MS = 640.0
 PAUSE_RESUME_MIN_FRAMES = 2  # 连续 >= 2 帧（64 ms）才从长停顿跳过恢复，防止单帧敲击/咳嗽尖峰误唤醒
-SEGMENT_SOFT_MIN_SEC = 12.0
-SEGMENT_SOFT_PAUSE_MS = 900.0
+SEGMENT_SOFT_MIN_SEC = 18.0
+SEGMENT_SOFT_PAUSE_MS = 1200.0
 SEGMENT_WARN_MIN_SEC = 24.0
 SEGMENT_WARN_PAUSE_MS = 320.0
 SEGMENT_MICRO_MIN_SEC = 26.0
@@ -416,7 +416,7 @@ class DictationSession:
             self._snapshot(abort)
 
     def _should_commit_segment(self) -> bool:
-        """判断是否满足安全切段提交条件：自然换气点（>=12s & >=900ms）、软上限（>=24s & >=320ms）、微停顿窗口（>=26s & >=64ms）或硬上限（>=28s）。"""
+        """判断是否满足安全切段提交条件：自然换气点（>=18s & >=1200ms）、软上限（>=24s & >=320ms）、微停顿窗口（>=26s & >=64ms）或硬上限（>=28s）。"""
         if not self.segment_has_speech:
             return False
         sec = self.segment_audio_sec

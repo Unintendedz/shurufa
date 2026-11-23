@@ -42,7 +42,7 @@ const DICTATION_V3_SYSTEM_PROMPT_ZH_HANS: &str = r#"你是本地语音输入法�
 1. 简体中文锁定与自然口语：当口述主体为中文时，严格输出标准简体中文，杜绝繁体漂移。只删口癖（呃、嗯、啊、哦、那个、就是说、然后的话）、结巴重复、多余回指代词与粗口脏字（静默删脏字但保留说话人情绪强度），顺通语病；尽量保留说话人原本的用词习惯与自然语气，严禁改写成生硬公文腔（禁止出现「予以补充」「使其能直接理解」「请查看确认」「我将其确认为」等官僚表达），也不要无故压缩删减原意。
 2. 严禁脑补或扩写：绝不替说话人补充原文未提及的硬件型号、参数、观点、论据或无关实体；对发音模糊且 <vocabulary> / <window_title> 中无确凿依据的词，宁可保守处理，绝不凭空猜测不相关概念。
 3. 显性与隐性自我纠错：无论是否说出「不对/不是/重说/改成/应该是/算了/或者说」等提示词，只要说话人中途否定、半句截断重启，或紧接着报出修正后的日期/数字/词句（如「四月四号、十月四号」「想法是、顾虑是」），彻底删掉作废的前半截，只保留最终修正结果。
-4. 英文术语、上下文消歧与词表：结合 <window_title>、<preceding_context> 与 <vocabulary> 修正同音/音译错词与拆散字母缩写（如 A P I K -> API Key），保留技术术语与品牌规范大小写；说话人直接说出的英文词、字段名、模型名、路径、代码标识符与专有名词必须原词、原次保留（例如禁止把 `file name` 译成「文件名」、把 `API` 改成「接口」、把 `API Key` 简写为「Key」或省去重复提及的模型/产品名），严禁翻译成中文；英文词卡顿重复（如 `react reaction`）直接删掉前半截，严禁用斜杠 `/` 拼成 `react/reaction`；不要随意改变原话中字段名的小写风格。若语音与 <window_title> 无关，绝不强行塞入窗口标题，绝不复述 <preceding_context>。
+4. 英文术语、上下文消歧与词表：结合 <window_title>、<preceding_context> 与 <vocabulary> 修正同音/音译错词与拆散字母缩写（如 A P I K -> API Key），保留技术术语与品牌规范大小写；说话人直接说出的英文词、字段名、模型名、路径、代码标识符与专有名词必须原词、原次保留（例如禁止把 `file name` 译成「文件名」、把 `API` 改成「接口」、把 `API Key` 简写为「Key」或省去重复提及的模型/产品名），严禁翻译成中文；口述代码/型号/路径连接符时（如「Qwen3 杠 ASR」「foo 横杠 bar」「src 斜杠 main」「account 下划线 id」）还原为规范半角符号（`-`、`/`、`_`），但严禁误改「抬杠」「杠杆」「某某杠某某」等正常中文词或讨论符号本身的元语句；英文词卡顿重复（如 `react reaction`）直接删掉前半截，严禁用斜杠 `/` 拼成 `react/reaction`；不要随意改变原话中字段名的小写风格。若语音与 <window_title> 无关，绝不强行塞入窗口标题，绝不复述 <preceding_context>。
 5. 长文全程一致与反过度摘要：即使文本超过 300 字，仍须从头到尾持续清理口癖与重复，并按话题分段或列点，严禁后半段原样照抄或用分号硬拼多段；严禁过度摘要与合并条目，说话人逐一列出的每一项（如第 1 项到第 9 项、多步流程或完整解释）必须逐条保留，不要擅自合并删减或把多条细节压缩成一句话。
 
 【排版与分段规则（必须严格执行）】
@@ -326,6 +326,25 @@ fn resolve_provider_defaults(provider: &str) -> (&'static str, &'static str) {
         "ollama" => ("http://127.0.0.1:11434/v1/chat/completions", "qwen3.5:9b"),
         other => super::provider::polish_provider_defaults(other).unwrap_or(("", "")),
     }
+}
+
+/// 将 OpenAI 兼容的 API 根路径（空路径、`/v<数字>`、`/v1beta/openai` 等）自动补全为
+/// `.../chat/completions`，与既有宿主对 `https://host/v1`、`http://127.0.0.1:11434/v1` 等
+/// 常见基地址的兼容行为保持一致；自定义完整路由保持原样。
+fn normalize_chat_completions_url(mut url: reqwest::Url) -> reqwest::Url {
+    let trimmed = url.path().trim_end_matches('/');
+    if trimmed.ends_with("/chat/completions") {
+        return url;
+    }
+    let last = trimmed.rsplit('/').next().unwrap_or("");
+    let is_version =
+        last.len() > 1 && last.starts_with('v') && last[1..].bytes().all(|b| b.is_ascii_digit());
+    let is_api_prefix = trimmed.is_empty() || is_version || trimmed.ends_with("/v1beta/openai");
+    if is_api_prefix {
+        let new_path = format!("{trimmed}/chat/completions");
+        url.set_path(&new_path);
+    }
+    url
 }
 
 /// 依据 `provider` 与解析后的 URL 判定是否必须提供非空 Bearer Token。
@@ -772,7 +791,9 @@ pub fn build_polish_http_request(
     } else {
         input.endpoint.as_str()
     };
-    let url = endpoint::validate(endpoint_str).map_err(|_| PolishRequestError::InvalidEndpoint)?;
+    let url = normalize_chat_completions_url(
+        endpoint::validate(endpoint_str).map_err(|_| PolishRequestError::InvalidEndpoint)?,
+    );
 
     if !crate::text::is_bounded_text(&input.model, MAX_MODEL_BYTES) {
         return Err(PolishRequestError::InvalidModel);
@@ -1528,5 +1549,55 @@ mod tests {
         let system = msgs[0]["content"].as_str().unwrap();
         assert!(system.contains("合成自定义整理提示词"));
         assert!(system.contains("<asr_text>"));
+    }
+
+    #[test]
+    fn normalizes_openai_compatible_root_endpoints_to_chat_completions() {
+        let cases = [
+            (
+                "https://proxy.example.test/v1",
+                "https://proxy.example.test/v1/chat/completions",
+            ),
+            (
+                "https://proxy.example.test/v1/",
+                "https://proxy.example.test/v1/chat/completions",
+            ),
+            (
+                "https://proxy.example.test/compatible-mode/v1",
+                "https://proxy.example.test/compatible-mode/v1/chat/completions",
+            ),
+            (
+                "https://proxy.example.test/api/paas/v4",
+                "https://proxy.example.test/api/paas/v4/chat/completions",
+            ),
+            (
+                "https://proxy.example.test/v1beta/openai",
+                "https://proxy.example.test/v1beta/openai/chat/completions",
+            ),
+            (
+                "https://proxy.example.test",
+                "https://proxy.example.test/chat/completions",
+            ),
+            (
+                "https://proxy.example.test/v1/chat/completions",
+                "https://proxy.example.test/v1/chat/completions",
+            ),
+            (
+                "https://proxy.example.test/custom/polish",
+                "https://proxy.example.test/custom/polish",
+            ),
+            (
+                "http://127.0.0.1:11434/v1",
+                "http://127.0.0.1:11434/v1/chat/completions",
+            ),
+        ];
+        for (raw, expected) in cases {
+            let mut input = local_base_input("帮我看一下这个接口");
+            input.provider = "openai".into();
+            input.endpoint = raw.into();
+            input.token = "synthetic-token".into();
+            let desc = build_polish_http_request(&input).unwrap();
+            assert_eq!(desc.url, expected, "endpoint: {raw}");
+        }
     }
 }

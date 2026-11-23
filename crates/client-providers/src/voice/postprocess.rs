@@ -845,10 +845,96 @@ fn count_consecutive_repeats(chars: &[char], start: usize, unit_len: usize) -> (
     (count, pos)
 }
 
-/// 合并口述下划线标识符（`Account下划线Identity` → `account_identity`）及明确域名点号（`Max点儿example点儿com` → `max.example.com`）。
+/// 合并口述下划线、短横杠、斜杠标识符（如 `Account下划线Identity` → `account_identity`、
+/// `Qwen3 杠 ASR` → `Qwen3-ASR`、`src 斜杠 main` → `src/main`）及明确域名点号（`Max点儿example点儿com` → `max.example.com`）。
 fn repair_spoken_symbols(text: &str) -> String {
     let after_underscore = repair_spoken_underscores(text);
-    repair_spoken_domain_dots(&after_underscore)
+    let after_hyphen =
+        repair_spoken_ascii_connector(&after_underscore, &["短横杠", "横杠", "杠"], '-');
+    let after_slash = repair_spoken_ascii_connector(&after_hyphen, &["斜杠"], '/');
+    repair_spoken_domain_dots(&after_slash)
+}
+
+/// 仅当两侧都是 ASCII 字母/数字片段时，把口述连接词（如「杠」「横杠」「斜杠」）合并为对应半角符号；
+/// 自然中文词（如「抬杠」「杠杆」「某某杠某某」）因两侧非 ASCII 片段而完全不受影响。
+fn repair_spoken_ascii_connector(text: &str, spoken_tokens: &[&str], symbol: char) -> String {
+    if !spoken_tokens.iter().any(|tok| text.contains(tok)) {
+        return text.to_owned();
+    }
+    let token_chars: Vec<Vec<char>> = spoken_tokens
+        .iter()
+        .map(|tok| tok.chars().collect())
+        .collect();
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i].is_ascii_alphanumeric() {
+            let start = i;
+            let mut end = i;
+            while end < chars.len()
+                && (chars[end].is_ascii_alphanumeric()
+                    || chars[end] == symbol
+                    || chars[end] == '_'
+                    || chars[end] == '.')
+            {
+                end += 1;
+            }
+            let mut segments: Vec<String> = vec![chars[start..end].iter().collect()];
+            let mut cursor = end;
+            let mut matched_any = false;
+            loop {
+                let mut probe = cursor;
+                while probe < chars.len() && chars[probe] == ' ' {
+                    probe += 1;
+                }
+                let matched_len = token_chars.iter().find_map(|tok| {
+                    if probe + tok.len() <= chars.len()
+                        && tok
+                            .iter()
+                            .enumerate()
+                            .all(|(off, &c)| chars[probe + off] == c)
+                    {
+                        Some(tok.len())
+                    } else {
+                        None
+                    }
+                });
+                let Some(tok_len) = matched_len else {
+                    break;
+                };
+                probe += tok_len;
+                while probe < chars.len() && chars[probe] == ' ' {
+                    probe += 1;
+                }
+                if probe < chars.len() && chars[probe].is_ascii_alphanumeric() {
+                    let seg_start = probe;
+                    while probe < chars.len()
+                        && (chars[probe].is_ascii_alphanumeric()
+                            || chars[probe] == symbol
+                            || chars[probe] == '_'
+                            || chars[probe] == '.')
+                    {
+                        probe += 1;
+                    }
+                    segments.push(chars[seg_start..probe].iter().collect());
+                    cursor = probe;
+                    matched_any = true;
+                    continue;
+                }
+                break;
+            }
+            if matched_any {
+                let sep = symbol.to_string();
+                out.push_str(&segments.join(&sep));
+                i = cursor;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
 }
 
 fn repair_spoken_underscores(text: &str) -> String {
@@ -2848,5 +2934,28 @@ mod tests {
             assert_eq!(twice.text, once.text, "not idempotent: {sample}");
             assert!(!twice.changed, "second pass mutated: {sample}");
         }
+    }
+
+    #[test]
+    fn merges_spoken_hyphens_and_slashes_between_ascii_without_touching_chinese() {
+        assert_eq!(
+            postprocess(&input_with("把 Qwen3 杠 ASR 换成 GPT 横杠 4o")).text,
+            "把 Qwen3-ASR 换成 GPT-4o"
+        );
+        assert_eq!(
+            postprocess(&input_with("分支名是 feature 短横杠 voice 杠 fix")).text,
+            "分支名是 feature-voice-fix"
+        );
+        assert_eq!(
+            postprocess(&input_with("路径在 src 斜杠 voice 斜杠 main.rs")).text,
+            "路径在 src/voice/main.rs"
+        );
+        assert_eq!(
+            postprocess(&input_with(
+                "别跟他抬杠，杠杆率太高了，比方说就是某某杠某某"
+            ))
+            .text,
+            "别跟他抬杠，杠杆率太高了，比方说就是某某杠某某"
+        );
     }
 }

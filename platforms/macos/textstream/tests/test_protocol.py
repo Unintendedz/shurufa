@@ -441,14 +441,14 @@ def u_long_audio_over_30s():
     model = _FakeModelSession(labels=["第一段话，", "第二段话，", "第三段结束。"])
     session = tw.DictationSession(rt, 101, model, "zh-CN", "", 0.5)
     abort = threading.Event()
-    # 38 s 合成音频：0.5s静音 + 13s语音 + 1.1s停顿（触发>=12s&>=900ms切段）+ 14s语音 + 1.1s停顿 + 8.3s语音
+    # 46.1 s 合成音频：0.5s静音 + 19s语音 + 1.3s停顿（触发>=18s&>=1200ms切段）+ 19s语音 + 1.3s停顿 + 5.0s语音
     pcm = (
         _synth_pcm(0.5, 0)
-        + _synth_pcm(13.0, 6000)
-        + _synth_pcm(1.1, 0)
-        + _synth_pcm(14.0, 6000)
-        + _synth_pcm(1.1, 0)
-        + _synth_pcm(8.3, 6000)
+        + _synth_pcm(19.0, 6000)
+        + _synth_pcm(1.3, 0)
+        + _synth_pcm(19.0, 6000)
+        + _synth_pcm(1.3, 0)
+        + _synth_pcm(5.0, 6000)
     )
 
     def drive():
@@ -462,7 +462,7 @@ def u_long_audio_over_30s():
     assert stats["segment_count"] == 3, stats
     assert stats["segments"] == ["第一段话，", "第二段话，", "第三段结束。"], stats
     assert final_text == "第一段话，第二段话，第三段结束。", final_text
-    assert stats["audio_ms"] == 38000, stats
+    assert stats["audio_ms"] == 46100, stats
     assert all(fed < 29 * 16000 for fed in model.segment_fed_history), model.segment_fed_history
     partials = [e for e in events if e["type"] == "partial"]
     assert partials, "expected partial events"
