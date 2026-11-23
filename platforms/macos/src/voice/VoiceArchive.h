@@ -20,6 +20,12 @@ NS_ASSUME_NONNULL_BEGIN
 /// 录音停止。`discard` 为 YES 时（误触的过短录音）连同记录一起删掉。之后按当前保留期限清理一次。
 - (void)endCaptureDiscarding:(BOOL)discard;
 - (void)noteText:(NSString *)text forRecording:(NSString *)identifier;
+/// 追加一段识别文本并附带可选元数据（如 `raw_text`、`mode`、`app_category`、`polish_*`、`asr_ms`、`polish_ms`）。
+- (void)noteText:(NSString *)text
+        metadata:(nullable NSDictionary<NSString *, id> *)metadata
+    forRecording:(NSString *)identifier;
+/// 记录因静音、误触或幻觉过滤而丢弃的原因码（不超过 128 字节）。
+- (void)noteDismissedReason:(NSString *)reason forRecording:(NSString *)identifier;
 - (void)noteFailure:(NSString *)reason forRecording:(NSString *)identifier;
 - (void)noteCancelledRecording:(NSString *)identifier;
 - (BOOL)noteRetranscription:(NSString *)text forRecording:(NSString *)identifier;

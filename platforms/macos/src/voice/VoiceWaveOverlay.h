@@ -50,16 +50,22 @@ typedef NS_ENUM(NSUInteger, MSIMEVoiceFailure) {
 /// The hold shortcut was locked with Space: recording continues after release, so the actions are shown. Ignored unless recording; `setListening:` clears it.
 - (void)setRecordingLocked:(BOOL)locked;
 - (void)setProcessing:(BOOL)polishing;
+/// 更新处理中状态提示文案（例如润色超过 7.5 秒时提示“正在润色，请稍候…”）；传入 nil 或空串恢复默认状态文案。仅在处理中且未取消/未显示失败时生效。
+- (void)setProcessingHint:(NSString *)hint;
 - (void)showFailure:(MSIMEVoiceFailure)failure;
 /// `detail` is the provider's own account of the failure, as MSIME-Windows shows it: the status line keeps the category's fixed message and the detail takes the transcript area. Nil or empty shows the category alone.
 - (void)showFailure:(MSIMEVoiceFailure)failure detail:(NSString *)detail;
 - (void)dismissFailure;
 - (void)setInputLevel:(float)level;
 - (void)setTranscript:(NSString *)text;
+/// 双态流式预览：已定稿部分按 100% 不透明前景色绘制，草稿部分按 55% 次级色绘制。`setTranscript:` 内部转发至此方法保持向后兼容。
+- (void)setFinalizedTranscript:(NSString *)finalized draft:(NSString *)draft;
 - (void)setPersistentRecording:(BOOL)persistent;
 - (void)setShortcutMonitoringAvailable:(BOOL)available;
 - (void)showCopyResult:(BOOL)copied;
 - (void)showCompletionNotice:(NSString *)notice;
 @property(nonatomic, readonly, copy) NSString *statusText;
 @property(nonatomic, readonly, copy) NSString *transcriptText;
+@property(nonatomic, readonly, copy) NSString *finalizedTranscriptText;
+@property(nonatomic, readonly, copy) NSString *draftTranscriptText;
 @end

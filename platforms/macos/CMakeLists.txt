@@ -122,7 +122,10 @@ set_tests_properties(usage-reporting-termination PROPERTIES TIMEOUT 60)
 # src/cloud 的 CloudClipboardClient、CloudClipboardWindowController、CloudDictionaryClient、CloudURLSession 是账号和云端改走 Rust（#8201）以前的 Objective-C 实现，输入法里已经没有代码引用它们，不再编进输入法；它们仍由下面的 cloud-clipboard-deletion、cloud-clipboard-selection、cloud-dictionary-client 三个测试目标编译，scripts/test-macos-cloud-query-encoding.py 和 test-macos-cloud-redirect-policy.py 也读它们的源码，所以文件留着，删不删由负责人定。同一批里没人引用的 CloudFileTransfer 和 src/core/Account{AuthClient,Keychain,SessionManager,WindowController} 已经删掉。
 add_executable(MSIMEClientInputMethod MACOSX_BUNDLE src/input/input_method_main.mm src/settings/PreferencesWindowController.mm src/core/SupportWindowController.mm src/voice/VoiceInputService.mm src/voice/VoiceWaveOverlay.mm src/voice/VoiceCuePlayer.mm src/voice/VoiceAudioMuter.mm src/voice/VoiceSettings.mm src/voice/VoiceProviderSettings.mm src/voice/VoiceArchive.mm src/voice/VoiceHistoryView.mm src/voice/TextStreamSupport.mm src/voice/OpenLessImport.mm src/input/InputController.mm src/input/InputModeHUDPanel.mm src/input/InputModeStatusItem.mm src/candidate/CandidateSkinAppearance.mm src/settings/AppearancePreferences.mm src/core/DiagnosticLog.cpp src/core/BoundedFileReader.mm src/candidate/CandidateSkin.cpp src/candidate/CandidateSkinPreviewView.mm src/candidate/SkinSettingsView.mm src/core/ChineseTextConversion.mm src/settings/ShuangpinKeymapPanel.mm src/input/InputSourceRegistration.mm src/core/FloatingToolbarPanel.mm src/core/UpdateController.mm src/dictionary/DictionaryWindowController.mm src/core/ClientDictionaryRuntime.mm src/dictionary/DictionaryInstaller.mm ../../crates/host-macos/native/uninstaller.mm)
 target_sources(MSIMEClientInputMethod PRIVATE src/core/AISettingsWindow.mm src/core/ScreenKeyboardPanel.mm src/cloud/CloudCandidateRequest.mm src/core/CustomTranslationBatch.mm src/voice/VoicePCMBuffer.mm src/voice/HTTPVoiceRequest.mm)
-target_sources(MSIMEClientInputMethod PRIVATE src/voice/DoubaoVoiceRequest.mm src/voice/LocalVoiceRequest.mm)
+target_sources(MSIMEClientInputMethod PRIVATE src/voice/DoubaoVoiceRequest.mm src/voice/LocalVoiceRequest.mm src/voice/VoiceContextCapture.mm src/voice/LocalPolishServer.mm src/voice/VoicePolishClient.mm src/voice/VoicePipelineHelper.mm)
+target_link_libraries(MSIMEClientInputMethod PRIVATE "-framework Security")
+# 所有编译 VoicePolishClient.mm 的目标（宿主、控制器测试、voice-polish-client-test）均链接 apple-client，统一静态绑定 Rust C ABI。
+set_source_files_properties(src/voice/VoicePolishClient.mm PROPERTIES COMPILE_DEFINITIONS "MSIME_VOICE_POLISH_USE_RUST_FFI=1")
 target_sources(MSIMEClientInputMethod PRIVATE src/core/DesktopInputSession.mm)
 target_sources(MSIMEClientInputMethod PRIVATE src/core/UsageReporting.mm)
 target_sources(MSIMEClientInputMethod PRIVATE src/core/DesktopCloudClipboard.mm)
@@ -1068,7 +1071,8 @@ target_link_libraries(shortcut-test PRIVATE "-framework IOKit")
 target_compile_options(shortcut-test PRIVATE ${MSIME_SPARKLE_COMPILE_OPTIONS})
 target_link_libraries(shortcut-test PRIVATE "${MSIME_SPARKLE_FRAMEWORK}")
 target_sources(shortcut-test PRIVATE src/settings/PreferencesWindowController.mm src/core/SupportWindowController.mm src/candidate/CandidateSkinAppearance.mm src/core/ScreenKeyboardPanel.mm src/voice/VoiceInputService.mm src/voice/VoicePCMBuffer.mm src/voice/VoiceWaveOverlay.mm src/voice/VoiceCuePlayer.mm src/voice/VoiceAudioMuter.mm src/voice/VoiceSettings.mm src/voice/VoiceProviderSettings.mm src/voice/TextStreamSupport.mm src/voice/OpenLessImport.mm src/cloud/CloudCandidateRequest.mm src/core/CustomTranslationBatch.mm)
-target_sources(shortcut-test PRIVATE src/voice/HTTPVoiceRequest.mm src/voice/DoubaoVoiceRequest.mm src/voice/LocalVoiceRequest.mm src/core/DesktopInputSession.mm)
+target_sources(shortcut-test PRIVATE src/voice/HTTPVoiceRequest.mm src/voice/DoubaoVoiceRequest.mm src/voice/LocalVoiceRequest.mm src/voice/VoiceContextCapture.mm src/voice/LocalPolishServer.mm src/voice/VoicePolishClient.mm src/voice/VoicePipelineHelper.mm src/core/DesktopInputSession.mm)
+target_link_libraries(shortcut-test PRIVATE "-framework Security")
 target_sources(shortcut-test PRIVATE src/core/DesktopCloudClipboard.mm)
 target_link_libraries(shortcut-test PRIVATE msime-voice-providers)
 target_link_libraries(shortcut-test PRIVATE "-framework AudioToolbox")
@@ -1654,6 +1658,28 @@ add_executable(typing-effect-panel-test tests/input/TypingEffectPanelTest.mm src
 target_compile_options(typing-effect-panel-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(typing-effect-panel-test PRIVATE "-framework AppKit" "-framework QuartzCore")
 add_test(NAME typing-effect-panel COMMAND typing-effect-panel-test)
+
+# Wave 2 本地语音管线单元测试：音频前端预处理、安全上下文采集、本机 llama-server 托管与独立润色客户端。
+add_executable(voice-audio-preprocess-test tests/voice/VoiceAudioPreprocessTest.mm)
+target_compile_options(voice-audio-preprocess-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME voice-audio-preprocess COMMAND voice-audio-preprocess-test)
+
+add_executable(voice-context-capture-test tests/voice/VoiceContextCaptureTest.mm src/voice/VoiceContextCapture.mm)
+target_compile_options(voice-context-capture-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(voice-context-capture-test PRIVATE "-framework AppKit" "-framework ApplicationServices" "-framework Carbon")
+add_test(NAME voice-context-capture COMMAND voice-context-capture-test)
+
+add_executable(local-polish-server-test tests/voice/LocalPolishServerTest.mm src/voice/LocalPolishServer.mm)
+target_compile_options(local-polish-server-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(local-polish-server-test PRIVATE "-framework Foundation" "-framework Security")
+add_test(NAME local-polish-server COMMAND local-polish-server-test)
+set_tests_properties(local-polish-server PROPERTIES TIMEOUT 60)
+
+add_executable(voice-polish-client-test tests/voice/VoicePolishClientTest.mm src/voice/VoicePolishClient.mm src/voice/LocalPolishServer.mm)
+target_compile_options(voice-polish-client-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(voice-polish-client-test PRIVATE apple-client "-framework Foundation" "-framework Security")
+add_test(NAME voice-polish-client COMMAND voice-polish-client-test)
+set_tests_properties(voice-polish-client PROPERTIES TIMEOUT 60)
 
 # 构建产物不能成为系统按 bundle id 查找的输入法副本。
 if(MSIME_EDITION STREQUAL "shurufa")

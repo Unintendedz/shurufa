@@ -14,6 +14,34 @@ static inline BOOL MSIMEVoiceStreamInlinePreeditEnabled(NSUserDefaults *defaults
     return value ? [defaults boolForKey:@"MSIMEClientVoiceStreamInlinePreedit"] : !MSIMEEditionIsShurufa();
 }
 
+// 本地润色与翻译 GGUF 模型显式路径；空串表示按默认目录自动发现。
+static inline NSString *MSIMEVoicePolishLocalModelPath(NSUserDefaults *defaults) {
+    return [defaults stringForKey:@"MSIMEClientVoicePolishLocalModelPath"] ?: @"";
+}
+
+static inline NSString *MSIMEVoicePolishTranslationModelPath(NSUserDefaults *defaults) {
+    return [defaults stringForKey:@"MSIMEClientVoicePolishTranslationModelPath"] ?: @"";
+}
+
+// 上下文感知与选区口头改写：Shurufa 出厂默认开启，其余版本保持关闭，显式偏好始终优先。
+static inline BOOL MSIMEVoicePolishContextAwareEnabled(NSUserDefaults *defaults) {
+    id value = [defaults objectForKey:@"MSIMEClientVoicePolishContextAware"];
+    if ([value isKindOfClass:NSNumber.class] &&
+        CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID()) {
+        return [value boolValue];
+    }
+    return MSIMEEditionIsShurufa();
+}
+
+static inline BOOL MSIMEVoicePolishEnableSelectionRewriteEnabled(NSUserDefaults *defaults) {
+    id value = [defaults objectForKey:@"MSIMEClientVoicePolishEnableSelectionRewrite"];
+    if ([value isKindOfClass:NSNumber.class] &&
+        CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID()) {
+        return [value boolValue];
+    }
+    return MSIMEEditionIsShurufa();
+}
+
 // Muting other audio is on out of the box, like the source and the shared macOS default.
 static inline BOOL MSIMEVoiceMuteSystemAudioEnabled(NSUserDefaults *defaults) {
     return [defaults objectForKey:@"MSIMEClientVoiceMuteSystemAudio"] == nil ||
@@ -146,6 +174,8 @@ static inline NSDictionary *MSIMEVoicePreferencesFromDefaults(NSUserDefaults *de
         @"polish_provider": @"MSIMEClientVoicePolishProvider",
         @"polish_endpoint": @"MSIMEClientVoicePolishEndpoint",
         @"polish_model": @"MSIMEClientVoicePolishModel",
+        @"polish_local_model_path": @"MSIMEClientVoicePolishLocalModelPath",
+        @"polish_translation_model_path": @"MSIMEClientVoicePolishTranslationModelPath",
         @"polish_token": @"MSIMEClientVoicePolishToken",
         @"polish_thinking": @"MSIMEClientVoicePolishThinking",
         @"polish_prompt_id": @"MSIMEClientVoicePolishPromptID",
@@ -164,6 +194,8 @@ static inline NSDictionary *MSIMEVoicePreferencesFromDefaults(NSUserDefaults *de
         @"stream_inline_preedit": @"MSIMEClientVoiceStreamInlinePreedit",
         @"polish_enabled": @"MSIMEClientVoicePolish",
         @"polish_text": @"MSIMEClientVoicePolishText",
+        @"polish_enable_selection_rewrite": @"MSIMEClientVoicePolishEnableSelectionRewrite",
+        @"polish_context_aware": @"MSIMEClientVoicePolishContextAware",
         @"doubao_enable_itn": @"MSIMEClientVoiceDoubaoEnableITN",
         @"doubao_enable_punc": @"MSIMEClientVoiceDoubaoEnablePunctuation",
         @"doubao_enable_ddc": @"MSIMEClientVoiceDoubaoEnableDDC",
@@ -222,7 +254,10 @@ static inline BOOL MSIMEApplySharedVoicePreferences(id voice, NSUserDefaults *de
         @"doubao_auth_mode": @"DoubaoAuthMode",
         @"doubao_boosting_table_id": @"DoubaoBoostingTableID",
         @"polish_provider": @"PolishProvider", @"polish_endpoint": @"PolishEndpoint",
-        @"polish_model": @"PolishModel", @"polish_token": @"PolishToken",
+        @"polish_model": @"PolishModel",
+        @"polish_local_model_path": @"PolishLocalModelPath",
+        @"polish_translation_model_path": @"PolishTranslationModelPath",
+        @"polish_token": @"PolishToken",
         @"polish_thinking": @"PolishThinking",
         @"polish_prompt_id": @"PolishPromptID",
         @"polish_prompt_custom_1": @"PolishPromptCustom1",
@@ -244,6 +279,8 @@ static inline BOOL MSIMEApplySharedVoicePreferences(id voice, NSUserDefaults *de
         @"sound_enabled": @"SoundEnabled", @"mute_system_audio": @"MuteSystemAudio",
         @"stream_inline_preedit": @"StreamInlinePreedit", @"polish_enabled": @"Polish",
         @"polish_text": @"PolishText",
+        @"polish_enable_selection_rewrite": @"PolishEnableSelectionRewrite",
+        @"polish_context_aware": @"PolishContextAware",
         @"doubao_enable_itn": @"DoubaoEnableITN",
         @"doubao_enable_punc": @"DoubaoEnablePunctuation",
         @"doubao_enable_ddc": @"DoubaoEnableDDC",

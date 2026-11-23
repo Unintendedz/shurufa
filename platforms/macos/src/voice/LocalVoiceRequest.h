@@ -25,6 +25,12 @@ FOUNDATION_EXPORT NSString * _Nullable MSIMELocalVoiceRuntimePath(NSDictionary *
 - (nullable instancetype)initWithTextStreamOptions:(NSDictionary *)options
                                        hostOptions:(nullable NSDictionary *)hostOptions
                                              error:(NSError **)error;
+// 可选双态流式预览回调：分别回传已定稿 `finalized` 与草稿 `draft`，保留原有 `MSIMEDoubaoResult` 回调语义不变。
+@property(nonatomic, copy, nullable) void (^partialStateHandler)(NSString *finalized, NSString *draft);
+// 最近一次流式事件中的定稿文本、草稿文本与最终识别指标（`audio_ms`/`speech_ms`/`asr_ms`/`segment_count`）。
+@property(nonatomic, copy, readonly, nullable) NSString *lastFinalizedText;
+@property(nonatomic, copy, readonly, nullable) NSString *lastDraftText;
+@property(nonatomic, copy, readonly, nullable) NSDictionary<NSString *, id> *lastFinalMetrics;
 @end
 
 NS_ASSUME_NONNULL_END

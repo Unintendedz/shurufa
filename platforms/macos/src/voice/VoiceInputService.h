@@ -16,6 +16,13 @@ typedef void (^MSIMEVoicePCMChunk)(NSData * _Nullable pcm, NSError * _Nullable e
 - (void)noteText:(NSString *)text forRecording:(NSString *)identifier;
 - (void)noteFailure:(NSString *)reason forRecording:(NSString *)identifier;
 - (void)noteCancelledRecording:(NSString *)identifier;
+@optional
+// 带结构化管线元数据（raw_text / asr_ms / polish_ms / mode / app_category 等）写入识别文本。
+- (void)noteText:(NSString *)text
+        metadata:(nullable NSDictionary<NSString *, id> *)metadata
+    forRecording:(NSString *)identifier;
+// 静默丢弃（纯语气词、静音误触、复读幻觉等）时写入原因，不标记为识别失败。
+- (void)noteDismissedReason:(NSString *)reason forRecording:(NSString *)identifier;
 @end
 @interface MSIMEVoiceInputService : NSObject
 @property(class, nonatomic, strong, nullable) id<MSIMEVoiceArchiving> archive;
@@ -51,5 +58,10 @@ typedef void (^MSIMEVoicePCMChunk)(NSData * _Nullable pcm, NSError * _Nullable e
 @property(nonatomic, readonly, nullable) NSString *archiveRecordingID;
 // Actual admitted capture frames; frozen at stop and reset for each new tap.
 @property(nonatomic, readonly) NSTimeInterval recordedDuration;
+// 前端音频预处理统计：用于停录时识别极短纯静音误触并回传有效语音时长与峰值幅度。
+@property(nonatomic, readonly) BOOL hasLikelySpeech;
+@property(nonatomic, readonly) uint32_t activeSpeechMs;
+@property(nonatomic, readonly) float peakAbs;
+@property(nonatomic, readonly) BOOL isLikelyAccidentalSilence;
 @end
 NS_ASSUME_NONNULL_END

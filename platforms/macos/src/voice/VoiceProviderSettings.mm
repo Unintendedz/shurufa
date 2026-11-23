@@ -16,6 +16,7 @@ NSNotificationName const MSIMEVoiceProviderSettingsDidChangeNotification = @"MSI
 #import <Security/Security.h>
 #import "../core/WindowPresentation.h"
 #import "../core/EditionIdentity.h"
+#import "../core/AIEndpointPolicy.h"
 #include <sys/stat.h>
 #include "../../../../shared/voice/VoiceProviderCatalog.h"
 
@@ -31,6 +32,57 @@ bool IsRegularFile(NSString *path)
 {
     struct stat status = {};
     return lstat(path.fileSystemRepresentation, &status) == 0 && S_ISREG(status.st_mode);
+}
+
+// 跟随符号链接检查本地 GGUF 模型文件，便于用户软链复用已缓存的大体积模型。
+bool IsReadableRegularFileFollowingSymlinks(NSString *path)
+{
+    if (!path.length || !path.isAbsolutePath)
+        return false;
+    struct stat status = {};
+    return stat(path.fileSystemRepresentation, &status) == 0 && S_ISREG(status.st_mode);
+}
+
+NSString *Trimmed(NSString *value)
+{
+    return value ? [value stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] : @"";
+}
+
+NSString *LocalPolishModelDirectory(void)
+{
+    NSString *configured = NSProcessInfo.processInfo.environment[@"SHURUFA_LOCAL_LLM_DIR"];
+    if (configured.length && configured.isAbsolutePath)
+        return configured;
+    return [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support/Shurufa/local-llm"];
+}
+
+// 按显式路径优先、其次自动发现 ~/Library/Application Support/Shurufa/local-llm/*.gguf 的顺序查找本机润色模型。
+NSString *DiscoveredLocalPolishModelPath(NSUserDefaults *defaults)
+{
+    NSString *explicitPath = Trimmed([defaults stringForKey:@"MSIMEClientVoicePolishLocalModelPath"]);
+    if (explicitPath.length)
+        return IsReadableRegularFileFollowingSymlinks(explicitPath) ? explicitPath : nil;
+    NSString *directory = LocalPolishModelDirectory();
+    NSArray<NSString *> *entries = [[NSFileManager.defaultManager contentsOfDirectoryAtPath:directory error:nil]
+        sortedArrayUsingSelector:@selector(localizedStandardCompare:)];
+    NSString *fallbackTranslation = nil;
+    for (NSString *name in entries)
+    {
+        NSString *lower = name.lowercaseString;
+        if (![lower hasSuffix:@".gguf"] || [lower containsString:@"mmproj"])
+            continue;
+        NSString *candidate = [directory stringByAppendingPathComponent:name];
+        if (!IsReadableRegularFileFollowingSymlinks(candidate))
+            continue;
+        if ([lower containsString:@"hy-mt"])
+        {
+            if (!fallbackTranslation)
+                fallbackTranslation = candidate;
+            continue;
+        }
+        return candidate;
+    }
+    return fallbackTranslation;
 }
 
 NSArray<NSDictionary<NSString *, NSString *> *> *ProviderSpecs()
@@ -199,6 +251,48 @@ BOOL IsWebSocketEndpoint(NSString *value)
     return [url.scheme.lowercaseString isEqualToString:@"wss"] && url.host.length > 0 && !url.user && !url.password &&
            !url.fragment;
 }
+// 仅去掉普通空格判断留空，保留 \n/\r/\t 等控制字符交由 Rust `ai::endpoint::validate` 拒绝。
+NSString *TrimAsciiSpaces(NSString *value)
+{
+    if (!value)
+        return @"";
+    return [value stringByTrimmingCharactersInSet:[NSCharacterSet characterSetWithCharactersInString:@" "]];
+}
+// 复用 Rust `ai::endpoint::validate`（经 `MSIMEAIEndpointCheck`）判断润色地址是否指向本机、私网或 Tailscale 主机，不重复实现 IP/网段解析。
+BOOL IsLocalNetworkPolishEndpoint(NSString *value)
+{
+    if (!value.length || TrimAsciiSpaces(value).length == 0)
+        return NO;
+    if (MSIMEAIEndpointCheck(value) != MSIMEAIEndpointProblemNone)
+        return NO;
+    NSString *spaceTrimmed = TrimAsciiSpaces(value);
+    NSString *lower = spaceTrimmed.lowercaseString;
+    if ([lower hasPrefix:@"http://"])
+        return YES;
+    if ([lower hasPrefix:@"https://"])
+    {
+        NSString *httpProbe = [@"http://" stringByAppendingString:[spaceTrimmed substringFromIndex:8]];
+        return MSIMEAIEndpointCheck(httpProbe) == MSIMEAIEndpointProblemNone;
+    }
+    return NO;
+}
+BOOL PolishProviderIsLocal(NSString *provider)
+{
+    return [Trimmed(provider).lowercaseString isEqualToString:@"local"];
+}
+BOOL PolishProviderIsOllama(NSString *provider)
+{
+    return [Trimmed(provider).lowercaseString isEqualToString:@"ollama"];
+}
+// `local`/`ollama` 以及本机/私网/Tailscale 端点免填 API 密钥，公网云端服务仍必填。
+BOOL PolishRequiresToken(NSString *polishProvider, NSString *polishEndpoint)
+{
+    if (PolishProviderIsLocal(polishProvider) || PolishProviderIsOllama(polishProvider))
+        return NO;
+    if (IsLocalNetworkPolishEndpoint(polishEndpoint))
+        return NO;
+    return YES;
+}
 } // namespace
 @implementation MetasequoiaVoiceProviderSettings
 // dictionaryForKey: type-checks the container and nothing inside it, and the NSString * properties
@@ -239,8 +333,23 @@ static NSString *SharedSetting(NSString *key, NSString *fallback)
         value.model = MSIMEVoiceASRProviderDefaultModel(rawProvider);
     value.modelPath = SharedSetting(@"modelPath", @"");
     value.polishEnabled = MSIMEVoicePolishEnabledForProvider(defaults, saved, rawProvider);
-    value.polishEndpoint = SharedSetting(@"polishEndpoint", MSIMEVoicePolishDefaultEndpoint);
-    value.polishModel = SharedSetting(@"polishModel", MSIMEVoicePolishDefaultModel);
+    NSString *polishProvider = [defaults stringForKey:@"MSIMEClientVoicePolishProvider"] ?: MSIMEVoicePolishDefaultProvider;
+    // 本机托管（local）与 Ollama 各自使用对应缺省地址和模型，其余云端服务沿用既有缺省。
+    if (PolishProviderIsLocal(polishProvider))
+    {
+        value.polishEndpoint = SharedSetting(@"polishEndpoint", @"");
+        value.polishModel = SharedSetting(@"polishModel", @"local");
+    }
+    else if (PolishProviderIsOllama(polishProvider))
+    {
+        value.polishEndpoint = SharedSetting(@"polishEndpoint", @"http://127.0.0.1:11434/v1/chat/completions");
+        value.polishModel = SharedSetting(@"polishModel", @"qwen3.5:9b");
+    }
+    else
+    {
+        value.polishEndpoint = SharedSetting(@"polishEndpoint", MSIMEVoicePolishDefaultEndpoint);
+        value.polishModel = SharedSetting(@"polishModel", MSIMEVoicePolishDefaultModel);
+    }
     value.polishPromptID = MSIMEPolishPromptIdentifierOrDefault(SharedSetting(@"polishPromptID", @""));
     value.polishPromptCustom1 = SharedSetting(@"polishPromptCustom1", @"");
     value.polishPromptCustom2 = SharedSetting(@"polishPromptCustom2", @"");
@@ -265,12 +374,18 @@ static NSString *SharedSetting(NSString *key, NSString *fallback)
         slots[rawProvider] = value.token;
         value.tokenSlots = slots;
     }
-    NSString *polishProvider = [defaults stringForKey:@"MSIMEClientVoicePolishProvider"] ?: MSIMEVoicePolishDefaultProvider;
-    NSString *sharedPolishToken = MSIMEVoiceTokenForProvider(
-        defaults, @"MSIMEClientVoicePolishTokens", polishProvider,
-        [defaults stringForKey:@"MSIMEClientVoicePolishToken"]);
-    value.polishToken = sharedPolishToken.length
-        ? sharedPolishToken : ReadToken(@"polish", polishProvider, value.polishEndpoint);
+    if (PolishProviderIsLocal(polishProvider))
+    {
+        value.polishToken = @"";
+    }
+    else
+    {
+        NSString *sharedPolishToken = MSIMEVoiceTokenForProvider(
+            defaults, @"MSIMEClientVoicePolishTokens", polishProvider,
+            [defaults stringForKey:@"MSIMEClientVoicePolishToken"]);
+        value.polishToken = sharedPolishToken.length
+            ? sharedPolishToken : ReadToken(@"polish", polishProvider, value.polishEndpoint);
+    }
     return value;
 }
 - (BOOL)validate:(NSError **)error
@@ -291,13 +406,55 @@ static NSString *SharedSetting(NSString *key, NSString *fallback)
     else if (![self.provider isEqualToString:@"doubao"] && MSIMEVoiceASRProviderUsesService(self.provider) &&
              (!IsEndpoint(self.endpoint) || self.model.length == 0 || self.token.length == 0))
         message = @"请填写 HTTPS 识别地址、模型名称和 API 密钥。";
-    // The polish check comes last and wins, as it always has; what is new is that the message carries the card it belongs on, so a polish failure no longer prints under the recognition fields as well.
-    if (self.polishEnabled &&
-        !([self.provider isEqual:@"textstream"] && self.polishToken.length == 0) &&
-        (!IsEndpoint(self.polishEndpoint) || self.polishModel.length == 0 || self.polishToken.length == 0))
+    // 润色校验与 Rust `ai::endpoint` 策略对齐：放行 HTTPS 与本机/私网/Tailscale HTTP，拒绝公网明文 HTTP 及控制字符，
+    // 并对 `local`/`ollama` 及本机/私网端点免除强制 API 密钥；仅在识别配置无误时检查，避免覆盖识别卡片错误。
+    if (!message && self.polishEnabled)
     {
-        message = @"启用文本整理需要 HTTPS 服务地址、模型名称和 API 密钥。";
-        scope = MSIMEVoiceProviderPolishScope;
+        NSString *polishProvider =
+            [NSUserDefaults.standardUserDefaults stringForKey:@"MSIMEClientVoicePolishProvider"]
+                ?: MSIMEVoicePolishDefaultProvider;
+        NSString *polishEndpoint = self.polishEndpoint ?: @"";
+        const BOOL polishEndpointBlank = TrimAsciiSpaces(polishEndpoint).length == 0;
+        NSString *polishModel = Trimmed(self.polishModel);
+        NSString *polishToken = Trimmed(self.polishToken);
+        if (PolishProviderIsLocal(polishProvider))
+        {
+            if (!polishEndpointBlank)
+            {
+                const MSIMEAIEndpointProblem problem = MSIMEAIEndpointCheck(polishEndpoint);
+                if (problem == MSIMEAIEndpointProblemCleartextPublicHost)
+                {
+                    message = MSIMEAIEndpointCleartextMessage;
+                    scope = MSIMEVoiceProviderPolishScope;
+                }
+                else if (problem != MSIMEAIEndpointProblemNone)
+                {
+                    message = @"请填写有效的整理服务地址（HTTPS，或本机、局域网的 HTTP）。";
+                    scope = MSIMEVoiceProviderPolishScope;
+                }
+            }
+        }
+        else
+        {
+            const MSIMEAIEndpointProblem problem = MSIMEAIEndpointCheck(polishEndpoint);
+            const BOOL needsToken = PolishRequiresToken(polishProvider, polishEndpoint);
+            const BOOL pendingTextStreamToken =
+                [self.provider isEqualToString:@"textstream"] && polishToken.length == 0 && needsToken;
+            if (problem == MSIMEAIEndpointProblemCleartextPublicHost)
+            {
+                message = MSIMEAIEndpointCleartextMessage;
+                scope = MSIMEVoiceProviderPolishScope;
+            }
+            else if (!pendingTextStreamToken &&
+                     (problem != MSIMEAIEndpointProblemNone || polishModel.length == 0 ||
+                      (needsToken && polishToken.length == 0)))
+            {
+                message = needsToken
+                    ? @"启用文本整理需要 HTTPS（或本机/局域网 HTTP）服务地址、模型名称和 API 密钥。"
+                    : @"启用本地文本整理需要有效的本机或局域网服务地址与模型名称（API 密钥可留空）。";
+                scope = MSIMEVoiceProviderPolishScope;
+            }
+        }
     }
     if (message)
     {
@@ -317,15 +474,18 @@ static NSString *SharedSetting(NSString *key, NSString *fallback)
     NSString *polishProvider = [defaults stringForKey:@"MSIMEClientVoicePolishProvider"] ?: MSIMEVoicePolishDefaultProvider;
     NSString *previousPolishEndpoint = [defaults stringForKey:@"MSIMEClientVoicePolishEndpoint"] ?: @"";
     const BOOL serviceProvider = MSIMEVoiceASRProviderUsesService(self.provider);
+    const BOOL managedLocalPolish = PolishProviderIsLocal(polishProvider);
     const BOOL changedProvider = previousProvider.length &&
         ![previousProvider.lowercaseString isEqual:self.provider.lowercaseString];
     NSString *previousToken = [self.tokenSlots[previousProvider] isKindOfClass:NSString.class]
         ? self.tokenSlots[previousProvider] : @"";
     const BOOL migratePrevious = changedProvider && MSIMEVoiceASRProviderUsesService(previousProvider) &&
         previousEndpoint.length && previousToken.length;
+    NSString *polishTokenToStore = managedLocalPolish ? @"" : (self.polishToken ?: @"");
+    const BOOL shouldWritePolishKeychain = !managedLocalPolish || previousPolishEndpoint.length > 0;
     if ((migratePrevious && !WriteToken(@"asr", previousProvider, previousEndpoint, previousToken, error)) ||
         (serviceProvider && !WriteToken(@"asr", self.provider, self.endpoint, self.token, error)) ||
-        !WriteToken(@"polish", polishProvider, self.polishEndpoint, self.polishToken, error))
+        (shouldWritePolishKeychain && !WriteToken(@"polish", polishProvider, self.polishEndpoint, polishTokenToStore, error)))
         return NO;
     // An endpoint edit for the same provider retires that provider's old
     // credential. Switching providers preserves the provider being left.
@@ -357,7 +517,7 @@ static NSString *SharedSetting(NSString *key, NSString *fallback)
         @"token" : self.token,
         @"polishEndpoint" : self.polishEndpoint,
         @"polishModel" : self.polishModel,
-        @"polishToken" : self.polishToken,
+        @"polishToken" : polishTokenToStore,
         @"polishPromptID" : self.polishPromptID ?: MSIMEPolishPromptIdentifiers().firstObject,
         @"polishPromptCustom1" : self.polishPromptCustom1 ?: @"",
         @"polishPromptCustom2" : self.polishPromptCustom2 ?: @"",
@@ -380,7 +540,7 @@ static NSString *SharedSetting(NSString *key, NSString *fallback)
                  forKey:@"MSIMEClientVoiceASRTokens"];
     [defaults setObject:MSIMEVoiceProviderTokenSlotsByUpdating(
                             [defaults objectForKey:@"MSIMEClientVoicePolishTokens"], polishProvider,
-                            self.polishToken, YES)
+                            polishTokenToStore, !managedLocalPolish)
                  forKey:@"MSIMEClientVoicePolishTokens"];
     [defaults setBool:self.polishEnabled forKey:@"MSIMEClientVoicePolish"];
     [defaults setBool:self.polishEnabled forKey:@"MSIMEClientVoicePolishText"];
@@ -526,6 +686,7 @@ static void ShowNotice(NSTextField *label, NSString *message, NSColor *color)
     _captureDevice.action = @selector(commit:);
     _polish = MSIMESettingSwitch(self, @selector(polishChanged:), @"识别后整理文本");
     _polishEndpoint = [self fieldLabelled:@"整理服务地址" secure:NO];
+    _polishEndpoint.placeholderString = @"https://... 或本机/局域网 http://...";
     _polishModel = [self fieldLabelled:@"整理模型" secure:NO];
     _fetchPolishModels = [NSButton buttonWithTitle:@"获取模型列表" target:self action:@selector(fetchPolishModels:)];
     _fetchPolishModels.accessibilityLabel = @"获取整理模型列表";
@@ -595,7 +756,7 @@ static void ShowNotice(NSTextField *label, NSString *message, NSColor *color)
 
     NSTextField *hint = [NSTextField
         wrappingLabelWithString:@"云端识别会发送本次录音；本地识别使用所选模型。密钥保存在系统钥匙串中。"
-                                @"本地流式识别在本机运行，不上传录音；整理会把识别出的文字发给上面的整理服务，失败或超时时直接输入原文。"];
+                                @"本地流式识别在本机运行，不上传录音；整理支持云端 HTTPS 以及本机/局域网 HTTP 服务，失败或超时时直接输入原文。"];
     hint.font = [NSFont systemFontOfSize:11.0];
     hint.textColor = NSColor.secondaryLabelColor;
 
@@ -968,7 +1129,33 @@ static void ShowNotice(NSTextField *label, NSString *message, NSColor *color)
     _textStreamStatus.stringValue = installing ? @"正在安装…" : (MSIMETextStreamReady() ? @"已就绪" : @"未安装");
     _textStreamInstall.title = MSIMETextStreamReady() ? @"修复语音模型" : @"安装语音模型";
     _textStreamInstall.enabled = !installing;
-    _polishKeyStatus.stringValue = _polishToken.stringValue.length ? @"整理密钥：已设置" : @"整理密钥：未设置";
+    NSString *polishProvider =
+        [NSUserDefaults.standardUserDefaults stringForKey:@"MSIMEClientVoicePolishProvider"]
+            ?: MSIMEVoicePolishDefaultProvider;
+    const BOOL managedLocalPolish = PolishProviderIsLocal(polishProvider);
+    const BOOL tokenOptional = !PolishRequiresToken(polishProvider, _polishEndpoint.stringValue);
+    // 本机托管润色显示自动发现的 GGUF 状态，本机/局域网 HTTP 端点提示免密钥，其余保持既有文案。
+    if (managedLocalPolish)
+    {
+        NSString *discovered = DiscoveredLocalPolishModelPath(NSUserDefaults.standardUserDefaults);
+        _polishKeyStatus.stringValue = discovered.length
+            ? [NSString stringWithFormat:@"本机模型已就绪：%@（免密钥）", discovered.lastPathComponent]
+            : @"本机模型未就绪（请将 .gguf 放入 ~/Library/Application Support/Shurufa/local-llm/）";
+        _polishEndpoint.placeholderString = @"留空由 Shurufa 自动托管本机模型";
+    }
+    else if (tokenOptional)
+    {
+        _polishKeyStatus.stringValue = _polishToken.stringValue.length
+            ? @"整理密钥：已设置（本机/局域网可选）"
+            : @"整理密钥：本机/局域网免填";
+        _polishEndpoint.placeholderString = @"https://... 或本机/局域网 http://...";
+    }
+    else
+    {
+        _polishKeyStatus.stringValue = _polishToken.stringValue.length ? @"整理密钥：已设置" : @"整理密钥：未设置";
+        _polishEndpoint.placeholderString = @"https://... 或本机/局域网 http://...";
+    }
+    _polishToken.placeholderString = tokenOptional ? @"本机/局域网服务可留空" : @"";
     BOOL polish = _polish.state == NSControlStateValueOn;
     _polishEndpoint.enabled = polish;
     _polishModel.enabled = polish;
@@ -1000,6 +1187,7 @@ static void ShowNotice(NSTextField *label, NSString *message, NSColor *color)
     if (notification.object == _endpoint && [self clearTokenForMovedEndpoint]) cleared = @"recognition";
     if (notification.object == _polishEndpoint && [self clearPolishTokenForMovedEndpoint]) cleared = @"polish";
     [self commit:nil];
+    [self updateEnabled:nil];
     // After the save, because -commit: is what puts a validation failure on these labels and a cleared key is the more useful of the two things to read.
     if ([cleared isEqual:@"recognition"])
         ShowNotice(_recognitionNotice, @"服务地址已更改，原 API 密钥已清除，请重新填写。", NSColor.secondaryLabelColor);

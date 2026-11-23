@@ -3,31 +3,172 @@
 #import "VoiceFailureMessages.h"
 #include "msime_client.h"
 #include "../../../common/HostApiString.h"
-#include <atomic>
+#import <os/log.h>
+#include <algorithm>
 #include <array>
+#include <atomic>
+#include <cctype>
 #include <cerrno>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <fcntl.h>
 #include <filesystem>
-#include <sys/stat.h>
 #include <iterator>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <string_view>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
 
+// 宿主主程序与控制器测试会链接 DiagnosticLog.cpp 的强定义；独立请求单测不链接该文件时，
+// 由此处的弱定义兜底，确保零未定义符号且无需改动 CMakeLists.txt。
+__attribute__((weak)) void msime_macos_diagnostic_write(std::string_view event) noexcept;
+__attribute__((weak)) void msime_macos_diagnostic_write(std::string_view event) noexcept {
+    (void)event;
+}
+__attribute__((weak)) void msime_macos_diagnostic_host_line(const char *line) noexcept;
+__attribute__((weak)) void msime_macos_diagnostic_host_line(const char *line) noexcept {
+    (void)line;
+}
+
 namespace {
 NSString *const LocalVoiceDomain = @"app.msime.client.voice.local";
-// A protocol line is a few kilobytes of base64 audio or a sentence of text; anything this long is a helper gone wrong, not a message to keep buffering.
+// 协议单行上限：正常音频帧或句子只有数 KB，超长行说明子进程状态异常。
 constexpr NSUInteger MaximumHelperLine = 4 * 1024 * 1024;
 // 安装器拒绝超过 64 KiB 的模型清单；读取时也必须限制累计字节数，避免检查后文件膨胀。
 constexpr NSUInteger MaximumModelManifestBytes = 64 * 1024;
+// 子进程 stderr 诊断环形缓冲上限：保留最近 32 行、每行不超过 256 字节。
+constexpr size_t kStderrRingCapacity = 32;
+constexpr size_t kStderrMaxLineBytes = 256;
+constexpr size_t kStderrPendingCap = 1024;
+// 按本机物理内存分级设定 TextStream 模型空闲驻留时长（>= 32 GiB 为 900s，否则 180s）。
+constexpr uint64_t kHighMemoryThresholdBytes = 32ULL * 1024ULL * 1024ULL * 1024ULL;
 
 NSError *LocalVoiceFailure(NSString *detail = nil) {
     NSMutableDictionary *info = [@{NSLocalizedDescriptionKey : @"本地语音识别失败，请检查模型或重试"} mutableCopy];
     if (detail.length) info[MSIMEVoiceFailureDetailKey] = detail;
     return [NSError errorWithDomain:LocalVoiceDomain code:1 userInfo:info];
+}
+
+// 线程安全的子进程 stderr 32 行环形缓冲：写入前剥离用户 home 路径前缀并清理控制字符，绝不记录用户语音文本。
+class StderrRingBuffer {
+public:
+    explicit StderrRingBuffer(std::string homePrefix)
+        : homePrefix_(std::move(homePrefix)) {}
+
+    void append(const char *bytes, size_t count) {
+        if (!bytes || count == 0) return;
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (size_t i = 0; i < count; ++i) {
+            const char ch = bytes[i];
+            if (ch == '\n') {
+                commitPendingLocked();
+                droppingLine_ = false;
+                continue;
+            }
+            if (droppingLine_) continue;
+            if (pending_.size() < kStderrPendingCap) {
+                pending_.push_back(ch);
+            } else {
+                droppingLine_ = true;
+            }
+        }
+    }
+
+    std::vector<std::string> drainSnapshot() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        commitPendingLocked();
+        droppingLine_ = false;
+        std::vector<std::string> out(lines_.begin(), lines_.end());
+        lines_.clear();
+        return out;
+    }
+
+private:
+    std::string sanitizeLineLocked(const std::string &raw) const {
+        std::string text;
+        text.reserve(std::min(raw.size(), kStderrPendingCap));
+        for (char c : raw) {
+            if (c == '\r') continue;
+            const auto byte = static_cast<unsigned char>(c);
+            text.push_back((byte < 0x20 || byte == 0x7F) ? ' ' : c);
+        }
+        // 剥离用户 home 目录前缀，避免将本机用户名带入任何本地诊断缓冲。
+        if (homePrefix_.size() > 1) {
+            size_t pos = 0;
+            while ((pos = text.find(homePrefix_, pos)) != std::string::npos) {
+                text.replace(pos, homePrefix_.size(), "~");
+                pos += 1;
+            }
+        }
+        const size_t first = text.find_first_not_of(' ');
+        if (first == std::string::npos) return {};
+        const size_t last = text.find_last_not_of(' ');
+        text = text.substr(first, last - first + 1);
+        if (text.size() > kStderrMaxLineBytes) {
+            size_t cut = kStderrMaxLineBytes;
+            while (cut > 0 && (static_cast<unsigned char>(text[cut]) & 0xC0) == 0x80) --cut;
+            text.resize(cut);
+        }
+        return text;
+    }
+
+    void commitPendingLocked() {
+        if (pending_.empty()) return;
+        std::string clean = sanitizeLineLocked(pending_);
+        pending_.clear();
+        if (clean.empty()) return;
+        if (lines_.size() >= kStderrRingCapacity) lines_.pop_front();
+        lines_.push_back(std::move(clean));
+    }
+
+    const std::string homePrefix_;
+    std::mutex mutex_;
+    std::deque<std::string> lines_;
+    std::string pending_;
+    bool droppingLine_ = false;
+};
+
+// 将脱敏 stderr 归纳为固定安全错误分类码（diagnostic.log 契约禁止写入路径或自由文本）。
+const char *ClassifyStderrKind(const std::vector<std::string> &lines) {
+    if (lines.empty()) return "none";
+    bool sawTraceback = false;
+    for (const std::string &line : lines) {
+        std::string lower;
+        lower.reserve(line.size());
+        for (unsigned char ch : line) lower.push_back(static_cast<char>(std::tolower(ch)));
+        if (lower.find("metal") != std::string::npos ||
+            lower.find("mlx::core") != std::string::npos ||
+            lower.find("command buffer") != std::string::npos ||
+            lower.find("out of memory") != std::string::npos) {
+            return "metal_error";
+        }
+        if (lower.find("modulenotfounderror") != std::string::npos ||
+            lower.find("importerror") != std::string::npos ||
+            lower.find("no module named") != std::string::npos ||
+            lower.find("dyld") != std::string::npos ||
+            lower.find("dlopen") != std::string::npos) {
+            return "import_error";
+        }
+        if (lower.find("safetensors") != std::string::npos ||
+            lower.find("model files are missing") != std::string::npos ||
+            lower.find("runtime unavailable") != std::string::npos ||
+            lower.find("config.json") != std::string::npos) {
+            return "model_error";
+        }
+        if (lower.find("traceback (most recent call last)") != std::string::npos ||
+            lower.find("runtimeerror:") != std::string::npos ||
+            lower.find("valueerror:") != std::string::npos ||
+            lower.find("oserror:") != std::string::npos) {
+            sawTraceback = true;
+        }
+    }
+    return sawTraceback ? "traceback" : "other";
 }
 
 // One host-api JSON call: the `value` of an `{"ok":true}` response, or nil for a failed call or a request that is not JSON.
@@ -175,11 +316,15 @@ NSString *MSIMELocalVoiceRuntimePath(NSDictionary *hostOptions) {
 }
 
 @interface MSIMELocalVoiceRequest ()
-- (void)helperMessage:(NSDictionary *)message;
-- (void)helperFailed:(NSError *)error session:(NSNumber *)session;
+@property(nonatomic, copy, readwrite, nullable) NSString *lastFinalizedText;
+@property(nonatomic, copy, readwrite, nullable) NSString *lastDraftText;
+@property(nonatomic, copy, readwrite, nullable) NSDictionary<NSString *, id> *lastFinalMetrics;
+- (void)helperMessage:(NSDictionary * _Nonnull)message;
+- (void)helperFailed:(NSError * _Nonnull)error session:(NSNumber * _Nonnull)session;
 @end
 
-// The one helper process this input method talks to, and the pipe to it. Everything that touches the process or writes to it runs on `queue`, which also orders a session's start, audio and finish exactly as the request issued them; what the helper prints is handed to the active request on main.
+// 单例本地识别辅助进程与通信管道管理器。所有进程启停、写入与 stderr 读取关闭都在同一串行 `queue` 上完成，
+// 确保无 FD 并发读/关竞态；TextStream 通道额外监听系统内存压力并回收 stderr 诊断分类。
 @interface MSIMELocalVoiceHelper : NSObject
 @property(nonatomic, readonly) dispatch_queue_t queue;
 @property(nonatomic, weak) MSIMELocalVoiceRequest *activeRequest; // main only
@@ -188,14 +333,19 @@ NSString *MSIMELocalVoiceRuntimePath(NSDictionary *hostOptions) {
 - (BOOL)startSession:(NSNumber *)session request:(MSIMELocalVoiceRequest *)request message:(NSDictionary *)message runtime:(NSString *)runtime error:(NSError **)error;
 - (void)sendMessage:(NSDictionary *)message session:(NSNumber *)session;
 - (void)endSession:(NSNumber *)session;
+- (void)reportDiagnosticStderrWithCategory:(NSString *)category;
 @end
 
 @implementation MSIMELocalVoiceHelper {
     BOOL _textStream;
     NSTask *_task;
     NSFileHandle *_input;
+    dispatch_source_t _stderrSource;
+    std::shared_ptr<StderrRingBuffer> _stderrRing;
+    dispatch_source_t _memoryPressureSource;
+    BOOL _releaseAfterSession;
     uint64_t _generation;
-    // The session whose start went to the running process, so that process ending can fail it.
+    // 当前正在由子进程处理的会话标识，用于进程异常退出时通知对应请求失败。
     NSNumber *_session;
     __weak MSIMELocalVoiceRequest *_sessionRequest;
 }
@@ -220,11 +370,104 @@ NSString *MSIMELocalVoiceRuntimePath(NSDictionary *hostOptions) {
     if (!(self = [super init])) return nil;
     _textStream = textStream;
     _queue = dispatch_queue_create(textStream ? "app.msime.client.voice.textstream" : "app.msime.client.voice.local", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0));
+    if (textStream) {
+        // 监听系统内存压力（Warn / Critical），在 worker 空闲时立即发 release 释放 MLX 权重与 Metal 缓存。
+        _memoryPressureSource = dispatch_source_create(
+            DISPATCH_SOURCE_TYPE_MEMORYPRESSURE, 0,
+            DISPATCH_MEMORYPRESSURE_WARN | DISPATCH_MEMORYPRESSURE_CRITICAL, _queue);
+        if (_memoryPressureSource) {
+            __weak MSIMELocalVoiceHelper *weakSelf = self;
+            dispatch_source_set_event_handler(_memoryPressureSource, ^{
+                MSIMELocalVoiceHelper *helper = weakSelf;
+                if (helper) [helper handleMemoryPressure];
+            });
+            dispatch_resume(_memoryPressureSource);
+        }
+    }
     return self;
+}
+
+- (void)dealloc {
+    if (_memoryPressureSource) {
+        dispatch_source_cancel(_memoryPressureSource);
+        _memoryPressureSource = nil;
+    }
+    if (_stderrSource) {
+        dispatch_source_cancel(_stderrSource);
+        _stderrSource = nil;
+    }
 }
 
 - (void)route:(NSDictionary *)message {
     [self.activeRequest helperMessage:message];
+}
+
+- (void)handleMemoryPressure {
+    if (!_task || !_task.running) return;
+    if (!_session) {
+        [self write:@{@"op" : @"release"} error:nil];
+        msime_macos_diagnostic_write("textstream_memory_pressure action=release_sent");
+    } else {
+        // 录音进行中不中断用户口述，待本次会话结束后立刻释放权重。
+        _releaseAfterSession = YES;
+        msime_macos_diagnostic_write("textstream_memory_pressure action=release_deferred");
+    }
+}
+
+// 仅在串行 `_queue` 上调用，与 `DISPATCH_SOURCE_TYPE_READ` 事件处理与关闭回调严格互斥，零 FD 竞态。
+- (void)drainStderrOnQueue {
+    if (!_stderrSource || !_stderrRing || dispatch_source_testcancel(_stderrSource) != 0) return;
+    const int fd = static_cast<int>(dispatch_source_get_handle(_stderrSource));
+    if (fd < 0) return;
+    std::array<char, 1024> buf{};
+    for (;;) {
+        const ssize_t n = ::read(fd, buf.data(), buf.size());
+        if (n > 0) {
+            _stderrRing->append(buf.data(), static_cast<size_t>(n));
+            continue;
+        }
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
+        dispatch_source_cancel(_stderrSource);
+        _stderrSource = nil;
+        break;
+    }
+}
+
+- (void)closeStderrSourceOnQueue {
+    if (_stderrSource) {
+        dispatch_source_cancel(_stderrSource);
+        _stderrSource = nil;
+    }
+    _stderrRing.reset();
+}
+
+- (void)emitDiagnosticStderrWithCategory:(NSString *)category exitStatus:(int)status hasExitStatus:(BOOL)hasExitStatus {
+    [self drainStderrOnQueue];
+    const std::vector<std::string> lines = _stderrRing ? _stderrRing->drainSnapshot() : std::vector<std::string>{};
+    const std::string prefix = _textStream ? "textstream_stderr" : "local_voice_stderr";
+    const std::string cat = category.UTF8String ? category.UTF8String : "event";
+    const char *kind = ClassifyStderrKind(lines);
+    if (hasExitStatus || !lines.empty()) {
+        // `diagnostic.log` 严格仅写单条固定结构化事件摘要（状态码、行数、错误分类），绝不写入路径或自由文本。
+        const std::string summary = prefix + " cat=" + cat + " status=" +
+                                    (hasExitStatus ? std::to_string(status) : "none") +
+                                    " lines=" + std::to_string(lines.size()) +
+                                    " kind=" + kind;
+        msime_macos_diagnostic_write(summary);
+        // 同步上报固定分类标签至 host_line 通道，便于既有汇总检视器识别故障归类。
+        const std::string hostCategory = prefix + "_" + kind + ": " + cat;
+        msime_macos_diagnostic_host_line(hostCategory.c_str());
+    }
+    // 详细脱敏 stderr 仅记入系统统一日志（标记 private 默认脱敏，不污染 diagnostic.log）。
+    for (size_t i = 0; i < lines.size(); ++i) {
+        os_log_error(OS_LOG_DEFAULT, "%{public}s [%{public}s/%{public}s #%zu]: %{private}s",
+                     prefix.c_str(), cat.c_str(), kind, i + 1, lines[i].c_str());
+    }
+}
+
+- (void)reportDiagnosticStderrWithCategory:(NSString *)category {
+    [self emitDiagnosticStderrWithCategory:category exitStatus:0 hasExitStatus:NO];
 }
 
 // `runtime` 是 MSIMELocalVoiceRuntimePath 的结果：非空时作为 `--runtime` 交给辅助进程。已经在运行的辅助进程沿用它启动时加载的运行库。
@@ -236,16 +479,30 @@ NSString *MSIMELocalVoiceRuntimePath(NSDictionary *hostOptions) {
     }
     NSTask *task = [NSTask new];
     task.executableURL = [NSURL fileURLWithPath:path];
-    if (_textStream) task.arguments = @[ @"--idle-exit", @"120" ];
-    else if (runtime.length) task.arguments = @[ @"--runtime", runtime ];
+    if (_textStream) {
+        // 保留 `--idle-exit 120` 兼容既有启动参数契约；模型实际驻留时长按物理内存分级经环境变量传给 worker
+        // （>= 32 GiB 默认 900s，避免大内存机型频繁重载 4.4 GB 权重；< 32 GiB 默认 180s；已显式设置时尊重调用方）。
+        task.arguments = @[ @"--idle-exit", @"120" ];
+        NSMutableDictionary<NSString *, NSString *> *environment = [NSProcessInfo.processInfo.environment mutableCopy];
+        if (!environment[@"SHURUFA_TEXTSTREAM_MODEL_IDLE_SEC"].length) {
+            const uint64_t physicalBytes = NSProcessInfo.processInfo.physicalMemory;
+            environment[@"SHURUFA_TEXTSTREAM_MODEL_IDLE_SEC"] =
+                physicalBytes >= kHighMemoryThresholdBytes ? @"900" : @"180";
+        }
+        task.environment = environment;
+    } else if (runtime.length) {
+        task.arguments = @[ @"--runtime", runtime ];
+    }
     NSPipe *input = [NSPipe pipe];
     NSPipe *output = [NSPipe pipe];
+    NSPipe *errorPipe = [NSPipe pipe];
     task.standardInput = input;
     task.standardOutput = output;
-    task.standardError = NSFileHandle.fileHandleWithNullDevice;
+    task.standardError = errorPipe;
     task.qualityOfService = NSQualityOfServiceUserInitiated;
     const uint64_t generation = ++_generation;
     __weak MSIMELocalVoiceHelper *weakSelf = self;
+
     NSMutableData *pending = [NSMutableData data];
     __block BOOL droppingOversizedLine = NO;
     output.fileHandleForReading.readabilityHandler = ^(NSFileHandle *handle) {
@@ -282,38 +539,84 @@ NSString *MSIMELocalVoiceRuntimePath(NSDictionary *hostOptions) {
             });
     };
     task.terminationHandler = ^(NSTask *ended) {
-        (void)ended;
+        const int status = ended.terminationStatus;
+        const BOOL uncaughtSignal = (ended.terminationReason == NSTaskTerminationReasonUncaughtSignal);
         MSIMELocalVoiceHelper *helper = weakSelf;
-        if (helper) dispatch_async(helper->_queue, ^{ [helper process:generation endedWithDetail:@"本地识别进程意外退出。"]; });
+        if (helper) {
+            dispatch_async(helper->_queue, ^{
+                [helper process:generation endedWithDetail:@"本地识别进程意外退出。"
+                     exitStatus:status uncaughtSignal:uncaughtSignal];
+            });
+        }
     };
+    NSFileHandle *stderrRead = errorPipe.fileHandleForReading;
     NSError *launchError = nil;
     if (![task launchAndReturnError:&launchError]) {
         output.fileHandleForReading.readabilityHandler = nil;
+        [stderrRead closeFile];
         if (error) *error = LocalVoiceFailure(_textStream ? @"无法启动本地识别组件 shurufa-textstream。" : @"无法启动本地识别组件 msime-voice-local。");
         return NO;
     }
-    // A helper that has died between two writes must fail the write, not raise SIGPIPE in the input method.
+
+    // 启动成功后在 `_queue` 上挂载非阻塞 DISPATCH_SOURCE_TYPE_READ 监听 stderr，
+    // 并在 cancel handler 中统一关闭读端句柄，杜绝并发 ::read() 与 FD 复用关闭竞态。
+    NSString *homeDirectory = NSHomeDirectory() ?: @"";
+    auto stderrRing = std::make_shared<StderrRingBuffer>(homeDirectory.UTF8String ?: "");
+    const int stderrFd = stderrRead.fileDescriptor;
+    dispatch_source_t stderrSource = nil;
+    if (stderrFd >= 0) {
+        const int flags = fcntl(stderrFd, F_GETFL, 0);
+        if (flags >= 0) (void)fcntl(stderrFd, F_SETFL, flags | O_NONBLOCK);
+        stderrSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, static_cast<uintptr_t>(stderrFd), 0, _queue);
+    }
+    if (stderrSource) {
+        dispatch_source_set_event_handler(stderrSource, ^{
+            MSIMELocalVoiceHelper *helper = weakSelf;
+            if (helper && helper->_generation == generation) [helper drainStderrOnQueue];
+        });
+        dispatch_source_set_cancel_handler(stderrSource, ^{
+            [stderrRead closeFile];
+        });
+        dispatch_resume(stderrSource);
+    } else {
+        [stderrRead closeFile];
+    }
+
+    // 禁止向已退出子进程写入时触发 SIGPIPE 杀掉输入法主进程。
     fcntl(input.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1);
     _task = task;
     _input = input.fileHandleForWriting;
+    _stderrSource = stderrSource;
+    _stderrRing = stderrRing;
+    _releaseAfterSession = NO;
     _session = nil;
     _sessionRequest = nil;
     return YES;
 }
 
-// The running process is gone, or is being given up on: forget it and fail the session it was serving.
-- (void)process:(uint64_t)generation endedWithDetail:(NSString *)detail {
+// 子进程退出或通信失败时的统一清理：按需上报结构化 stderr 诊断分类，串行取消 stderr 监听并通知在途会话失败。
+- (void)process:(uint64_t)generation endedWithDetail:(NSString *)detail exitStatus:(int)status uncaughtSignal:(BOOL)uncaughtSignal {
     if (generation != _generation || !_task) return;
+    const BOOL abnormal = uncaughtSignal || status != 0 || _session != nil;
+    if (abnormal) {
+        [self emitDiagnosticStderrWithCategory:@"exit" exitStatus:status hasExitStatus:YES];
+    }
     if (_task.running) [_task terminate];
     [_input closeFile];
+    [self closeStderrSourceOnQueue];
     _task = nil;
     _input = nil;
+    _releaseAfterSession = NO;
     NSNumber *session = _session;
     MSIMELocalVoiceRequest *request = _sessionRequest;
     _session = nil;
     _sessionRequest = nil;
     if (session && request)
         dispatch_async(dispatch_get_main_queue(), ^{ [request helperFailed:LocalVoiceFailure(detail) session:session]; });
+}
+
+- (void)process:(uint64_t)generation endedWithDetail:(NSString *)detail {
+    [self process:generation endedWithDetail:detail exitStatus:-1 uncaughtSignal:NO];
 }
 
 - (BOOL)write:(NSDictionary *)message error:(NSError **)error {
@@ -357,6 +660,13 @@ NSString *MSIMELocalVoiceRuntimePath(NSDictionary *hostOptions) {
     if (![_session isEqual:session]) return;
     _session = nil;
     _sessionRequest = nil;
+    if (_releaseAfterSession) {
+        _releaseAfterSession = NO;
+        if (_task && _task.running) {
+            [self write:@{@"op" : @"release"} error:nil];
+            msime_macos_diagnostic_write("textstream_memory_pressure action=release_after_session");
+        }
+    }
 }
 @end
 
@@ -452,6 +762,9 @@ enum class LocalRequestState : int { idle, streaming, finishing, closed };
     static uint64_t sessions = 0;
     _session = @(++sessions);
     _result = [result copy];
+    _lastFinalizedText = @"";
+    _lastDraftText = @"";
+    _lastFinalMetrics = nil;
     MSIMELocalVoiceHelper *helper = _helper;
     helper.activeRequest = self;
     NSNumber *session = _session;
@@ -516,6 +829,7 @@ enum class LocalRequestState : int { idle, streaming, finishing, closed };
 - (void)cancel {
     const LocalRequestState previous = _state.exchange(LocalRequestState::closed);
     _result = nil;
+    _partialStateHandler = nil;
     MSIMELocalVoiceHelper *helper = _helper;
     if (helper.activeRequest == self) helper.activeRequest = nil;
     if (previous != LocalRequestState::streaming && previous != LocalRequestState::finishing) return;
@@ -535,6 +849,7 @@ enum class LocalRequestState : int { idle, streaming, finishing, closed };
     dispatch_async(helper.queue, ^{ [helper endSession:session]; });
     MSIMEDoubaoResult result = _result;
     _result = nil;
+    _partialStateHandler = nil;
     if (result) result(error ? nil : (text ?: @""), !error, error);
 }
 
@@ -542,6 +857,8 @@ enum class LocalRequestState : int { idle, streaming, finishing, closed };
     if (_textStream && [message[@"type"] isEqual:@"hello"] && [message[@"available"] isEqual:@NO]) {
         const LocalRequestState current = _state.load();
         if (current != LocalRequestState::streaming && current != LocalRequestState::finishing) return;
+        MSIMELocalVoiceHelper *helper = _helper;
+        dispatch_async(helper.queue, ^{ [helper reportDiagnosticStderrWithCategory:@"hello_unavailable"]; });
         id why = message[@"error"];
         NSString *detail = [why isKindOfClass:NSString.class] && [why length] ? [NSString stringWithFormat:@"本地语音识别运行环境不可用（%@），请在语音设置里重新安装语音模型。", why] : @"本地语音识别运行环境不可用，请在语音设置里重新安装语音模型。";
         [self closeWithText:nil error:LocalVoiceFailure(detail)];
@@ -553,9 +870,29 @@ enum class LocalRequestState : int { idle, streaming, finishing, closed };
     NSString *type = [message[@"type"] isKindOfClass:NSString.class] ? message[@"type"] : @"";
     NSString *text = [message[@"text"] isKindOfClass:NSString.class] ? message[@"text"] : @"";
     if ([type isEqual:@"partial"]) {
+        // 解析双态流式字段；旧协议未附带 finalized / draft 时退化为全文定稿、草稿为空。
+        NSString *finalized = [message[@"finalized"] isKindOfClass:NSString.class] ? message[@"finalized"] : nil;
+        NSString *draft = [message[@"draft"] isKindOfClass:NSString.class] ? message[@"draft"] : nil;
+        if (!finalized && !draft) {
+            finalized = text;
+            draft = @"";
+        } else {
+            finalized = finalized ?: @"";
+            draft = draft ?: @"";
+        }
+        _lastFinalizedText = [finalized copy];
+        _lastDraftText = [draft copy];
+        if (_partialStateHandler) _partialStateHandler(finalized, draft);
         if (_result) _result(text, NO, nil);
     } else if ([type isEqual:@"final"]) {
         _state.store(LocalRequestState::closed);
+        // 记录可选统计与分段信息（供上层存档与性能观测使用，旧协议缺失时为空）。
+        NSMutableDictionary<NSString *, id> *metrics = [NSMutableDictionary dictionary];
+        if ([message[@"segments"] isKindOfClass:NSArray.class]) metrics[@"segments"] = message[@"segments"];
+        for (NSString *key in @[@"audio_ms", @"speech_ms", @"asr_ms", @"segment_count"]) {
+            if ([message[key] isKindOfClass:NSNumber.class]) metrics[key] = message[key];
+        }
+        _lastFinalMetrics = metrics.count ? [metrics copy] : nil;
         MSIMELocalVoiceHelper *helper = _helper;
         if (!text.length) { [self closeWithText:text error:nil]; return; }
         // Pinyin correction reads the hotwords the start fetched, which only the helper queue touches.
@@ -568,6 +905,10 @@ enum class LocalRequestState : int { idle, streaming, finishing, closed };
             dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf closeWithText:corrected error:nil]; });
         });
     } else if ([type isEqual:@"error"] || [type isEqual:@"cancelled"]) {
+        if ([type isEqual:@"error"]) {
+            MSIMELocalVoiceHelper *helper = _helper;
+            dispatch_async(helper.queue, ^{ [helper reportDiagnosticStderrWithCategory:@"protocol_error"]; });
+        }
         id detail = message[@"message"];
         [self closeWithText:nil error:LocalVoiceFailure([detail isKindOfClass:NSString.class] ? detail : nil)];
     }

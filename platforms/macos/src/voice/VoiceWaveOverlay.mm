@@ -141,8 +141,10 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
 @property(nonatomic) CGFloat footerHeight;
 /// 一条细长的录音条：只画一行最新转写，左右是圆形取消和完成。
 @property(nonatomic) BOOL singleLine;
-/// Already cut to the newest three lines; nil when the layout has no transcript area.
+/// 已裁剪到最新若干行的可见转写；当前版面无转写区域时为 nil。
 @property(nonatomic, copy) NSString *visibleTranscript;
+/// `visibleTranscript` 末尾属于草稿（未定稿）部分的 UTF-16 长度，绘制时按 55% 透明度着色。
+@property(nonatomic) NSUInteger visibleDraftLength;
 - (void)advanceWave;
 - (void)resetWave;
 @end
@@ -155,6 +157,24 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
     [self setNeedsDisplay:YES];
 }
 - (void)resetWave { std::fill(_levels, _levels + MSIMEVoiceWaveBarCount, 0.0f); }
+/// 构造双态转写富文本：定稿部分 100% 不透明，末尾草稿部分 55% 次级色。
+- (NSAttributedString *)attributedTranscriptWithForeground:(NSColor *)foreground paragraphStyle:(NSParagraphStyle *)style {
+    NSString *text = self.visibleTranscript ?: @"";
+    NSDictionary *baseAttributes = @{
+        NSFontAttributeName: VoiceTranscriptFont(),
+        NSForegroundColorAttributeName: foreground,
+        NSParagraphStyleAttributeName: style
+    };
+    NSMutableAttributedString *attributed = [[NSMutableAttributedString alloc] initWithString:text attributes:baseAttributes];
+    const NSUInteger draftLength = MIN(self.visibleDraftLength, text.length);
+    if (draftLength > 0) {
+        NSColor *draftColor = [foreground colorWithAlphaComponent:0.55];
+        [attributed addAttribute:NSForegroundColorAttributeName
+                           value:draftColor
+                           range:NSMakeRange(text.length - draftLength, draftLength)];
+    }
+    return attributed;
+}
 - (void)drawRect:(NSRect)r {
     (void)r;
     const BOOL light = self.followsSystemAppearance ? !VoiceAppearanceIsDark(self.effectiveAppearance) : self.lightTheme;
@@ -186,9 +206,9 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
     if (singleLine && transcript && !label) {
         NSMutableParagraphStyle *style = [NSMutableParagraphStyle new];
         style.lineBreakMode = NSLineBreakByClipping;
-        NSDictionary *attributes = @{NSFontAttributeName: VoiceTranscriptFont(), NSForegroundColorAttributeName: foreground, NSParagraphStyleAttributeName: style};
+        NSAttributedString *attributed = [self attributedTranscriptWithForeground:foreground paragraphStyle:style];
         const CGFloat lineHeight = ceil(VoiceTranscriptFont().ascender - VoiceTranscriptFont().descender + VoiceTranscriptFont().leading);
-        [self.visibleTranscript drawInRect:NSMakeRect(contentLeft + 8.0, centerY - lineHeight * 0.5, contentWidth - 16.0, lineHeight) withAttributes:attributes];
+        [attributed drawInRect:NSMakeRect(contentLeft + 8.0, centerY - lineHeight * 0.5, contentWidth - 16.0, lineHeight)];
     } else if (label) {
         NSMutableParagraphStyle *style = [NSMutableParagraphStyle new];
         style.alignment = NSTextAlignmentCenter;
@@ -226,11 +246,10 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
         style.maximumLineHeight = kTranscriptLineHeight;
         const NSRect textRect = NSMakeRect(kTranscriptHorizontalPadding, kTranscriptTextTop, w - 2.0 * kTranscriptHorizontalPadding,
                                            h - kTranscriptTextTop - kTranscriptTextBottom - self.footerHeight);
+        NSAttributedString *attributed = [self attributedTranscriptWithForeground:foreground paragraphStyle:style];
         [NSGraphicsContext saveGraphicsState];
         NSRectClip(textRect);
-        [self.visibleTranscript drawWithRect:textRect options:NSStringDrawingUsesLineFragmentOrigin
-                              attributes:@{NSFontAttributeName: VoiceTranscriptFont(), NSForegroundColorAttributeName: foreground, NSParagraphStyleAttributeName: style}
-                                 context:nil];
+        [attributed drawWithRect:textRect options:NSStringDrawingUsesLineFragmentOrigin context:nil];
         [NSGraphicsContext restoreGraphicsState];
     }
 
@@ -259,13 +278,20 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
 @implementation MSIMEVoiceWaveOverlay {
     MSIMEVoiceWaveView *_view;
     NSString *_transcript;
+    NSString *_finalizedTranscript;
+    NSString *_draftTranscript;
     NSString *_visibleTranscriptSource;
+    NSString *_visibleFinalizedSource;
+    NSString *_visibleDraftSource;
     CGFloat _visibleTranscriptWidth;
     NSString *_visibleTranscript;
+    NSUInteger _visibleDraftLength;
     NSUInteger _presentationGeneration;
     BOOL _showingFailure;
     BOOL _dismissed;
     BOOL _processing;
+    BOOL _processingPolishing;
+    NSString *_processingHint;
     BOOL _recordingLocked;
     NSButton *_cancelButton;
     NSButton *_confirmButton;
@@ -284,6 +310,8 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
         self.floatingPanel = YES; self.hidesOnDeactivate = NO;
         _view = [MSIMEVoiceWaveView new]; _view.status = @""; self.contentView = _view;
         _transcript = @"";
+        _finalizedTranscript = @"";
+        _draftTranscript = @"";
         _cancelButton = [NSButton buttonWithTitle:@"取消" target:self action:@selector(cancelVoice:)];
         _confirmButton = [NSButton buttonWithTitle:@"确认" target:self action:@selector(confirmVoice:)];
         for (NSButton *button in @[_cancelButton, _confirmButton]) {
@@ -341,6 +369,8 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
 }
 - (NSString *)statusText { return _view.status; }
 - (NSString *)transcriptText { return _transcript; }
+- (NSString *)finalizedTranscriptText { return _finalizedTranscript; }
+- (NSString *)draftTranscriptText { return _draftTranscript; }
 - (BOOL)canBecomeKeyWindow { return NO; }
 - (BOOL)canBecomeMainWindow { return NO; }
 - (void)setActionHandler:(void (^)(BOOL))handler {
@@ -357,6 +387,7 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
 }
 - (void)dismissProcessing {
     _dismissed = YES;
+    _processingHint = nil;
     ++_presentationGeneration;
     [self orderOut:nil];
 }
@@ -369,50 +400,81 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
     return self.actionHandler && _view.status.length && !_showingFailure && !_dismissed &&
            (_processing || ((_recordingLocked || _persistentRecording) && _view.listening));
 }
-- (NSString *)visibleTranscriptForWidth:(CGFloat)width {
-    return [self visibleTranscriptForWidth:width lines:kMaxTranscriptLines];
+- (NSString *)visibleTranscriptForWidth:(CGFloat)width draftLength:(NSUInteger *)draftLength {
+    return [self visibleTranscriptForWidth:width lines:kMaxTranscriptLines draftLength:draftLength];
 }
-- (NSString *)visibleTranscriptForWidth:(CGFloat)width lines:(NSUInteger)lines {
-    if (!_transcript.length) return nil;
+- (NSString *)visibleTranscriptForWidth:(CGFloat)width lines:(NSUInteger)lines draftLength:(NSUInteger *)draftLength {
+    if (!_transcript.length) {
+        if (draftLength) *draftLength = 0;
+        return nil;
+    }
     if (_visibleTranscript && _visibleTranscriptWidth == width && _visibleTranscriptLines == lines &&
-        [_visibleTranscriptSource isEqualToString:_transcript]) return _visibleTranscript;
+        [_visibleTranscriptSource isEqualToString:_transcript] &&
+        [_visibleFinalizedSource isEqualToString:_finalizedTranscript] &&
+        [_visibleDraftSource isEqualToString:_draftTranscript]) {
+        if (draftLength) *draftLength = _visibleDraftLength;
+        return _visibleTranscript;
+    }
     NSFont *font = VoiceTranscriptFont();
-    // 单行预览把换行当空格，只留下最新说的那一段。
-    NSString *source = lines == 1 ? [[_transcript componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet] componentsJoinedByString:@" "] : _transcript;
+    // 单行预览把换行当空格，同时分别规范定稿与草稿，确保尾部草稿长度精确对齐。
+    NSString *finalizedSource = lines == 1
+        ? [[_finalizedTranscript componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet] componentsJoinedByString:@" "]
+        : _finalizedTranscript;
+    NSString *draftSource = lines == 1
+        ? [[_draftTranscript componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet] componentsJoinedByString:@" "]
+        : _draftTranscript;
+    NSString *source = draftSource.length ? [finalizedSource stringByAppendingString:draftSource] : finalizedSource;
     _visibleTranscript = MSIMEVoiceTranscriptVisibleText(source, lines, ^NSUInteger(NSString *candidate) {
         return MSIMEVoiceTranscriptLineCount(candidate, font, width);
     });
+    const BOOL ellipsized = ![_visibleTranscript isEqualToString:source] && [_visibleTranscript hasPrefix:@"…"];
+    const NSUInteger visibleFromSource = _visibleTranscript.length > (ellipsized ? 1u : 0u)
+        ? _visibleTranscript.length - (ellipsized ? 1u : 0u)
+        : 0u;
+    _visibleDraftLength = MIN(draftSource.length, visibleFromSource);
     _visibleTranscriptSource = _transcript;
+    _visibleFinalizedSource = _finalizedTranscript;
+    _visibleDraftSource = _draftTranscript;
     _visibleTranscriptWidth = width;
     _visibleTranscriptLines = lines;
+    if (draftLength) *draftLength = _visibleDraftLength;
     return _visibleTranscript;
 }
 - (void)layoutPresentation {
     const BOOL actions = [self actionsVisible];
     NSSize size;
     NSString *visible = nil;
+    NSUInteger visibleDraft = 0;
     if (_showingFailure) {
         // Windows reports failures in a message box; this host keeps them in the overlay, so the category message takes the label line and the provider's detail the transcript area.
         const CGFloat labelWidth = ceil([_view.status sizeWithAttributes:@{NSFontAttributeName: VoiceStatusFont()}].width) + 2.0 * kTranscriptHorizontalPadding;
         size = _transcript.length ? NSMakeSize(MAX(kTranscriptWidth, labelWidth), kTranscriptHeight)
                                   : NSMakeSize(MAX(kProcessingWidth, labelWidth), kProcessingHeight);
-        if (_transcript.length) visible = [self visibleTranscriptForWidth:size.width - 2.0 * kTranscriptHorizontalPadding];
+        if (_transcript.length) visible = [self visibleTranscriptForWidth:size.width - 2.0 * kTranscriptHorizontalPadding draftLength:&visibleDraft];
     } else {
         const MSIMEVoiceWaveOverlayLayout layout = MSIMEVoiceWaveOverlayLayoutFor(actions, _processing, _transcript.length > 0);
         size = MSIMEVoiceWaveOverlaySizeForLayout(layout);
-        if (layout == MSIMEVoiceWaveOverlayLayoutTranscript) visible = [self visibleTranscriptForWidth:size.width - 2.0 * kTranscriptHorizontalPadding];
+        if (layout == MSIMEVoiceWaveOverlayLayoutTranscript)
+            visible = [self visibleTranscriptForWidth:size.width - 2.0 * kTranscriptHorizontalPadding draftLength:&visibleDraft];
+        // 慢响应提示文案较长时，按文本宽度适度拉宽处理条，同时不影响默认“识别中...”/“处理中...”尺寸。
+        if (_processing && _processingHint.length > 0) {
+            const CGFloat hintWidth = ceil([_view.status sizeWithAttributes:@{NSFontAttributeName: VoiceStatusFont()}].width);
+            const CGFloat padding = actions ? (2.0 * kActionContentInset + 16.0) : (2.0 * kTranscriptHorizontalPadding);
+            size.width = MAX(size.width, MIN(kPersistentWidth, hintWidth + padding));
+        }
     }
     const BOOL persistentActions = actions && _persistentRecording;
     if (persistentActions) {
         // 跨窗口录音只占屏幕底部一条：左边取消，右边完成，中间一行最新转写。
         size = NSMakeSize(kPersistentWidth, kActionHeight);
-        visible = [self visibleTranscriptForWidth:kPersistentWidth - 2.0 * kActionContentInset - 16.0 lines:1];
+        visible = [self visibleTranscriptForWidth:kPersistentWidth - 2.0 * kActionContentInset - 16.0 lines:1 draftLength:&visibleDraft];
     }
     _view.footerHeight = 0;
     _view.singleLine = persistentActions;
     _view.showsLabel = _showingFailure || _processing;
     _view.showsActions = actions;
     _view.visibleTranscript = visible;
+    _view.visibleDraftLength = visible ? visibleDraft : 0;
     NSScreen *screen = [self resolvedPreferredScreen];
     const NSPoint origin = screen ? MSIMEVoiceWaveOverlayOriginForFrames(screen.frame, screen.visibleFrame, size) : self.frame.origin;
     [self setFrame:NSMakeRect(origin.x, origin.y, size.width, size.height) display:NO];
@@ -445,8 +507,19 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
     }
 }
 - (void)setTranscript:(NSString *)text {
-    if (!self.visible || _showingFailure || ![text isKindOfClass:NSString.class] || text.length > 65536) return;
-    _transcript = [text copy];
+    if (![text isKindOfClass:NSString.class]) return;
+    [self setFinalizedTranscript:text draft:@""];
+}
+- (void)setFinalizedTranscript:(NSString *)finalized draft:(NSString *)draft {
+    if (!self.visible || _showingFailure) return;
+    if (finalized && ![finalized isKindOfClass:NSString.class]) return;
+    if (draft && ![draft isKindOfClass:NSString.class]) return;
+    NSString *safeFinalized = finalized ? [finalized copy] : @"";
+    NSString *safeDraft = draft ? [draft copy] : @"";
+    if (safeFinalized.length > 65536 || safeDraft.length > 65536 || safeFinalized.length + safeDraft.length > 65536) return;
+    _finalizedTranscript = safeFinalized;
+    _draftTranscript = safeDraft;
+    _transcript = safeDraft.length ? [safeFinalized stringByAppendingString:safeDraft] : safeFinalized;
     [self layoutPresentation];
 }
 - (void)showStatus:(NSString *)status listening:(BOOL)listening failure:(BOOL)failure {
@@ -462,8 +535,10 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
 - (void)setListening:(BOOL)listening {
     if (listening) _dismissed = NO;
     else self.actionHandler = nil;
-    _processing = NO; _recordingLocked = NO;
+    _processing = NO; _processingPolishing = NO; _processingHint = nil; _recordingLocked = NO;
     _transcript = @"";
+    _finalizedTranscript = @"";
+    _draftTranscript = @"";
     [self showStatus:listening ? @"正在录音…" : @"" listening:listening failure:NO];
 }
 - (void)setPersistentRecording:(BOOL)persistent {
@@ -480,7 +555,10 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
     [self showCompletionNotice:copied ? @"已复制" : @"复制失败"];
 }
 - (void)showCompletionNotice:(NSString *)notice {
+    _processing = NO; _processingPolishing = NO; _processingHint = nil;
     _transcript = @"";
+    _finalizedTranscript = @"";
+    _draftTranscript = @"";
     [self showStatus:notice listening:NO failure:YES];
     const NSUInteger generation = _presentationGeneration;
     __weak MSIMEVoiceWaveOverlay *weakSelf = self;
@@ -496,17 +574,34 @@ static NSFont *VoiceStatusFont() { return [NSFont systemFontOfSize:kStatusFontSi
     [self layoutPresentation];
 }
 - (void)setProcessing:(BOOL)polishing {
-    _processing = YES; _recordingLocked = NO;
+    _processing = YES; _processingPolishing = polishing; _processingHint = nil; _recordingLocked = NO;
     [self showStatus:polishing ? @"处理中..." : @"识别中..." listening:NO failure:NO];
+}
+- (void)setProcessingHint:(NSString *)hint {
+    if (!_processing || _showingFailure || _dismissed || !self.visible) return;
+    if (hint && ![hint isKindOfClass:NSString.class]) return;
+    NSString *trimmed = hint.length ? [hint copy] : nil;
+    if (trimmed.length > 256) {
+        // 按组合字符序列边界截断，避免切开 UTF-16 代理对或组合表情。
+        const NSRange sequence = [trimmed rangeOfComposedCharacterSequenceAtIndex:256];
+        trimmed = [trimmed substringToIndex:sequence.location];
+    }
+    _processingHint = trimmed;
+    NSString *status = _processingHint ?: (_processingPolishing ? @"处理中..." : @"识别中...");
+    _view.status = status;
+    _view.accessibilityLabel = status;
+    [self layoutPresentation];
 }
 - (NSTimeInterval)failureDisplayDuration { return 6; }
 - (void)showFailure:(MSIMEVoiceFailure)failure { [self showFailure:failure detail:nil]; }
 - (void)showFailure:(MSIMEVoiceFailure)failure detail:(NSString *)detail {
     self.actionHandler = nil;
     _dismissed = NO;
-    _processing = NO; _recordingLocked = NO;
-    // A pending transcript is discarded. The detail is the sentence the voice request built for the user from the provider's answer - its message, HTTP status or trace id - never a transcript, credential or request body, and it is shown in the transcript area.
+    _processing = NO; _processingPolishing = NO; _processingHint = nil; _recordingLocked = NO;
+    // 丢弃待定转写；失败详情仅展示识别服务返回的诊断句（绝不含转写原文、凭据或请求体）。
     _transcript = [detail isKindOfClass:NSString.class] && detail.length <= 65536 ? [detail copy] : @"";
+    _finalizedTranscript = _transcript;
+    _draftTranscript = @"";
     NSString *message;
     switch (failure) {
         case MSIMEVoiceFailureMicrophonePermission: message = @"请在系统设置允许麦克风访问"; break;

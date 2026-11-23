@@ -36,6 +36,11 @@
 #import "../core/WindowPresentationLog.h"
 #import "../voice/DoubaoVoiceRequest.h"
 #import "../voice/LocalVoiceRequest.h"
+#import "../voice/VoiceContextCapture.h"
+#import "../voice/LocalPolishServer.h"
+#import "../voice/VoicePolishClient.h"
+#import "../voice/VoicePipelineHelper.h"
+#include <time.h>
 #import "../voice/VoiceFailureMessages.h"
 #import "../core/SupportWindowController.h"
 #import "../backend/account/BackendAccountEntry.h"
@@ -1720,6 +1725,18 @@ static NSImage *MSIMECandidateLogoImage() {
     NSString *_voicePreviewText;
     NSNumber *_voiceCopiedResult;
     NSString *_voicePolishFallbackNotice;
+    // Wave 2 本地语音后处理与润色管线状态（后台词表队列、缓存、上下文快照与在途润色任务）。
+    dispatch_queue_t _voicePipelineQueue;
+    MSIMEVoicePolishClient *_voicePolishClient;
+    MSIMEVoicePolishTask *_voicePolishTask;
+    BOOL _voicePolishPending;
+    MSIMEVoiceContextSnapshot *_voiceContextSnapshot;
+    NSDictionary *_voiceOptionsSnapshot;
+    NSArray<NSDictionary<NSString *, id> *> *_voiceVocabularyTerms;
+    uint64_t _voiceVocabularyGeneration;
+    uint64_t _voiceAsrStartedAtNs;
+    BOOL _useVoicePolishClientForDoubao;
+    BOOL _useVoicePolishClientForLive;
     id _globalVoiceHotkeyMonitor;
     id _voicePermissionToken;
     uint64_t _voiceGeneration;
@@ -5592,22 +5609,139 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     if (_globalVoiceHotkeyMonitor) [NSEvent removeMonitor:_globalVoiceHotkeyMonitor];
     [_desktopInputSession stop]; [_httpVoiceRequest cancel]; [_doubaoVoiceRequest cancel];
     [_doubaoPolishRequest cancel]; [_livePolishRequest cancel];
+    [_voicePolishTask cancel]; _voicePolishTask = nil; _voicePolishPending = NO;
     // A client that dies without deactivateServer: leaves the repeating timer on the run loop, and its candidate window on screen.
     [_preferencesTimer invalidate];
     [self flushKeyPresses];
     [_panel orderOut:nil];
+}
+- (dispatch_queue_t)voicePipelineQueue {
+    if (!_voicePipelineQueue) {
+        _voicePipelineQueue = dispatch_queue_create("dev.shurufa.voice-pipeline", DISPATCH_QUEUE_SERIAL);
+    }
+    return _voicePipelineQueue;
+}
+- (MSIMEVoicePolishClient *)sharedVoicePolishClient {
+    if (!_voicePolishClient) _voicePolishClient = [[MSIMEVoicePolishClient alloc] init];
+    return _voicePolishClient;
+}
+// 仅采纳测试子类覆写返回的非 MSIMEHTTPVoiceRequest 夹具；生产路径统一交由 MSIMEVoicePolishClient 处理。
+- (id)injectedLegacyPolisherForSelector:(SEL)selector options:(NSDictionary *)options {
+    if ([self methodForSelector:selector] == [MSIMEInputController instanceMethodForSelector:selector]) {
+        return nil;
+    }
+    id candidate = selector == @selector(makeDoubaoPolishRequest:)
+        ? [self makeDoubaoPolishRequest:options]
+        : [self makeLiveVoicePolishRequest:options];
+    if (!candidate) return nil;
+    if ([candidate isKindOfClass:MSIMEHTTPVoiceRequest.class]) {
+        [(MSIMEHTTPVoiceRequest *)candidate cancel];
+        return nil;
+    }
+    return candidate;
+}
+- (void)prepareVoicePipelineForOptions:(NSDictionary *)options {
+    [_voicePolishTask cancel];
+    _voicePolishTask = nil;
+    _voicePolishPending = NO;
+    _voiceOptionsSnapshot = [options copy];
+    _voiceAsrStartedAtNs = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    _voiceContextSnapshot = MSIMECaptureVoiceContext(_activeClient);
+    _voiceVocabularyTerms = nil;
+    const uint64_t vocabGen = _voiceGeneration;
+    _voiceVocabularyGeneration = vocabGen;
+    NSDictionary *hostOptions = [_session respondsToSelector:@selector(hostOptions)]
+        ? [_session.hostOptions copy] : nil;
+    if (hostOptions.count) {
+        __weak MSIMEInputController *weakSelf = self;
+        dispatch_async([self voicePipelineQueue], ^{
+            MSIMEVoiceVocabularyBundle *bundle = MSIMEVoiceLoadVocabulary(hostOptions, nil, nil);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                MSIMEInputController *controller = weakSelf;
+                if (!controller || controller->_voiceVocabularyGeneration != vocabGen) return;
+                controller->_voiceVocabularyTerms = bundle.terms;
+            });
+        });
+    }
+    NSString *prewarmPath = nil;
+    if (MSIMEVoiceResolveLocalPolishPrewarmPath(options, &prewarmPath)) {
+        [MSIMELocalPolishServer.sharedServer prewarmWithModelPath:prewarmPath];
+    }
+}
+- (void)clearVoicePipelineState {
+    [_voicePolishTask cancel];
+    _voicePolishTask = nil;
+    _voicePolishPending = NO;
+    _voiceContextSnapshot = nil;
+    _voiceOptionsSnapshot = nil;
+    _voiceVocabularyTerms = nil;
+    _voiceVocabularyGeneration = 0;
+    _voiceAsrStartedAtNs = 0;
+    _useVoicePolishClientForDoubao = NO;
+    _useVoicePolishClientForLive = NO;
+}
+- (NSArray<NSDictionary<NSString *, id> *> *)cachedVoiceVocabularyTerms {
+    return _voiceVocabularyGeneration == _voiceGeneration ? _voiceVocabularyTerms : nil;
+}
+- (void)noteVoiceArchiveDismissed:(NSString *)reason {
+    if (_voiceService.archiveRecordingID &&
+        [MSIMEVoiceInputService.archive respondsToSelector:@selector(noteDismissedReason:forRecording:)]) {
+        [MSIMEVoiceInputService.archive noteDismissedReason:reason ?: @"dismissed"
+                                               forRecording:_voiceService.archiveRecordingID];
+    }
+}
+- (BOOL)voiceServiceReportsAccidentalSilence {
+    return [_voiceService respondsToSelector:@selector(isLikelyAccidentalSilence)] &&
+        _voiceService.isLikelyAccidentalSilence;
+}
+- (uint64_t)currentVoiceAsrMillisecondsForRequest:(id)request {
+    if ([request respondsToSelector:@selector(lastFinalMetrics)]) {
+        NSDictionary *metrics = [(MSIMELocalVoiceRequest *)request lastFinalMetrics];
+        if ([metrics[@"asr_ms"] isKindOfClass:NSNumber.class]) {
+            const long long value = [metrics[@"asr_ms"] longLongValue];
+            if (value > 0) return static_cast<uint64_t>(value);
+        }
+    }
+    if (_voiceAsrStartedAtNs > 0) {
+        const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+        if (now > _voiceAsrStartedAtNs) return (now - _voiceAsrStartedAtNs) / 1000000ULL;
+    }
+    return 0;
+}
+- (NSNumber *)currentVoiceAudioMillisecondsForRequest:(id)request {
+    if ([request respondsToSelector:@selector(lastFinalMetrics)]) {
+        NSDictionary *metrics = [(MSIMELocalVoiceRequest *)request lastFinalMetrics];
+        if ([metrics[@"audio_ms"] isKindOfClass:NSNumber.class]) return metrics[@"audio_ms"];
+    }
+    const NSTimeInterval duration = _voiceService.recordedDuration;
+    if (duration > 0.0) return @(static_cast<uint64_t>(duration * 1000.0 + 0.5));
+    return nil;
 }
 - (MSIMEHTTPVoiceRequest *)makeDoubaoPolishRequest:(NSDictionary *)options {
     if (!([options[@"polish_enabled"] boolValue] || [options[@"polish_text"] boolValue]) || ![options[@"polish_token"] length]) return nil;
     return [[MSIMEHTTPVoiceRequest alloc] initWithPolishOptions:options error:nil];
 }
 - (void)applyDoubaoFinalText:(NSString *)text request:(id<MSIMEStreamingVoiceRequest>)request polishFailed:(BOOL)polishFailed {
+    [self applyDoubaoFinalText:text request:request polishFailed:polishFailed replaceSelection:NO archiveMetadata:nil];
+}
+- (void)applyDoubaoFinalText:(NSString *)text
+                     request:(id<MSIMEStreamingVoiceRequest>)request
+                polishFailed:(BOOL)polishFailed
+            replaceSelection:(BOOL)replaceSelection
+             archiveMetadata:(NSDictionary<NSString *, id> *)archiveMetadata {
     if (_doubaoVoiceRequest != request) return;
     if ([self ownsDoubaoVoiceFocus]) {
         if (!text.length) { [self reportVoiceFailure:MSIMEVoiceFailureNoSpeech]; return; }
         NSDictionary *result = text.length ? [_doubaoVoiceSession applyVoiceText:text generation:_doubaoVoiceGeneration error:nil] : nil;
         if (!result) { [self reportVoiceFailure:MSIMEVoiceFailureSession]; return; }
-        if (result) { if (![self ownsPersistentVoiceRecording]) _doubaoVoiceMarked = NO; [self applyVoiceResult:result route:_doubaoVoiceCommit polishFailed:polishFailed]; }
+        if (result) {
+            if (![self ownsPersistentVoiceRecording]) _doubaoVoiceMarked = NO;
+            [self applyVoiceResult:result
+                             route:_doubaoVoiceCommit
+                      polishFailed:polishFailed
+                  replaceSelection:replaceSelection
+                   archiveMetadata:archiveMetadata];
+        }
     }
     [self cancelDoubaoVoiceInput];
 }
@@ -5701,6 +5835,7 @@ static NSString *MSIMEVoiceArchiveFailureReason(MSIMEVoiceFailure failure, NSStr
     [_doubaoPolishRequest cancel];
     _doubaoPolishRequest = nil;
     _doubaoPolishCreationFailed = NO;
+    [self clearVoicePipelineState];
     _doubaoFinalReceived = NO;
     _doubaoVoiceRequest = nil;
     _doubaoVoiceSession = nil;
@@ -5723,10 +5858,13 @@ static NSString *MSIMEVoiceArchiveFailureReason(MSIMEVoiceFailure failure, NSStr
         return NO;
     }
     [self apply:finished];
+    [self prepareVoicePipelineForOptions:options];
     _doubaoVoiceRequest = request;
-    _doubaoPolishRequest = [self makeDoubaoPolishRequest:options];
-    _doubaoPolishCreationFailed = !_doubaoPolishRequest &&
-        ([options[@"polish_enabled"] boolValue] || [options[@"polish_text"] boolValue]) && [options[@"polish_token"] length];
+    _doubaoPolishRequest = [self injectedLegacyPolisherForSelector:@selector(makeDoubaoPolishRequest:) options:options];
+    BOOL doubaoPolishCreationFailed = NO;
+    _useVoicePolishClientForDoubao = !_doubaoPolishRequest &&
+        MSIMEVoiceShouldUsePolishClient(options, &doubaoPolishCreationFailed);
+    _doubaoPolishCreationFailed = !_doubaoPolishRequest && doubaoPolishCreationFailed;
     _doubaoFinalReceived = NO;
     _doubaoVoiceSession = _session;
     _doubaoVoiceClient = _activeClient;
@@ -5738,6 +5876,20 @@ static NSString *MSIMEVoiceArchiveFailureReason(MSIMEVoiceFailure failure, NSStr
     [self bindVoiceOverlayActions];
     __weak MSIMEInputController *weakSelf = self;
     __weak id<MSIMEStreamingVoiceRequest> weakRequest = request;
+    BOOL wiredDualPartialState = NO;
+    if ([request respondsToSelector:@selector(setPartialStateHandler:)]) {
+        wiredDualPartialState = YES;
+        [(MSIMELocalVoiceRequest *)request setPartialStateHandler:^(NSString *finalized, NSString *draft) {
+            MSIMEInputController *controller = weakSelf;
+            id<MSIMEStreamingVoiceRequest> liveRequest = weakRequest;
+            if (!controller || !liveRequest || controller->_doubaoVoiceRequest != liveRequest) return;
+            if (![controller ownsDoubaoVoiceFocus] || controller->_doubaoFinalReceived) return;
+            if (!controller->_doubaoVoiceInline &&
+                [controller->_voiceOverlay respondsToSelector:@selector(setFinalizedTranscript:draft:)]) {
+                [controller->_voiceOverlay setFinalizedTranscript:finalized ?: @"" draft:draft ?: @""];
+            }
+        }];
+    }
     if (![request startWithResult:^(NSString *text, BOOL final, NSError *failure) {
         MSIMEInputController *controller = weakSelf;
         id<MSIMEStreamingVoiceRequest> liveRequest = weakRequest;
@@ -5752,7 +5904,11 @@ static NSString *MSIMEVoiceArchiveFailureReason(MSIMEVoiceFailure failure, NSStr
                 controller->_doubaoVoiceMarked = YES;
                 controller->_clientHasMarkedText = YES;
             }
-            if (!controller->_doubaoVoiceInline && text.length <= 65536) [controller->_voiceOverlay setTranscript:text ?: @""];
+            const BOOL dualRendered = wiredDualPartialState &&
+                [controller->_voiceOverlay respondsToSelector:@selector(setFinalizedTranscript:draft:)];
+            if (!controller->_doubaoVoiceInline && !dualRendered && text.length <= 65536) {
+                [controller->_voiceOverlay setTranscript:text ?: @""];
+            }
             return; // Partial text must not consume the runtime's final-only token.
         }
         controller->_doubaoFinalReceived = YES;
@@ -5766,16 +5922,104 @@ static NSString *MSIMEVoiceArchiveFailureReason(MSIMEVoiceFailure failure, NSStr
         if (msime::voice::short_capture(controller->_voiceService.recordedDuration)) {
             [controller cancelDoubaoVoiceInput]; return;
         }
-        MSIMEHTTPVoiceRequest *polisher = controller->_doubaoPolishRequest;
-        if (text.length && polisher) {
-            [controller->_voiceOverlay setProcessing:YES];
-            if (!controller->_doubaoVoiceInline) [controller->_voiceOverlay setTranscript:text];
+        if ([controller voiceServiceReportsAccidentalSilence]) {
+            [controller noteVoiceArchiveDismissed:@"accidental_silence"];
+            [controller cancelDoubaoVoiceInput]; return;
         }
-        if (text.length && polisher && [polisher polishText:text completion:^(NSString *polished, NSError *polishError) {
-            [weakSelf applyDoubaoFinalText:!polishError && polished.length ? polished : text request:liveRequest
-                polishFailed:polisher.polishFailed || polishError != nil || !polished.length];
-        } error:nil]) return;
-        [controller applyDoubaoFinalText:text request:liveRequest polishFailed:polisher != nil || controller->_doubaoPolishCreationFailed];
+        NSDictionary *sessionOptions = controller->_voiceOptionsSnapshot ?: @{};
+        MSIMEVoiceContextSnapshot *snapshot = controller->_voiceContextSnapshot;
+        const BOOL contextAware = MSIMEVoiceOptionsContextAware(sessionOptions);
+        NSString *appCategory = contextAware ? MSIMEVoiceInferAppCategory(snapshot) : @"general";
+        const uint64_t asrMs = [controller currentVoiceAsrMillisecondsForRequest:liveRequest];
+        NSNumber *audioMs = [controller currentVoiceAudioMillisecondsForRequest:liveRequest];
+        NSString *modelKind = [sessionOptions[@"asr_provider"] isKindOfClass:NSString.class] ? sessionOptions[@"asr_provider"] : @"";
+        NSString *rawText = text.length ? [text copy] : @"";
+        // 主线程仅消费录音开始时后台预加载的内存词表缓存，绝不在 IMK 主线程执行磁盘或 SQLite 扫描。
+        NSArray<NSDictionary<NSString *, id> *> *cachedTerms = [controller cachedVoiceVocabularyTerms];
+        NSString *processedText = rawText;
+        if (rawText.length) {
+            MSIMEVoicePostprocessResult *post = MSIMEVoiceRunPostprocess(
+                rawText, modelKind, audioMs, @"dictation", appCategory, cachedTerms);
+            if (post.dismissed) {
+                [controller noteVoiceArchiveDismissed:post.dismissedReason ?: @"dismissed"];
+                [controller cancelDoubaoVoiceInput];
+                return;
+            }
+            if (post.text.length) processedText = post.text;
+        }
+        MSIMEHTTPVoiceRequest *polisher = controller->_doubaoPolishRequest;
+        if (processedText.length && polisher) {
+            [controller->_voiceOverlay setProcessing:YES];
+            if (!controller->_doubaoVoiceInline) [controller->_voiceOverlay setTranscript:processedText];
+            if ([polisher polishText:processedText completion:^(NSString *polished, NSError *polishError) {
+                const BOOL failed = polisher.polishFailed || polishError != nil || !polished.length;
+                NSString *finalText = !polishError && polished.length ? polished : processedText;
+                NSDictionary *meta = MSIMEVoiceBuildArchiveMetadata(rawText, asrMs, nil, sessionOptions, appCategory, failed);
+                [weakSelf applyDoubaoFinalText:finalText
+                                       request:liveRequest
+                                  polishFailed:failed
+                              replaceSelection:NO
+                               archiveMetadata:meta];
+            } error:nil]) return;
+            NSDictionary *meta = MSIMEVoiceBuildArchiveMetadata(rawText, asrMs, nil, sessionOptions, appCategory, YES);
+            [controller applyDoubaoFinalText:processedText request:liveRequest polishFailed:YES replaceSelection:NO archiveMetadata:meta];
+            return;
+        }
+        if (processedText.length && controller->_useVoicePolishClientForDoubao) {
+            [controller->_voiceOverlay setProcessing:YES];
+            if (!controller->_doubaoVoiceInline) [controller->_voiceOverlay setTranscript:processedText];
+            controller->_voicePolishPending = YES;
+            NSDictionary *hostOptions = [controller->_doubaoVoiceSession respondsToSelector:@selector(hostOptions)]
+                ? [controller->_doubaoVoiceSession.hostOptions copy] : nil;
+            // 在后台串行队列按本句文本筛选 Top-K 词表提示，随后切回主线程发起异步润色任务。
+            dispatch_async([controller voicePipelineQueue], ^{
+                NSArray<NSString *> *hints = cachedTerms.count
+                    ? MSIMEVoiceSelectPromptHints(cachedTerms, processedText, appCategory)
+                    : (hostOptions.count ? MSIMEVoiceLoadVocabulary(hostOptions, processedText, appCategory).promptHints : @[]);
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    MSIMEInputController *ready = weakSelf;
+                    if (!ready || ready->_doubaoVoiceRequest != liveRequest) return;
+                    // 送入 Pre-LLM 确定性清洗后的 processedText，存档仍保留原始 ASR rawText。
+                    MSIMEVoicePolishRequest *polishReq = MSIMEVoiceBuildPolishRequest(
+                        sessionOptions, processedText, processedText, snapshot, hints);
+                    [ready->_voicePolishTask cancel];
+                    ready->_voicePolishTask = [[ready sharedVoicePolishClient]
+                        polishRequest:polishReq
+                             slowHint:^(NSString *message) {
+                                 MSIMEInputController *inner = weakSelf;
+                                 if (!inner || inner->_doubaoVoiceRequest != liveRequest) return;
+                                 if ([inner->_voiceOverlay respondsToSelector:@selector(setProcessingHint:)]) {
+                                     [inner->_voiceOverlay setProcessingHint:message];
+                                 }
+                             }
+                              partial:nil
+                           completion:^(MSIMEVoicePolishResult *polishResult) {
+                               MSIMEInputController *inner = weakSelf;
+                               if (!inner || inner->_doubaoVoiceRequest != liveRequest) return;
+                               inner->_voicePolishTask = nil;
+                               inner->_voicePolishPending = NO;
+                               NSString *finalText = polishResult.text.length ? polishResult.text : processedText;
+                               const BOOL replaceSel = [polishResult.resolvedAction isEqualToString:@"replace_selection"];
+                               NSDictionary *meta = MSIMEVoiceBuildArchiveMetadata(
+                                   rawText, asrMs, polishResult, sessionOptions, appCategory, polishResult.polishFailed);
+                               [inner applyDoubaoFinalText:finalText
+                                                   request:liveRequest
+                                              polishFailed:polishResult.polishFailed
+                                          replaceSelection:replaceSel
+                                           archiveMetadata:meta];
+                           }];
+                });
+            });
+            return;
+        }
+        NSDictionary *meta = rawText.length
+            ? MSIMEVoiceBuildArchiveMetadata(rawText, asrMs, nil, sessionOptions, appCategory, controller->_doubaoPolishCreationFailed)
+            : nil;
+        [controller applyDoubaoFinalText:processedText
+                                 request:liveRequest
+                            polishFailed:polisher != nil || controller->_doubaoPolishCreationFailed
+                        replaceSelection:NO
+                         archiveMetadata:meta];
     } error:&error]) { [self reportVoiceFailure:MSIMEVoiceFailureProvider detail:MSIMEVoiceFailureDetail(error)]; return NO; }
     NSString *device = MSIMEVoiceCaptureDeviceUID(NSUserDefaults.standardUserDefaults);
     if (![_voiceService startPCMStreaming:^(NSData *pcm, NSError *failure) {
@@ -5805,6 +6049,11 @@ static NSString *MSIMEVoiceArchiveFailureReason(MSIMEVoiceFailure failure, NSStr
     NSError *error = nil;
     NSData *tail = [_voiceService finishPCMStreamingWithError:&error];
     if (tail && !error && msime::voice::short_capture(_voiceService.recordedDuration)) { [self cancelDoubaoVoiceInput]; return; }
+    if (tail && !error && [self voiceServiceReportsAccidentalSilence]) {
+        [self noteVoiceArchiveDismissed:@"accidental_silence"];
+        [self cancelDoubaoVoiceInput];
+        return;
+    }
     [_voiceAudioMuter restore];
     [_voiceOverlay setProcessing:NO];
     [self voiceCaptureDidEnd];
@@ -5821,6 +6070,7 @@ static NSString *MSIMEVoiceArchiveFailureReason(MSIMEVoiceFailure failure, NSStr
     _httpVoiceSession = nil;
     _httpVoiceClient = nil;
     _httpVoiceProcessing = NO;
+    [self clearVoicePipelineState];
     [_voiceService cancelWithError:nil];
     [_voiceAudioMuter restore];
     [_voiceOverlay setListening:NO];
@@ -5835,6 +6085,7 @@ static NSString *MSIMEVoiceArchiveFailureReason(MSIMEVoiceFailure failure, NSStr
         [self reportVoiceFailure:request ? MSIMEVoiceFailureSession : MSIMEVoiceFailureProvider detail:MSIMEVoiceFailureDetail(error)];
         return NO;
     }
+    [self prepareVoicePipelineForOptions:options];
     _httpVoiceRequest = request;
     _httpVoiceSession = _session;
     _httpVoiceClient = _activeClient;
@@ -5884,6 +6135,11 @@ static NSString *MSIMEVoiceArchiveFailureReason(MSIMEVoiceFailure failure, NSStr
     NSError *error = nil;
     NSData *pcm = [_voiceService finishPCMRecordingWithError:&error];
     if (pcm && !error && msime::voice::short_capture(_voiceService.recordedDuration)) { [self cancelHTTPVoiceInput]; return; }
+    if (pcm && !error && [self voiceServiceReportsAccidentalSilence]) {
+        [self noteVoiceArchiveDismissed:@"accidental_silence"];
+        [self cancelHTTPVoiceInput];
+        return;
+    }
     [_voiceAudioMuter restore];
     [_voiceOverlay setProcessing:NO];
     [self voiceCaptureDidEnd];
@@ -5898,11 +6154,32 @@ static NSString *MSIMEVoiceArchiveFailureReason(MSIMEVoiceFailure failure, NSStr
         if (![controller voiceFocusMatchesClient:client session:session generation:generation]) { [controller cancelHTTPVoiceInput]; return; }
         if (failure || !text.length) { [controller reportVoiceFailure:failure ? MSIMEVoiceFailureProvider : MSIMEVoiceFailureNoSpeech detail:MSIMEVoiceFailureDetail(failure)]; return; }
         if (!failure && text.length && [controller voiceFocusMatchesClient:client session:session generation:generation]) {
+            NSDictionary *sessionOptions = controller->_voiceOptionsSnapshot ?: @{};
+            MSIMEVoiceContextSnapshot *snapshot = controller->_voiceContextSnapshot;
+            const BOOL contextAware = MSIMEVoiceOptionsContextAware(sessionOptions);
+            NSString *appCategory = contextAware ? MSIMEVoiceInferAppCategory(snapshot) : @"general";
+            const uint64_t asrMs = [controller currentVoiceAsrMillisecondsForRequest:nil];
+            NSNumber *audioMs = [controller currentVoiceAudioMillisecondsForRequest:nil];
+            NSArray<NSDictionary<NSString *, id> *> *cachedTerms = [controller cachedVoiceVocabularyTerms];
+            MSIMEVoicePostprocessResult *post = MSIMEVoiceRunPostprocess(
+                text, @"", audioMs, @"dictation", appCategory, cachedTerms);
+            if (post.dismissed) {
+                [controller noteVoiceArchiveDismissed:post.dismissedReason ?: @"dismissed"];
+                [controller cancelHTTPVoiceInput];
+                return;
+            }
+            NSString *finalText = post.text.length ? post.text : text;
             // Native host session methods are main-thread-only. Recheck the
             // departing focus identity before the runtime's own generation check.
-            NSDictionary *result = [session applyVoiceText:text generation:generation error:nil];
+            NSDictionary *result = [session applyVoiceText:finalText generation:generation error:nil];
             if (!result) { [controller reportVoiceFailure:MSIMEVoiceFailureSession]; return; }
-            [controller applyVoiceResult:result route:controller->_httpVoiceCommit polishFailed:request.polishFailed];
+            NSDictionary *meta = MSIMEVoiceBuildArchiveMetadata(
+                text, asrMs, nil, sessionOptions, appCategory, request.polishFailed);
+            [controller applyVoiceResult:result
+                                   route:controller->_httpVoiceCommit
+                            polishFailed:request.polishFailed
+                        replaceSelection:NO
+                         archiveMetadata:meta];
         }
         [controller cancelHTTPVoiceInput];
     } error:&error]) [self reportVoiceFailure:MSIMEVoiceFailureProvider detail:MSIMEVoiceFailureDetail(error)];
@@ -5962,6 +6239,7 @@ static NSString *MSIMEVoiceArchiveFailureReason(MSIMEVoiceFailure failure, NSStr
     if (!_liveVoiceToken) return;
     [_livePolishRequest cancel]; _livePolishRequest = nil;
     _livePolishCreationFailed = NO;
+    [self clearVoicePipelineState];
     if (_liveVoiceMarked && [self ownsLiveVoiceToken:_liveVoiceToken])
         [(id<MSIMETextClient>)_liveVoiceClient setMarkedText:@"" selectionRange:NSMakeRange(0, 0) replacementRange:NSMakeRange(NSNotFound, NSNotFound)];
     MSIMEDeactivateVoice(_voiceService, _liveVoiceSession, _voiceAudioMuter, _voiceOverlay, _liveVoiceSocket, _liveVoiceGeneration);
@@ -5977,8 +6255,8 @@ static NSString *MSIMEVoiceArchiveFailureReason(MSIMEVoiceFailure failure, NSStr
 }
 - (void)expireLiveVoice:(id)token {
     if ([self ownsLiveVoiceToken:token]) {
-        // 最终转写已经到达时，由整理请求自己的预算负责原文回退。
-        if (_liveVoiceFinalReceived && _livePolishRequest) return;
+        // 最终转写已经到达且正在润色时，由润色请求自己的超时预算负责原文回退。
+        if (_liveVoiceFinalReceived && (_livePolishRequest || _voicePolishTask || _voicePolishPending)) return;
         [self reportVoiceFailure:MSIMEVoiceFailureTimeout];
     } else if (token && _liveVoiceToken == token) [self cancelLiveVoiceInput];
 }
@@ -5990,13 +6268,15 @@ static NSString *MSIMEVoiceArchiveFailureReason(MSIMEVoiceFailure failure, NSStr
         return nil;
     }
     [self apply:finished];
+    if (!socket.length) [self prepareVoicePipelineForOptions:options];
     _liveVoiceToken = [NSObject new]; _liveVoiceSession = _session; _liveVoiceClient = _activeClient;
     _liveVoiceGeneration = _voiceGeneration; _liveVoiceSocket = [socket copy];
-    // External providers already own their optional polish stage. Snapshot local
-    // settings at recording start through the shared native request adapter.
-    _livePolishRequest = socket.length ? nil : [self makeLiveVoicePolishRequest:options];
-    _livePolishCreationFailed = !socket.length && !_livePolishRequest &&
-        ([options[@"polish_enabled"] boolValue] || [options[@"polish_text"] boolValue]) && [options[@"polish_token"] length];
+    // 外部 socket 提供商自行持有润色阶段；系统语音路径优先走测试注入夹具或新版独立润色客户端。
+    _livePolishRequest = socket.length ? nil : [self injectedLegacyPolisherForSelector:@selector(makeLiveVoicePolishRequest:) options:options];
+    BOOL livePolishCreationFailed = NO;
+    _useVoicePolishClientForLive = !socket.length && !_livePolishRequest &&
+        MSIMEVoiceShouldUsePolishClient(options, &livePolishCreationFailed);
+    _livePolishCreationFailed = !socket.length && !_livePolishRequest && livePolishCreationFailed;
     _liveVoiceFinalReceived = NO;
     _liveVoiceCommit = MSIMECaptureVoiceCommit(options[@"commit_mode"], _activeClient);
     _liveVoiceInline = [options[@"stream"] boolValue] && [_liveVoiceCommit.mode isEqual:@"tsf"];
@@ -6044,12 +6324,26 @@ static NSString *MSIMEVoiceArchiveFailureReason(MSIMEVoiceFailure failure, NSStr
     }
 }
 - (void)applyLiveVoiceFinalText:(NSString *)text token:(id)token polishFailed:(BOOL)polishFailed {
+    [self applyLiveVoiceFinalText:text token:token polishFailed:polishFailed replaceSelection:NO archiveMetadata:nil];
+}
+- (void)applyLiveVoiceFinalText:(NSString *)text
+                          token:(id)token
+                   polishFailed:(BOOL)polishFailed
+               replaceSelection:(BOOL)replaceSelection
+                archiveMetadata:(NSDictionary<NSString *, id> *)archiveMetadata {
     if (!token || token != _liveVoiceToken) return;
     if ([self ownsLiveVoiceToken:token]) {
         if (!text.length) { [self reportVoiceFailure:MSIMEVoiceFailureNoSpeech]; return; }
         NSDictionary *result = text.length ? [_liveVoiceSession applyVoiceText:text generation:_liveVoiceGeneration error:nil] : nil;
         if (!result) { [self reportVoiceFailure:MSIMEVoiceFailureSession]; return; }
-        if (result) { if (![self ownsPersistentVoiceRecording]) _liveVoiceMarked = NO; [self applyVoiceResult:result route:_liveVoiceCommit polishFailed:polishFailed]; }
+        if (result) {
+            if (![self ownsPersistentVoiceRecording]) _liveVoiceMarked = NO;
+            [self applyVoiceResult:result
+                             route:_liveVoiceCommit
+                      polishFailed:polishFailed
+                  replaceSelection:replaceSelection
+                   archiveMetadata:archiveMetadata];
+        }
     }
     [self cancelLiveVoiceInput];
 }
@@ -6072,22 +6366,105 @@ static NSString *MSIMEVoiceArchiveFailureReason(MSIMEVoiceFailure failure, NSStr
         [self finishLiveVoiceInput];
         if (![self ownsLiveVoiceToken:token]) return;
     }
-    if (text.length && _livePolishRequest) {
-        // Final recognition may arrive before key release. Stop audio while
-        // polishing, retaining only this session's final-result authorization.
+    if (!_liveVoiceSocket.length && [self voiceServiceReportsAccidentalSilence]) {
+        [self noteVoiceArchiveDismissed:@"accidental_silence"];
+        [self cancelLiveVoiceInput];
+        return;
+    }
+    NSDictionary *sessionOptions = _voiceOptionsSnapshot ?: @{};
+    MSIMEVoiceContextSnapshot *snapshot = _voiceContextSnapshot;
+    const BOOL contextAware = MSIMEVoiceOptionsContextAware(sessionOptions);
+    NSString *appCategory = contextAware ? MSIMEVoiceInferAppCategory(snapshot) : @"general";
+    const uint64_t asrMs = [self currentVoiceAsrMillisecondsForRequest:nil];
+    NSNumber *audioMs = [self currentVoiceAudioMillisecondsForRequest:nil];
+    NSString *rawText = text.length ? [text copy] : @"";
+    NSString *processedText = rawText;
+    NSArray<NSDictionary<NSString *, id> *> *cachedTerms = [self cachedVoiceVocabularyTerms];
+    if (!_liveVoiceSocket.length && rawText.length) {
+        MSIMEVoicePostprocessResult *post = MSIMEVoiceRunPostprocess(
+            rawText, @"system", audioMs, @"dictation", appCategory, cachedTerms);
+        if (post.dismissed) {
+            [self noteVoiceArchiveDismissed:post.dismissedReason ?: @"dismissed"];
+            [self cancelLiveVoiceInput];
+            return;
+        }
+        if (post.text.length) processedText = post.text;
+    }
+    if (processedText.length && _livePolishRequest) {
         if (!_liveVoiceProcessing) [self finishLiveVoiceInput];
         [_voiceService stopTranscription];
         [_voiceOverlay setProcessing:YES];
-        if (!_liveVoiceInline) [_voiceOverlay setTranscript:text];
-        NSString *original = [text copy];
+        if (!_liveVoiceInline) [_voiceOverlay setTranscript:processedText];
+        NSString *original = [processedText copy];
         __weak MSIMEInputController *weakSelf = self;
         MSIMEHTTPVoiceRequest *polisher = _livePolishRequest;
         if ([polisher polishText:original completion:^(NSString *polished, NSError *error) {
-            [weakSelf applyLiveVoiceFinalText:!error && polished.length ? polished : original token:token
-                polishFailed:polisher.polishFailed || error != nil || !polished.length];
+            const BOOL failed = polisher.polishFailed || error != nil || !polished.length;
+            NSString *finalText = !error && polished.length ? polished : original;
+            NSDictionary *meta = MSIMEVoiceBuildArchiveMetadata(rawText, asrMs, nil, sessionOptions, appCategory, failed);
+            [weakSelf applyLiveVoiceFinalText:finalText
+                                        token:token
+                                 polishFailed:failed
+                             replaceSelection:NO
+                              archiveMetadata:meta];
         } error:nil]) return;
     }
-    [self applyLiveVoiceFinalText:text token:token polishFailed:_livePolishRequest != nil || _livePolishCreationFailed];
+    if (processedText.length && _useVoicePolishClientForLive) {
+        if (!_liveVoiceProcessing) [self finishLiveVoiceInput];
+        [_voiceService stopTranscription];
+        [_voiceOverlay setProcessing:YES];
+        if (!_liveVoiceInline) [_voiceOverlay setTranscript:processedText];
+        _voicePolishPending = YES;
+        NSDictionary *hostOptions = [_liveVoiceSession respondsToSelector:@selector(hostOptions)]
+            ? [_liveVoiceSession.hostOptions copy] : nil;
+        __weak MSIMEInputController *weakSelf = self;
+        dispatch_async([self voicePipelineQueue], ^{
+            NSArray<NSString *> *hints = cachedTerms.count
+                ? MSIMEVoiceSelectPromptHints(cachedTerms, processedText, appCategory)
+                : (hostOptions.count ? MSIMEVoiceLoadVocabulary(hostOptions, processedText, appCategory).promptHints : @[]);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                MSIMEInputController *ready = weakSelf;
+                if (!ready || ready->_liveVoiceToken != token) return;
+                MSIMEVoicePolishRequest *polishReq = MSIMEVoiceBuildPolishRequest(
+                    sessionOptions, processedText, processedText, snapshot, hints);
+                [ready->_voicePolishTask cancel];
+                ready->_voicePolishTask = [[ready sharedVoicePolishClient]
+                    polishRequest:polishReq
+                         slowHint:^(NSString *message) {
+                             MSIMEInputController *inner = weakSelf;
+                             if (!inner || inner->_liveVoiceToken != token) return;
+                             if ([inner->_voiceOverlay respondsToSelector:@selector(setProcessingHint:)]) {
+                                 [inner->_voiceOverlay setProcessingHint:message];
+                             }
+                         }
+                          partial:nil
+                       completion:^(MSIMEVoicePolishResult *polishResult) {
+                           MSIMEInputController *inner = weakSelf;
+                           if (!inner || inner->_liveVoiceToken != token) return;
+                           inner->_voicePolishTask = nil;
+                           inner->_voicePolishPending = NO;
+                           NSString *finalText = polishResult.text.length ? polishResult.text : processedText;
+                           const BOOL replaceSel = [polishResult.resolvedAction isEqualToString:@"replace_selection"];
+                           NSDictionary *meta = MSIMEVoiceBuildArchiveMetadata(
+                               rawText, asrMs, polishResult, sessionOptions, appCategory, polishResult.polishFailed);
+                           [inner applyLiveVoiceFinalText:finalText
+                                                    token:token
+                                             polishFailed:polishResult.polishFailed
+                                         replaceSelection:replaceSel
+                                          archiveMetadata:meta];
+                       }];
+            });
+        });
+        return;
+    }
+    NSDictionary *meta = (!_liveVoiceSocket.length && rawText.length)
+        ? MSIMEVoiceBuildArchiveMetadata(rawText, asrMs, nil, sessionOptions, appCategory, _livePolishCreationFailed)
+        : nil;
+    [self applyLiveVoiceFinalText:processedText
+                            token:token
+                     polishFailed:_livePolishRequest != nil || _livePolishCreationFailed
+                 replaceSelection:NO
+                  archiveMetadata:meta];
 }
 - (void)applyLiveVoicePhase:(NSUInteger)phase token:(id)token {
     if (![self ownsLiveVoiceToken:token]) return;
@@ -6105,6 +6482,11 @@ static NSString *MSIMEVoiceArchiveFailureReason(MSIMEVoiceFailure failure, NSStr
     // endAudio is sent by stopMicrophoneCapture; leave Speech alive for its final.
     [_voiceService stopMicrophoneCapture];
     if (!_liveVoiceSocket.length && msime::voice::short_capture(_voiceService.recordedDuration)) { [self cancelLiveVoiceInput]; return; }
+    if (!_liveVoiceSocket.length && [self voiceServiceReportsAccidentalSilence]) {
+        [self noteVoiceArchiveDismissed:@"accidental_silence"];
+        [self cancelLiveVoiceInput];
+        return;
+    }
     [_voiceAudioMuter restore]; [_voiceOverlay setProcessing:NO];
     [self voiceCaptureDidEnd];
     if (_liveVoiceSocket.length) {
@@ -8626,10 +9008,30 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
 - (BOOL)copyVoiceText:(NSString *)text {
     return MSIMEWriteVoiceClipboard(text, NSPasteboard.generalPasteboard);
 }
+static NSRange MSIMEVoiceReplacementRangeForClient(id client, BOOL replaceSelection) {
+    if (replaceSelection && [client respondsToSelector:@selector(selectedRange)]) {
+        @try {
+            NSRange selected = [(id<IMKTextInput>)client selectedRange];
+            if (selected.location != NSNotFound && selected.length > 0) {
+                return selected;
+            }
+        } @catch (NSException *exception) {
+            (void)exception;
+        }
+    }
+    return NSMakeRange(NSNotFound, NSNotFound);
+}
 - (void)applyVoiceResult:(NSDictionary *)transition route:(const MSIMEVoiceCommitRoute &)route {
-    [self applyVoiceResult:transition route:route polishFailed:NO];
+    [self applyVoiceResult:transition route:route polishFailed:NO replaceSelection:NO archiveMetadata:nil];
 }
 - (void)applyVoiceResult:(NSDictionary *)transition route:(const MSIMEVoiceCommitRoute &)route polishFailed:(BOOL)polishFailed {
+    [self applyVoiceResult:transition route:route polishFailed:polishFailed replaceSelection:NO archiveMetadata:nil];
+}
+- (void)applyVoiceResult:(NSDictionary *)transition
+                   route:(const MSIMEVoiceCommitRoute &)route
+            polishFailed:(BOOL)polishFailed
+        replaceSelection:(BOOL)replaceSelection
+         archiveMetadata:(NSDictionary<NSString *, id> *)archiveMetadata {
     // 语音不修改引擎，桥接层只附当前 view；它仍携带本方案的简繁转换规则。
     if (!transition[@"commit_context"] && [transition[@"view"] isKindOfClass:NSDictionary.class]) {
         NSMutableDictionary *contextual = [transition mutableCopy];
@@ -8637,8 +9039,16 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         transition = contextual;
     }
     NSString *text = transition[@"commit"];
-    if ([text isKindOfClass:NSString.class] && text.length && _voiceService.archiveRecordingID)
-        [MSIMEVoiceInputService.archive noteText:text forRecording:_voiceService.archiveRecordingID];
+    if ([text isKindOfClass:NSString.class] && text.length && _voiceService.archiveRecordingID) {
+        if (archiveMetadata.count &&
+            [MSIMEVoiceInputService.archive respondsToSelector:@selector(noteText:metadata:forRecording:)]) {
+            [MSIMEVoiceInputService.archive noteText:text
+                                            metadata:archiveMetadata
+                                        forRecording:_voiceService.archiveRecordingID];
+        } else {
+            [MSIMEVoiceInputService.archive noteText:text forRecording:_voiceService.archiveRecordingID];
+        }
+    }
     if ([self ownsPersistentVoiceRecording] && [text isKindOfClass:NSString.class] && text.length) {
         [self detachVoiceMarkedText];
         MSIMEInputController *destination = [self currentVoiceDestination];
@@ -8649,7 +9059,8 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
             if (destination->_session) [destination apply:[destination->_session command:MSIME_FINISH_COMPOSITION error:nil]];
             // 与普通上屏一致，先更新前文，避免同步客户端回调读到录音前的标点状态。
             [destination noteSmartPunctuationShadow:[text characterAtIndex:text.length - 1]];
-            [(id<MSIMETextClient>)destination->_activeClient insertText:text replacementRange:NSMakeRange(NSNotFound,NSNotFound)];
+            NSRange replacement = MSIMEVoiceReplacementRangeForClient(destination->_activeClient, replaceSelection);
+            [(id<MSIMETextClient>)destination->_activeClient insertText:text replacementRange:replacement];
             destination->_clientHasMarkedText = NO;
             if (polishFailed) _voicePolishFallbackNotice = @"整理失败，已输入原文";
             MSIMERecordTypingStatistics(destination->_preferencesDirectory ?: MSIMEStatisticsHostOptions(destination->_session)[@"preferences_directory"],
@@ -8661,6 +9072,24 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         return;
     }
     if ([route.mode isEqual:@"tsf"] || ![text isKindOfClass:NSString.class] || !text.length) {
+        if (replaceSelection && [text isKindOfClass:NSString.class] && text.length && _activeClient) {
+            NSRange selected = MSIMEVoiceReplacementRangeForClient(_activeClient, YES);
+            if (selected.location != NSNotFound && selected.length > 0) {
+                NSString *replacementText = text;
+                if (_appearance.traditionalOutput && MSIMEScriptConversionApplies(transition[@"commit_context"])) {
+                    replacementText = MSIMEChineseOutputString(replacementText, YES);
+                }
+                [self noteSmartPunctuationShadow:[replacementText characterAtIndex:replacementText.length - 1]];
+                [(id<MSIMETextClient>)_activeClient insertText:replacementText replacementRange:selected];
+                _clientHasMarkedText = NO;
+                MSIMERecordTypingStatistics(_preferencesDirectory ?: MSIMEStatisticsHostOptions(_session)[@"preferences_directory"],
+                                            replacementText, msime::mac::TypingSource::Voice);
+                NSMutableDictionary *remaining = [transition mutableCopy];
+                [remaining removeObjectForKey:@"commit"];
+                [self apply:remaining];
+                return;
+            }
+        }
         _typingSourceOverride = @(static_cast<NSInteger>(msime::mac::TypingSource::Voice));
         [self apply:transition];
         _typingSourceOverride = nil;

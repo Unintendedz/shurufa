@@ -3,6 +3,7 @@
 #import "../settings/RuntimeOptions.h"
 #include "../../../common/HostApiString.h"
 #include "msime_client.h"
+#include <cmath>
 
 NSString *const MSIMEVoiceArchiveDidChangeNotification = @"MSIMEVoiceArchiveDidChange";
 
@@ -56,6 +57,7 @@ id Call(char *raw) {
 }
 
 id CallWithRequest(char *(*function)(const uint8_t *, size_t), NSDictionary *request) {
+    if (![NSJSONSerialization isValidJSONObject:request]) return nil;
     NSData *json = [NSJSONSerialization dataWithJSONObject:request options:0 error:nil];
     return json ? Call(function(static_cast<const uint8_t *>(json.bytes), json.length)) : nil;
 }
@@ -145,15 +147,88 @@ void CollectBytes(const uint8_t *bytes, size_t length, void *context) {
 
 - (void)note:(NSString *)kind text:(NSString *)text recording:(NSString *)identifier {
     if (!identifier.length || !_available) return;
+    NSDictionary<NSString *, id> *request = @{
+        @"kind": [kind copy],
+        @"text": text.length ? [text copy] : @"",
+        @"id": [identifier copy],
+    };
     dispatch_async(_queue, ^{
-        CallWithRequest(msime_client_voice_archive_note, @{@"kind": kind, @"text": text ?: @"", @"id": identifier});
+        CallWithRequest(msime_client_voice_archive_note, request);
         [self postChange];
     });
 }
 
 - (void)noteText:(NSString *)text forRecording:(NSString *)identifier {
-    if (text.length) [self note:@"text" text:text recording:identifier];
+    [self noteText:text metadata:nil forRecording:identifier];
 }
+
+- (void)noteText:(NSString *)text
+        metadata:(nullable NSDictionary<NSString *, id> *)metadata
+    forRecording:(NSString *)identifier {
+    if (!identifier.length || !_available) return;
+    NSString *copiedText = text.length ? [text copy] : @"";
+    NSString *copiedIdentifier = [identifier copy];
+    NSMutableDictionary<NSString *, id> *payload = [NSMutableDictionary dictionary];
+    payload[@"kind"] = @"text";
+    payload[@"text"] = copiedText;
+    payload[@"id"] = copiedIdentifier;
+    BOOL hasMetadata = NO;
+    // 仅白名单透传已知元数据键并做显式类型转型与边界归一化，避免 selector 歧义或非法值导致序列化异常。
+    if ([metadata isKindOfClass:NSDictionary.class]) {
+        for (NSString *key in @[
+            @"raw_text", @"mode", @"app_category", @"polish_provider",
+            @"polish_model", @"polish_prompt_id", @"polish_rejected_reason"
+        ]) {
+            id rawValue = metadata[key];
+            if ([rawValue isKindOfClass:NSString.class]) {
+                NSString *stringValue = static_cast<NSString *>(rawValue);
+                if (stringValue.length) {
+                    payload[key] = [stringValue copy];
+                    hasMetadata = YES;
+                }
+            }
+        }
+        id rawPolishFailed = metadata[@"polish_failed"];
+        if ([rawPolishFailed isKindOfClass:NSNumber.class]) {
+            NSNumber *flagValue = static_cast<NSNumber *>(rawPolishFailed);
+            payload[@"polish_failed"] = @(flagValue.boolValue);
+            hasMetadata = YES;
+        }
+        for (NSString *key in @[ @"asr_ms", @"polish_ms" ]) {
+            id rawValue = metadata[key];
+            if ([rawValue isKindOfClass:NSNumber.class] &&
+                CFGetTypeID((__bridge CFTypeRef)rawValue) != CFBooleanGetTypeID()) {
+                NSNumber *numberValue = static_cast<NSNumber *>(rawValue);
+                const double numeric = numberValue.doubleValue;
+                if (std::isfinite(numeric) && numeric >= 0.0 && numeric < 18446744073709551616.0) {
+                    payload[key] = @(numberValue.unsignedLongLongValue);
+                    hasMetadata = YES;
+                }
+            }
+        }
+    }
+    if (!copiedText.length && !hasMetadata) return;
+    NSDictionary<NSString *, id> *request = [payload copy];
+    dispatch_async(_queue, ^{
+        id result = CallWithRequest(msime_client_voice_archive_note, request);
+        if (!result && hasMetadata && copiedText.length) {
+            // 可选元数据若因超限或非法字符被共享层拒绝，回退写入裸文本，确保用户听写内容绝不静默丢失。
+            CallWithRequest(msime_client_voice_archive_note, @{
+                @"kind": @"text",
+                @"text": copiedText,
+                @"id": copiedIdentifier,
+            });
+        }
+        [self postChange];
+    });
+}
+
+- (void)noteDismissedReason:(NSString *)reason forRecording:(NSString *)identifier {
+    if (!identifier.length || !reason.length || !_available) return;
+    // 原因长度上限（128 字节）与控制字符检查由 Rust 共享层统一把关。
+    [self note:@"dismissed" text:reason recording:identifier];
+}
+
 - (void)noteFailure:(NSString *)reason forRecording:(NSString *)identifier { [self note:@"failure" text:reason recording:identifier]; }
 - (void)noteCancelledRecording:(NSString *)identifier { [self note:@"cancelled" text:nil recording:identifier]; }
 
