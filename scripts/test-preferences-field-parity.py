@@ -54,6 +54,11 @@ RUST_ONLY: dict[str, set[str]] = {
         # 听写历史的两个保留期限同样只在 Shurufa 的 macOS 原生语音设置页编辑。
         "history_retention_days",
         "recording_retention_hours",
+        # 本地润色/翻译模型路径、选区改写与上下文感知开关仅在 Shurufa 的 macOS 原生设置与运行时消费，React 设置页不承载。
+        "polish_local_model_path",
+        "polish_translation_model_path",
+        "polish_enable_selection_rewrite",
+        "polish_context_aware",
     },
     "TouchToolbarPreferences": {
         # 撤销与重做仅在 Android 原生工具栏设置页提供入口，其他宿主保留共享字段，React 设置页不显示。

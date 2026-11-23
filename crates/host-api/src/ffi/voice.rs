@@ -1053,3 +1053,578 @@ pub unsafe extern "C" fn msime_client_voice_model_setting_check(
         Ok(Value::Object(value))
     })
 }
+
+// ---- 确定性语音后处理、跨语种个人词表与本地/云端润色 C ABI ----
+
+const MAX_POLISH_CLEAN_OUTPUT_CHARS: usize = 40_000;
+const MAX_VOCABULARY_DICTIONARY_SCAN_ROWS: usize = 5_000;
+
+fn valid_vocabulary_terms(
+    terms: &[msime_client_providers::voice::vocabulary::VocabularyTerm],
+) -> bool {
+    if terms.len() > MAX_VOICE_CORRECTION_HOTWORDS {
+        return false;
+    }
+    terms.iter().all(|term| {
+        is_bounded_text(&term.canonical, MAX_VOICE_CORRECTION_HOTWORD_TEXT_BYTES)
+            && is_bounded_text(&term.pinyin, MAX_VOICE_CORRECTION_HOTWORD_PINYIN_BYTES)
+            && is_bounded_text(&term.category, 64)
+            && term.aliases.len() <= 32
+            && term
+                .aliases
+                .iter()
+                .all(|alias| is_bounded_text(alias, MAX_VOICE_CORRECTION_HOTWORD_TEXT_BYTES))
+    })
+}
+
+fn collect_voice_vocabulary_dictionary_kind(
+    options: &Value,
+    kind: &str,
+) -> Result<Vec<msime_client_providers::voice::vocabulary::DictionaryEntryInput>, String> {
+    let mut collected = Vec::new();
+    let mut offset = 0usize;
+    let page_size = 1_000usize;
+    while offset < MAX_VOCABULARY_DICTIONARY_SCAN_ROWS {
+        let request = serde_json::to_vec(&json!({
+            "options": options,
+            "action": {
+                "operation": "list",
+                "offset": offset,
+                "limit": page_size,
+                "kind": kind,
+                "user_only": true,
+            },
+        }))
+        .map_err(|_| "invalid voice vocabulary request")?;
+        let page = crate::dictionary_request_json(&request)?;
+        let entries = page["entries"].as_array().cloned().unwrap_or_default();
+        let count = entries.len();
+        for entry in entries {
+            let (Some(value), Some(key)) = (entry["value"].as_str(), entry["key"].as_str()) else {
+                continue;
+            };
+            collected.push(
+                msime_client_providers::voice::vocabulary::DictionaryEntryInput {
+                    key: key.to_owned(),
+                    value: value.to_owned(),
+                    weight: entry["weight"].as_i64().unwrap_or(0),
+                },
+            );
+        }
+        if page["has_more"].as_bool() != Some(true) || count == 0 {
+            break;
+        }
+        offset = offset.saturating_add(count);
+    }
+    Ok(collected)
+}
+
+/// 无网络确定性语音后处理入口：执行空白与缩进规整、块边界结巴清理、纯语气词/幻觉拦截、
+/// 标点规整、双边界保守 ITN、个人词表与技术词大小写、Pangu 空格及句末句号策略。
+///
+/// 请求 JSON 上限 1 MiB，`text` 上限 10,000 个 Unicode 标量，`vocabulary` 至多 1,000 条。
+/// 响应 `value`：`{text, dismissed, dismissed_reason, changed}`。纯函数，不访问磁盘或网络。
+///
+/// # Safety
+/// `request` 必须指向本次调用期间可读的 `length` 个字节；空指针或超限会被拒绝。
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_voice_postprocess(
+    request: *const u8,
+    length: usize,
+) -> *mut c_char {
+    response(|| {
+        let input: msime_client_providers::voice::postprocess::PostprocessInput =
+            local_voice_request(request, length, LOCAL_VOICE_REQUEST_LIMIT)?;
+        if !is_bounded_chars_without_nul(&input.text, MAX_VOICE_CORRECTION_TEXT_CHARS)
+            || !is_bounded_text(&input.model_kind, 64)
+            || !valid_vocabulary_terms(&input.vocabulary)
+        {
+            return Err("invalid voice postprocess request".into());
+        }
+        let output = msime_client_providers::voice::postprocess::postprocess(&input);
+        serde_json::to_value(output).map_err(|error| error.to_string())
+    })
+}
+
+/// 聚合跨语种个人语音词表：只读合并用户词库（`pinyin`/`english`/`quick_phrase`）与
+/// `<preferences_directory>/voice-vocabulary.json`，并按需针对 `raw_text` 返回 Top-K 润色词表提示。
+/// 若传入 `cached_terms`，则直接基于内存词条执行纯内存 `prompt_hints` 筛选而不触碰磁盘或 SQLite。
+/// 单类词库读取失败（如词库维护租约忙）时该类降级为空集合，保留自定义词表与其他词库结果。
+///
+/// 请求 JSON 上限 1 MiB：`{options?: HostOptions, preferences_directory?: absolute_dir, cached_terms?: [...],
+/// limit?: 300, raw_text?: string, app_category?: string, prompt_limit?: 60}`。
+/// 响应 `value`：`{version, terms, prompt_hints?}`。涉及磁盘与词库读取时应在工作线程调用。
+///
+/// # Safety
+/// `request` 必须指向本次调用期间可读的 `length` 个字节；空指针或超限会被拒绝。
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_voice_vocabulary(
+    request: *const u8,
+    length: usize,
+) -> *mut c_char {
+    response(|| {
+        #[derive(Deserialize)]
+        struct VocabularyRequest {
+            #[serde(default)]
+            options: Option<Value>,
+            #[serde(default)]
+            preferences_directory: Option<String>,
+            #[serde(default)]
+            cached_terms: Option<Vec<msime_client_providers::voice::vocabulary::VocabularyTerm>>,
+            #[serde(default)]
+            limit: Option<usize>,
+            #[serde(default)]
+            raw_text: Option<String>,
+            #[serde(default)]
+            app_category: Option<msime_client_providers::voice::postprocess::AppCategory>,
+            #[serde(default)]
+            prompt_limit: Option<usize>,
+        }
+        let req: VocabularyRequest =
+            local_voice_request(request, length, HOST_OPTIONS_DOCUMENT_LIMIT)?;
+        if let Some(raw_text) = req.raw_text.as_deref() {
+            if !is_bounded_chars_without_nul(raw_text, MAX_VOICE_CORRECTION_TEXT_CHARS) {
+                return Err("invalid voice vocabulary request".into());
+            }
+        }
+        let vocabulary = if let Some(cached_terms) = req.cached_terms {
+            if !valid_vocabulary_terms(&cached_terms) {
+                return Err("invalid voice vocabulary request".into());
+            }
+            msime_client_providers::voice::vocabulary::VoiceVocabulary::new(cached_terms)
+        } else {
+            let pref_dir = req.preferences_directory.as_deref().or_else(|| {
+                req.options
+                    .as_ref()
+                    .and_then(|opts| opts.get("preferences_directory"))
+                    .and_then(Value::as_str)
+            });
+            let custom = if let Some(dir) = pref_dir.filter(|value| !value.is_empty()) {
+                let path = local_model_root(dir)
+                    .map_err(|_| "invalid voice vocabulary preferences directory".to_owned())?;
+                Some(msime_client_providers::voice::vocabulary::load_from_preferences_dir(path)?)
+            } else {
+                None
+            };
+            let (pinyin, english, quick_phrase) = match req.options.as_ref() {
+                Some(options) if options.is_object() => {
+                    // 单类词库读取失败（如词库维护租约忙或该类词库暂未就绪）时局部降级，不拖垮自定义词表与其他词库。
+                    let pinyin = collect_voice_vocabulary_dictionary_kind(options, "pinyin")
+                        .unwrap_or_default();
+                    let english = collect_voice_vocabulary_dictionary_kind(options, "english")
+                        .unwrap_or_default();
+                    let quick_phrase =
+                        collect_voice_vocabulary_dictionary_kind(options, "quick_phrase")
+                            .unwrap_or_default();
+                    (pinyin, english, quick_phrase)
+                }
+                Some(_) => return Err("invalid voice vocabulary request".into()),
+                None => (Vec::new(), Vec::new(), Vec::new()),
+            };
+            let limit = req
+                .limit
+                .unwrap_or(msime_client_providers::voice::vocabulary::DEFAULT_VOCABULARY_LIMIT)
+                .min(msime_client_providers::voice::vocabulary::MAX_VOCABULARY_LIMIT);
+            msime_client_providers::voice::vocabulary::build_vocabulary(
+                custom.as_ref(),
+                &pinyin,
+                &english,
+                &quick_phrase,
+                limit,
+            )
+        };
+        let mut value = json!({
+            "version": vocabulary.version,
+            "terms": vocabulary.terms,
+        });
+        if let Some(raw_text) = req.raw_text.as_deref() {
+            let prompt_limit = req
+                .prompt_limit
+                .unwrap_or(msime_client_providers::voice::vocabulary::DEFAULT_PROMPT_TERM_LIMIT)
+                .min(msime_client_providers::voice::vocabulary::MAX_PROMPT_TERM_LIMIT);
+            let hints = msime_client_providers::voice::vocabulary::select_prompt_terms(
+                raw_text,
+                req.app_category.unwrap_or_default(),
+                &vocabulary,
+                prompt_limit,
+            );
+            value["prompt_hints"] = json!(hints);
+        }
+        Ok(value)
+    })
+}
+
+/// 清洗并校验 LLM 润色/改写/翻译输出（剥离 `<think>`、解析 `<action>`、防助手元回复/膨胀/塌缩/繁体漂移）。
+///
+/// 请求 JSON 上限 1 MiB；响应 `value`：`{accepted, text, resolved_action, rejection_reason}`。
+/// `accepted` 为 `false` 时宿主应降级使用确定性后处理后的原文。纯函数，不访问磁盘或网络。
+///
+/// # Safety
+/// `request` 必须指向本次调用期间可读的 `length` 个字节；空指针或超限会被拒绝。
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_voice_polish_clean(
+    request: *const u8,
+    length: usize,
+) -> *mut c_char {
+    response(|| {
+        let input: msime_client_providers::voice::polish_clean::PolishCleanInput =
+            local_voice_request(request, length, LOCAL_VOICE_REQUEST_LIMIT)?;
+        if !is_bounded_chars_without_nul(&input.raw_text, MAX_VOICE_CORRECTION_TEXT_CHARS)
+            || !is_bounded_chars_without_nul(&input.polished_text, MAX_POLISH_CLEAN_OUTPUT_CHARS)
+            || !input.selected_text.as_deref().is_none_or(|sel| {
+                is_bounded_chars_without_nul(sel, MAX_VOICE_CORRECTION_TEXT_CHARS)
+            })
+            || !valid_vocabulary_terms(&input.vocabulary)
+        {
+            return Err("invalid voice polish clean request".into());
+        }
+        let output = msime_client_providers::voice::polish_clean::clean_polish_output(&input);
+        serde_json::to_value(output).map_err(|error| error.to_string())
+    })
+}
+
+/// 构造语音润色/改写/翻译的 Sans-IO OpenAI 兼容 HTTP 请求描述器。
+///
+/// 请求 JSON 上限 256 KiB；密码框下非本机回环端点（云端及局域网）返回错误 `polish_secure_field_blocked`，
+/// 本机回环端点自动清空上下文、选区与词表后放行；公网明文地址返回 `polish_invalid_endpoint`，
+/// 公网缺凭据返回 `polish_missing_token`。描述器可能含凭据，严禁写日志。
+///
+/// # Safety
+/// `request` 必须指向本次调用期间可读的 `length` 个字节；空指针或超限会被拒绝。
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_voice_polish_http_request(
+    request: *const u8,
+    length: usize,
+) -> *mut c_char {
+    response(|| {
+        if request.is_null() || length == 0 {
+            return Err("polish_empty_input".into());
+        }
+        if length > msime_client_providers::voice::polish::MAX_POLISH_REQUEST_BYTES {
+            return Err("polish_input_too_large".into());
+        }
+        // SAFETY: 非空指针与长度上限已在上文校验，满足调用方可读字节切片契约。
+        let bytes = unsafe { std::slice::from_raw_parts(request, length) };
+        let input: msime_client_providers::voice::polish::PolishHttpRequestInput =
+            serde_json::from_slice(bytes).map_err(|_| "invalid voice polish request".to_owned())?;
+        let descriptor = msime_client_providers::voice::polish::build_polish_http_request(&input)
+            .map_err(|error| error.code().to_owned())?;
+        serde_json::to_value(descriptor).map_err(|error| error.to_string())
+    })
+}
+
+/// 解析润色接口返回的非流式 JSON 响应体或 SSE 流式数据块。
+///
+/// 非流式响应上限 1 MiB，单次 SSE 载荷上限 64 KiB；响应 `value`：`{text, finish_reason, done}`。
+///
+/// # Safety
+/// `body` 必须非空且指向本次调用期间可读的 `length` 个字节；空指针或超限会被拒绝。
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_voice_polish_parse_response(
+    body: *const u8,
+    length: usize,
+    is_sse: bool,
+) -> *mut c_char {
+    response(|| {
+        if body.is_null() {
+            return Err("polish_invalid_response".into());
+        }
+        let max_bytes = if is_sse {
+            msime_client_providers::voice::polish::MAX_POLISH_SSE_CHUNK_BYTES
+        } else {
+            msime_client_providers::voice::polish::MAX_POLISH_RESPONSE_BYTES
+        };
+        if length > max_bytes {
+            return Err("polish_response_too_large".into());
+        }
+        // SAFETY: `body` 已校验非空且长度不越界，即使 `length == 0` 也满足切片构造前提。
+        let bytes = unsafe { std::slice::from_raw_parts(body, length) };
+        let parsed = msime_client_providers::voice::polish::parse_polish_response(bytes, is_sse)
+            .map_err(|error| error.code().to_owned())?;
+        serde_json::to_value(parsed).map_err(|error| error.to_string())
+    })
+}
+
+#[cfg(test)]
+mod wave2_voice_abi_tests {
+    use super::*;
+    use std::ffi::CStr;
+
+    fn take_json(ptr: *mut c_char) -> Value {
+        assert!(!ptr.is_null());
+        let text = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_owned();
+        unsafe { crate::msime_client_string_free(ptr) };
+        serde_json::from_str(&text).unwrap()
+    }
+
+    #[test]
+    fn postprocess_abi_handles_normal_dismiss_and_invalid_inputs() {
+        let null_resp = take_json(unsafe { msime_client_voice_postprocess(std::ptr::null(), 0) });
+        assert_eq!(null_resp["ok"], false);
+
+        let bad_utf8 = [0xffu8, 0xfeu8];
+        let bad_resp =
+            take_json(unsafe { msime_client_voice_postprocess(bad_utf8.as_ptr(), bad_utf8.len()) });
+        assert_eq!(bad_resp["ok"], false);
+
+        let filler_req = serde_json::to_vec(&json!({
+            "text": "嗯。",
+            "app_category": "im"
+        }))
+        .unwrap();
+        let filler_resp = take_json(unsafe {
+            msime_client_voice_postprocess(filler_req.as_ptr(), filler_req.len())
+        });
+        assert_eq!(filler_resp["ok"], true);
+        assert_eq!(filler_resp["value"]["dismissed"], true);
+        assert_eq!(filler_resp["value"]["dismissed_reason"], "filler_only");
+
+        let normal_req = serde_json::to_vec(&json!({
+            "text": "我在用shurufa测试OpenAPI接口。",
+            "app_category": "im",
+            "vocabulary": [{"canonical": "Shurufa", "aliases": ["shurufa"]}]
+        }))
+        .unwrap();
+        let normal_resp = take_json(unsafe {
+            msime_client_voice_postprocess(normal_req.as_ptr(), normal_req.len())
+        });
+        assert_eq!(normal_resp["ok"], true);
+        assert_eq!(normal_resp["value"]["dismissed"], false);
+        assert_eq!(
+            normal_resp["value"]["text"],
+            "我在用 Shurufa 测试 OpenAPI 接口"
+        );
+    }
+
+    #[test]
+    fn vocabulary_abi_loads_custom_file_degrades_unavailable_dict_and_supports_cached_terms() {
+        let null_resp = take_json(unsafe { msime_client_voice_vocabulary(std::ptr::null(), 0) });
+        assert_eq!(null_resp["ok"], false);
+
+        let rel_req = serde_json::to_vec(&json!({
+            "preferences_directory": "relative/dir"
+        }))
+        .unwrap();
+        let rel_resp =
+            take_json(unsafe { msime_client_voice_vocabulary(rel_req.as_ptr(), rel_req.len()) });
+        assert_eq!(rel_resp["ok"], false);
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("voice-vocabulary.json"),
+            serde_json::to_vec(&json!({
+                "version": 1,
+                "terms": [
+                    {"canonical": "Shurufa", "aliases": ["输入法测试词"], "weight": 500},
+                    {"canonical": "Kubernetes", "aliases": ["k8s"], "weight": 300}
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        // 即便 options 中的词库路径尚未初始化导致词库读取失败，仍须保留 voice-vocabulary.json。
+        let req = serde_json::to_vec(&json!({
+            "options": {"preferences_directory": dir.path().to_string_lossy()},
+            "preferences_directory": dir.path().to_string_lossy(),
+            "raw_text": "今天在 k8s 上部署输入法测试词",
+            "app_category": "terminal_ide",
+            "limit": 100,
+            "prompt_limit": 10
+        }))
+        .unwrap();
+        let resp = take_json(unsafe { msime_client_voice_vocabulary(req.as_ptr(), req.len()) });
+        assert_eq!(resp["ok"], true);
+        let terms = resp["value"]["terms"].as_array().unwrap();
+        assert_eq!(terms.len(), 2);
+        let hints = resp["value"]["prompt_hints"].as_array().unwrap();
+        assert!(hints.iter().any(|item| item == "Shurufa"));
+        assert!(hints.iter().any(|item| item == "Kubernetes"));
+
+        // `cached_terms` 零磁盘路径直接筛选 prompt_hints。
+        let cached_req = serde_json::to_vec(&json!({
+            "cached_terms": terms,
+            "raw_text": "部署 k8s 服务",
+            "app_category": "terminal_ide",
+            "prompt_limit": 5
+        }))
+        .unwrap();
+        let cached_resp = take_json(unsafe {
+            msime_client_voice_vocabulary(cached_req.as_ptr(), cached_req.len())
+        });
+        assert_eq!(cached_resp["ok"], true);
+        let cached_hints = cached_resp["value"]["prompt_hints"].as_array().unwrap();
+        assert!(cached_hints.iter().any(|item| item == "Kubernetes"));
+    }
+
+    #[test]
+    fn polish_clean_abi_strips_think_and_resolves_action() {
+        let null_resp = take_json(unsafe { msime_client_voice_polish_clean(std::ptr::null(), 0) });
+        assert_eq!(null_resp["ok"], false);
+
+        let rewrite_req = serde_json::to_vec(&json!({
+            "raw_text": "把这段改正式一点",
+            "polished_text": "<think>内部思考</think><action>rewrite</action>请确认上述接口变更方案是否满足发布要求，并在评审通过后同步排期。",
+            "selected_text": "看看这个接口改动行不行，没问题的话后面把排期也发一下",
+            "mode": "rewrite_selection",
+            "expect_action_tag": true,
+            "app_category": "mail"
+        }))
+        .unwrap();
+        let rewrite_resp = take_json(unsafe {
+            msime_client_voice_polish_clean(rewrite_req.as_ptr(), rewrite_req.len())
+        });
+        assert_eq!(rewrite_resp["ok"], true);
+        assert_eq!(rewrite_resp["value"]["accepted"], true);
+        assert_eq!(
+            rewrite_resp["value"]["resolved_action"],
+            "replace_selection"
+        );
+        assert_eq!(
+            rewrite_resp["value"]["text"],
+            "请确认上述接口变更方案是否满足发布要求，并在评审通过后同步排期。"
+        );
+
+        let unclosed_req = serde_json::to_vec(&json!({
+            "raw_text": "合成语音原文",
+            "polished_text": "<think>只输出了未闭合思考"
+        }))
+        .unwrap();
+        let unclosed_resp = take_json(unsafe {
+            msime_client_voice_polish_clean(unclosed_req.as_ptr(), unclosed_req.len())
+        });
+        assert_eq!(unclosed_resp["ok"], true);
+        assert_eq!(unclosed_resp["value"]["accepted"], false);
+        assert_eq!(unclosed_resp["value"]["rejection_reason"], "unclosed_think");
+    }
+
+    #[test]
+    fn polish_http_request_and_parse_response_abi_enforce_gates_and_bounds() {
+        let null_req =
+            take_json(unsafe { msime_client_voice_polish_http_request(std::ptr::null(), 0) });
+        assert_eq!(null_req["ok"], false);
+        assert_eq!(null_req["error"], "polish_empty_input");
+
+        let oversized_len = msime_client_providers::voice::polish::MAX_POLISH_REQUEST_BYTES + 1;
+        let dummy = b"{}";
+        let too_large = take_json(unsafe {
+            msime_client_voice_polish_http_request(dummy.as_ptr(), oversized_len)
+        });
+        assert_eq!(too_large["ok"], false);
+        assert_eq!(too_large["error"], "polish_input_too_large");
+
+        // 密码框在云端与局域网端点必须拒绝外发（polish_secure_field_blocked）。
+        let secure_cloud_req = serde_json::to_vec(&json!({
+            "provider": "openai",
+            "endpoint": "https://api.openai.com/v1/chat/completions",
+            "model": "gpt-4o-mini",
+            "token": "synthetic-key",
+            "raw_text": "合成敏感测试",
+            "context": {"is_secure_field": true}
+        }))
+        .unwrap();
+        let secure_cloud_resp = take_json(unsafe {
+            msime_client_voice_polish_http_request(
+                secure_cloud_req.as_ptr(),
+                secure_cloud_req.len(),
+            )
+        });
+        assert_eq!(secure_cloud_resp["ok"], false);
+        assert_eq!(secure_cloud_resp["error"], "polish_secure_field_blocked");
+
+        let secure_lan_req = serde_json::to_vec(&json!({
+            "provider": "custom",
+            "endpoint": "http://192.168.1.50:11434/v1/chat/completions",
+            "model": "qwen3.5:9b",
+            "raw_text": "合成敏感测试",
+            "context": {"is_secure_field": true}
+        }))
+        .unwrap();
+        let secure_lan_resp = take_json(unsafe {
+            msime_client_voice_polish_http_request(secure_lan_req.as_ptr(), secure_lan_req.len())
+        });
+        assert_eq!(secure_lan_resp["ok"], false);
+        assert_eq!(secure_lan_resp["error"], "polish_secure_field_blocked");
+
+        // 本机回环端点在密码框下允许离线整理，但必须剥离所有窗口标题、前文、选区与词表。
+        let secure_loopback_req = serde_json::to_vec(&json!({
+            "provider": "local",
+            "endpoint": "http://127.0.0.1:18080/v1/chat/completions",
+            "model": "local",
+            "raw_text": "合成密码框本地整理",
+            "vocabulary_hints": ["SyntheticVocabSecret"],
+            "context": {
+                "is_secure_field": true,
+                "app_bundle_id": "com.tencent.xinWeChat",
+                "window_title": "SyntheticLoginTitle",
+                "preceding_text": "SyntheticPrecedingSecret",
+                "selected_text": "SyntheticSelectedSecret"
+            }
+        }))
+        .unwrap();
+        let secure_loopback_resp = take_json(unsafe {
+            msime_client_voice_polish_http_request(
+                secure_loopback_req.as_ptr(),
+                secure_loopback_req.len(),
+            )
+        });
+        assert_eq!(secure_loopback_resp["ok"], true);
+        assert_eq!(secure_loopback_resp["value"]["app_category"], "general");
+        let loopback_body = secure_loopback_resp["value"]["body"].as_str().unwrap();
+        assert!(!loopback_body.contains("SyntheticLoginTitle"));
+        assert!(!loopback_body.contains("SyntheticPrecedingSecret"));
+        assert!(!loopback_body.contains("SyntheticSelectedSecret"));
+        assert!(!loopback_body.contains("SyntheticVocabSecret"));
+
+        let ok_req = serde_json::to_vec(&json!({
+            "provider": "local",
+            "endpoint": "http://127.0.0.1:18080/v1/chat/completions",
+            "model": "local",
+            "raw_text": "嗯今天下午三点开会",
+            "context": {"app_bundle_id": "com.tencent.xinWeChat", "app_name": "WeChat"}
+        }))
+        .unwrap();
+        let ok_resp = take_json(unsafe {
+            msime_client_voice_polish_http_request(ok_req.as_ptr(), ok_req.len())
+        });
+        assert_eq!(ok_resp["ok"], true);
+        assert_eq!(ok_resp["value"]["no_proxy"], true);
+        assert_eq!(ok_resp["value"]["resolved_mode"], "dictation");
+        assert_eq!(ok_resp["value"]["app_category"], "im");
+
+        // 响应解析（非流式、SSE 与边界）。
+        let null_parse = take_json(unsafe {
+            msime_client_voice_polish_parse_response(std::ptr::null(), 0, false)
+        });
+        assert_eq!(null_parse["ok"], false);
+        assert_eq!(null_parse["error"], "polish_invalid_response");
+
+        let sse_oversized = take_json(unsafe {
+            msime_client_voice_polish_parse_response(
+                dummy.as_ptr(),
+                msime_client_providers::voice::polish::MAX_POLISH_SSE_CHUNK_BYTES + 1,
+                true,
+            )
+        });
+        assert_eq!(sse_oversized["ok"], false);
+        assert_eq!(sse_oversized["error"], "polish_response_too_large");
+
+        let non_stream =
+            r#"{"choices":[{"message":{"content":"今天下午三点开会"},"finish_reason":"stop"}]}"#
+                .as_bytes();
+        let parsed = take_json(unsafe {
+            msime_client_voice_polish_parse_response(non_stream.as_ptr(), non_stream.len(), false)
+        });
+        assert_eq!(parsed["ok"], true);
+        assert_eq!(parsed["value"]["text"], "今天下午三点开会");
+        assert_eq!(parsed["value"]["done"], true);
+
+        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"合成\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n".as_bytes();
+        let sse_parsed = take_json(unsafe {
+            msime_client_voice_polish_parse_response(sse.as_ptr(), sse.len(), true)
+        });
+        assert_eq!(sse_parsed["ok"], true);
+        assert_eq!(sse_parsed["value"]["text"], "合成");
+        assert_eq!(sse_parsed["value"]["done"], true);
+    }
+}

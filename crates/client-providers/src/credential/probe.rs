@@ -52,7 +52,7 @@ impl ProbeTransport for ChatProbeTransport {
             .timeout(Duration::from_secs(15))
             .build()
             .map_err(|_| ProbeFailure::Connection)?;
-        // 空 Token 是不鉴权的服务（Ollama），不带 Authorization。
+        // 空 Token 对应免鉴权服务（Ollama、本机或局域网自建接口），不带 Authorization。
         let request = client.post(endpoint);
         let request = if token.is_empty() {
             request
@@ -122,12 +122,24 @@ pub fn test_chat(service: &str, config: &Value, transport: &impl ProbeTransport)
         return result(false, "此配置测试类型尚未接入。");
     }
     let value = |key| config.get(key).and_then(Value::as_str).unwrap_or("").trim();
-    // Ollama 不鉴权（`ai::provider_uses_token`）：不看也不发 Token。
-    let uses_token = service != "ai.assistant" || crate::ai::provider_uses_token(value("provider"));
-    let token = if uses_token { value("token") } else { "" };
+    let provider = value("provider");
     let endpoint = value("endpoint");
     let model = value("model");
-    if uses_token && !crate::credential::usable_token(token) {
+    // Ollama 不鉴权：始终剥离旧 Token；语音润色对 `local`、`ollama` 及本机/私网/Tailscale 端点免填 Token，
+    // 但若本机/私网自定义端点显式填写了 Token，仍校验并携带 Authorization。
+    let (requires_token, strip_token) = match service {
+        "ai.assistant" => {
+            let uses = crate::ai::provider_uses_token(provider);
+            (uses, !uses)
+        }
+        "voice.polish" => (
+            crate::voice::provider_settings::polish_requires_token(provider, endpoint),
+            provider.eq_ignore_ascii_case("ollama"),
+        ),
+        _ => unreachable!(),
+    };
+    let token = if strip_token { "" } else { value("token") };
+    if (requires_token || !token.is_empty()) && !crate::credential::usable_token(token) {
         return result(false, "请先填写有效的 API Key。");
     }
     if !crate::ai::endpoint::is_allowed(endpoint)
@@ -142,7 +154,7 @@ pub fn test_chat(service: &str, config: &Value, transport: &impl ProbeTransport)
     // 给强制思考模型留出生成正文的预算；这是上限，不要求生成 512 个 token。
     let mut body = json!({"model": model, "stream": false, "max_tokens": 512,
         "messages": [{"role": "user", "content": "Reply OK"}]});
-    match value("provider") {
+    match provider {
         "deepseek" => body["thinking"] = json!({"type": "disabled"}),
         "siliconflow" => body["enable_thinking"] = json!(false),
         _ => {}
@@ -176,7 +188,7 @@ pub fn test_chat(service: &str, config: &Value, transport: &impl ProbeTransport)
         body["reasoning_effort"] = json!("low");
     }
     match transport.post(endpoint, token, &body) {
-        Ok(200..=299) if !uses_token => result(true, "连接成功，模型配置有效。"),
+        Ok(200..=299) if token.is_empty() => result(true, "连接成功，模型配置有效。"),
         Ok(200..=299) => result(true, "连接成功，API Key 和模型配置有效。"),
         Ok(status) => ProbeResult {
             ok: false,
@@ -290,15 +302,85 @@ mod tests {
         request["endpoint"] = json!("http://localhost:11434/v1/chat/completions");
         let tested = test_chat("ai.assistant", &request, &transport);
         assert!(tested.ok);
+        assert_eq!(tested.message, "连接成功，模型配置有效。");
         request["token"] = json!("");
         assert!(test_chat("ai.assistant", &request, &transport).ok);
-        // 即使请求里带着旧 Token 也不发；语音润色没有不鉴权的服务。
-        assert_eq!(*transport.0.borrow(), ["", ""]);
-        assert!(!test_chat("voice.polish", &request, &transport).ok);
+        // 语音润色接入本机 Ollama 时同样免鉴权，即使请求里残存旧 Token 也不发。
+        request["token"] = json!("synthetic-stale-key");
+        let polish_ollama = test_chat("voice.polish", &request, &transport);
+        assert!(polish_ollama.ok);
+        assert_eq!(polish_ollama.message, "连接成功，模型配置有效。");
+        request["token"] = json!("");
+        assert!(test_chat("voice.polish", &request, &transport).ok);
+        assert_eq!(*transport.0.borrow(), ["", "", "", ""]);
+        // 公网明文地址仍被端点安全策略拦截，不触发任何网络探测。
         request["endpoint"] = json!("http://8.8.8.8/v1/chat/completions");
         assert!(!test_chat("ai.assistant", &request, &transport).ok);
-        assert_eq!(transport.0.borrow().len(), 2);
+        assert!(!test_chat("voice.polish", &request, &transport).ok);
+        assert_eq!(transport.0.borrow().len(), 4);
     }
+
+    #[test]
+    fn voice_polish_local_and_lan_endpoints_allow_tokenless_probe() {
+        struct Recording(RefCell<Vec<String>>);
+        impl ProbeTransport for Recording {
+            fn post(&self, _: &str, token: &str, _: &Value) -> Result<u16, ProbeFailure> {
+                self.0.borrow_mut().push(token.into());
+                Ok(200)
+            }
+        }
+        let transport = Recording(RefCell::default());
+
+        // 本机托管 `local` 无 Token 可探测；显式带合法 Token 时透传。
+        let local_no_token = json!({
+            "provider": "local",
+            "endpoint": "http://127.0.0.1:18080/v1/chat/completions",
+            "model": "local",
+            "token": ""
+        });
+        let res = test_chat("voice.polish", &local_no_token, &transport);
+        assert!(res.ok);
+        assert_eq!(res.message, "连接成功，模型配置有效。");
+
+        // 局域网/Tailscale 自定义端点免填 Token；若含非法控制字符 Token 仍须拒绝。
+        let lan_no_token = json!({
+            "provider": "custom",
+            "endpoint": "http://192.168.1.25:11434/v1/chat/completions",
+            "model": "qwen3.5:9b",
+            "token": ""
+        });
+        assert!(test_chat("voice.polish", &lan_no_token, &transport).ok);
+
+        let lan_with_token = json!({
+            "provider": "custom",
+            "endpoint": "http://100.64.0.10:8080/v1/chat/completions",
+            "model": "qwen3.5:9b",
+            "token": "synthetic-lan-key"
+        });
+        let res = test_chat("voice.polish", &lan_with_token, &transport);
+        assert!(res.ok);
+        assert_eq!(res.message, "连接成功，API Key 和模型配置有效。");
+
+        let lan_bad_token = json!({
+            "provider": "custom",
+            "endpoint": "http://127.0.0.1:8080/v1/chat/completions",
+            "model": "local",
+            "token": "bad\r\ntoken"
+        });
+        assert!(!test_chat("voice.polish", &lan_bad_token, &transport).ok);
+
+        // 公网 HTTPS 自定义端点缺 Token 必须拒绝。
+        let public_no_token = json!({
+            "provider": "custom",
+            "endpoint": "https://api.example.invalid/v1/chat/completions",
+            "model": "fixture-model",
+            "token": ""
+        });
+        assert!(!test_chat("voice.polish", &public_no_token, &transport).ok);
+
+        assert_eq!(*transport.0.borrow(), ["", "", "synthetic-lan-key"]);
+    }
+
     #[test]
     fn credential_chat_endpoint_policy_matches_the_shared_contract() {
         struct Recording(RefCell<Vec<String>>);

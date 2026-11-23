@@ -36,6 +36,14 @@ const FLUSH_SAMPLES: usize = SAMPLE_RATE as usize / 2;
 /// 单块密文的上限，读到更大的长度就当作文件损坏，不按它分配内存。
 const MAX_CHUNK_BYTES: usize = FLUSH_SAMPLES * 2 * 8 + TAG_BYTES;
 const MAX_RECORD_BYTES: u64 = 16 * 1024 * 1024;
+/// 单条文本（识别结果或原始分段）允许的最大字节数（1 MiB）。
+pub const MAX_TEXT_BYTES: usize = 1024 * 1024;
+/// 常规元数据标签（模式、场景、润色服务商、提示词模板 ID）允许的最大字节数。
+pub const MAX_METADATA_TAG_BYTES: usize = 128;
+/// 润色模型名称允许的最大字节数（与 `voice::provider` 的 512 字节模型名契约一致）。
+pub const MAX_MODEL_NAME_BYTES: usize = 512;
+/// 润色拒收或静音丢弃原因允许的最大字节数。
+pub const MAX_REASON_BYTES: usize = 128;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ArchiveError {
@@ -47,10 +55,12 @@ pub enum ArchiveError {
     Corrupt,
     #[error("system random source unavailable")]
     Random,
+    #[error("invalid voice archive metadata")]
+    InvalidMetadata,
 }
 
 /// 一次录音的听写记录。识别结果按到达顺序追加在 `segments` 里：持续录音一次能投递好几段。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Record {
     pub id: String,
     pub started_at_ms: u64,
@@ -72,6 +82,95 @@ pub struct Record {
     /// 从存档重新听写的最近一次结果。
     #[serde(default)]
     pub retranscription: Option<String>,
+    /// 润色或后处理前的原始识别文本分段（按到达顺序追加）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub raw_segments: Vec<String>,
+    /// 本次识别或润色模式（如 `dictation`、`rewrite_selection`、`translate`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// 前台应用分类（如 `im`、`terminal_ide`、`ai_chat`、`browser_doc`、`mail`、`general`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_category: Option<String>,
+    /// 实际使用的润色服务商标识。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polish_provider: Option<String>,
+    /// 实际使用的润色模型名称。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polish_model: Option<String>,
+    /// 使用的润色提示词模板 ID。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polish_prompt_id: Option<String>,
+    /// 润色是否失败或被校验拒收并降级。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polish_failed: Option<bool>,
+    /// 润色失败或拒收的原因码。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polish_rejected_reason: Option<String>,
+    /// 语音识别阶段耗时（毫秒）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asr_ms: Option<u64>,
+    /// 润色阶段耗时（毫秒）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polish_ms: Option<u64>,
+    /// 静音、误触或幻觉过滤拦截导致丢弃的原因码。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dismissed_reason: Option<String>,
+}
+
+/// 追加识别文本时附带的可选元数据；未提供的字段保持记录原值不变。
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct TextNoteMetadata {
+    pub raw_text: Option<String>,
+    pub mode: Option<String>,
+    pub app_category: Option<String>,
+    pub polish_provider: Option<String>,
+    pub polish_model: Option<String>,
+    pub polish_prompt_id: Option<String>,
+    pub polish_failed: Option<bool>,
+    pub polish_rejected_reason: Option<String>,
+    pub asr_ms: Option<u64>,
+    pub polish_ms: Option<u64>,
+}
+
+impl TextNoteMetadata {
+    /// 是否所有可选字段均未提供（空字符串标签视作未提供）。
+    pub fn is_empty(&self) -> bool {
+        self.raw_text.as_deref().is_none_or(str::is_empty)
+            && self.mode.as_deref().is_none_or(str::is_empty)
+            && self.app_category.as_deref().is_none_or(str::is_empty)
+            && self.polish_provider.as_deref().is_none_or(str::is_empty)
+            && self.polish_model.as_deref().is_none_or(str::is_empty)
+            && self.polish_prompt_id.as_deref().is_none_or(str::is_empty)
+            && self.polish_failed.is_none()
+            && self
+                .polish_rejected_reason
+                .as_deref()
+                .is_none_or(str::is_empty)
+            && self.asr_ms.is_none()
+            && self.polish_ms.is_none()
+    }
+
+    /// 校验全部字段的字节长度与字符边界。
+    pub fn validate(&self) -> Result<(), ArchiveError> {
+        if self
+            .raw_text
+            .as_deref()
+            .is_some_and(|value| value.len() > MAX_TEXT_BYTES)
+        {
+            return Err(ArchiveError::InvalidMetadata);
+        }
+        for tag in [
+            self.mode.as_deref(),
+            self.app_category.as_deref(),
+            self.polish_provider.as_deref(),
+            self.polish_prompt_id.as_deref(),
+        ] {
+            validate_optional_tag(tag, MAX_METADATA_TAG_BYTES)?;
+        }
+        validate_optional_tag(self.polish_model.as_deref(), MAX_MODEL_NAME_BYTES)?;
+        validate_optional_tag(self.polish_rejected_reason.as_deref(), MAX_REASON_BYTES)?;
+        Ok(())
+    }
 }
 
 /// 记录在列表里显示的状态，由记录本身和它是不是正在录的那一条推出。
@@ -154,14 +253,9 @@ impl Archive {
         let record = Record {
             id: id.clone(),
             started_at_ms: now_ms,
-            capture_ended_at_ms: None,
-            audio_ms: 0,
             app: app.to_owned(),
             provider: provider.to_owned(),
-            segments: Vec::new(),
-            failure: None,
-            cancelled: false,
-            retranscription: None,
+            ..Record::default()
         };
         self.write_record(&record)?;
         let mut file = create_private_file(&self.path(&id, "audio"))?;
@@ -200,6 +294,67 @@ impl Archive {
         change(&mut record);
         self.write_record(&record)?;
         Ok(record)
+    }
+
+    /// 追加一段识别文本，并按需记录原始转写、模式、场景、润色结果与耗时等元数据。
+    /// 当 `text` 与 `metadata` 均为空时不改写磁盘，仅校验记录存在并返回当前记录。
+    pub fn note_text_with_metadata(
+        &self,
+        id: &str,
+        text: &str,
+        metadata: TextNoteMetadata,
+    ) -> Result<Record, ArchiveError> {
+        if text.len() > MAX_TEXT_BYTES {
+            return Err(ArchiveError::InvalidMetadata);
+        }
+        metadata.validate()?;
+        if text.is_empty() && metadata.is_empty() {
+            return self.record(id);
+        }
+        let text = text.to_owned();
+        self.update(id, move |record| {
+            if !text.is_empty() {
+                record.segments.push(text);
+            }
+            if let Some(raw_text) = metadata.raw_text.filter(|value| !value.is_empty()) {
+                record.raw_segments.push(raw_text);
+            }
+            apply_optional_non_empty(&mut record.mode, metadata.mode);
+            apply_optional_non_empty(&mut record.app_category, metadata.app_category);
+            apply_optional_non_empty(&mut record.polish_provider, metadata.polish_provider);
+            apply_optional_non_empty(&mut record.polish_model, metadata.polish_model);
+            apply_optional_non_empty(&mut record.polish_prompt_id, metadata.polish_prompt_id);
+            if let Some(failed) = metadata.polish_failed {
+                record.polish_failed = Some(failed);
+                if !failed
+                    && metadata
+                        .polish_rejected_reason
+                        .as_deref()
+                        .is_none_or(str::is_empty)
+                {
+                    record.polish_rejected_reason = None;
+                }
+            }
+            apply_optional_non_empty(
+                &mut record.polish_rejected_reason,
+                metadata.polish_rejected_reason,
+            );
+            if let Some(asr_ms) = metadata.asr_ms {
+                record.asr_ms = Some(asr_ms);
+            }
+            if let Some(polish_ms) = metadata.polish_ms {
+                record.polish_ms = Some(polish_ms);
+            }
+        })
+    }
+
+    /// 记录静音、误触或幻觉过滤导致的丢弃原因；保持现有 `Status` 枚举取值不变。
+    pub fn note_dismissed(&self, id: &str, reason: &str) -> Result<Record, ArchiveError> {
+        validate_dismissed_reason(reason)?;
+        let reason = reason.to_owned();
+        self.update(id, move |record| {
+            record.dismissed_reason = Some(reason);
+        })
     }
 
     pub fn list(&self) -> Result<Listing, ArchiveError> {
@@ -469,6 +624,34 @@ pub fn validate_id(id: &str) -> Result<(), ArchiveError> {
         Ok(())
     } else {
         Err(ArchiveError::InvalidId)
+    }
+}
+
+/// 校验丢弃原因：去空白后非空、不超过 [`MAX_REASON_BYTES`] 字节且不含 ASCII 控制字符。
+pub fn validate_dismissed_reason(reason: &str) -> Result<(), ArchiveError> {
+    if reason.trim().is_empty() || reason.len() > MAX_REASON_BYTES || has_ascii_control(reason) {
+        return Err(ArchiveError::InvalidMetadata);
+    }
+    Ok(())
+}
+
+fn has_ascii_control(value: &str) -> bool {
+    value.bytes().any(|byte| byte < 0x20 || byte == 0x7f)
+}
+
+fn validate_optional_tag(value: Option<&str>, max_bytes: usize) -> Result<(), ArchiveError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if value.len() > max_bytes || has_ascii_control(value) {
+        return Err(ArchiveError::InvalidMetadata);
+    }
+    Ok(())
+}
+
+fn apply_optional_non_empty(slot: &mut Option<String>, value: Option<String>) {
+    if let Some(value) = value.filter(|text| !text.is_empty()) {
+        *slot = Some(value);
     }
 }
 

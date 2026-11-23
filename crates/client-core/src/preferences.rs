@@ -2070,6 +2070,18 @@ pub struct VoiceInputPreferences {
     /// 听写记录的保留天数，0 表示不限期（出厂值），否则取值 1..=[`MAX_HISTORY_RETENTION_DAYS`]。记录过期时连同它的音频一起删。
     #[serde(default)]
     pub history_retention_days: u32,
+    /// 本机托管润色 GGUF 模型显式路径；空串表示按默认目录自动发现。
+    #[serde(default)]
+    pub polish_local_model_path: String,
+    /// 本机托管翻译 GGUF 模型显式路径（如 Hy-MT）；空串表示由通用润色模型承担翻译。
+    #[serde(default)]
+    pub polish_translation_model_path: String,
+    /// 是否在自动模式下允许结合选中文本触发口头改写；非 Shurufa 版本出厂关闭。
+    #[serde(default)]
+    pub polish_enable_selection_rewrite: bool,
+    /// 是否在录音启动瞬间采集脱敏前台上下文供润色与排版路由；非 Shurufa 版本出厂关闭。
+    #[serde(default)]
+    pub polish_context_aware: bool,
 }
 
 /// 录音音频可选的保留小时数：24 小时、三天。
@@ -2141,6 +2153,10 @@ impl Default for VoiceInputPreferences {
             doubao_boosting_table_id: String::new(),
             recording_retention_hours: default_recording_retention_hours(),
             history_retention_days: 0,
+            polish_local_model_path: String::new(),
+            polish_translation_model_path: String::new(),
+            polish_enable_selection_rewrite: false,
+            polish_context_aware: false,
         }
     }
 }
@@ -4371,7 +4387,7 @@ pub const AI_PROVIDERS: [&str; 15] = [
 ];
 /// Polishing additionally supports DeepSeek, which offers no recognition, and
 /// accepts doubao plus legacy ids the catalog resolves without listing.
-pub const POLISH_PROVIDERS: [&str; 12] = [
+pub const POLISH_PROVIDERS: [&str; 14] = [
     "siliconflow",
     "openai",
     "deepseek",
@@ -4383,6 +4399,8 @@ pub const POLISH_PROVIDERS: [&str; 12] = [
     "qwen",
     "volcengine",
     "openrouter",
+    "local",
+    "ollama",
     "custom",
 ];
 
@@ -4448,10 +4466,12 @@ impl Preferences {
             preferences.voice_input.hotkey_ralt = false;
             preferences.voice_input.hotkey_ctrl_win = false;
             preferences.voice_input.hotkey_rctrl_ralt = false;
-            // 本机 TextStream 流式识别；整理默认开，宿主仍要求有整理服务的凭据才会发请求。
+            // 本机 TextStream 流式识别；整理默认开，云端仍要求凭据，本机/局域网端点免 Token。
             preferences.voice_input.asr_provider = "textstream".into();
             preferences.voice_input.polish_enabled = true;
             preferences.voice_input.polish_text = true;
+            preferences.voice_input.polish_context_aware = true;
+            preferences.voice_input.polish_enable_selection_rewrite = true;
         }
         preferences
     }
@@ -4491,6 +4511,9 @@ impl Preferences {
         next.voice_input.polish_tokens = self.voice_input.polish_tokens.clone();
         next.voice_input.polish_endpoint = self.voice_input.polish_endpoint.clone();
         next.voice_input.polish_model = self.voice_input.polish_model.clone();
+        next.voice_input.polish_local_model_path = self.voice_input.polish_local_model_path.clone();
+        next.voice_input.polish_translation_model_path =
+            self.voice_input.polish_translation_model_path.clone();
 
         next.ai_assistant.provider = self.ai_assistant.provider.clone();
         next.ai_assistant.model = self.ai_assistant.model.clone();
@@ -4730,6 +4753,8 @@ impl Preferences {
                 .is_some_and(|key| !key.valid() || key.conflicts_with(&self.keybindings, edition))
             || !POLISH_PROVIDERS.contains(&self.voice_input.polish_provider.as_str())
             || !valid_model_path(&self.voice_input.asr_model_path)
+            || !valid_model_path(&self.voice_input.polish_local_model_path)
+            || !valid_model_path(&self.voice_input.polish_translation_model_path)
             || !valid_model_mirror(&self.voice_input.asr_model_mirror)
             || !RECORDING_RETENTION_HOURS.contains(&self.voice_input.recording_retention_hours)
             || self.voice_input.history_retention_days > MAX_HISTORY_RETENTION_DAYS
@@ -5250,12 +5275,28 @@ impl PreferencesStore {
             return Err(PreferencesError::UnsupportedFormat);
         }
         // 缺键沿用独立版默认值，明确存下的 true/false 都保持原样。
-        if self.edition().id == "shurufa"
-            && document
+        if self.edition().id == "shurufa" {
+            if document
                 .pointer("/preferences/quanpin_helpcode/enabled")
                 .is_none()
-        {
-            snapshot.preferences.quanpin_helpcode.enabled = false;
+            {
+                snapshot.preferences.quanpin_helpcode.enabled = false;
+            }
+            if document
+                .pointer("/preferences/voice_input/polish_context_aware")
+                .is_none()
+            {
+                snapshot.preferences.voice_input.polish_context_aware = true;
+            }
+            if document
+                .pointer("/preferences/voice_input/polish_enable_selection_rewrite")
+                .is_none()
+            {
+                snapshot
+                    .preferences
+                    .voice_input
+                    .polish_enable_selection_rewrite = true;
+            }
         }
         snapshot.preferences.validate_for_edition(self.edition())?;
         snapshot

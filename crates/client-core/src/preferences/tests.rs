@@ -8472,3 +8472,118 @@ fn voice_archive_retention_defaults_and_validation() {
     preferences.voice_input.history_retention_days = MAX_HISTORY_RETENTION_DAYS + 1;
     assert!(preferences.validate().is_err());
 }
+
+/// 本地语音润色扩展字段：非 Shurufa 版本保持出厂关闭，仅 Shurufa 默认开启上下文感知与选区改写；
+/// `local`/`ollama` 润色服务与绝对模型路径通过校验并在恢复默认设置时保留模型路径。
+#[test]
+fn local_voice_polish_fields_freeze_non_shurufa_defaults_and_validate() {
+    let full = Preferences::default();
+    assert!(full.voice_input.polish_local_model_path.is_empty());
+    assert!(full.voice_input.polish_translation_model_path.is_empty());
+    assert!(!full.voice_input.polish_enable_selection_rewrite);
+    assert!(!full.voice_input.polish_context_aware);
+
+    let legacy: VoiceInputPreferences = serde_json::from_value(serde_json::json!({})).unwrap();
+    assert!(legacy.polish_local_model_path.is_empty());
+    assert!(legacy.polish_translation_model_path.is_empty());
+    assert!(!legacy.polish_enable_selection_rewrite);
+    assert!(!legacy.polish_context_aware);
+
+    let shurufa_edition = crate::edition::Edition::by_id("shurufa").unwrap();
+    let shurufa = Preferences::for_edition(shurufa_edition);
+    assert!(shurufa.voice_input.polish_context_aware);
+    assert!(shurufa.voice_input.polish_enable_selection_rewrite);
+    assert!(shurufa.voice_input.polish_local_model_path.is_empty());
+    assert!(shurufa.voice_input.polish_translation_model_path.is_empty());
+    assert!(shurufa.validate_for_edition(shurufa_edition).is_ok());
+
+    let mut configured = Preferences::default();
+    for provider in ["local", "ollama"] {
+        configured.voice_input.polish_provider = provider.into();
+        assert!(configured.validate().is_ok(), "{provider}");
+    }
+    configured.voice_input.polish_local_model_path = "/synthetic/models/qwen-local.gguf".into();
+    configured.voice_input.polish_translation_model_path =
+        "/synthetic/models/hy-mt-local.gguf".into();
+    assert!(configured.validate().is_ok());
+
+    let restored = configured.restored_to_defaults_for(shurufa_edition);
+    assert_eq!(
+        restored.voice_input.polish_local_model_path,
+        "/synthetic/models/qwen-local.gguf"
+    );
+    assert_eq!(
+        restored.voice_input.polish_translation_model_path,
+        "/synthetic/models/hy-mt-local.gguf"
+    );
+
+    let mut invalid_local = configured.clone();
+    invalid_local.voice_input.polish_local_model_path = "relative/model.gguf".into();
+    assert!(matches!(
+        invalid_local.validate(),
+        Err(PreferencesError::InvalidVoiceInput)
+    ));
+
+    let mut invalid_translation = configured;
+    invalid_translation
+        .voice_input
+        .polish_translation_model_path = "/synthetic/models/bad\nname.gguf".into();
+    assert!(matches!(
+        invalid_translation.validate(),
+        Err(PreferencesError::InvalidVoiceInput)
+    ));
+}
+
+/// 存量 Shurufa 用户的旧 `preferences.json` 缺少 `polish_context_aware` / `polish_enable_selection_rewrite` 时，
+/// 读取阶段应回填为 `true`；显式保存的 `false` 必须原样保留，非 Shurufa 版本缺键仍为 `false`。
+#[test]
+fn shurufa_missing_local_voice_polish_flags_backfill_without_overwriting_explicit_values() {
+    for edition_id in ["shurufa", "full"] {
+        let edition = crate::edition::Edition::by_id(edition_id).unwrap();
+        for supplied in [None, Some(false), Some(true)] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut document = serde_json::json!({
+                "format_version": 1,
+                "revision": 1,
+                "preferences": Preferences::for_edition(edition),
+            });
+            let voice = document["preferences"]["voice_input"]
+                .as_object_mut()
+                .unwrap();
+            match supplied {
+                Some(flag) => {
+                    voice.insert("polish_context_aware".into(), serde_json::json!(flag));
+                    voice.insert(
+                        "polish_enable_selection_rewrite".into(),
+                        serde_json::json!(flag),
+                    );
+                }
+                None => {
+                    voice.remove("polish_context_aware");
+                    voice.remove("polish_enable_selection_rewrite");
+                }
+            }
+            fs::write(
+                directory.path().join("preferences.json"),
+                serde_json::to_vec(&document).unwrap(),
+            )
+            .unwrap();
+            let loaded = PreferencesStore::for_edition(directory.path(), edition)
+                .load()
+                .unwrap();
+            let expected = supplied.unwrap_or(edition_id == "shurufa");
+            assert_eq!(
+                loaded.preferences.voice_input.polish_context_aware, expected,
+                "{edition_id} context_aware: {supplied:?}"
+            );
+            assert_eq!(
+                loaded
+                    .preferences
+                    .voice_input
+                    .polish_enable_selection_rewrite,
+                expected,
+                "{edition_id} selection_rewrite: {supplied:?}"
+            );
+        }
+    }
+}

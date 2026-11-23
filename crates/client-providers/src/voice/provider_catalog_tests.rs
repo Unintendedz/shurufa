@@ -37,6 +37,8 @@ fn voice_catalog_preserves_settings_order_and_uses_runtime_defaults() {
             "qwen",
             "volcengine",
             "openrouter",
+            "local",
+            "ollama",
             "custom"
         ]
     );
@@ -49,8 +51,8 @@ fn voice_catalog_preserves_settings_order_and_uses_runtime_defaults() {
             assert!(ids.insert(preset.id), "duplicate {}", preset.id);
             assert!(!preset.title.is_empty());
             assert_eq!(defaults(preset.id), Some((preset.endpoint, preset.model)));
-            // 自定义服务没有预设地址和接入文档，全部由用户填写。
-            if preset.id != "custom" {
+            // 自定义服务与 Shurufa 托管的本机模型没有外部接入文档链接。
+            if !matches!(preset.id, "custom" | "local") {
                 assert!(preset.documentation.starts_with("https://"));
             }
             assert!(preset.model.is_empty() || preset.models.contains(&preset.model));
@@ -96,7 +98,7 @@ fn new_asr_presets_match_the_reference_endpoints() {
 
 /// 新增润色服务的端点与模型取自 Windows v0.11.1 `DefaultPolishEndpoint` /
 /// `DefaultPolishModel`（同上文件）；kimi/qwen 沿用 AI 目录的 id，
-/// 对应 Windows 的 moonshot/dashscope。
+/// 对应 Windows 的 moonshot/dashscope，并补充本机托管 `local` 与 `ollama`。
 #[test]
 fn new_polish_presets_match_the_reference_endpoints() {
     let find = |id| {
@@ -135,6 +137,12 @@ fn new_polish_presets_match_the_reference_endpoints() {
             "openrouter",
             "https://openrouter.ai/api/v1/chat/completions",
             "openrouter/auto",
+        ),
+        ("local", "", "local"),
+        (
+            "ollama",
+            "http://127.0.0.1:11434/v1/chat/completions",
+            "qwen3.5:9b",
         ),
     ];
     for (id, endpoint, model) in cases {

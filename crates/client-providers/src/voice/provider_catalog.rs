@@ -121,7 +121,7 @@ pub const ASR_PROVIDERS: &[VoiceProviderPreset] = &[
     },
 ];
 
-/// 设置页的润色服务，顺序与现有下拉框一致。
+/// 设置页的润色服务，顺序与现有下拉框一致；`local` 与 `ollama` 位于 `custom` 之前。
 pub const POLISH_PROVIDERS: &[VoiceProviderPreset] = &[
     VoiceProviderPreset {
         id: "siliconflow",
@@ -205,6 +205,22 @@ pub const POLISH_PROVIDERS: &[VoiceProviderPreset] = &[
         documentation: "https://openrouter.ai/docs/quickstart",
     },
     VoiceProviderPreset {
+        id: "local",
+        title: "本机模型（Shurufa 托管）",
+        endpoint: "",
+        model: "local",
+        models: &["local"],
+        documentation: "",
+    },
+    VoiceProviderPreset {
+        id: "ollama",
+        title: "Ollama / 本机 OpenAI 服务",
+        endpoint: "http://127.0.0.1:11434/v1/chat/completions",
+        model: "qwen3.5:9b",
+        models: &["qwen3.5:9b"],
+        documentation: "https://docs.ollama.com/api/openai-compatibility",
+    },
+    VoiceProviderPreset {
         id: "custom",
         title: "自定义",
         endpoint: "",
@@ -213,3 +229,127 @@ pub const POLISH_PROVIDERS: &[VoiceProviderPreset] = &[
         documentation: "",
     },
 ];
+
+/// 桌面端本机润色服务子集（Shurufa 托管本地模型与本机 Ollama）。
+///
+/// 两项预设已并入 `POLISH_PROVIDERS`（置于 `custom` 之前）；保留此常量以便调用方快速识别本机润色服务集合。
+pub const LOCAL_POLISH_PROVIDERS: &[VoiceProviderPreset] = &[
+    VoiceProviderPreset {
+        id: "local",
+        title: "本机模型（Shurufa 托管）",
+        endpoint: "",
+        model: "local",
+        models: &["local"],
+        documentation: "",
+    },
+    VoiceProviderPreset {
+        id: "ollama",
+        title: "Ollama / 本机 OpenAI 服务",
+        endpoint: "http://127.0.0.1:11434/v1/chat/completions",
+        model: "qwen3.5:9b",
+        models: &["qwen3.5:9b"],
+        documentation: "https://docs.ollama.com/api/openai-compatibility",
+    },
+];
+
+/// 按服务 id 查找润色预设（覆盖 `POLISH_PROVIDERS` 中的全部云端与本机服务）。
+pub fn polish_provider_preset(id: &str) -> Option<&'static VoiceProviderPreset> {
+    POLISH_PROVIDERS.iter().find(|preset| preset.id == id)
+}
+
+/// 判断润色服务 id 是否属于本机/自托管预设（`local` 或 `ollama`）。
+pub fn is_local_polish_provider(id: &str) -> bool {
+    LOCAL_POLISH_PROVIDERS.iter().any(|preset| preset.id == id)
+}
+
+/// 返回包含本机预设在内的完整润色服务列表（与 `POLISH_PROVIDERS` 顺序一致，无重复条目）。
+pub fn all_polish_providers() -> Vec<&'static VoiceProviderPreset> {
+    POLISH_PROVIDERS.iter().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn local_polish_providers_define_expected_metadata() {
+        assert_eq!(
+            LOCAL_POLISH_PROVIDERS
+                .iter()
+                .map(|preset| preset.id)
+                .collect::<Vec<_>>(),
+            ["local", "ollama"]
+        );
+
+        let local = polish_provider_preset("local").expect("local preset");
+        assert_eq!(local.title, "本机模型（Shurufa 托管）");
+        assert!(local.endpoint.is_empty());
+        assert_eq!(local.model, "local");
+        assert!(local.models.contains(&local.model));
+        assert!(local.documentation.is_empty());
+
+        let ollama = polish_provider_preset("ollama").expect("ollama preset");
+        assert_eq!(ollama.title, "Ollama / 本机 OpenAI 服务");
+        assert_eq!(
+            ollama.endpoint,
+            "http://127.0.0.1:11434/v1/chat/completions"
+        );
+        assert_eq!(ollama.model, "qwen3.5:9b");
+        assert!(ollama.models.contains(&ollama.model));
+        assert!(ollama.documentation.starts_with("https://"));
+    }
+
+    #[test]
+    fn polish_provider_lookup_and_combined_catalog_have_no_duplicates() {
+        assert!(is_local_polish_provider("local"));
+        assert!(is_local_polish_provider("ollama"));
+        assert!(!is_local_polish_provider("deepseek"));
+        assert!(!is_local_polish_provider("custom"));
+
+        assert_eq!(
+            polish_provider_preset("deepseek").map(|preset| preset.model),
+            Some("deepseek-v4-flash")
+        );
+        assert!(polish_provider_preset("unknown").is_none());
+
+        let all = all_polish_providers();
+        assert_eq!(all.len(), POLISH_PROVIDERS.len());
+        let mut seen = BTreeSet::new();
+        for preset in &all {
+            assert!(seen.insert(preset.id), "重复的服务 id: {}", preset.id);
+            assert!(!preset.title.is_empty());
+            assert!(preset.model.is_empty() || preset.models.contains(&preset.model));
+        }
+        let ids: Vec<&str> = all.iter().map(|preset| preset.id).collect();
+        assert_eq!(ids[ids.len() - 3..], ["local", "ollama", "custom"]);
+    }
+
+    #[test]
+    fn local_polish_presets_serialize_without_credentials() {
+        let local = serde_json::to_value(polish_provider_preset("local").unwrap()).unwrap();
+        assert_eq!(
+            local,
+            serde_json::json!({
+                "id": "local",
+                "title": "本机模型（Shurufa 托管）",
+                "endpoint": "",
+                "model": "local",
+                "models": ["local"],
+                "documentation": ""
+            })
+        );
+        let ollama = serde_json::to_value(polish_provider_preset("ollama").unwrap()).unwrap();
+        assert_eq!(
+            ollama,
+            serde_json::json!({
+                "id": "ollama",
+                "title": "Ollama / 本机 OpenAI 服务",
+                "endpoint": "http://127.0.0.1:11434/v1/chat/completions",
+                "model": "qwen3.5:9b",
+                "models": ["qwen3.5:9b"],
+                "documentation": "https://docs.ollama.com/api/openai-compatibility"
+            })
+        );
+    }
+}

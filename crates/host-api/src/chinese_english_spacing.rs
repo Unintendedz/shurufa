@@ -1,6 +1,8 @@
 //! 「中英文之间加空格」：一次上屏的文本里，汉字与 ASCII 字母、数字相邻处插入一个半角空格，语义同 rime-ice 的 `cn_en_spacer.lua`（#7172）。两次上屏之间不加。
 
-use msime_client_services::dictionary::is_han_character;
+use msime_client_providers::voice::postprocess::{
+    is_han_ascii_alphanumeric_boundary, space_han_ascii_alphanumeric,
+};
 use msime_engine::SchemeType;
 use msime_input_runtime::OutputContext;
 
@@ -16,29 +18,16 @@ pub(crate) fn applies(context: Option<&OutputContext>) -> bool {
     })
 }
 
+/// 复用下沉至 `msime_client_base::text` 的共享边界谓词，保证键盘上屏与语音后处理采用同一汉字定义。
 fn boundary(left: char, right: char) -> bool {
-    (is_han_character(left) && right.is_ascii_alphanumeric())
-        || (left.is_ascii_alphanumeric() && is_han_character(right))
+    is_han_ascii_alphanumeric_boundary(left, right)
 }
 
 /// 在 `text` 里汉字与 ASCII 字母、数字相邻的地方各插入一个半角空格；没有这样的相邻处时返回 `None`，原文不动，也不分配。
 ///
-/// 已经隔着空格的不再插入，首尾也不加：上屏的第一个和最后一个字符保持不变，宿主的智能标点按它们判断前一个字符。汉字取 `is_han_character` 的范围（基本区、扩展 A 到 F 和兼容表意文字）；假名、谚文、全角字母和 ASCII 标点都不算。
+/// 已经隔着空格的不再插入，首尾也不加：上屏的第一个和最后一个字符保持不变，宿主的智能标点按它们判断前一个字符。汉字取 `msime_client_base::text::is_han_character` 的范围（基本区、扩展 A 到 G 和兼容表意文字）；假名、谚文、全角字母和 ASCII 标点都不算。
 pub(crate) fn space(text: &str) -> Option<String> {
-    let mut pairs = text.chars().zip(text.chars().skip(1));
-    if !pairs.any(|(left, right)| boundary(left, right)) {
-        return None;
-    }
-    let mut spaced = String::with_capacity(text.len() + 8);
-    let mut previous = None;
-    for character in text.chars() {
-        if previous.is_some_and(|previous| boundary(previous, character)) {
-            spaced.push(' ');
-        }
-        spaced.push(character);
-        previous = Some(character);
-    }
-    Some(spaced)
+    space_han_ascii_alphanumeric(text)
 }
 
 #[cfg(test)]

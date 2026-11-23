@@ -671,15 +671,42 @@ char *msime_client_voice_local_model_install(
 char *msime_client_voice_local_model_cancel(const uint8_t *request, size_t length);
 char *msime_client_voice_local_model_remove(const uint8_t *request, size_t length);
 char *msime_client_voice_model_setting_check(const uint8_t *request, size_t length);
+/* 确定性语音后处理（无网络、无状态纯函数）。请求 <=1 MiB：{text, model_kind?, audio_ms?, mode?, app_category?,
+ * enable_pangu_spacing?, enable_number_itn?, enable_tech_casing?, trailing_period_policy?, vocabulary?}。
+ * text 上限 10000 Unicode 标量，vocabulary 至多 1000 条。响应 value：{text, dismissed, dismissed_reason, changed}。
+ * dismissed 为 true 时宿主应静默丢弃而不上屏；返回字符串用 msime_client_string_free 释放。 */
+char *msime_client_voice_postprocess(const uint8_t *request, size_t length);
+/* 跨语种个人语音词表聚合（只读磁盘与用户词库，不加文件锁，建议在工作线程调用）。
+ * 请求 <=1 MiB：{options?: HostOptions, preferences_directory?: 绝对路径, cached_terms?: [...], limit?: 300, raw_text?: string, app_category?: string, prompt_limit?: 60}。
+ * 传 cached_terms 时仅做纯内存 prompt_hints 筛选；否则合并用户词库（pinyin/english/quick_phrase，单类不可用时局部降级）与 <preferences_directory>/voice-vocabulary.json；
+ * 响应 value：{version, terms:[{canonical,aliases,pinyin,category,weight}], prompt_hints?:[string]}（prompt_hints 至多 60 条）。 */
+char *msime_client_voice_vocabulary(const uint8_t *request, size_t length);
+/* LLM 润色/改写/翻译输出清洗与防幻觉门控（纯函数）。请求 <=1 MiB：{raw_text, polished_text, selected_text?, mode?,
+ * expect_action_tag?, app_category?, enable_pangu_spacing?, enforce_simplified_chinese?, trailing_period_policy?, vocabulary?}。
+ * 响应 value：{accepted, text, resolved_action:"replace_selection"|"insert", rejection_reason}；accepted 为 false 时宿主应降级到确定性后处理原文。 */
+char *msime_client_voice_polish_clean(const uint8_t *request, size_t length);
+/* Sans-IO 语音润色 HTTP 请求描述器（不执行网络 I/O）。请求 <=256 KiB：{provider, endpoint, model, token?, prompt_id?,
+ * custom_prompts?, mode?, enable_selection_rewrite?, target_language?, stream?, raw_text, context?, vocabulary_hints?}。
+ * 密码框下非本机回环端点（云端与局域网）返回错误 "polish_secure_field_blocked"，本机回环端点清空上下文、选区与词表后放行；
+ * 公网明文地址返回 "polish_invalid_endpoint"，公网缺凭据返回 "polish_missing_token"。
+ * 响应 value：{url, method, headers, body, timeout_ms, connect_timeout_ms, max_response_bytes, no_proxy, resolved_mode, expect_action_tag, app_category, stream}。
+ * 描述器可能含凭据，严禁写日志，宿主须禁用重定向并按 no_proxy 绕过系统代理。 */
+char *msime_client_voice_polish_http_request(const uint8_t *request, size_t length);
+/* 解析语音润色非流式 JSON 响应体（<=1 MiB）或 SSE 流式数据块（<=64 KiB）。
+ * 响应 value：{text, finish_reason, done}；错误码为 "polish_response_too_large"、"polish_provider_error" 或 "polish_invalid_response"。 */
+char *msime_client_voice_polish_parse_response(const uint8_t *body, size_t length, bool is_sse);
 /* 语音存档：每次录音的音频（16 kHz 单声道）与听写记录，用宿主交来的 32 字节密钥以 XChaCha20-Poly1305 加密后存在 directory 下，
  * 格式见 client-providers 的 voice::archive。进程里只有一个存档、至多一条正在录的录音；append 可在采集队列上调用，其余在主线程。
  * 返回 JSON 用 msime_client_string_free 释放。错误为 "voice_archive_closed"、"voice_archive_idle"、"voice_archive_invalid_id"、
  * "voice_archive_not_found"、"voice_archive_corrupt"（密钥不对或文件损坏）、"voice_archive_recording"、"voice_archive_io" 或 "invalid voice archive request"。
  * open(directory 绝对路径, key 32 字节) -> {opened}，正在录的录音不受影响。
  * begin {now_ms, app, provider} -> {id}，上一条没停时先替它收尾。append 追加 16 kHz 单声道 f32 样本（一次至多 160000 个），没有正在录的录音时返回 false。
- * end_capture(now_ms) -> {id|null}。note {kind:"text"|"failure"|"cancelled"|"retranscription", text, id?}，不给 id 时记到最近一次录音；retranscription 必须给 id。
+ * end_capture(now_ms) -> {id|null}。note {kind:"text"|"failure"|"cancelled"|"retranscription"|"dismissed", text, id?,
+ *   raw_text?, asr_ms?, polish_ms?, mode?, app_category?, polish_provider?, polish_model?, polish_prompt_id?, polish_failed?, polish_rejected_reason?}，
+ *   不给 id 时记到最近一次录音；retranscription 必须给 id；dismissed 记录静默丢弃原因而不记作失败。
  * list -> {entries:[{id, started_at_ms, capture_ended_at_ms, audio_ms, app, provider, segments, failure, cancelled, retranscription,
- *   status:"recording"|"recognized"|"failed"|"cancelled"|"interrupted"|"no_result", has_audio}], unreadable}，新的在前。
+ *   raw_text?, asr_ms?, polish_ms?, mode?, app_category?, polish_provider?, polish_model?, polish_prompt_id?, polish_failed?, polish_rejected_reason?, dismissed_reason?,
+ *   status:"recording"|"recognized"|"failed"|"cancelled"|"interrupted"|"no_result"|"dismissed", has_audio}], unreadable}，新的在前。
  * audio(id, format 0=WAV/1=f32 PCM) 把解密后的字节交给 callback 一次（缓冲区在回调返回后失效，不落盘）-> {bytes}。
  * delete(id) -> {deleted}，正在录的那一条不能删。purge {now_ms, recording_retention_hours: 24|72, history_retention_days: 0..36500, 0 为不限期} -> {audio_removed, records_removed}。 */
 typedef void (*msime_client_voice_archive_bytes_callback)(const uint8_t *bytes, size_t length, void *context);
