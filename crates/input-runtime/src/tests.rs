@@ -10933,3 +10933,104 @@ fn the_fourteen_key_grid_is_offered_to_quanpin_and_wubi_only() {
         Err(RuntimeError::InvalidNineKeyScheme)
     ));
 }
+
+#[test]
+fn projected_emoji_refresh_focus_loss_and_settled_rerank_stay_aligned() {
+    let directory = tempfile::tempdir().unwrap();
+    let dictionaries = directory.path().join("dictionaries");
+    std::fs::create_dir_all(&dictionaries).unwrap();
+    rusqlite::Connection::open(dictionaries.join(msime_engine::assets::MAIN_DICTIONARY))
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE tbl_1_c(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+             INSERT INTO tbl_1_c VALUES('chu','c','出',900000);\
+             INSERT INTO tbl_1_c VALUES('chu','c','处',800000);\
+             INSERT INTO tbl_1_c VALUES('chu','c','楚',700000);\
+             INSERT INTO tbl_1_c VALUES('chu','c','除',600000);\
+             INSERT INTO tbl_1_c VALUES('chu','c','初',500000);\
+             INSERT INTO tbl_1_c VALUES('chu','c','触',400000);\
+             CREATE TABLE tbl_2_c(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+             INSERT INTO tbl_2_c VALUES('chu''fa','cf','出发',590000);\
+             INSERT INTO tbl_2_c VALUES('chu''fa','cf','处罚',580000);\
+             INSERT INTO tbl_2_c VALUES('chu''fa','cf','触发',550000);\
+             INSERT INTO tbl_2_c VALUES('chu''fa','cf','除法',50000);\
+             CREATE TABLE tbl_3_c(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+             INSERT INTO tbl_3_c VALUES('chu''fa''dian','cfd','出发点',100000);\
+             CREATE TABLE tbl_4_c(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+             INSERT INTO tbl_4_c VALUES('chu''fa''jue''ding','cfjd','处罚决定',90000);",
+        )
+        .unwrap();
+    let options = real_engine_options(directory.path());
+    let session = msime_engine::host::Session::new(&options).unwrap();
+    let mut runtime = Runtime::new(session, 6).unwrap();
+    runtime.focus(true).unwrap();
+    runtime.set_inline_emoji_projection(true, None);
+
+    // 1. `chuf` 触发「出发」投影 `🚀` 在第 3 位，再键入 `a` 变为 `chufa` 时，
+    //    `refresh` 必须清空旧 `projected_emojis`，绝不得把新快照下标 2 的「触发」误删。
+    type_characters(&mut runtime, "chuf");
+    assert_eq!(runtime.view().candidates[2].text, "🚀");
+    character(&mut runtime, b'a');
+    let all_chufa: Vec<String> = runtime
+        .all_candidates()
+        .candidates
+        .into_iter()
+        .map(|row| row.text)
+        .collect();
+    assert!(
+        all_chufa.iter().any(|text| text == "触发"),
+        "键入 chuf -> chufa 后不能丢掉「触发」: {all_chufa:?}"
+    );
+    assert!(
+        all_chufa.iter().any(|text| text == "除法"),
+        "键入 chuf -> chufa 后不能丢掉「除法」: {all_chufa:?}"
+    );
+
+    // 2. 从已投影 Emoji 的 `chuf` 退格到 `chu`：不仅不能误删「处」，选第 3 项「楚」必须精确上屏「楚」。
+    runtime.dispatch(Action::Command(Command::Cancel)).unwrap();
+    type_characters(&mut runtime, "chuf");
+    assert_eq!(runtime.view().candidates[2].text, "🚀");
+    let chu_view = runtime
+        .dispatch(Action::Command(Command::Backspace))
+        .unwrap()
+        .view;
+    let chu_texts: Vec<&str> = chu_view
+        .candidates
+        .iter()
+        .map(|c| c.text.as_str())
+        .collect();
+    assert_eq!(&chu_texts[..4], ["出", "处", "楚", "除"]);
+    let pick_third = runtime
+        .dispatch(Action::Select(chu_view.candidates[2].id))
+        .unwrap();
+    assert_eq!(pick_third.commit.as_deref(), Some("楚"));
+
+    // 3. 高亮落在投影 Emoji 席位时，失焦提交与向左整句改字均应回退到真实引擎首选，不得把 Emoji 当失焦词上屏或传入 usize::MAX。
+    type_characters(&mut runtime, "chufa");
+    runtime.dispatch(Action::NextCandidate).unwrap();
+    runtime.dispatch(Action::NextCandidate).unwrap();
+    assert_eq!(runtime.view().candidates[2].text, "🚀");
+    assert!(runtime.view().candidates[2].highlighted);
+    let conv = runtime
+        .dispatch(Action::Command(Command::ConversionLeft))
+        .unwrap();
+    assert!(conv.view.candidates.iter().all(|c| !c.text.is_empty()));
+    // 第一次 Cancel 退出整句改字，第二次清空未上屏拼音。
+    runtime.dispatch(Action::Command(Command::Cancel)).unwrap();
+    runtime.dispatch(Action::Command(Command::Cancel)).unwrap();
+    assert!(runtime.view().editing_text.is_empty());
+    type_characters(&mut runtime, "chufa");
+    runtime.dispatch(Action::NextCandidate).unwrap();
+    runtime.dispatch(Action::NextCandidate).unwrap();
+    assert!(runtime.view().candidates[2].highlighted);
+    let lost = runtime.dispatch(Action::FinishOnFocusLoss).unwrap();
+    assert_eq!(lost.commit.as_deref(), Some("出发"));
+
+    // 4. 组字中途把内联 Emoji 从关切到开时，应立即生效投影。
+    runtime.focus(true).unwrap();
+    runtime.set_inline_emoji_projection(false, None);
+    type_characters(&mut runtime, "chufa");
+    assert!(!runtime.view().candidates.iter().any(|c| c.text == "🚀"));
+    runtime.set_inline_emoji_projection(true, None);
+    assert_eq!(runtime.view().candidates[2].text, "🚀");
+}

@@ -267,11 +267,14 @@ impl NeuralReranker {
     /// 单字没有词内搭配约束，不同读音简拼的静态权重也不可直接互比；因此调用方只传入字数 `>= 2`
     /// 且完整读音一致的同音词引用。神经条件对数概率 `ln P_LM(w | context)` 本身已包含语料先验，
     /// 旧词库分档权重又存在人工倍数断崖（如「登录 502k / 登陆 5k」「把他 319k / 把它 4.6k」），
-    /// 因此仅以 `0.25 * ln(weight)` 作为低频防噪稳定项，当最佳同音词相对原首选净领先不少于 `0.35` nats 时返回其下标。
+    /// 因此仅以 `0.25 * ln(weight)` 作为低频防噪稳定项，可叠加 Stage 4 贝叶斯等效先验权重与 `.gram`
+    /// 搭配加成；当最佳同音词相对原首选净领先不少于 `0.35` nats 时返回其下标。
     pub fn pick_dictionary_homophone(
         &mut self,
         items: &[&crate::types::WordItem],
         context: &str,
+        effective_weights: Option<&[f64]>,
+        collocation_bonuses: Option<&[f64]>,
     ) -> Option<usize> {
         const HOMOPHONE_STATIC_PRIOR_WEIGHT: f64 = 0.25;
         const HOMOPHONE_PROMOTE_SUM_MARGIN_NATS: f64 = 0.35;
@@ -292,8 +295,16 @@ impl NeuralReranker {
         }
         let chars = texts[0].chars().count() as f64;
         let score_of = |index: usize| {
-            HOMOPHONE_STATIC_PRIOR_WEIGHT * (items[index].weight.max(1) as f64).ln()
+            let weight = effective_weights
+                .and_then(|weights| weights.get(index).copied())
+                .unwrap_or_else(|| items[index].weight.max(1) as f64)
+                .max(1.0);
+            let collocation = collocation_bonuses
+                .and_then(|bonuses| bonuses.get(index).copied())
+                .unwrap_or(0.0);
+            HOMOPHONE_STATIC_PRIOR_WEIGHT * weight.ln()
                 + f64::from(means[index]) * chars
+                + collocation
         };
         let leader_score = score_of(0);
         let mut best = 0;
@@ -308,6 +319,39 @@ impl NeuralReranker {
         (best != 0 && best_score - leader_score >= HOMOPHONE_PROMOTE_SUM_MARGIN_NATS)
             .then_some(best)
     }
+}
+
+/// 计算 `.gram` 语法模型对多字同音词组的跨界搭配加成（仅用于 `pick_dictionary_homophone`）。
+///
+/// 相比词网格逐边打分（`collocation_min_length = 2`），同音词竞争要求跨界搭配长度至少为 3 字，
+/// 避免仅凭「上文末字 + 候选首字」两字偶然共现就压倒神经模型的全句语境判断。
+pub(crate) fn homophone_collocation_bonuses(
+    db: Option<&crate::lattice::octagram::GramDb>,
+    context: &str,
+    items: &[&crate::types::WordItem],
+    collocation_weight: f64,
+    grammar: &crate::lattice::octagram::GramConfig,
+    out: &mut [f64; MAX_RERANK_PATHS],
+) -> Option<usize> {
+    let db = db?;
+    if collocation_weight <= 0.0 {
+        return None;
+    }
+    let clause = trailing_han_clause(context);
+    if clause.is_empty() {
+        return None;
+    }
+    let mut config = *grammar;
+    config.collocation_min_length = config.collocation_min_length.max(3);
+    let count = items.len().min(MAX_RERANK_PATHS);
+    let mut any_hit = false;
+    for (slot, item) in out[..count].iter_mut().zip(&items[..count]) {
+        let raw = db.query(clause, &item.word, false, &config);
+        let bonus = (raw - config.non_collocation_penalty).max(0.0) * collocation_weight;
+        *slot = bonus;
+        any_hit |= bonus > 0.0;
+    }
+    any_hit.then_some(count)
 }
 
 #[cfg(test)]

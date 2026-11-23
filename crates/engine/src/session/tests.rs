@@ -14310,5 +14310,81 @@ fn decoupled_personal_learning_overlay_protects_static_weights_recalls_rare_noun
     assert!(!session.undo_last_personal_learning());
 }
 
+#[test]
+fn decoupled_personal_learning_works_across_interleaved_completions_and_survives_neutral_context() {
+    let fixture = Fixture::new(
+        "CREATE TABLE tbl_2_d(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_2_d VALUES('deng''lu','dl','登录',502000);\
+         INSERT INTO tbl_2_d VALUES('deng''lu','dl','登陆',5005);\
+         CREATE TABLE tbl_3_d(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_3_d VALUES('deng''lu''ming','dlm','登录名',200000);\
+         CREATE TABLE tbl_4_d(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_4_d VALUES('deng''lu''shi''jian','dlsj','登录时间',400000);\
+         CREATE TABLE tbl_3_c(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_3_c VALUES('chu''fa''le','cfl','出发了',18000);\
+         INSERT INTO tbl_3_c VALUES('chu''fa''le','cfl','触发了',100);",
+    );
+    // 神经模型对「出」「触」「发」「了」给出完全均等的中性概率，验证仅靠前文存在汉字不会把已学成的「触发了」打回静态次席。
+    write_synthetic_keyboard_model(
+        &fixture.path().join(assets::NEURAL_MODEL_KEYBOARD),
+        &['前', '文', '出', '触', '发', '了'],
+        &[],
+    );
+    let mut session = fixture.session_with(|options| {
+        options.learning = true;
+        options.decoupled_personal_learning = true;
+        options.sentence_association.neural_keyboard = true;
+        options.frequency.mode = FrequencyAdjustmentMode::Promote;
+        options.frequency.trigger_count = 1;
+    });
+
+    // 1. 「登录」与「登陆」中间夹着补全词「登录时间」「登录名」时，1 次改选「登陆」立即升至第 2 位，
+    //    连续 3 次改选后自然升至第 1 位，且原首位「登录」紧随第 2 位。
+    type_text(&mut session, "denglu");
+    let before = words(&session);
+    assert_eq!(before[0], "登录");
+    let initial_pos = before.iter().position(|w| w == "登陆").unwrap();
+    assert!(initial_pos >= 2, "补全词应夹在登录与登陆之间: {before:?}");
+    assert_eq!(
+        select_word(&mut session, "登陆").commit.as_deref(),
+        Some("登陆")
+    );
+    type_text(&mut session, "denglu");
+    assert_eq!(&words(&session)[..2], ["登录", "登陆"]);
+    session.command(Command::Cancel);
+    for _ in 0..2 {
+        type_text(&mut session, "denglu");
+        assert_eq!(
+            select_word(&mut session, "登陆").commit.as_deref(),
+            Some("登陆")
+        );
+    }
+    type_text(&mut session, "denglu");
+    assert_eq!(&words(&session)[..2], ["登陆", "登录"]);
+    session.command(Command::Cancel);
+
+    // 2. 连续 3 次选择静态弱词「触发了」（100 vs 18000）后，无论空上文还是中性汉字上文均保持首位。
+    for _ in 0..3 {
+        session.set_rescoring_context("");
+        type_text(&mut session, "chufale");
+        assert_eq!(
+            select_word(&mut session, "触发了").commit.as_deref(),
+            Some("触发了")
+        );
+    }
+    session.set_rescoring_context("");
+    type_text(&mut session, "chufale");
+    assert_eq!(&words(&session)[..2], ["触发了", "出发了"]);
+    session.command(Command::Cancel);
+
+    session.set_rescoring_context("前文");
+    type_text(&mut session, "chufale");
+    assert_eq!(
+        &words(&session)[..2],
+        ["触发了", "出发了"],
+        "中性汉字上文不得拿未改写的静态权重把 Stage 4 已学成的首位打回次席"
+    );
+}
+
 mod caret_suffix;
 mod stroke_filter;

@@ -1197,6 +1197,9 @@ impl<E: InputEngine> Runtime<E> {
             self.strip_projected_emojis();
             let _ = self.advance();
             self.bump_candidates_epoch();
+        } else if enabled && !self.is_idle() && self.apply_slot_allocator() {
+            let _ = self.advance();
+            self.bump_candidates_epoch();
         }
     }
 
@@ -1247,17 +1250,20 @@ impl<E: InputEngine> Runtime<E> {
         if self.settled_rerank_blocked() {
             return false;
         }
+        let marked = self.settled_highlight();
         let had_projected = self.strip_projected_emojis();
         self.snapshot_settled_seats();
-        let marked = self.settled_highlight();
         let order = self.settled_model_order();
         let moved = order
             .as_deref()
             .is_some_and(|order| self.apply_settled_order(order));
-        let changed = self.finish_settled_presentation(moved, marked);
+        let changed = self.finish_settled_presentation(moved, marked.as_ref());
         if !changed && had_projected {
             // 未触发重排时把之前剥离的投影行原样恢复，不推进代次。
             self.apply_slot_allocator();
+            if let Some((previous_highlight, text, code)) = &marked {
+                self.keep_highlight_on_same_candidate(*previous_highlight, text, code.as_deref());
+            }
         }
         changed
     }
@@ -1345,9 +1351,12 @@ impl<E: InputEngine> Runtime<E> {
         let moved = order
             .as_deref()
             .is_some_and(|order| self.apply_settled_order(order));
-        let changed = self.finish_settled_presentation(moved, marked);
+        let changed = self.finish_settled_presentation(moved, marked.as_ref());
         if !changed && had_projected {
             self.apply_slot_allocator();
+            if let Some((previous_highlight, text, code)) = &marked {
+                self.keep_highlight_on_same_candidate(*previous_highlight, text, code.as_deref());
+            }
         }
         SettledRerankApplied {
             current: true,
@@ -1403,6 +1412,8 @@ impl<E: InputEngine> Runtime<E> {
         }
         let mut order = std::mem::take(&mut self.settled_order_scratch);
         self.copy_seat_order(&mut order);
+        // 异步路径开始时快照里仍含投影 Emoji（`usize::MAX`），与发布前剥离投影行后的主候选座位口径对齐。
+        order.retain(|&index| index != usize::MAX);
         self.settled_order_scratch = order;
     }
 
@@ -1413,7 +1424,7 @@ impl<E: InputEngine> Runtime<E> {
     }
 
     fn settled_highlight(&self) -> Option<(usize, String, Option<String>)> {
-        if self.highlighted == 0 {
+        if self.highlighted == 0 || self.is_projected_emoji(self.highlighted) {
             return None;
         }
         Some((
@@ -1426,7 +1437,7 @@ impl<E: InputEngine> Runtime<E> {
     fn finish_settled_presentation(
         &mut self,
         rerank_moved: bool,
-        marked: Option<(usize, String, Option<String>)>,
+        marked: Option<&(usize, String, Option<String>)>,
     ) -> bool {
         let mut moved = rerank_moved;
         moved |= self.demote_runner_up_readings();
@@ -1440,7 +1451,7 @@ impl<E: InputEngine> Runtime<E> {
             self.snapshot_valid = true;
             // 用户还停在第一条时，落定重排换上来的词就是新的第一条。已经翻页或移动过高亮时，
             // 停在原来那一条上，不能弹回第一页。
-            if let Some((previous_highlight, text, code)) = &marked {
+            if let Some((previous_highlight, text, code)) = marked {
                 self.keep_highlight_on_same_candidate(*previous_highlight, text, code.as_deref());
             } else {
                 self.highlighted = 0;
@@ -2225,8 +2236,9 @@ impl<E: InputEngine> Runtime<E> {
         let snapshot = self.engine.snapshot()?;
         self.load_snapshot(snapshot);
         self.order_presentation();
-        // 派发类调用里的展开重新运行插件，其余（`all_candidates`）只重放。
+        // 派发类调用里的展开重新运行插件，其余（`all_candidates`）只重放；随后再经 `SlotAllocator` 投影内联 Emoji。
         self.transform_candidates();
+        self.apply_slot_allocator();
         self.bump_candidates_epoch();
         Ok(true)
     }
@@ -2891,8 +2903,8 @@ impl<E: InputEngine> Runtime<E> {
         true
     }
 
-    /// 内置的呈现排序：逐键重排、整句读法降位、在线候选座位，以及末步 `SlotAllocator` 投影。
-    /// refresh、展开和落定重排三处都走同一纯函数，免得三处的步骤漂移。返回是否挪动了候选。
+    /// 内置的呈现排序：逐键重排、整句读法降位与在线候选座位。
+    /// `refresh`、展开和落定重排三处都按「内置排序 -> 插件变换 -> `SlotAllocator` 投影」同序执行，免得步骤漂移。
     fn order_presentation(&mut self) -> bool {
         if self.cached.prediction {
             return false;
@@ -2900,7 +2912,6 @@ impl<E: InputEngine> Runtime<E> {
         let mut moved = self.rerank();
         moved |= self.demote_runner_up_readings();
         moved |= self.normalize_online_slots();
-        moved |= self.apply_slot_allocator();
         moved
     }
 
@@ -2926,6 +2937,19 @@ impl<E: InputEngine> Runtime<E> {
         }
         let projected = std::mem::take(&mut self.projected_emojis);
         let count = self.cached.candidates.len();
+        const EMOJI_SOURCE: u8 = msime_engine::CandidateSource::Emoji as u8;
+        // 不变量守卫：每条记录的投影席位必须确实属于当前快照里的内联 Emoji 行，
+        // 防止快照换新漏清 `projected_emojis` 时误删真实中文候选并错位 `engine_order`。
+        debug_assert!(
+            projected.iter().all(|entry| {
+                entry.seat < count
+                    && self.cached.candidate_sources.get(entry.seat) == Some(&EMOJI_SOURCE)
+                    && self.engine_order.len() == count
+                    && self.engine_order[entry.seat] == usize::MAX
+            }),
+            "projected_emojis 与当前快照脱节：projected={projected:?}, count={count}, engine_order_len={}",
+            self.engine_order.len()
+        );
         let keep: Vec<bool> = (0..count)
             .map(|seat| {
                 projected
@@ -2983,6 +3007,7 @@ impl<E: InputEngine> Runtime<E> {
             || !self.cached.nine_key_strokes.is_empty()
             || self.cached.nine_key_single_character
             || self.cached.candidates.is_empty()
+            || self.has_inserted_rows()
         {
             return false;
         }
@@ -3324,6 +3349,9 @@ impl<E: InputEngine> Runtime<E> {
         self.translations.clear();
         self.highlight_translations.clear();
         self.engine_order.clear();
+        // 即将换入引擎原生新快照，上一键的投影 Emoji 席位必须同步作废，
+        // 否则 `order_presentation` -> `strip_projected_emojis` 会把新快照同下标的真实候选整条删掉。
+        self.projected_emojis.clear();
         let previous_highlight = self.highlighted;
         self.highlighted = 0;
         // Drop cached candidate identities even if fetching the replacement fails.
@@ -3384,6 +3412,8 @@ impl<E: InputEngine> Runtime<E> {
         self.order_presentation();
         // 派发类调用里的 refresh 重新运行插件，其余只重放；隐藏的行数和插件注释的变化也算候选视图的变化。
         let plugin_marks_changed = self.transform_candidates();
+        // `SlotAllocator` 始终作为全部重排与插件变换之后的末步投影，避免插件改序/插行错位 `projected_emojis`。
+        self.apply_slot_allocator();
         self.snapshot_valid = true;
         let composition_held = self.cached.editing_text == previous.editing_text
             && self.cached.preedit == previous.preedit
@@ -3883,8 +3913,11 @@ impl<E: InputEngine> Runtime<E> {
                 raw_route = true;
                 self.engine.command(Command::CommitRaw)
             }
-            // 失焦时插件插进普通候选的行也不替用户上屏：结束在引擎的首行上，和没有插件时一样。
-            Action::FinishOnFocusLoss if self.is_inserted(self.highlighted) => {
+            // 失焦时插件插进普通候选的行与投影 Emoji 都不替用户上屏：结束在引擎的首行上，和没有插件/投影时一样。
+            Action::FinishOnFocusLoss
+                if self.is_inserted(self.highlighted)
+                    || self.is_projected_emoji(self.highlighted) =>
+            {
                 let seat = self.first_engine_seat();
                 pick = Some((SelectionHow::Finish, seat));
                 self.engine.finish(self.engine_index(seat))
@@ -3998,9 +4031,11 @@ impl<E: InputEngine> Runtime<E> {
                 })
             }
             // 进入整句改字时改的是用户高亮着的那一句，它可能被重排过，不在引擎的首位。
-            // 高亮在插件插入的行上时从引擎的首行进入。
+            // 高亮在插件插入的行或投影 Emoji 上时从引擎的首行进入。
             Action::Command(Command::ConversionLeft) if self.cached.conversion.is_empty() => {
-                let seat = if self.is_inserted(self.highlighted) {
+                let seat = if self.is_inserted(self.highlighted)
+                    || self.is_projected_emoji(self.highlighted)
+                {
                     self.first_engine_seat()
                 } else {
                     self.highlighted

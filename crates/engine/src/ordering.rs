@@ -782,6 +782,14 @@ where
 /// 拼凑切分（如「许个愿」对「许各院 / 许哥原」差 `> 3.8` nats/字），不再占用首屏读法席位，改排在第 2 页次选区
 /// 开头；四字及以上短语与长句（合法 `[1, 1, 2]` 组合常与 `[2, 2]` 同音词竞争）保留全部 3 个首屏读法席位。
 const RUNNER_UP_MAX_MEAN_GAP_NATS: f64 = 3.8;
+/// 双字精确词典词已领先时，词网格在「去重后补充次选」下产出的单字+单字（`1+1`）拼凑读法
+/// （如「楚伐」「邓禄」「豹寸」「艘所」）缺少 `PHRASE_LENGTH_BONUS (20)` 且双边各扣 `ln(1e6)`，
+/// 每字静态证据恒低于 `-16 nats/字`；而任何双字整词边（含指物代词「它」双证据合成边）每字静态证据
+/// 恒不低于 `-13 nats/字`。居中取 `-14.5 nats/字` 仅让 `1+1` 拼凑句退出首屏，既保住「它在」等双字合成边，
+/// 又避免双字词第 2 格被无意义单字拼凑抢占。
+const TWO_CHAR_SPLIT_FALLBACK_MAX_MEAN_NATS: f64 = -14.5;
+/// 双字精确词典词领先且首页读法全部让位时，首页前排总席位上限（保证多次调用幂等）。
+const TWO_CHAR_DEFERRED_PAGE_BUDGET: usize = 6;
 
 #[allow(clippy::too_many_arguments)]
 fn visit_runner_up_order(
@@ -790,9 +798,11 @@ fn visit_runner_up_order(
     keep: usize,
     front_limit: usize,
     expand_front_with_unused_keep: bool,
+    deferred_front_limit: Option<usize>,
     is_reading: &impl Fn(usize) -> bool,
     is_deferred_reading: &impl Fn(usize) -> bool,
     is_far_below_leader: &impl Fn(usize) -> bool,
+    is_promoted_exact_non_reading: &impl Fn(usize) -> bool,
     mut emit: impl FnMut(usize),
 ) {
     let primary_reading = |index: usize| is_reading(index) && !is_deferred_reading(index);
@@ -825,22 +835,32 @@ fn visit_runner_up_order(
         }
     }
     let kept_total = kept_primary + kept_deferred;
-    // 3. 留在剩余次选读法之前的首页前排非读法行（三字以上长串把未用的读法名额补给前排非读法行以凑满首屏）。
-    let effective_front_limit = if expand_front_with_unused_keep {
+    // 3. 留在剩余次选读法之前的首页前排非读法行（三字以上长串把未用的读法名额补给前排非读法行以凑满首屏；
+    //    双字词典命中领先且全部 1+1 读法让位时按页预算补齐首屏并保留精确同音词典行在拼凑句之前）。
+    let promote_exact_after_budget = kept_total == 0 && deferred_front_limit.is_some();
+    let effective_front_limit = if kept_total == 0 {
+        if let Some(limit) = deferred_front_limit {
+            limit
+        } else if expand_front_with_unused_keep {
+            front_limit + keep
+        } else {
+            front_limit
+        }
+    } else if expand_front_with_unused_keep {
         front_limit + keep.saturating_sub(kept_total)
     } else {
         front_limit
     };
     let mut kept_front = 0;
-    if effective_front_limit > 0 {
-        for index in (first_reading + 1)..count {
-            if !is_reading(index) {
-                emit(index);
-                kept_front += 1;
-                if kept_front == effective_front_limit {
-                    break;
-                }
-            }
+    for index in (first_reading + 1)..count {
+        if is_reading(index) {
+            continue;
+        }
+        if kept_front < effective_front_limit {
+            emit(index);
+            kept_front += 1;
+        } else if promote_exact_after_budget && is_promoted_exact_non_reading(index) {
+            emit(index);
         }
     }
     // 4. 其余全键次选读法紧随首页前排之后（先近分未纠错次选、再悬殊未纠错次选、再纠错整句），排在所有单字与余下非读法行之前。
@@ -880,6 +900,9 @@ fn visit_runner_up_order(
         }
         if skipped_front < effective_front_limit {
             skipped_front += 1;
+            continue;
+        }
+        if promote_exact_after_budget && is_promoted_exact_non_reading(index) {
             continue;
         }
         emit(index);
@@ -936,6 +959,12 @@ pub fn runner_up_order<'a, R: OrderRowSource<'a> + ?Sized>(
         SHORT_FRONT_ROW_LIMIT
     };
     let expand_front_with_unused_keep = width >= LONG_SENTENCE_CHARACTERS;
+    let defer_two_char_splits = width == SENTENCE_SYLLABLES
+        && first_reading > 0
+        && DICTIONARY_SOURCES.contains(&rows.get(0).source)
+        && !rows.get(0).corrected;
+    let deferred_front_limit =
+        defer_two_char_splits.then(|| TWO_CHAR_DEFERRED_PAGE_BUDGET.saturating_sub(first_reading));
 
     let defer_corrected = !rows.get(first_reading).corrected;
     let is_deferred_reading = |index: usize| defer_corrected && rows.get(index).corrected;
@@ -946,6 +975,12 @@ pub fn runner_up_order<'a, R: OrderRowSource<'a> + ?Sized>(
         })
         .flatten();
     let far_below_leader = |index: usize| {
+        if defer_two_char_splits {
+            return rows
+                .static_evidence(index)
+                .and_then(StaticEvidence::mean)
+                .is_some_and(|mean| mean < TWO_CHAR_SPLIT_FALLBACK_MAX_MEAN_NATS);
+        }
         index != first_reading
             && match (
                 leader_mean,
@@ -954,6 +989,10 @@ pub fn runner_up_order<'a, R: OrderRowSource<'a> + ?Sized>(
                 (Some(leader), Some(candidate)) => leader - candidate > RUNNER_UP_MAX_MEAN_GAP_NATS,
                 _ => false,
             }
+    };
+    let is_promoted_exact_non_reading = |index: usize| {
+        let row = rows.get(index);
+        DICTIONARY_SOURCES.contains(&row.source) && row.answers_key && !row.corrected
     };
 
     // 先做零分配线性扫描检查是否已处于目标顺序；仅确实需要重排时才构造返回向量。
@@ -965,9 +1004,11 @@ pub fn runner_up_order<'a, R: OrderRowSource<'a> + ?Sized>(
         keep,
         front_limit,
         expand_front_with_unused_keep,
+        deferred_front_limit,
         &is_reading,
         &is_deferred_reading,
         &far_below_leader,
+        &is_promoted_exact_non_reading,
         |index| {
             identity &= output == index;
             output += 1;
@@ -985,9 +1026,11 @@ pub fn runner_up_order<'a, R: OrderRowSource<'a> + ?Sized>(
         keep,
         front_limit,
         expand_front_with_unused_keep,
+        deferred_front_limit,
         &is_reading,
         &is_deferred_reading,
         &far_below_leader,
+        &is_promoted_exact_non_reading,
         |index| {
             order.push(index);
         },
@@ -2082,6 +2125,66 @@ mod tests {
                 false,
                 &ScoredOrderRows::new(&rows, &mismatched_scores),
             ),
+            None
+        );
+    }
+
+    #[test]
+    fn runner_up_order_defers_two_char_split_fallbacks_when_dictionary_hits_lead() {
+        let mut longer1 = row("处罚的", 0);
+        longer1.answers_key = false;
+        let mut longer2 = row("出发点", 0);
+        longer2.answers_key = false;
+        let mut single = row("出", 0);
+        single.answers_key = false;
+        let rows = [
+            row("出发", 0),
+            row("处罚", 0),
+            row("触发", 0),
+            row("楚伐", LATTICE_SOURCE),
+            longer1,
+            longer2,
+            row("除法", 0),
+            single,
+        ];
+        // `1+1` 拼凑句「楚伐」每字静态分 -16.9 nats（< -14.5）：让位到首页词典/补全与其余精确同音词「除法」之后，
+        // 且仍在单字「出」之前；再次调用必须零分配返回 None。
+        let scores = [
+            None,
+            None,
+            None,
+            Some(StaticEvidence::new(-33_800, 2)),
+            None,
+            None,
+            None,
+            None,
+        ];
+        let scored = ScoredOrderRows::new(&rows, &scores);
+        let order = runner_up_order(0, &scored).expect("双字 1+1 拼凑次选应让出首屏");
+        assert_eq!(order, vec![0, 1, 2, 4, 5, 6, 3, 7]);
+
+        let reordered: Vec<_> = order.iter().map(|&idx| rows[idx]).collect();
+        let reordered_scores: Vec<_> = order.iter().map(|&idx| scores[idx]).collect();
+        let reordered_scored = ScoredOrderRows::new(&reordered, &reordered_scores);
+        let (again, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            runner_up_order(0, &reordered_scored)
+        });
+        assert_eq!(again, None);
+        assert_eq!(allocations, 0);
+
+        // 双字整词合成边（如指物代词「它在」，每字 -11.5 nats >= -14.5）必须保留在首屏次选位。
+        let pronoun_rows = [row("他在", 0), row("它在", LATTICE_SOURCE), longer1, single];
+        let pronoun_scores = [None, Some(StaticEvidence::new(-23_000, 2)), None, None];
+        assert_eq!(
+            runner_up_order(0, &ScoredOrderRows::new(&pronoun_rows, &pronoun_scores)),
+            None
+        );
+
+        // 未登录双字短语（`first_reading == 0`，词典无领先精确命中）即使为 1+1 拼凑也稳守第 0 位。
+        let oov_rows = [row("未录", LATTICE_SOURCE), single];
+        let oov_scores = [Some(StaticEvidence::new(-33_800, 2)), None];
+        assert_eq!(
+            runner_up_order(0, &ScoredOrderRows::new(&oov_rows, &oov_scores)),
             None
         );
     }

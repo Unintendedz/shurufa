@@ -951,10 +951,10 @@ mod desktop {
             !self.plugins.inserted.is_empty()
         }
 
-        /// 引擎的第一个候选现在的座位：插入的行不算。
+        /// 引擎的第一个候选现在的座位：插件插入行与投影 Emoji 都不算。
         pub(crate) fn first_engine_seat(&self) -> usize {
             (0..self.cached.candidates.len())
-                .find(|seat| !self.is_inserted(*seat))
+                .find(|seat| !self.is_inserted(*seat) && !self.is_projected_emoji(*seat))
                 .unwrap_or(0)
         }
 
@@ -1082,7 +1082,9 @@ mod inert {
         }
 
         pub(crate) fn first_engine_seat(&self) -> usize {
-            0
+            (0..self.cached.candidates.len())
+                .find(|seat| !self.is_projected_emoji(*seat))
+                .unwrap_or(0)
         }
     }
 }

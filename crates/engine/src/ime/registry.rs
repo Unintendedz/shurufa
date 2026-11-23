@@ -258,22 +258,25 @@ impl ProviderRegistry {
         }
     }
 
-    /// 用方案的键盘神经模型按 `context` 在同音字典候选中选出应旋至首位的下标。
+    /// 用方案的键盘神经模型与搭配模型按 `context` 在同音字典候选中选出应旋至首位的下标。
     pub fn pick_dictionary_homophone(
         &mut self,
         scheme: SchemeType,
         items: &[&WordItem],
         context: &str,
+        effective_weights: Option<&[f64]>,
     ) -> Option<usize> {
         match scheme {
-            SchemeType::Quanpin => self
-                .quanpin
-                .as_mut()?
-                .pick_dictionary_homophone(items, context),
-            SchemeType::Shuangpin => self
-                .shuangpin
-                .as_mut()?
-                .pick_dictionary_homophone(items, context),
+            SchemeType::Quanpin => {
+                self.quanpin
+                    .as_mut()?
+                    .pick_dictionary_homophone(items, context, effective_weights)
+            }
+            SchemeType::Shuangpin => self.shuangpin.as_mut()?.pick_dictionary_homophone(
+                items,
+                context,
+                effective_weights,
+            ),
             _ => None,
         }
     }

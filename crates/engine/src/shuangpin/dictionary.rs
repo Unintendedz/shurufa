@@ -871,19 +871,35 @@ impl ShuangpinDictionary {
             .any(|reranker| reranker.source == CandidateSource::NeuralKeyboard)
     }
 
-    /// 用已挂载的键盘神经模型按 `context` 在多字同音词中选出应提至首位的下标。
+    /// 用已挂载的键盘神经模型与可选 `.gram` 语法搭配模型按 `context` 在多字同音词中选出应提至首位的下标。
     pub fn pick_dictionary_homophone(
         &mut self,
         items: &[&WordItem],
         context: &str,
+        effective_weights: Option<&[f64]>,
     ) -> Option<usize> {
+        let mut collocation_buf = [0.0f64; MAX_RERANK_PATHS];
+        let collocation_bonuses = crate::lattice::neural::homophone_collocation_bonuses(
+            self.collocation_db.as_deref(),
+            context,
+            items,
+            self.sentence_association.collocation_weight,
+            &self.sentence_association.collocation_grammar,
+            &mut collocation_buf,
+        )
+        .map(|count| &collocation_buf[..count]);
         let mut picked = None;
         for reranker in self
             .rerankers
             .iter_mut()
             .filter(|reranker| reranker.source == CandidateSource::NeuralKeyboard)
         {
-            picked = reranker.pick_dictionary_homophone(items, context);
+            picked = reranker.pick_dictionary_homophone(
+                items,
+                context,
+                effective_weights,
+                collocation_bonuses,
+            );
         }
         picked
     }

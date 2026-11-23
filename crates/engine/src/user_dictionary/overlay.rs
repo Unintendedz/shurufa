@@ -125,9 +125,62 @@ pub struct OverlayOutcome {
     pub leader_protected: bool,
 }
 
-/// 用独立贝叶斯衰减叠加层重排前段同音词典候选；绝不修改任何 `WordItem::weight`。
+/// 判断候选是否为 `entry_key` 对应的未纠错、非模糊精确拼音词典同音词。
+fn is_exact_homophone(item: &WordItem, entry_key: &str) -> bool {
+    item.source.is_dictionary()
+        && item.scheme.is_pinyin()
+        && !item.fuzzy
+        && item.corrected_from.is_empty()
+        && candidate_dictionary_key(item, entry_key) == entry_key
+}
+
+/// 为语境同音竞争计算融合了 Stage 4 衰减个人选词事件的等效静态先验权重。
 ///
-/// 仅作用于开头连续的同键拼音词典行（跳过整句、前缀补全与混输行）。
+/// 推导：`alpha * P_static(w) + n_user(w) = (alpha / Z) * (w_static + (Z / alpha) * n_user(w))`；
+/// 当所有同音词均无个人选词记录（`n_user == 0`）时返回 `None`，使下游 `ln(weight)` 与冷启动完全等价；
+/// 有明确选词记录时既不改写主词库静态权重，又能防止中性前文把刚学会的常用词打回静态次席。
+pub fn effective_bayesian_weights(
+    user_db: &Path,
+    entry_key: &str,
+    items: &[&WordItem],
+    now_unix: i64,
+) -> Option<Vec<f64>> {
+    if entry_key.is_empty() || items.len() < 2 {
+        return None;
+    }
+    let counts = decayed_counts_for_key(user_db, entry_key, now_unix);
+    if counts.is_empty() {
+        return None;
+    }
+    let any_matched = items
+        .iter()
+        .any(|item| counts.get(item.word.as_str()).is_some_and(|&n| n > 0.0));
+    if !any_matched {
+        return None;
+    }
+    let total_static_mass: f64 = items
+        .iter()
+        .map(|item| item.weight.max(1) as f64)
+        .sum::<f64>()
+        .max(1.0);
+    let user_unit_weight = total_static_mass / BAYESIAN_PRIOR_ALPHA;
+    Some(
+        items
+            .iter()
+            .map(|item| {
+                let base = item.weight.max(1) as f64;
+                let n_user = counts.get(item.word.as_str()).copied().unwrap_or(0.0);
+                (base + user_unit_weight * n_user).max(1.0)
+            })
+            .collect(),
+    )
+}
+
+/// 用独立贝叶斯衰减叠加层重排同音词典候选；绝不修改任何 `WordItem::weight`。
+///
+/// 要求第 0 位本身是 `entry_key` 的精确拼音词典命中；随后跨越中间可能夹入的词网格整句与长词补全，
+/// 收集全部精确同音词典行一起参与贝叶斯平滑与手动置顶，避免「登录/登陆」「出发/除法」这类因补全词
+/// 夹层而断开的同音词脱离个人学习与置顶控制。
 pub fn apply_personal_overlay(
     user_db: &Path,
     entry_key: &str,
@@ -135,81 +188,146 @@ pub fn apply_personal_overlay(
     candidates: &mut [WordItem],
     now_unix: i64,
 ) -> OverlayOutcome {
-    if entry_key.is_empty() || candidates.len() < 2 {
+    if entry_key.is_empty()
+        || candidates.len() < 2
+        || !is_exact_homophone(&candidates[0], entry_key)
+    {
         return OverlayOutcome::default();
     }
-    // 收集开头连续且与 `entry_key` 完全同音的拼音词典行。
-    let group_len = candidates
+    let counts = decayed_counts_for_key(user_db, entry_key, now_unix);
+    if counts.is_empty() && pinned_leader.is_none() {
+        return OverlayOutcome::default();
+    }
+    // 跨越可能夹在同音词之间的整句与长词补全，收集全部精确同音词典行下标。
+    let exact_indices: Vec<usize> = candidates
         .iter()
-        .take_while(|item| {
-            item.source.is_dictionary()
-                && item.scheme.is_pinyin()
-                && candidate_dictionary_key(item, entry_key) == entry_key
-        })
-        .count();
+        .enumerate()
+        .filter_map(|(idx, item)| is_exact_homophone(item, entry_key).then_some(idx))
+        .collect();
+    let group_len = exact_indices.len();
     if group_len < 2 {
         return OverlayOutcome::default();
     }
-    let pinned_idx = pinned_leader.and_then(|pin| {
-        candidates[..group_len]
+    let pinned_pos = pinned_leader.and_then(|pin| {
+        exact_indices
             .iter()
-            .position(|item| item.word.as_str() == pin)
+            .position(|&raw_idx| candidates[raw_idx].word.as_str() == pin)
     });
-    let counts = decayed_counts_for_key(user_db, entry_key, now_unix);
     if counts.is_empty() {
-        let Some(pin_pos) = pinned_idx else {
+        let Some(pin_pos) = pinned_pos else {
             return OverlayOutcome::default();
         };
-        if pin_pos > 0 {
-            candidates[..=pin_pos].rotate_right(1);
+        let raw_idx = exact_indices[pin_pos];
+        if raw_idx > 0 {
+            candidates[..=raw_idx].rotate_right(1);
         }
         return OverlayOutcome {
-            moved: pin_pos > 0,
+            moved: raw_idx > 0,
             leader_protected: true,
         };
     }
-    let total_static_mass: f64 = candidates[..group_len]
+    let total_static_mass: f64 = exact_indices
         .iter()
-        .map(|item| item.weight.max(1) as f64)
+        .map(|&raw_idx| candidates[raw_idx].weight.max(1) as f64)
         .sum::<f64>()
         .max(1.0);
     let mut posteriors = Vec::with_capacity(group_len);
     let mut user_counts = Vec::with_capacity(group_len);
-    for item in &candidates[..group_len] {
+    for &raw_idx in &exact_indices {
+        let item = &candidates[raw_idx];
         let p_static = item.weight.max(1) as f64 / total_static_mass;
         let n_user = counts.get(item.word.as_str()).copied().unwrap_or(0.0);
         posteriors.push(BAYESIAN_PRIOR_ALPHA * p_static + n_user);
         user_counts.push(n_user);
     }
 
-    let mut leader_idx = pinned_idx.unwrap_or(0);
+    let mut leader_pos = pinned_pos.unwrap_or(0);
     let mut overlay_promoted_leader = false;
-    if pinned_idx.is_none() {
+    if pinned_pos.is_none() {
         let mut best_score = posteriors[0];
-        for idx in 1..group_len {
-            if user_counts[idx] >= SLOT_ZERO_MIN_DECAYED_PICKS && posteriors[idx] > best_score {
-                best_score = posteriors[idx];
-                leader_idx = idx;
+        for pos in 1..group_len {
+            if user_counts[pos] >= SLOT_ZERO_MIN_DECAYED_PICKS && posteriors[pos] > best_score {
+                best_score = posteriors[pos];
+                leader_pos = pos;
                 overlay_promoted_leader = true;
             }
         }
     }
-    let leader_protected = pinned_idx.is_some() || overlay_promoted_leader;
+    let leader_protected = pinned_pos.is_some() || overlay_promoted_leader;
 
-    let mut order: Vec<usize> = Vec::with_capacity(group_len);
-    order.push(leader_idx);
-    let mut rest: Vec<usize> = (0..group_len).filter(|&idx| idx != leader_idx).collect();
+    let mut exact_order: Vec<usize> = Vec::with_capacity(group_len);
+    exact_order.push(leader_pos);
+    let mut rest: Vec<usize> = (0..group_len).filter(|&pos| pos != leader_pos).collect();
     // 余下同音词按贝叶斯后验降序稳定排布：首次明确选择的冷门专名（`n_user ≈ 1.0`）自动进入首屏前排。
     rest.sort_by(|&a, &b| posteriors[b].total_cmp(&posteriors[a]).then(a.cmp(&b)));
-    order.extend(rest);
+    exact_order.extend(rest);
 
-    if order.iter().enumerate().all(|(seat, &idx)| seat == idx) {
+    let leading_contiguous = exact_indices
+        .iter()
+        .enumerate()
+        .take_while(|&(pos, &raw_idx)| pos == raw_idx)
+        .count();
+    if leading_contiguous == group_len {
+        if exact_order
+            .iter()
+            .enumerate()
+            .all(|(seat, &pos)| seat == pos)
+        {
+            return OverlayOutcome {
+                moved: false,
+                leader_protected,
+            };
+        }
+        crate::ordering::apply_order(&mut candidates[..group_len], &exact_order);
+        return OverlayOutcome {
+            moved: true,
+            leader_protected,
+        };
+    }
+
+    // 存在夹层（整句/长词补全）时：凡是新首位、显式置顶、带个人选词记录或原本即在连续前段的同音词
+    // 均连续排在最前，确保一次明确改选即可越过补全词进入首屏前排，且被替代的原首位紧随第 2 位；
+    // 中间的非同音夹层保持相对次序，其余未选过的尾部同音词顺次填回后排空位。
+    let max_exact_idx = *exact_indices.last().expect("group_len >= 2");
+    let mut front_exact = Vec::with_capacity(group_len);
+    let mut tail_exact = Vec::new();
+    for &pos in &exact_order {
+        let promoted_to_front = pos == leader_pos
+            || pinned_pos == Some(pos)
+            || user_counts[pos] > 0.0
+            || exact_indices[pos] < leading_contiguous;
+        if promoted_to_front {
+            front_exact.push(exact_indices[pos]);
+        } else {
+            tail_exact.push(exact_indices[pos]);
+        }
+    }
+    let mut full_order = Vec::with_capacity(max_exact_idx + 1);
+    full_order.extend_from_slice(&front_exact);
+    let mut tail_iter = tail_exact.into_iter();
+    let mut exact_cursor = leading_contiguous;
+    for raw_idx in leading_contiguous..=max_exact_idx {
+        if exact_cursor < group_len && exact_indices[exact_cursor] == raw_idx {
+            exact_cursor += 1;
+            if let Some(next_tail) = tail_iter.next() {
+                full_order.push(next_tail);
+            }
+        } else {
+            full_order.push(raw_idx);
+        }
+    }
+    debug_assert_eq!(full_order.len(), max_exact_idx + 1);
+    if full_order
+        .iter()
+        .enumerate()
+        .all(|(seat, &raw_idx)| seat == raw_idx)
+    {
         return OverlayOutcome {
             moved: false,
             leader_protected,
         };
     }
-    crate::ordering::apply_order(&mut candidates[..group_len], &order);
+    crate::ordering::apply_order(&mut candidates[..=max_exact_idx], &full_order);
     OverlayOutcome {
         moved: true,
         leader_protected,
@@ -320,5 +438,72 @@ mod tests {
         );
         assert!(out_decay.moved && !out_decay.leader_protected);
         assert_eq!(words(&decayed), ["一个", "义戈", "一格"]);
+    }
+
+    #[test]
+    fn interleaved_generated_and_longer_phrases_do_not_block_overlay_learning_or_pin() {
+        let dir = Dir::new();
+        let journal = dir.journal();
+        let now = 1_800_000_000;
+
+        let make = || {
+            let mut gen_row = item("deng'lu", "邓禄", 10);
+            gen_row.source = crate::types::CandidateSource::Generated;
+            let longer_a = item("deng'lu'shi'jian", "登录时间", 400_000);
+            let longer_b = item("deng'lu'ming", "登录名", 200_000);
+            let single = item("deng", "等", 800_000);
+            vec![
+                item("deng'lu", "登录", 502_000),
+                gen_row,
+                longer_a,
+                longer_b,
+                item("deng'lu", "登陆", 5_000),
+                single,
+            ]
+        };
+
+        // 未学习、未置顶时保持原序且有效先验权重返回 None。
+        let mut untouched = make();
+        assert!(!apply_personal_overlay(&journal, "deng'lu", None, &mut untouched, now).moved);
+        let refs: Vec<&WordItem> = vec![&untouched[0], &untouched[4]];
+        assert!(effective_bayesian_weights(&journal, "deng'lu", &refs, now).is_none());
+
+        // 仅手动置顶夹层后的同音词「登陆」：直接旋至首位且保持「登录」在次席。
+        let mut pinned_only = make();
+        let out_pin =
+            apply_personal_overlay(&journal, "deng'lu", Some("登陆"), &mut pinned_only, now);
+        assert!(out_pin.moved && out_pin.leader_protected);
+        assert_eq!(
+            words(&pinned_only),
+            ["登陆", "登录", "邓禄", "登录时间", "登录名", "等"]
+        );
+
+        // 1 次明确改选「登陆」：跨过整句与补全夹层进入第 2 位，「登录」稳守第 1 位。
+        record_personal_selection(&journal, "deng'lu", "登陆", now).unwrap();
+        let mut after1 = make();
+        let out1 = apply_personal_overlay(&journal, "deng'lu", None, &mut after1, now + 1);
+        assert!(out1.moved && !out1.leader_protected);
+        assert_eq!(
+            words(&after1),
+            ["登录", "登陆", "邓禄", "登录时间", "登录名", "等"]
+        );
+
+        // 连续 3 次明确改选「登陆」：跃升至第 1 位，「登录」紧随第 2 位，且有效先验权重超过「登录」。
+        record_personal_selection(&journal, "deng'lu", "登陆", now + 2).unwrap();
+        record_personal_selection(&journal, "deng'lu", "登陆", now + 3).unwrap();
+        let mut after3 = make();
+        let out3 = apply_personal_overlay(&journal, "deng'lu", None, &mut after3, now + 4);
+        assert!(out3.moved && out3.leader_protected);
+        assert_eq!(
+            words(&after3),
+            ["登陆", "登录", "邓禄", "登录时间", "登录名", "等"]
+        );
+        let pair_refs: Vec<&WordItem> = vec![&after3[0], &after3[1]];
+        let weights = effective_bayesian_weights(&journal, "deng'lu", &pair_refs, now + 4)
+            .expect("有个人选择记录时应返回有效贝叶斯权重");
+        assert!(
+            weights[0] > weights[1],
+            "3 次选择后的「登陆」有效权重应高于「登录」: {weights:?}"
+        );
     }
 }

@@ -526,11 +526,13 @@ fn shurufa_slot_allocator_projects_curated_inline_emoji_with_mru_and_clean_toggl
         .iter()
         .any(|row| row["source"] == 6));
 
-    // `daxiao`：Top-2「大笑」在第 3 位投「😂」，第 2 页开头提供备选「🤣」；选中「🤣」后本地 MRU 升至第 3 位。
+    // `daxiao`：Top-2「大笑」在第 3 位投「😂」，第 2 页开头提供备选「🤣」，且原下标 2 的「打小」完整保留；
+    // 选中「🤣」后本地 MRU 升至第 3 位。
     let daxiao = type_keys(handle, "daxiao");
     assert_eq!(daxiao["candidates"][0]["text"], "大小");
     assert_eq!(daxiao["candidates"][1]["text"], "大笑");
     assert_eq!(daxiao["candidates"][2]["text"], "😂");
+    assert_eq!(daxiao["candidates"][3]["text"], "打小");
     let page2 = value(msime_client_command(handle, 100))["view"].clone();
     assert_eq!(page2["candidates"][0]["text"], "🤣");
     assert_eq!(choose(handle, &page2, "🤣")["commit"], "🤣");
@@ -539,6 +541,7 @@ fn shurufa_slot_allocator_projects_curated_inline_emoji_with_mru_and_clean_toggl
     assert_eq!(daxiao_after["candidates"][0]["text"], "大小");
     assert_eq!(daxiao_after["candidates"][1]["text"], "大笑");
     assert_eq!(daxiao_after["candidates"][2]["text"], "🤣");
+    assert_eq!(daxiao_after["candidates"][3]["text"], "打小");
 
     // 关闭开关后，Emoji 立即消失，中文候选相对顺序与关闭前主序逐条一致。
     let mut disabled = Preferences::for_edition(Edition::by_id("shurufa").unwrap());
@@ -559,5 +562,107 @@ fn shurufa_slot_allocator_projects_curated_inline_emoji_with_mru_and_clean_toggl
         .map(|row| row["text"].as_str().unwrap())
         .collect();
     assert_eq!(words_off, vec!["思考", "思靠", "私考"]);
+    value(msime_client_destroy(handle));
+}
+
+#[test]
+fn shurufa_emoji_projection_refresh_and_backspace_never_drop_or_miscommit_candidates() {
+    let root = tempfile::tempdir().unwrap();
+    let path = |name: &str| {
+        let dir = root.path().join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.to_string_lossy().into_owned()
+    };
+    let resources = path("resources");
+    let dictionaries = path("dictionaries");
+    let user_data = path("user_data");
+    {
+        let db = rusqlite::Connection::open(
+            std::path::Path::new(&dictionaries).join(msime_engine::assets::MAIN_DICTIONARY),
+        )
+        .unwrap();
+        db.execute_batch(
+            "CREATE TABLE tbl_1_c(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+             INSERT INTO tbl_1_c VALUES('chu','c','出',900000);\
+             INSERT INTO tbl_1_c VALUES('chu','c','处',800000);\
+             INSERT INTO tbl_1_c VALUES('chu','c','楚',700000);\
+             INSERT INTO tbl_1_c VALUES('chu','c','除',600000);\
+             INSERT INTO tbl_1_c VALUES('chu','c','初',500000);\
+             INSERT INTO tbl_1_c VALUES('chu','c','触',400000);\
+             CREATE TABLE tbl_2_c(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+             INSERT INTO tbl_2_c VALUES('chu''fa','cf','出发',590000);\
+             INSERT INTO tbl_2_c VALUES('chu''fa','cf','处罚',580000);\
+             INSERT INTO tbl_2_c VALUES('chu''fa','cf','触发',550000);\
+             INSERT INTO tbl_2_c VALUES('chu''fa','cf','除法',10000);\
+             CREATE TABLE quick_parases(key TEXT,value TEXT,weight INTEGER);",
+        )
+        .unwrap();
+    }
+    let preferences = Preferences::for_edition(Edition::by_id("shurufa").unwrap());
+    let request = json!({
+        "api_version": 1,
+        "edition": "shurufa",
+        "resources": resources,
+        "dictionaries": dictionaries,
+        "user_data": user_data,
+        "cache": path("cache"),
+        "preferences": preferences,
+    })
+    .to_string();
+    // SAFETY: 合成配置缓冲区在同步调用期间有效。
+    let created = value(unsafe { msime_client_create(request.as_ptr(), request.len()) });
+    let handle = created["session"].as_u64().unwrap();
+    value(msime_client_focus(handle, true));
+
+    // `chuf` 投影 `🚀` 后继续键入 `a` -> `chufa`：「触发」完整保留在第 4 位（下标 3），非 Emoji 列表与关开关逐条一致。
+    let chufa = type_keys(handle, "chufa");
+    let chufa_on: Vec<&str> = chufa["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["source"] != 6)
+        .map(|row| row["text"].as_str().unwrap())
+        .collect();
+    assert!(
+        chufa_on.contains(&"触发"),
+        "chufa 必须保留「触发」: {chufa_on:?}"
+    );
+    assert!(
+        chufa_on.contains(&"除法"),
+        "chufa 必须保留「除法」: {chufa_on:?}"
+    );
+
+    // `chuf` 退格到 `chu`：不能丢掉下标 2 的「处」，且选第 3 项「楚」必须精确上屏「楚」。
+    let chuf = type_keys(handle, "chuf");
+    assert_eq!(chuf["candidates"][2]["text"], "🚀");
+    let chu = value(msime_client_command(handle, 0))["view"].clone();
+    let chu_words: Vec<&str> = chu["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(&chu_words[..4], ["出", "处", "楚", "除"]);
+    assert_eq!(choose(handle, &chu, "楚")["commit"], "楚");
+
+    // 关掉内联 Emoji 后再打 `chufa`，主候选序列必须与开着时剥离 Emoji 后完全一致。
+    let mut disabled = Preferences::for_edition(Edition::by_id("shurufa").unwrap());
+    disabled.mixed_input.emoji = false;
+    let snapshot = json!({
+        "format_version": 1,
+        "revision": 1,
+        "preferences": disabled,
+    })
+    .to_string();
+    // SAFETY: 合成偏好缓冲区在同步调用期间有效。
+    value(unsafe { msime_client_update_preferences(handle, snapshot.as_ptr(), snapshot.len()) });
+    let chufa_off_view = type_keys(handle, "chufa");
+    let chufa_off: Vec<&str> = chufa_off_view["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(chufa_on, &chufa_off[..chufa_on.len()]);
     value(msime_client_destroy(handle));
 }

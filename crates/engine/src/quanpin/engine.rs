@@ -150,8 +150,10 @@ impl QuanpinEngine {
         &mut self,
         items: &[&WordItem],
         context: &str,
+        effective_weights: Option<&[f64]>,
     ) -> Option<usize> {
-        self.dictionary.pick_dictionary_homophone(items, context)
+        self.dictionary
+            .pick_dictionary_homophone(items, context, effective_weights)
     }
 
     pub fn knows_han_char(&self, han: &str) -> bool {

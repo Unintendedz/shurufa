@@ -948,9 +948,14 @@ impl ImeSession {
         &mut self,
         scheme: SchemeType,
         items: &[&WordItem],
+        effective_weights: Option<&[f64]>,
     ) -> Option<usize> {
-        self.registry
-            .pick_dictionary_homophone(scheme, items, &self.rescoring_context)
+        self.registry.pick_dictionary_homophone(
+            scheme,
+            items,
+            &self.rescoring_context,
+            effective_weights,
+        )
     }
 
     /// Routed by the producing row's scheme in mixed wubi (overlays.md §3.3). The provider layer only reads: the session writes pins, removals and frequency learning into user_dictionary, keyed by the selected row's scheme, and learned phrases through its own canonical-pinyin `QuanpinEngine`; `reset_cache` then makes the providers see them.

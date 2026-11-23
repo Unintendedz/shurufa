@@ -19,7 +19,9 @@ use crate::types::{
     LocalInputMode, PersonalDictionaryKind, SchemeType, WordItem,
 };
 use crate::user_dictionary::journal::has_matching_user_weight;
-use crate::user_dictionary::overlay::{apply_personal_overlay, unix_now_seconds};
+use crate::user_dictionary::overlay::{
+    apply_personal_overlay, effective_bayesian_weights, unix_now_seconds,
+};
 use crate::user_dictionary::positions::{
     apply_fixed_positions_with_state, clear_fixed_position, is_pinned_candidate,
     pinned_candidate_for, record_pinned_candidate, set_fixed_position,
@@ -339,9 +341,17 @@ impl InputSession {
         if is_pinned_candidate(journal, &context, &first.word) {
             return None;
         }
-        let best = self
-            .engine
-            .pick_dictionary_homophone(scheme, &refs[..count])?;
+        // Stage 4 独立个人学习不改写 `WordItem::weight`：若开启叠加层，这里把 30 天衰减选词次数
+        // 换算为等效贝叶斯先验权重再与前文竞争，避免中性前文把反复学成的常用词打回静态次席。
+        let effective_weights = self.decoupled_personal_learning.then(|| {
+            effective_bayesian_weights(journal, &context, &refs[..count], unix_now_seconds())
+        });
+        let effective_weights = effective_weights.flatten();
+        let best = self.engine.pick_dictionary_homophone(
+            scheme,
+            &refs[..count],
+            effective_weights.as_deref(),
+        )?;
         (best > 0).then_some(indices[best])
     }
 
