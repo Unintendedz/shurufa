@@ -11,6 +11,8 @@
     double _inputRate;
     // Output samples already drained and released; _pcm holds the samples after them.
     NSUInteger _drainedFrames;
+    // 在中途切换麦克风格式之前已定稿的 16 kHz 输出帧数，用于跨多段设备切换时持续精确对齐样本上限与排空水位。
+    NSUInteger _completedSegmentFrames;
     NSUInteger _sampleLimit;
     uint64_t _inputLimit;
 }
@@ -73,10 +75,15 @@
             _converter = [[AVAudioConverter alloc] initFromFormat:format toFormat:target];
             if (!_converter) return [self fail:error];
             _converter.primeMethod = AVAudioConverterPrimeMethod_None;
-            _pcm = [NSMutableData data];
+            if (!_pcm) _pcm = [NSMutableData data];
             _inputRate = format.sampleRate;
-            _inputLimit = _sampleLimit == NSUIntegerMax ? UINT64_MAX
-                : (uint64_t)std::ceil(_sampleLimit * _inputRate / 16000.0);
+            _inputFrames = 0;
+            if (_sampleLimit == NSUIntegerMax) {
+                _inputLimit = UINT64_MAX;
+            } else {
+                const NSUInteger remainingLimit = _completedSegmentFrames < _sampleLimit ? _sampleLimit - _completedSegmentFrames : 0;
+                _inputLimit = (uint64_t)std::ceil(remainingLimit * _inputRate / 16000.0);
+            }
         } else if (![_converter.inputFormat isEqual:format]) {
             return [self fail:error];
         }
@@ -87,12 +94,35 @@
         return [self convert:buffer final:NO error:error];
     }
 }
+- (BOOL)transitionInputFormatWithError:(NSError **)error {
+    @synchronized(self) {
+        if (_finished || _failed) return [self fail:error];
+        if (!_converter) return YES;
+        if (![self convert:nil final:YES error:error]) return NO;
+        if (_inputRate > 0) {
+            const NSUInteger segmentFrames = (NSUInteger)std::llround(_inputFrames * 16000.0 / _inputRate);
+            const NSUInteger totalExpected = MIN(_completedSegmentFrames + segmentFrames, _sampleLimit);
+            if ([self convertedFrames] > totalExpected) {
+                _pcm.length = totalExpected > _drainedFrames ? (totalExpected - _drainedFrames) * sizeof(float) : 0;
+            }
+            _completedSegmentFrames = MIN([self convertedFrames], totalExpected);
+        } else {
+            _completedSegmentFrames = [self convertedFrames];
+        }
+        _converter = nil;
+        _inputFrames = 0;
+        _inputRate = 0;
+        _inputLimit = 0;
+        return YES;
+    }
+}
 - (NSData *)finishWithError:(NSError **)error {
     @synchronized(self) {
         if (_failed) { [self fail:error]; return nil; }
         if (!_finished && _converter && ![self convert:nil final:YES error:error]) return nil;
-        if (_inputRate > 0) {
-            NSUInteger frames = MIN((NSUInteger)std::llround(_inputFrames * 16000.0 / _inputRate), _sampleLimit);
+        if (_inputRate > 0 || _completedSegmentFrames > 0) {
+            const NSUInteger currentSegmentFrames = _inputRate > 0 ? (NSUInteger)std::llround(_inputFrames * 16000.0 / _inputRate) : 0;
+            NSUInteger frames = MIN(_completedSegmentFrames + currentSegmentFrames, _sampleLimit);
             if ([self convertedFrames] > frames)
                 _pcm.length = frames > _drainedFrames ? (frames - _drainedFrames) * sizeof(float) : 0;
         }
@@ -112,8 +142,9 @@
     @synchronized(self) {
         if (_failed) { [self fail:error]; return nil; }
         NSUInteger available = [self convertedFrames];
-        if (!_finished && _inputRate > 0) {
-            NSUInteger captured = (NSUInteger)std::floor(_inputFrames * 16000.0 / _inputRate);
+        if (!_finished && (_inputRate > 0 || _completedSegmentFrames > 0)) {
+            const NSUInteger currentCaptured = _inputRate > 0 ? (NSUInteger)std::floor(_inputFrames * 16000.0 / _inputRate) : 0;
+            const NSUInteger captured = MIN(_completedSegmentFrames + currentCaptured, _sampleLimit);
             available = MIN(available, captured);
         }
         if (available <= _drainedFrames) return NSData.data;

@@ -10,6 +10,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <time.h>
 
 static BOOL MSIMEVoiceStrictGeneration(id value, uint64_t *result) {
     if (![value isKindOfClass:NSNumber.class] ||
@@ -27,6 +28,17 @@ namespace {
 struct PCMStreamAdmission { std::mutex mutex; bool live = true; };
 
 enum class PCMCaptureMode : int { None = 0, BatchRecording, Streaming };
+
+constexpr NSUInteger kMaxEngineRecoveryRetries = 4;
+constexpr NSUInteger kMaxSessionMigrations = 8;
+constexpr NSTimeInterval kConfigChangeDebounceSec = 0.12;
+constexpr NSTimeInterval kStallWatchdogIntervalSec = 0.6;
+constexpr uint64_t kInitialStallGraceNs = 2400000000ULL; // 2.4 秒：容忍蓝牙 HFP 初次协商握手
+constexpr uint64_t kActiveStallThresholdNs = 1800000000ULL; // 1.8 秒无任何音频回调视为采集流卡死
+
+inline uint64_t MonotonicUptimeNs() {
+    return clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+}
 
 // 对 16 kHz 单声道 float PCM 执行前端预处理，返回独立的可安全传递数据块，不修改入参底层缓冲。
 NSData *PreprocessPCMData(NSData *pcm, msime::voice::VoiceAudioPreprocessor *preprocessor) {
@@ -51,6 +63,8 @@ NSData *PreprocessPCMData(NSData *pcm, msime::voice::VoiceAudioPreprocessor *pre
     MSIMEVoicePCMBuffer *_pcmRecording;
     std::shared_ptr<PCMStreamAdmission> _pcmStreamLive;
     std::shared_ptr<msime::voice::CaptureDuration> _captureDuration;
+    // 跨多次麦克风热切换累计的已录制时长（秒）。
+    NSTimeInterval _accumulatedDurationSeconds;
     NSTimeInterval _recordedDuration;
     NSString *_archiveRecordingID;
     BOOL _archiving;
@@ -71,12 +85,34 @@ NSData *PreprocessPCMData(NSData *pcm, msime::voice::VoiceAudioPreprocessor *pre
     BOOL _lastHasLikelySpeech;
     uint32_t _lastActiveSpeechMs;
     float _lastPeakAbs;
+
+    // 音频设备热迁移与卡死恢复状态（仅在主线程读写，`_lastAudioBufferNs` 由采集回调原子更新）。
+    NSUInteger _captureSessionGeneration;
+    BOOL _captureSessionOpen;
+    MSIMEVoiceAudioBuffer _activeBufferHandler;
+    NSString *_requestedDeviceUID;
+    NSString *_activeCaptureDeviceUID;
+    NSString *_activeCaptureDeviceName;
+    id _audioConfigObserver;
+    AudioObjectPropertyListenerBlock _halDefaultInputListener;
+    AudioObjectPropertyListenerBlock _halDevicesListener;
+    BOOL _halListenersRegistered;
+    NSTimer *_captureStallWatchdog;
+    std::shared_ptr<std::atomic<uint64_t>> _lastAudioBufferNs;
+    uint64_t _captureEngineStartedNs;
+    BOOL _recoveryScheduled;
+    NSUInteger _recoveryRetryCount;
+    NSUInteger _sessionMigrationCount;
 }
 static id<MSIMEVoiceArchiving> MSIMEVoiceInputArchive;
 + (id<MSIMEVoiceArchiving>)archive { return MSIMEVoiceInputArchive; }
 + (void)setArchive:(id<MSIMEVoiceArchiving>)archive { MSIMEVoiceInputArchive = archive; }
 - (NSString *)archiveRecordingID { return _archiveRecordingID; }
-- (NSTimeInterval)recordedDuration { return _captureDuration ? _captureDuration->seconds() : _recordedDuration; }
+- (NSString *)activeCaptureDeviceName { return _activeCaptureDeviceName; }
+- (NSTimeInterval)recordedDuration {
+    if (_captureDuration) return _accumulatedDurationSeconds + _captureDuration->seconds();
+    return _captureSessionOpen ? _accumulatedDurationSeconds : _recordedDuration;
+}
 - (BOOL)hasLikelySpeech {
     if (_audioPreprocessor && _tapMutex) {
         std::lock_guard<std::mutex> lock(*_tapMutex);
@@ -126,7 +162,7 @@ static id<MSIMEVoiceArchiving> MSIMEVoiceInputArchive;
     return [self startPCMRecording:handler deviceUID:deviceUID failure:nil error:error];
 }
 - (BOOL)startPCMRecording:(MSIMEVoiceAudioBuffer)handler deviceUID:(NSString *)deviceUID failure:(void (^)(NSError *))failure error:(NSError **)error {
-    if (_pcmRecording || _audioEngine || _speechTask) {
+    if (_pcmRecording || _audioEngine || _captureSessionOpen || _speechTask) {
         if (error) *error = [NSError errorWithDomain:@"app.msime.client.voice" code:4
             userInfo:@{NSLocalizedDescriptionKey: @"录音已在进行中"}];
         return NO;
@@ -226,7 +262,7 @@ static id<MSIMEVoiceArchiving> MSIMEVoiceInputArchive;
     return result;
 }
 - (BOOL)startPCMStreaming:(MSIMEVoicePCMChunk)handler deviceUID:(NSString *)deviceUID error:(NSError **)error {
-    if (!handler || _pcmRecording || _audioEngine || _speechTask) {
+    if (!handler || _pcmRecording || _audioEngine || _captureSessionOpen || _speechTask) {
         if (error) *error = [NSError errorWithDomain:@"app.msime.client.voice" code:4
             userInfo:@{NSLocalizedDescriptionKey:@"无法开始流式录音"}];
         return NO;
@@ -279,57 +315,224 @@ static id<MSIMEVoiceArchiving> MSIMEVoiceInputArchive;
     // 生产单次重采样路径已在 finishPCMRecordingWithError: 中排空并完成尾帧预处理。
     return tapHandled ? finished : [recording drainWithError:error];
 }
-- (BOOL)startMicrophoneCapture:(MSIMEVoiceAudioBuffer)bufferHandler deviceUID:(NSString *)deviceUID error:(NSError **)error {
-    if ([self microphoneAuthorizationStatus] != AVAuthorizationStatusAuthorized) { if (error) *error = [NSError errorWithDomain:@"app.msime.client.voice" code:1 userInfo:@{NSLocalizedDescriptionKey: @"麦克风权限未授权"}]; return NO; }
-    if (_audioEngine) return YES;
-    _recordedDuration = 0;
-    _captureDuration.reset();
-    _hasPreprocessStats = NO;
-    _lastHasLikelySpeech = YES;
-    _lastActiveSpeechMs = 0;
-    _lastPeakAbs = 0.0f;
-    _audioEngine = [self makeAudioEngine];
-    AVAudioInputNode *input = _audioEngine.inputNode;
-    if (!MSIMEConfigureVoiceCaptureDevice(deviceUID, input.audioUnit, error)) {
+
+// 拆除当前 AVAudioEngine 与配置变更观察者，但保留整个录音会话（存档、预处理器、缓冲与流式回调）以供热迁移复用。
+- (void)teardownAudioEngineInstanceOnly {
+    if (_audioConfigObserver) {
+        [NSNotificationCenter.defaultCenter removeObserver:_audioConfigObserver];
+        _audioConfigObserver = nil;
+    }
+    if (_captureDuration) {
+        _accumulatedDurationSeconds += _captureDuration->finish();
+        _captureDuration.reset();
+    }
+    if (_audioEngine) {
+        [_audioEngine.inputNode removeTapOnBus:0];
+        [_audioEngine stop];
         _audioEngine = nil;
+    }
+}
+
+- (void)stopCaptureResilienceMonitors {
+    if (_captureStallWatchdog) {
+        [_captureStallWatchdog invalidate];
+        _captureStallWatchdog = nil;
+    }
+    if (_halListenersRegistered) {
+        _halListenersRegistered = NO;
+        AudioObjectPropertyAddress defaultInputAddr = {
+            kAudioHardwarePropertyDefaultInputDevice,
+            kAudioObjectPropertyScopeGlobal,
+            kAudioObjectPropertyElementMain
+        };
+        AudioObjectPropertyAddress devicesAddr = {
+            kAudioHardwarePropertyDevices,
+            kAudioObjectPropertyScopeGlobal,
+            kAudioObjectPropertyElementMain
+        };
+        if (_halDefaultInputListener) {
+            AudioObjectRemovePropertyListenerBlock(kAudioObjectSystemObject, &defaultInputAddr,
+                                                   dispatch_get_main_queue(), _halDefaultInputListener);
+            _halDefaultInputListener = nil;
+        }
+        if (_halDevicesListener) {
+            AudioObjectRemovePropertyListenerBlock(kAudioObjectSystemObject, &devicesAddr,
+                                                   dispatch_get_main_queue(), _halDevicesListener);
+            _halDevicesListener = nil;
+        }
+    }
+}
+
+- (void)startCaptureResilienceMonitorsForRealEngine {
+    if (_halListenersRegistered) return;
+    __weak MSIMEVoiceInputService *weakSelf = self;
+    const NSUInteger generation = _captureSessionGeneration;
+    AudioObjectPropertyAddress defaultInputAddr = {
+        kAudioHardwarePropertyDefaultInputDevice,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain
+    };
+    AudioObjectPropertyAddress devicesAddr = {
+        kAudioHardwarePropertyDevices,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain
+    };
+    _halDefaultInputListener = ^(UInt32 numberAddresses, const AudioObjectPropertyAddress *addresses) {
+        (void)numberAddresses; (void)addresses;
+        MSIMEVoiceInputService *service = weakSelf;
+        if (!service || !service->_captureSessionOpen || service->_captureSessionGeneration != generation) return;
+        // 仅当用户采用系统默认设备或当前使用设备已变更/掉线时才触发无缝切换，避免无意义的重启闪烁。
+        if (!service->_requestedDeviceUID.length) {
+            [service scheduleDebouncedCaptureRecoveryForGeneration:generation];
+        } else {
+            BOOL fellBack = NO;
+            NSString *resolvedUID = nil;
+            NSString *resolvedName = nil;
+            MSIMEVoiceResolveCaptureDeviceWithFallback(service->_requestedDeviceUID, &resolvedUID, &resolvedName, &fellBack);
+            if (fellBack || (resolvedName.length && ![resolvedName isEqualToString:service->_activeCaptureDeviceName])) {
+                [service scheduleDebouncedCaptureRecoveryForGeneration:generation];
+            }
+        }
+    };
+    _halDevicesListener = ^(UInt32 numberAddresses, const AudioObjectPropertyAddress *addresses) {
+        (void)numberAddresses; (void)addresses;
+        MSIMEVoiceInputService *service = weakSelf;
+        if (!service || !service->_captureSessionOpen || service->_captureSessionGeneration != generation) return;
+        if (service->_audioEngine && !service->_audioEngine.isRunning) {
+            [service scheduleDebouncedCaptureRecoveryForGeneration:generation];
+            return;
+        }
+        if (service->_requestedDeviceUID.length) {
+            BOOL fellBack = NO;
+            NSString *resolvedUID = nil;
+            NSString *resolvedName = nil;
+            if (!MSIMEVoiceResolveCaptureDeviceWithFallback(service->_requestedDeviceUID, &resolvedUID, &resolvedName, &fellBack) || fellBack) {
+                [service scheduleDebouncedCaptureRecoveryForGeneration:generation];
+            }
+        }
+    };
+    OSStatus s1 = AudioObjectAddPropertyListenerBlock(kAudioObjectSystemObject, &defaultInputAddr,
+                                                      dispatch_get_main_queue(), _halDefaultInputListener);
+    OSStatus s2 = AudioObjectAddPropertyListenerBlock(kAudioObjectSystemObject, &devicesAddr,
+                                                      dispatch_get_main_queue(), _halDevicesListener);
+    _halListenersRegistered = (s1 == noErr || s2 == noErr);
+    if (s1 != noErr) _halDefaultInputListener = nil;
+    if (s2 != noErr) _halDevicesListener = nil;
+
+    _captureStallWatchdog = [NSTimer timerWithTimeInterval:kStallWatchdogIntervalSec repeats:YES block:^(NSTimer *timer) {
+        MSIMEVoiceInputService *service = weakSelf;
+        if (!service || !service->_captureSessionOpen || service->_captureSessionGeneration != generation) {
+            [timer invalidate];
+            return;
+        }
+        if (service->_recoveryScheduled) return;
+        const uint64_t now = MonotonicUptimeNs();
+        const uint64_t lastFrame = service->_lastAudioBufferNs ? service->_lastAudioBufferNs->load(std::memory_order_acquire) : 0;
+        const BOOL engineStopped = (service->_audioEngine != nil && !service->_audioEngine.isRunning);
+        const BOOL stalledAfterFirstFrame = (lastFrame > 0 && now > lastFrame && (now - lastFrame) >= kActiveStallThresholdNs);
+        const BOOL stalledWithoutAnyFrame = (lastFrame == 0 && now > service->_captureEngineStartedNs &&
+                                             (now - service->_captureEngineStartedNs) >= kInitialStallGraceNs);
+        if (engineStopped || stalledAfterFirstFrame || stalledWithoutAnyFrame) {
+            [service scheduleDebouncedCaptureRecoveryForGeneration:generation preferAlternativeDevice:(stalledAfterFirstFrame || stalledWithoutAnyFrame)];
+        }
+    }];
+    [NSRunLoop.mainRunLoop addTimer:_captureStallWatchdog forMode:NSRunLoopCommonModes];
+}
+
+- (void)scheduleDebouncedCaptureRecoveryForGeneration:(NSUInteger)generation {
+    [self scheduleDebouncedCaptureRecoveryForGeneration:generation preferAlternativeDevice:NO];
+}
+
+- (void)scheduleDebouncedCaptureRecoveryForGeneration:(NSUInteger)generation preferAlternativeDevice:(BOOL)preferAlternative {
+    if (!_captureSessionOpen || _captureSessionGeneration != generation) return;
+    if (_recoveryScheduled) return;
+    _recoveryScheduled = YES;
+    __weak MSIMEVoiceInputService *weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kConfigChangeDebounceSec * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        MSIMEVoiceInputService *service = weakSelf;
+        if (!service || !service->_captureSessionOpen || service->_captureSessionGeneration != generation) return;
+        service->_recoveryScheduled = NO;
+        if (preferAlternative) {
+            NSString *altName = nil;
+            NSString *altUID = MSIMEVoiceAlternativeCaptureDeviceUID(service->_activeCaptureDeviceUID ?: service->_requestedDeviceUID, &altName);
+            if (altUID.length) {
+                // 当前设备持续 0 帧卡死（常见于假连接蓝牙 HFP）：本次会话优先切到另一台存活麦克风，避免在死设备上死循环。
+                service->_requestedDeviceUID = [altUID copy];
+            }
+        }
+        [service recoverAudioCaptureForConfigurationChange];
+    });
+}
+
+// 启动或重建 AVAudioEngine 并挂载共享采集 tap；`isRecovery == YES` 时复用既有存档、预处理器、缓冲与流回调。
+- (BOOL)attachAndStartAudioEngineWithDeviceUID:(NSString *)deviceUID
+                                    isRecovery:(BOOL)isRecovery
+                                  usedFallback:(BOOL *)usedFallbackOut
+                                  resolvedName:(NSString * __autoreleasing *)resolvedNameOut
+                                         error:(NSError **)error {
+    if (usedFallbackOut) *usedFallbackOut = NO;
+    if (resolvedNameOut) *resolvedNameOut = nil;
+
+    AVAudioEngine *engine = [self makeAudioEngine];
+    if (!engine) {
+        if (error) *error = [NSError errorWithDomain:@"app.msime.client.voice" code:6
+            userInfo:@{NSLocalizedDescriptionKey: @"无法创建音频采集引擎"}];
         return NO;
     }
-    // 每次开麦都存一份 16 kHz 单声道音频，与交给哪个识别服务无关；成功、失败、取消、中断都留着。
-    id<MSIMEVoiceArchiving> archive = MSIMEVoiceInputArchive;
-    NSString *archiveID = [archive beginRecordingForApp:_archiveApp provider:_archiveProvider];
-    if (archiveID) { _archiveRecordingID = archiveID; _archiving = YES; }
+    AVAudioInputNode *input = engine.inputNode;
+    BOOL usedFallback = NO;
+    NSString *resolvedName = nil;
+    if (!MSIMEConfigureVoiceCaptureDeviceWithFallback(deviceUID, input.audioUnit, &usedFallback, &resolvedName, error)) {
+        return NO;
+    }
     AVAudioFormat *format = [input inputFormatForBus:0];
-    NSError *tapError = nil;
-    SFSpeechAudioBufferRecognitionRequest *speechRequest = _speechRequest;
-    id<MSIMEBackendSpeechAnalyzerSession> analyzer = _analyzer;
-    auto duration = std::make_shared<msime::voice::CaptureDuration>(format.sampleRate);
-    auto preprocessor = std::make_shared<msime::voice::VoiceAudioPreprocessor>();
-    auto tapMutex = std::make_shared<std::mutex>();
-    _captureDuration = duration;
-    _audioPreprocessor = preprocessor;
-    _tapMutex = tapMutex;
+    if (!format || !std::isfinite(format.sampleRate) || format.sampleRate < 8000.0 || format.channelCount < 1) {
+        if (error) *error = [NSError errorWithDomain:@"app.msime.client.voice" code:7
+            userInfo:@{NSLocalizedDescriptionKey: @"麦克风音频格式暂不可用"}];
+        return NO;
+    }
 
+    auto duration = std::make_shared<msime::voice::CaptureDuration>(format.sampleRate);
+    _captureDuration = duration;
+    _audioEngine = engine;
+    _activeCaptureDeviceName = resolvedName.length ? [resolvedName copy] : nil;
+    if ([engine isKindOfClass:AVAudioEngine.class]) {
+        NSString *resolvedUID = nil;
+        NSString *ignoredName = nil;
+        BOOL ignoredFallback = NO;
+        if (MSIMEVoiceResolveCaptureDeviceWithFallback(deviceUID, &resolvedUID, &ignoredName, &ignoredFallback)) {
+            _activeCaptureDeviceUID = [resolvedUID copy];
+        } else {
+            _activeCaptureDeviceUID = [deviceUID copy];
+        }
+    } else {
+        _activeCaptureDeviceUID = [deviceUID copy];
+    }
+
+    id<MSIMEVoiceArchiving> archive = MSIMEVoiceInputArchive;
+    NSString *archiveID = _archiveRecordingID;
+    auto preprocessor = _audioPreprocessor;
+    auto tapMutex = _tapMutex;
     const PCMCaptureMode mode = _pcmCaptureMode;
     MSIMEVoicePCMBuffer *sharedRecording = (mode != PCMCaptureMode::None) ? _pcmRecording : nil;
-    MSIMEVoicePCMBuffer *standalonePCM = (mode == PCMCaptureMode::None)
-        ? [[MSIMEVoicePCMBuffer alloc] initWithSampleLimit:NSUIntegerMax]
-        : nil;
-    _tapStandalonePCM = standalonePCM;
+    MSIMEVoicePCMBuffer *standalonePCM = _tapStandalonePCM;
     auto streamLive = _pcmStreamLive;
     MSIMEVoicePCMChunk streamHandler = _pcmStreamHandler;
     NSMutableData *batchAccumulated = _pcmBatchAccumulated;
     void (^batchFailure)(NSError *) = _pcmBatchFailure;
     auto batchFailed = _pcmBatchFailed;
-    if (mode != PCMCaptureMode::None) {
-        _pcmTapHandled = YES;
-        if (_pendingTapHandled) _pendingTapHandled->store(true, std::memory_order_release);
-    }
+    SFSpeechAudioBufferRecognitionRequest *speechRequest = _speechRequest;
+    id<MSIMEBackendSpeechAnalyzerSession> analyzer = _analyzer;
+    MSIMEVoiceAudioBuffer bufferHandler = _activeBufferHandler;
+    auto lastBufferNs = _lastAudioBufferNs;
     __weak MSIMEVoiceInputService *weakSelf = self;
 
     // 合并存档与识别为单次 16 kHz 单声道 f32 转换，经 VoiceAudioPreprocessor 处理后同时供给存档与识别。
     AVAudioNodeTapBlock capture = ^(AVAudioPCMBuffer *buffer, AVAudioTime *time) {
         (void)time;
         if (!duration->append(buffer.frameLength)) return;
+        if (lastBufferNs) lastBufferNs->store(MonotonicUptimeNs(), std::memory_order_release);
         if (mode == PCMCaptureMode::Streaming && sharedRecording && streamLive) {
             std::lock_guard<std::mutex> streamLock(streamLive->mutex);
             if (!streamLive->live) return;
@@ -392,38 +595,176 @@ static id<MSIMEVoiceArchiving> MSIMEVoiceInputArchive;
         [analyzer appendBuffer:buffer];
         if (bufferHandler) bufferHandler(buffer);
     };
-    // AVAudioInputNode exposes the tap API without an NSError parameter on
-    // the macOS SDKs supported by this host. Keep the deprecated warning
-    // local to this call rather than selecting a non-existent overload.
+
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
     [input installTapOnBus:0 bufferSize:1024 format:format block:capture];
 #pragma clang diagnostic pop
-    if (tapError) {
-        duration->finish();
-        _captureDuration.reset();
-        _audioEngine = nil;
-        _tapStandalonePCM = nil;
-        _audioPreprocessor.reset();
-        _tapMutex.reset();
-        _pcmTapHandled = NO;
-        [self endArchiveDiscarding:YES];
-        if (error) *error = tapError;
-        return NO;
-    }
+
     NSError *startError = nil;
-    if (![_audioEngine startAndReturnError:&startError]) {
+    if (![engine startAndReturnError:&startError]) {
         duration->finish();
         _captureDuration.reset();
         [input removeTapOnBus:0];
         _audioEngine = nil;
+        if (error) *error = startError;
+        return NO;
+    }
+
+    _captureEngineStartedNs = MonotonicUptimeNs();
+    if (_lastAudioBufferNs) _lastAudioBufferNs->store(0, std::memory_order_release);
+
+    const NSUInteger generation = _captureSessionGeneration;
+    _audioConfigObserver = [NSNotificationCenter.defaultCenter
+        addObserverForName:AVAudioEngineConfigurationChangeNotification
+                    object:engine
+                     queue:NSOperationQueue.mainQueue
+                usingBlock:^(NSNotification *notification) {
+                    (void)notification;
+                    MSIMEVoiceInputService *service = weakSelf;
+                    if (!service || !service->_captureSessionOpen || service->_captureSessionGeneration != generation) return;
+                    [service scheduleDebouncedCaptureRecoveryForGeneration:generation];
+                }];
+
+    if ([engine isKindOfClass:AVAudioEngine.class]) {
+        [self startCaptureResilienceMonitorsForRealEngine];
+    }
+
+    if (usedFallbackOut) *usedFallbackOut = usedFallback;
+    if (resolvedNameOut) *resolvedNameOut = resolvedName;
+    (void)isRecovery;
+    return YES;
+}
+
+- (BOOL)recoverAudioCaptureForConfigurationChange {
+    if (!_captureSessionOpen) return NO;
+    const NSUInteger generation = _captureSessionGeneration;
+    if (_sessionMigrationCount >= kMaxSessionMigrations) {
+        NSError *limitError = [NSError errorWithDomain:@"app.msime.client.voice" code:8
+            userInfo:@{NSLocalizedDescriptionKey: @"音频设备频繁断开，无法继续切换"}];
+        [self stopCaptureResilienceMonitors];
+        [self teardownAudioEngineInstanceOnly];
+        if (self.captureDeviceLostHandler) self.captureDeviceLostHandler(limitError);
+        return NO;
+    }
+
+    // 1. 拆除旧引擎（同步冻结已录时长）并冲刷现有重采样器，为新设备的采样率/声道数无缝衔接做好准备。
+    [self teardownAudioEngineInstanceOnly];
+    if (_tapMutex) {
+        std::lock_guard<std::mutex> dspLock(*_tapMutex);
+        if (_pcmRecording) [_pcmRecording transitionInputFormatWithError:nil];
+        if (_tapStandalonePCM) [_tapStandalonePCM transitionInputFormatWithError:nil];
+    }
+
+    // 2. 重建引擎并自动回退至存活麦克风（若首选外设已拔出或断开，立即切到系统默认麦克风）。
+    BOOL usedFallback = NO;
+    NSString *resolvedName = nil;
+    NSError *reconfigError = nil;
+    if ([self attachAndStartAudioEngineWithDeviceUID:_requestedDeviceUID
+                                          isRecovery:YES
+                                        usedFallback:&usedFallback
+                                        resolvedName:&resolvedName
+                                               error:&reconfigError]) {
+        _recoveryRetryCount = 0;
+        ++_sessionMigrationCount;
+        if (self.captureRouteDidChangeHandler) {
+            self.captureRouteDidChangeHandler(resolvedName.length ? resolvedName : @"系统默认麦克风", YES);
+        }
+        return YES;
+    }
+
+    // 3. 蓝牙/CoreAudio 聚合设备断开后常有 200~800 ms 的重建窗口：退避重试而不急于宣判失败。
+    if (_recoveryRetryCount < kMaxEngineRecoveryRetries) {
+        ++_recoveryRetryCount;
+        const NSTimeInterval delay = 0.22 * static_cast<NSTimeInterval>(_recoveryRetryCount);
+        _recoveryScheduled = YES;
+        __weak MSIMEVoiceInputService *weakSelf = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            MSIMEVoiceInputService *service = weakSelf;
+            if (!service || !service->_captureSessionOpen || service->_captureSessionGeneration != generation) return;
+            service->_recoveryScheduled = NO;
+            [service recoverAudioCaptureForConfigurationChange];
+        });
+        return NO;
+    }
+
+    // 4. 所有重试耗尽（确实已无任何可用输入设备）：停止看门狗并回调宿主抢救已录音频，绝不静默丢弃已说内容。
+    [self stopCaptureResilienceMonitors];
+    NSError *lostError = reconfigError ?: [NSError errorWithDomain:@"app.msime.client.voice" code:9
+        userInfo:@{NSLocalizedDescriptionKey: @"麦克风已断开且没有可用的替代设备"}];
+    if (self.captureDeviceLostHandler) self.captureDeviceLostHandler(lostError);
+    return NO;
+}
+
+- (BOOL)startMicrophoneCapture:(MSIMEVoiceAudioBuffer)bufferHandler deviceUID:(NSString *)deviceUID error:(NSError **)error {
+    if ([self microphoneAuthorizationStatus] != AVAuthorizationStatusAuthorized) {
+        if (error) *error = [NSError errorWithDomain:@"app.msime.client.voice" code:1
+            userInfo:@{NSLocalizedDescriptionKey: @"麦克风权限未授权"}];
+        return NO;
+    }
+    if (_audioEngine || _captureSessionOpen) return YES;
+
+    ++_captureSessionGeneration;
+    _captureSessionOpen = YES;
+    _accumulatedDurationSeconds = 0;
+    _recordedDuration = 0;
+    _captureDuration.reset();
+    _hasPreprocessStats = NO;
+    _lastHasLikelySpeech = YES;
+    _lastActiveSpeechMs = 0;
+    _lastPeakAbs = 0.0f;
+    _activeBufferHandler = [bufferHandler copy];
+    _requestedDeviceUID = [deviceUID copy];
+    _activeCaptureDeviceName = nil;
+    _recoveryScheduled = NO;
+    _recoveryRetryCount = 0;
+    _sessionMigrationCount = 0;
+    _lastAudioBufferNs = std::make_shared<std::atomic<uint64_t>>(0);
+
+    // 每次开麦都存一份 16 kHz 单声道音频，与交给哪个识别服务无关；成功、失败、取消、中断都留着。
+    id<MSIMEVoiceArchiving> archive = MSIMEVoiceInputArchive;
+    NSString *archiveID = [archive beginRecordingForApp:_archiveApp provider:_archiveProvider];
+    if (archiveID) { _archiveRecordingID = archiveID; _archiving = YES; }
+
+    _audioPreprocessor = std::make_shared<msime::voice::VoiceAudioPreprocessor>();
+    _tapMutex = std::make_shared<std::mutex>();
+    _tapStandalonePCM = (_pcmCaptureMode == PCMCaptureMode::None)
+        ? [[MSIMEVoicePCMBuffer alloc] initWithSampleLimit:NSUIntegerMax]
+        : nil;
+    if (_pcmCaptureMode != PCMCaptureMode::None) {
+        _pcmTapHandled = YES;
+        if (_pendingTapHandled) _pendingTapHandled->store(true, std::memory_order_release);
+    }
+
+    BOOL usedFallback = NO;
+    NSString *resolvedName = nil;
+    if (![self attachAndStartAudioEngineWithDeviceUID:deviceUID
+                                           isRecovery:NO
+                                         usedFallback:&usedFallback
+                                         resolvedName:&resolvedName
+                                                error:error]) {
+        _captureSessionOpen = NO;
+        ++_captureSessionGeneration;
+        [self stopCaptureResilienceMonitors];
+        [self teardownAudioEngineInstanceOnly];
         _tapStandalonePCM = nil;
         _audioPreprocessor.reset();
         _tapMutex.reset();
+        _activeBufferHandler = nil;
+        _requestedDeviceUID = nil;
+        _lastAudioBufferNs.reset();
         _pcmTapHandled = NO;
         [self endArchiveDiscarding:YES];
-        if (error) *error = startError;
         return NO;
+    }
+
+    if (usedFallback && self.captureRouteDidChangeHandler) {
+        NSString *name = resolvedName.length ? [resolvedName copy] : @"系统默认麦克风";
+        void (^routeHandler)(NSString *, BOOL) = [self.captureRouteDidChangeHandler copy];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            routeHandler(name, NO);
+        });
     }
     return YES;
 }
@@ -442,11 +783,17 @@ static id<MSIMEVoiceArchiving> MSIMEVoiceInputArchive;
 }
 - (AVAudioEngine *)makeAudioEngine { return [AVAudioEngine new]; }
 - (void)stopAudioEngineCapture {
-    if (_captureDuration) { _recordedDuration = _captureDuration->finish(); _captureDuration.reset(); }
-    if (!_audioEngine) return;
-    [_audioEngine.inputNode removeTapOnBus:0];
-    [_audioEngine stop];
-    _audioEngine = nil;
+    ++_captureSessionGeneration;
+    _captureSessionOpen = NO;
+    _recoveryScheduled = NO;
+    [self stopCaptureResilienceMonitors];
+    [self teardownAudioEngineInstanceOnly];
+    _recordedDuration = _accumulatedDurationSeconds;
+    _accumulatedDurationSeconds = 0;
+    _activeBufferHandler = nil;
+    _requestedDeviceUID = nil;
+    _activeCaptureDeviceUID = nil;
+    _lastAudioBufferNs.reset();
     [_speechRequest endAudio];
     [_analyzer finishAudio];
 }

@@ -23,6 +23,10 @@ typedef void (^MSIMEVoicePCMChunk)(NSData * _Nullable pcm, NSError * _Nullable e
     forRecording:(NSString *)identifier;
 // 静默丢弃（纯语气词、静音误触、复读幻觉等）时写入原因，不标记为识别失败。
 - (void)noteDismissedReason:(NSString *)reason forRecording:(NSString *)identifier;
+// 取回指定录音存档的 16 kHz 单声道 f32 PCM，用于失败浮窗的一键原地重试识别。
+- (nullable NSData *)PCMForRecording:(NSString *)identifier;
+// 写回重新听写得到的最新文本。
+- (BOOL)noteRetranscription:(NSString *)text forRecording:(NSString *)identifier;
 @end
 @interface MSIMEVoiceInputService : NSObject
 @property(class, nonatomic, strong, nullable) id<MSIMEVoiceArchiving> archive;
@@ -63,5 +67,13 @@ typedef void (^MSIMEVoicePCMChunk)(NSData * _Nullable pcm, NSError * _Nullable e
 @property(nonatomic, readonly) uint32_t activeSpeechMs;
 @property(nonatomic, readonly) float peakAbs;
 @property(nonatomic, readonly) BOOL isLikelyAccidentalSilence;
+// 当前录音实际使用的输入设备名称（在系统默认或热切换后更新）。
+@property(nonatomic, readonly, copy, nullable) NSString *activeCaptureDeviceName;
+// 麦克风在起录回退或录音中途热迁移至新设备时在主线程回调；`recovered == YES` 表示录音中途无缝转移。
+@property(nonatomic, copy, nullable) void (^captureRouteDidChangeHandler)(NSString *deviceName, BOOL recovered);
+// 录音中途设备彻底断开且重试恢复均失败时在主线程回调；此时已录音频仍保留，供宿主抢救并提交识别。
+@property(nonatomic, copy, nullable) void (^captureDeviceLostHandler)(NSError *error);
+// 主动触发一次音频采集引擎热重建（由系统配置变更/HAL 监听/看门狗调用，同时供单测确定性验证无缝切换）。
+- (BOOL)recoverAudioCaptureForConfigurationChange;
 @end
 NS_ASSUME_NONNULL_END

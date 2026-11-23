@@ -8,6 +8,8 @@
 // Keep at most `sampleLimit` 16 kHz samples. Audio arriving after the limit is dropped rather than failing the recording, so the host still submits everything captured up to it; the host also ends the recording at that point, so the user sees it stop. NSUIntegerMax means no limit, for a stream that drains as it goes.
 - (instancetype)initWithSampleLimit:(NSUInteger)sampleLimit NS_DESIGNATED_INITIALIZER;
 - (BOOL)append:(AVAudioPCMBuffer *)buffer error:(NSError **)error;
+// 显式完成当前输入设备格式段的冲刷并重置重采样器，允许录音中途热切换至不同采样率/声道数的新麦克风，同时保持 16 kHz 输出流连续。
+- (BOOL)transitionInputFormatWithError:(NSError **)error;
 // Every sample not yet drained. For a recording that is never drained, that is the complete recording.
 - (NSData *)finishWithError:(NSError **)error;
 // Return each converted sample at most once and release it, so a streamed recording holds only what has not been delivered yet. Before finish, withhold any converter padding beyond the captured input duration; after finish, drain returns the tail.

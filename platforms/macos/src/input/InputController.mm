@@ -41,6 +41,8 @@
 #import "../voice/VoicePolishClient.h"
 #import "../voice/VoicePipelineHelper.h"
 #import "../voice/VoiceEditTracker.h"
+#import "../voice/VoiceTargetEditability.h"
+#import "../voice/VoiceRecoveryToast.h"
 #include <time.h>
 #import "../voice/VoiceFailureMessages.h"
 #import "../core/SupportWindowController.h"
@@ -1726,6 +1728,14 @@ static NSImage *MSIMECandidateLogoImage() {
     NSString *_voicePreviewText;
     NSNumber *_voiceCopiedResult;
     NSString *_voicePolishFallbackNotice;
+    NSString *_voiceSalvageNotice;
+    NSString *_lastUndeliveredVoiceText;
+    // 失败浮窗一键原地重试状态（独立于常规实时录音，可被新录音或 Esc 随时取消）。
+    BOOL _voiceRetryInFlight;
+    uint64_t _voiceRetryGeneration;
+    id<MSIMEStreamingVoiceRequest> _voiceRetryStreamRequest;
+    MSIMEHTTPVoiceRequest *_voiceRetryHTTPRequest;
+    MSIMEVoicePolishTask *_voiceRetryPolishTask;
     // Wave 2 本地语音后处理与润色管线状态（后台词表队列、缓存、上下文快照与在途润色任务）。
     dispatch_queue_t _voicePipelineQueue;
     MSIMEVoicePolishClient *_voicePolishClient;
@@ -5615,6 +5625,10 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     [_doubaoPolishRequest cancel]; [_livePolishRequest cancel];
     [_voicePolishTask cancel]; _voicePolishTask = nil; _voicePolishPending = NO;
     [_voiceEditTracker cancel]; _voiceEditTracker = nil;
+    [_voiceRetryStreamRequest cancel]; _voiceRetryStreamRequest = nil;
+    [_voiceRetryHTTPRequest cancel]; _voiceRetryHTTPRequest = nil;
+    [_voiceRetryPolishTask cancel]; _voiceRetryPolishTask = nil;
+    _voiceRetryInFlight = NO;
     // A client that dies without deactivateServer: leaves the repeating timer on the run loop, and its candidate window on screen.
     [_preferencesTimer invalidate];
     [self flushKeyPresses];
@@ -5666,6 +5680,10 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     return candidate;
 }
 - (void)prepareVoicePipelineForOptions:(NSDictionary *)options {
+    [self cancelArchivedVoiceRetry];
+    [self bindVoiceServiceResilienceHandlers];
+    if ([self shouldShowVoiceRecoveryToast]) [[MSIMEVoiceRecoveryToast sharedToast] dismiss];
+    _voiceSalvageNotice = nil;
     [_voiceEditTracker cancel];
     [_voicePolishTask cancel];
     _voicePolishTask = nil;
@@ -5850,17 +5868,299 @@ static NSString *MSIMEVoiceArchiveFailureReason(MSIMEVoiceFailure failure, NSStr
 - (void)noteVoiceArchiveCancelled {
     if (_voiceService.archiveRecordingID) [MSIMEVoiceInputService.archive noteCancelledRecording:_voiceService.archiveRecordingID];
 }
+- (BOOL)shouldShowVoiceRecoveryToast {
+    return MSIMEEditionIsShurufa() && (_voiceOverlay == nil || [_voiceOverlay isKindOfClass:MSIMEVoiceWaveOverlay.class]);
+}
+- (MSIMEVoiceTargetEditableState)voiceTargetEditabilityForClient:(id)client {
+    return MSIMEProbeVoiceTargetEditability(client);
+}
+- (void)showVoiceHistoryFromRecoveryToast {
+    [[MSIMEPreferencesWindowController sharedController] showAndActivateWithPageIdentifier:@"voice-history"];
+}
+- (void)cancelArchivedVoiceRetry {
+    if (!_voiceRetryInFlight && !_voiceRetryStreamRequest && !_voiceRetryHTTPRequest && !_voiceRetryPolishTask) return;
+    ++_voiceRetryGeneration;
+    _voiceRetryInFlight = NO;
+    [_voiceRetryStreamRequest cancel];
+    _voiceRetryStreamRequest = nil;
+    [_voiceRetryHTTPRequest cancel];
+    _voiceRetryHTTPRequest = nil;
+    [_voiceRetryPolishTask cancel];
+    _voiceRetryPolishTask = nil;
+    if ([_voiceOverlay isKindOfClass:MSIMEVoiceWaveOverlay.class] && !_voiceService.active) {
+        [_voiceOverlay setListening:NO];
+    }
+}
+- (void)bindVoiceServiceResilienceHandlers {
+    if (!_voiceService || ![_voiceService respondsToSelector:@selector(setCaptureRouteDidChangeHandler:)]) return;
+    __weak MSIMEInputController *weakSelf = self;
+    _voiceService.captureRouteDidChangeHandler = ^(NSString *deviceName, BOOL recovered) {
+        MSIMEInputController *controller = weakSelf;
+        if (!controller || ![controller shouldShowVoiceRecoveryToast]) return;
+        NSString *safeName = deviceName.length ? deviceName : @"系统默认麦克风";
+        NSString *title = recovered ? @"麦克风已自动切换" : @"原麦克风不可用，已切换";
+        NSString *detail = [NSString stringWithFormat:@"当前使用「%@」，录音未中断。", safeName];
+        [[MSIMEVoiceRecoveryToast sharedToast] showRouteNoticeTitle:title detail:detail];
+    };
+    _voiceService.captureDeviceLostHandler = ^(NSError *error) {
+        MSIMEInputController *controller = weakSelf;
+        if (!controller || !controller->_voiceService.active) return;
+        const BOOL hasSalvageableSpeech = controller->_voiceService.recordedDuration >= 0.4 &&
+                                          controller->_voiceService.hasLikelySpeech;
+        if (hasSalvageableSpeech) {
+            controller->_voiceSalvageNotice = @"麦克风已断开，已保留并转写已录内容";
+            if (controller->_doubaoVoiceRequest && !controller->_doubaoVoiceProcessing) {
+                [controller finishDoubaoVoiceInput];
+                return;
+            }
+            if (controller->_httpVoiceRequest && !controller->_httpVoiceProcessing) {
+                [controller finishHTTPVoiceInput];
+                return;
+            }
+            if (controller->_liveVoiceToken && !controller->_liveVoiceProcessing) {
+                [controller finishLiveVoiceInput];
+                return;
+            }
+        }
+        [controller reportVoiceFailure:MSIMEVoiceFailureCapture detail:error.localizedDescription];
+    };
+}
+- (void)deliverRecoveredVoiceText:(NSString *)text
+                      recordingID:(NSString *)recordingID
+                     polishFailed:(BOOL)polishFailed {
+    if (!text.length) return;
+    if (recordingID.length && [MSIMEVoiceInputService.archive respondsToSelector:@selector(noteRetranscription:forRecording:)]) {
+        [MSIMEVoiceInputService.archive noteRetranscription:text forRecording:recordingID];
+    }
+    MSIMEInputController *destination = [self currentVoiceDestination];
+    BOOL targetWasNonEditable = NO;
+    if (destination && [self voiceTargetEditabilityForClient:destination->_activeClient] == MSIMEVoiceTargetEditableStateNotEditable) {
+        destination = nil;
+        targetWasNonEditable = YES;
+    }
+    NSString *output = text;
+    MSIMEAppearancePreferences *outputAppearance = destination ? destination->_appearance : _appearance;
+    if (outputAppearance.traditionalOutput) {
+        output = MSIMEChineseOutputString(output, YES);
+    }
+    if (destination) {
+        if (destination->_session) [destination apply:[destination->_session command:MSIME_FINISH_COMPOSITION error:nil]];
+        [destination noteSmartPunctuationShadow:[output characterAtIndex:output.length - 1]];
+        [(id<MSIMETextClient>)destination->_activeClient insertText:output replacementRange:NSMakeRange(NSNotFound, NSNotFound)];
+        destination->_clientHasMarkedText = NO;
+        NSString *prefsDir = destination->_preferencesDirectory ?: MSIMEStatisticsHostOptions(destination->_session)[@"preferences_directory"];
+        MSIMERecordTypingStatistics(prefsDir, output, msime::mac::TypingSource::Voice);
+        [destination beginVoiceEditTrackingForText:output preferencesDirectory:prefsDir];
+        if (polishFailed) [_voiceOverlay showCompletionNotice:@"重试完成（整理失败，已输入原文）"];
+        return;
+    }
+    const BOOL copied = [self copyVoiceText:output];
+    _lastUndeliveredVoiceText = [output copy];
+    if ([self shouldShowVoiceRecoveryToast]) {
+        NSString *title = targetWasNonEditable
+            ? (copied ? @"重试完成 · 当前位置不可输入，已复制" : @"重试完成 · 请点击复制")
+            : (copied ? @"重试完成 · 焦点已离开，已复制" : @"重试完成 · 请点击复制");
+        __weak MSIMEInputController *weakSelf = self;
+        [[MSIMEVoiceRecoveryToast sharedToast] showUndeliveredText:output
+                                                             title:title
+                                                            copied:copied
+                                                       copyHandler:^BOOL(NSString *copyTarget) {
+            MSIMEInputController *inner = weakSelf;
+            return inner ? [inner copyVoiceText:copyTarget] : MSIMEWriteVoiceClipboard(copyTarget, NSPasteboard.generalPasteboard);
+        }];
+    }
+}
+- (void)retryArchivedVoiceRecording:(NSString *)recordingID {
+    if (!recordingID.length || _voiceService.active || _voiceRetryInFlight) return;
+    id<MSIMEVoiceArchiving> archive = MSIMEVoiceInputService.archive;
+    if (!archive || ![archive respondsToSelector:@selector(PCMForRecording:)]) return;
+    if (MSIMEVoiceProviderSocket()) return;
+
+    _voiceRetryInFlight = YES;
+    const uint64_t retryGen = ++_voiceRetryGeneration;
+    if (!_voiceOverlay) {
+        _voiceOverlay = [[MSIMEVoiceWaveOverlay alloc] init];
+        [_voiceOverlay setPersistentRecording:MSIMEEditionIsShurufa()];
+        [_voiceOverlay applyThemePreferences:_voiceThemePreferences ?: @{}];
+    }
+    [self refreshVoiceOverlayScreen];
+    [_voiceOverlay setProcessing:NO];
+    if ([_voiceOverlay respondsToSelector:@selector(setProcessingHint:)]) {
+        [_voiceOverlay setProcessingHint:@"正在重试识别已保存录音…"];
+    }
+
+    NSDictionary *query = MSIMEVoiceRecognitionQuery(NSUserDefaults.standardUserDefaults, 0, NO);
+    NSDictionary *hostOptions = [_session respondsToSelector:@selector(hostOptions)]
+        ? [_session.hostOptions copy] : MSIMELoadRuntimeOptions();
+    MSIMEVoiceContextSnapshot *snapshot = MSIMECaptureVoiceContext([self currentVoiceDestination] ? [self currentVoiceDestination]->_activeClient : _activeClient);
+    const BOOL contextAware = MSIMEVoiceOptionsContextAware(query);
+    NSString *appCategory = contextAware ? MSIMEVoiceInferAppCategory(snapshot) : @"general";
+
+    __weak MSIMEInputController *weakSelf = self;
+    void (^failRetry)(NSString *) = ^(NSString *reason) {
+        MSIMEInputController *controller = weakSelf;
+        if (!controller || controller->_voiceRetryGeneration != retryGen) return;
+        [controller cancelArchivedVoiceRetry];
+        if ([controller shouldShowVoiceRecoveryToast]) {
+            [[MSIMEVoiceRecoveryToast sharedToast]
+                showRetryableFailureTitle:@"重试识别失败 · 录音仍已保留"
+                                   detail:reason.length ? reason : @"请检查本地语音模型或网络设置后重试"
+                             retryHandler:^{ [weakSelf retryArchivedVoiceRecording:recordingID]; }
+                           historyHandler:^{ [weakSelf showVoiceHistoryFromRecoveryToast]; }];
+        }
+    };
+
+    void (^finalizeRetryText)(NSString *, NSNumber *) = ^(NSString *rawText, NSNumber *audioMs) {
+        MSIMEInputController *controller = weakSelf;
+        if (!controller || controller->_voiceRetryGeneration != retryGen) return;
+        if (!rawText.length) { failRetry(@"未识别到语音内容"); return; }
+        NSString *modelKind = [query[@"asr_provider"] isKindOfClass:NSString.class] ? query[@"asr_provider"] : @"";
+        dispatch_async([controller voicePipelineQueue], ^{
+            MSIMEVoiceVocabularyBundle *vocab = hostOptions.count
+                ? MSIMEVoiceLoadVocabulary(hostOptions, rawText, appCategory) : nil;
+            MSIMEVoicePostprocessResult *post = MSIMEVoiceRunPostprocess(
+                rawText, modelKind, audioMs, @"dictation", appCategory, vocab.terms);
+            NSString *processed = post.text.length ? post.text : rawText;
+            NSArray<NSString *> *hints = vocab.terms.count
+                ? MSIMEVoiceSelectPromptHints(vocab.terms, processed, appCategory)
+                : (vocab.promptHints ?: @[]);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                MSIMEInputController *ready = weakSelf;
+                if (!ready || ready->_voiceRetryGeneration != retryGen) return;
+                if (post.dismissed) { failRetry(@"录音仅含静音或语气词"); return; }
+                BOOL polishCreationFailed = NO;
+                if (MSIMEVoiceShouldUsePolishClient(query, &polishCreationFailed)) {
+                    [ready->_voiceOverlay setProcessing:YES];
+                    if ([ready->_voiceOverlay respondsToSelector:@selector(setProcessingHint:)]) {
+                        [ready->_voiceOverlay setProcessingHint:@"重试完成，正在润色…"];
+                    }
+                    MSIMEVoicePolishRequest *polishReq = MSIMEVoiceBuildPolishRequest(
+                        query, processed, processed, snapshot, hints);
+                    ready->_voiceRetryPolishTask = [[ready sharedVoicePolishClient]
+                        polishRequest:polishReq
+                             slowHint:nil
+                              partial:nil
+                           completion:^(MSIMEVoicePolishResult *polishResult) {
+                               MSIMEInputController *inner = weakSelf;
+                               if (!inner || inner->_voiceRetryGeneration != retryGen) return;
+                               NSString *finalText = polishResult.text.length ? polishResult.text : processed;
+                               [inner cancelArchivedVoiceRetry];
+                               [inner deliverRecoveredVoiceText:finalText
+                                                    recordingID:recordingID
+                                                   polishFailed:polishResult.polishFailed];
+                           }];
+                    return;
+                }
+                [ready cancelArchivedVoiceRetry];
+                [ready deliverRecoveredVoiceText:processed
+                                     recordingID:recordingID
+                                    polishFailed:polishCreationFailed];
+            });
+        });
+    };
+
+    dispatch_async([self voicePipelineQueue], ^{
+        NSData *pcm = [archive PCMForRecording:recordingID];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            MSIMEInputController *controller = weakSelf;
+            if (!controller || controller->_voiceRetryGeneration != retryGen) return;
+            if (!pcm.length) { failRetry(@"未找到已保存的录音音频"); return; }
+            NSNumber *audioMs = @(static_cast<uint64_t>((pcm.length / sizeof(float)) * 1000ULL / 16000ULL));
+            NSString *provider = [query[@"asr_provider"] isKindOfClass:NSString.class]
+                ? [query[@"asr_provider"] lowercaseString] : @"";
+            NSError *reqError = nil;
+            if (MSIMEVoiceUsesNativeHTTPProvider(provider, NO)) {
+                MSIMEHTTPVoiceRequest *httpReq = [[MSIMEHTTPVoiceRequest alloc] initWithOptions:query error:&reqError];
+                if (!httpReq) { failRetry(MSIMEVoiceFailureDetail(reqError)); return; }
+                controller->_voiceRetryHTTPRequest = httpReq;
+                if (![httpReq recognizePCM:pcm completion:^(NSString *text, NSError *failure) {
+                    if (failure) { failRetry(MSIMEVoiceFailureDetail(failure)); return; }
+                    finalizeRetryText(text ?: @"", audioMs);
+                } error:&reqError]) {
+                    failRetry(MSIMEVoiceFailureDetail(reqError));
+                }
+                return;
+            }
+            id<MSIMEStreamingVoiceRequest> streamReq = nil;
+            if ([provider isEqualToString:@"textstream"]) {
+                streamReq = [[MSIMELocalVoiceRequest alloc] initWithTextStreamOptions:query hostOptions:hostOptions error:&reqError];
+            } else if ([provider isEqualToString:@"local"]) {
+                streamReq = [[MSIMELocalVoiceRequest alloc] initWithOptions:query hostOptions:hostOptions error:&reqError];
+            } else if ([provider isEqualToString:@"doubao"]) {
+                streamReq = [[MSIMEDoubaoVoiceRequest alloc] initWithOptions:query error:&reqError];
+            } else {
+                failRetry(@"当前识别方式不支持一键重试，请在听写历史中切换识别服务后重听");
+                return;
+            }
+            if (!streamReq) { failRetry(MSIMEVoiceFailureDetail(reqError)); return; }
+            controller->_voiceRetryStreamRequest = streamReq;
+            __block BOOL streamFinished = NO;
+            if (![streamReq startWithResult:^(NSString *text, BOOL final, NSError *failure) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    MSIMEInputController *inner = weakSelf;
+                    if (!inner || inner->_voiceRetryGeneration != retryGen || streamFinished) return;
+                    if (failure) { streamFinished = YES; failRetry(MSIMEVoiceFailureDetail(failure)); return; }
+                    if (!final) return;
+                    streamFinished = YES;
+                    finalizeRetryText(text ?: @"", audioMs);
+                });
+            } error:&reqError]) {
+                failRetry(MSIMEVoiceFailureDetail(reqError));
+                return;
+            }
+            // 按 0.1 秒分块把存档 16 kHz PCM 喂回流式识别器。
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                constexpr NSUInteger kChunkBytes = 1600 * sizeof(float);
+                NSError *feedError = nil;
+                BOOL ok = YES;
+                for (NSUInteger offset = 0; ok && offset < pcm.length; offset += kChunkBytes) {
+                    NSData *chunk = [pcm subdataWithRange:NSMakeRange(offset, MIN(kChunkBytes, pcm.length - offset))];
+                    ok = [streamReq appendPCM:chunk error:&feedError];
+                }
+                if (ok) ok = [streamReq finishWithError:&feedError];
+                if (!ok) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        if (!streamFinished) {
+                            streamFinished = YES;
+                            failRetry(MSIMEVoiceFailureDetail(feedError));
+                        }
+                    });
+                }
+            });
+        });
+    });
+}
 - (void)reportVoiceFailure:(MSIMEVoiceFailure)failure { [self reportVoiceFailure:failure detail:nil]; }
 - (void)reportVoiceFailure:(MSIMEVoiceFailure)failure detail:(NSString *)detail {
     const BOOL persistent = MSIMEEditionIsShurufa() && MSIMEVoiceRecordingOwner == self;
+    NSString *failedRecordingID = [_voiceService.archiveRecordingID copy];
+    const NSTimeInterval failedDuration = _voiceService.recordedDuration;
     // 开麦之前的失败（缺权限、缺凭据、缺模型）没有录音，archiveRecordingID 还是上一次激活的，不记。
-    if (_voiceService.archiveRecordingID && MSIMEVoiceFailureFollowsCapture(failure))
+    if (failedRecordingID.length && MSIMEVoiceFailureFollowsCapture(failure))
         [MSIMEVoiceInputService.archive noteFailure:MSIMEVoiceArchiveFailureReason(failure, detail)
-                                          forRecording:_voiceService.archiveRecordingID];
+                                          forRecording:failedRecordingID];
     _voicePermissionToken = nil; _voiceHoldShortcut.reset(); _configuredVoiceShortcut.reset();
     [self cancelHTTPVoiceInput]; [self cancelDoubaoVoiceInput]; [self cancelLiveVoiceInput];
     if (_voiceService.active) [_voiceService cancelWithError:nil];
     [_voiceAudioMuter restore]; [self voiceCaptureDidEnd];
+    const BOOL canOfferRetry = [self shouldShowVoiceRecoveryToast] &&
+                               failedRecordingID.length &&
+                               failedDuration >= 0.35 &&
+                               MSIMEVoiceFailureFollowsCapture(failure) &&
+                               [MSIMEVoiceInputService.archive respondsToSelector:@selector(PCMForRecording:)];
+    if (canOfferRetry) {
+        NSString *title = failure == MSIMEVoiceFailureTimeout
+            ? @"语音处理超时 · 录音已保留"
+            : failure == MSIMEVoiceFailureCapture
+                ? @"录音中断 · 已录音频已保留"
+                : @"语音识别失败 · 录音已保留";
+        __weak MSIMEInputController *weakSelf = self;
+        [[MSIMEVoiceRecoveryToast sharedToast]
+            showRetryableFailureTitle:title
+                               detail:detail
+                         retryHandler:^{ [weakSelf retryArchivedVoiceRecording:failedRecordingID]; }
+                       historyHandler:^{ [weakSelf showVoiceHistoryFromRecoveryToast]; }];
+    }
     if (!_activeClient && !persistent) return;
     if (!_voiceOverlay) {
         _voiceOverlay = [MSIMEVoiceWaveOverlay new];
@@ -6585,8 +6885,12 @@ static NSString *MSIMEVoiceArchiveFailureReason(MSIMEVoiceFailure failure, NSStr
         if (_httpVoiceRequest && !_httpVoiceProcessing) [self finishHTTPVoiceInput];
         else if (_doubaoVoiceRequest && !_doubaoVoiceProcessing) [self finishDoubaoVoiceInput];
         else if (_liveVoiceToken && !_liveVoiceProcessing) [self finishLiveVoiceInput];
+        else if ([_voiceOverlay respondsToSelector:@selector(setProcessingHint:)]) {
+            [_voiceOverlay setProcessingHint:@"上一条仍在处理中（按 Esc 可取消）"];
+        }
         return;
     }
+    if (_voiceRetryInFlight) [self cancelArchivedVoiceRetry];
     if (_voicePermissionToken) { _voicePermissionToken = nil; return; }
     // All menu, toolbar, local/global shortcut and permission callbacks converge
     // here. Recheck after asynchronous permission delivery, before any capture.
@@ -6598,6 +6902,7 @@ static NSString *MSIMEVoiceArchiveFailureReason(MSIMEVoiceFailure failure, NSStr
     if (!_session) [self prepareSession];
     if (!_session) { [self reportVoiceFailure:MSIMEVoiceFailureSession]; return; }
     if (!_voiceService) _voiceService = [[MSIMEVoiceInputService alloc] init];
+    [self bindVoiceServiceResilienceHandlers];
     if (!_voiceCuePlayer) _voiceCuePlayer = [[MSIMEVoiceCuePlayer alloc] init];
     if (!_voiceAudioMuter) _voiceAudioMuter = [[MSIMEVoiceAudioMuter alloc] init];
     if (!_voiceOverlay) {
@@ -8264,7 +8569,13 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         [self startPreferencesMonitoring];
     }
     NSUserDefaults *voiceDefaults = NSUserDefaults.standardUserDefaults;
-    if (event.type == NSEventTypeKeyDown && event.keyCode == 53) [_voiceOverlay dismissFailure];
+    if (event.type == NSEventTypeKeyDown && event.keyCode == 53) {
+        [_voiceOverlay dismissFailure];
+        if (_voiceRetryInFlight) {
+            [self cancelArchivedVoiceRetry];
+            return YES;
+        }
+    }
     if (_voicePermissionToken && event.type == NSEventTypeKeyDown && event.keyCode == 53) {
         _voicePermissionToken = nil; _voiceHoldShortcut.reset(); _configuredVoiceShortcut.reset(); [self resetModifierTap]; return YES;
     }
@@ -9097,6 +9408,12 @@ static NSRange MSIMEVoiceReplacementRangeForClient(id client, BOOL replaceSelect
     if ([self ownsPersistentVoiceRecording] && [text isKindOfClass:NSString.class] && text.length) {
         [self detachVoiceMarkedText];
         MSIMEInputController *destination = [self currentVoiceDestination];
+        BOOL targetWasNonEditable = NO;
+        if (destination &&
+            [self voiceTargetEditabilityForClient:destination->_activeClient] == MSIMEVoiceTargetEditableStateNotEditable) {
+            destination = nil;
+            targetWasNonEditable = YES;
+        }
         MSIMEAppearancePreferences *outputAppearance = destination ? destination->_appearance : _appearance;
         if (outputAppearance.traditionalOutput && MSIMEScriptConversionApplies(transition[@"commit_context"]))
             text = MSIMEChineseOutputString(text, YES);
@@ -9108,13 +9425,36 @@ static NSRange MSIMEVoiceReplacementRangeForClient(id client, BOOL replaceSelect
             [(id<MSIMETextClient>)destination->_activeClient insertText:text replacementRange:replacement];
             destination->_clientHasMarkedText = NO;
             if (polishFailed) _voicePolishFallbackNotice = @"整理失败，已输入原文";
+            else if (_voiceSalvageNotice.length) _voicePolishFallbackNotice = _voiceSalvageNotice;
             NSString *prefsDir = destination->_preferencesDirectory ?: MSIMEStatisticsHostOptions(destination->_session)[@"preferences_directory"];
             MSIMERecordTypingStatistics(prefsDir, text, msime::mac::TypingSource::Voice);
             [destination beginVoiceEditTrackingForText:text preferencesDirectory:prefsDir];
         } else {
-            _voiceCopiedResult = @([self copyVoiceText:text]);
-            if (polishFailed && _voiceCopiedResult.boolValue) _voicePolishFallbackNotice = @"整理失败，已复制原文";
+            const BOOL copied = [self copyVoiceText:text];
+            _voiceCopiedResult = @(copied);
+            _lastUndeliveredVoiceText = [text copy];
+            if (polishFailed && copied) _voicePolishFallbackNotice = @"整理失败，已复制原文";
+            else if (_voiceSalvageNotice.length && copied) _voicePolishFallbackNotice = @"麦克风断开 · 已保留并复制结果";
+            if ([self shouldShowVoiceRecoveryToast]) {
+                NSString *toastTitle = nil;
+                if (polishFailed) {
+                    toastTitle = copied ? @"整理失败且焦点不可输入 · 已复制原文" : @"整理失败且焦点不可输入 · 请点击复制";
+                } else if (targetWasNonEditable) {
+                    toastTitle = copied ? @"当前位置不可输入 · 结果已复制" : @"当前位置不可输入 · 请点击复制";
+                } else {
+                    toastTitle = copied ? @"焦点已离开输入框 · 结果已复制" : @"焦点已离开输入框 · 请点击复制";
+                }
+                __weak MSIMEInputController *weakSelf = self;
+                [[MSIMEVoiceRecoveryToast sharedToast] showUndeliveredText:text
+                                                                     title:toastTitle
+                                                                    copied:copied
+                                                               copyHandler:^BOOL(NSString *copyTarget) {
+                    MSIMEInputController *inner = weakSelf;
+                    return inner ? [inner copyVoiceText:copyTarget] : MSIMEWriteVoiceClipboard(copyTarget, NSPasteboard.generalPasteboard);
+                }];
+            }
         }
+        _voiceSalvageNotice = nil;
         return;
     }
     if ([route.mode isEqual:@"tsf"] || ![text isKindOfClass:NSString.class] || !text.length) {
