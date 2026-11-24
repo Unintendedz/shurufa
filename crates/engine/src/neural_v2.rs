@@ -539,6 +539,14 @@ pub fn fuse_neural_response(
     }
 
     // 6. 按唯一统一概率公式为 `Tier 0 ∪ Tier 1` 计分并排序。
+    // 当同池已存在未纠错的真实双字词典整词时，非词典 `[1,1]` 拆字拼接（如 `但反`/`但犯`）
+    // 承担温和的非成词结构先验惩罚（`-1.8 nats`），避免仅凭分桶归一抹平成词优势；
+    // 真实语境必需的拆字组合（如 `把这`/`个事`/`快寄`）在神经分上通常领先 `+4..+12 nats`，仍可稳定胜出。
+    const TWO_CHAR_NON_LEXICAL_SPLIT_PENALTY: f64 = -1.8;
+    let has_exact_two_char_dict = competing_tier0.iter().any(|(_, c, _)| {
+        c.char_count == 2 && is_dict_bucket(c.source) && c.channel_log_prob == 0.0
+    });
+
     let mut competitors: Vec<ScoredCompetitor> =
         Vec::with_capacity(competing_tier0.len() + unique_beams.len());
     let mut observed_min_rel_stat: Option<f64> = None;
@@ -557,7 +565,17 @@ pub fn fuse_neural_response(
         };
         observed_min_rel_stat =
             Some(observed_min_rel_stat.map_or(rel_stat, |cur| cur.min(rel_stat)));
+        let non_lexical_split_penalty = if has_exact_two_char_dict
+            && cand.char_count == 2
+            && !is_dict_bucket(cand.source)
+            && cand.channel_log_prob == 0.0
+        {
+            TWO_CHAR_NON_LEXICAL_SPLIT_PENALTY
+        } else {
+            0.0
+        };
         let total = cand.channel_log_prob
+            + non_lexical_split_penalty
             + weights.lambda_neural * (*neural_lp)
             + weights.lambda_stat * rel_stat
             + weights.lambda_user * cand.user_log_prob;
@@ -668,53 +686,77 @@ pub fn fuse_neural_response(
     } else {
         let exact_slot_set: HashSet<usize> = exact_slots.iter().copied().collect();
         let mut comp_iter = competitors.into_iter();
+        let first_exact = exact_slots[0];
         let last_exact_slot = *exact_slots.last().unwrap_or(&0);
-        // 把被新注入束搜索候选挤出的尾部项紧跟在等跨度组之后插入，既保留完整候选池，又不打散首页前缀。
+        // 保证首页前 4 席等跨度主候选从 `first_exact` 起连续呈现，
+        // 防止长词续写（如 `淡饭粗茶`/`淡饭黄齑`/`单反相机`）楔入首页中间把真实等跨度词（如 `但凡`）挤到第 2 页；
+        // 3+ 字整句 `ordering.rs` 原本已占 `0..4`，`displaced_non_exact` 为空，完整保持 `4+2` 布局。
+        let front_exact_count = exact_slots.len().min(4);
+        let contiguous_front_end = (first_exact + front_exact_count).min(total_base_len);
+        let displaced_non_exact: Vec<usize> = (first_exact..contiguous_front_end)
+            .filter(|idx| !exact_slot_set.contains(idx))
+            .collect();
         let mut overflow_inserted = false;
 
-        for base_idx in 0..total_base_len {
+        let make_seat =
+            |comp: ScoredCompetitor, target_slot: usize, track_promoted: bool| match comp.kind {
+                CompetitorKind::Tier0 { index, .. } => FusedSeat::Existing {
+                    index,
+                    promoted_by_neural: track_promoted && index != target_slot,
+                },
+                CompetitorKind::Beam {
+                    text,
+                    pinyin,
+                    neural_log_prob,
+                    channel_log_prob,
+                } => FusedSeat::InjectedBeam {
+                    text,
+                    pinyin,
+                    neural_log_prob,
+                    channel_log_prob,
+                },
+            };
+
+        // 1. 首个等跨度槽位之前的非等跨度行（如置顶项）原位保留。
+        for base_idx in 0..first_exact {
+            seats.push(FusedSeat::Existing {
+                index: base_idx,
+                promoted_by_neural: false,
+            });
+        }
+
+        // 2. 从 `first_exact` 起连续回填前 `front_exact_count` 名等跨度胜出者。
+        for slot in first_exact..contiguous_front_end {
+            if let Some(comp) = comp_iter.next() {
+                seats.push(make_seat(comp, slot, true));
+            }
+        }
+        // 若所有原始等跨度槽位均已落在前段内，立即接上束搜索溢出项，避免丢失。
+        if last_exact_slot < contiguous_front_end && !overflow_inserted {
+            overflow_inserted = true;
+            for extra in comp_iter.by_ref() {
+                seats.push(make_seat(extra, contiguous_front_end, false));
+            }
+        }
+
+        // 3. 将原本夹在 `first_exact..contiguous_front_end` 内的非等跨度续写词顺延至前 4 等跨度之后。
+        for idx in displaced_non_exact {
+            seats.push(FusedSeat::Existing {
+                index: idx,
+                promoted_by_neural: false,
+            });
+        }
+
+        // 4. 其余区间按原槽位无损回填剩余等跨度与非等跨度候选。
+        for base_idx in contiguous_front_end..total_base_len {
             if exact_slot_set.contains(&base_idx) {
                 if let Some(comp) = comp_iter.next() {
-                    let seat = match comp.kind {
-                        CompetitorKind::Tier0 { index, .. } => FusedSeat::Existing {
-                            index,
-                            promoted_by_neural: index != base_idx,
-                        },
-                        CompetitorKind::Beam {
-                            text,
-                            pinyin,
-                            neural_log_prob,
-                            channel_log_prob,
-                        } => FusedSeat::InjectedBeam {
-                            text,
-                            pinyin,
-                            neural_log_prob,
-                            channel_log_prob,
-                        },
-                    };
-                    seats.push(seat);
+                    seats.push(make_seat(comp, base_idx, true));
                 }
                 if base_idx == last_exact_slot && !overflow_inserted {
                     overflow_inserted = true;
                     for extra in comp_iter.by_ref() {
-                        let seat = match extra.kind {
-                            CompetitorKind::Tier0 { index, .. } => FusedSeat::Existing {
-                                index,
-                                promoted_by_neural: false,
-                            },
-                            CompetitorKind::Beam {
-                                text,
-                                pinyin,
-                                neural_log_prob,
-                                channel_log_prob,
-                            } => FusedSeat::InjectedBeam {
-                                text,
-                                pinyin,
-                                neural_log_prob,
-                                channel_log_prob,
-                            },
-                        };
-                        seats.push(seat);
+                        seats.push(make_seat(extra, base_idx, false));
                     }
                 }
             } else {
@@ -1110,5 +1152,65 @@ mod tests {
             &out.seats[1],
             FusedSeat::InjectedBeam { text, .. } if text == "我没观息"
         ));
+    }
+
+    #[test]
+    fn two_char_dictionary_word_beats_non_lexical_split_and_stays_contiguous_before_continuations()
+    {
+        // 真实双字词典整词 `但凡` 与非成词 `1+1` 拆字 `但反`、长词续写 `淡饭粗茶`/`淡饭黄齑` 共池时：
+        // 1. `但反` 不再因独立分桶归零而以微小神经波动反超真实词典整词 `但凡`；
+        // 2. 前 4 个等跨度主候选在首页首段连续呈现，长词续写顺延其后，不会将真实双字词挤到第 2 页。
+        let mut dict_a = sample_candidate(0, "但凡", true, Some(-9.66));
+        dict_a.source = CandidateSource::Database as u8;
+        let mut dict_b = sample_candidate(1, "单反", true, Some(-9.93));
+        dict_b.source = CandidateSource::Database as u8;
+        let mut dict_c = sample_candidate(2, "胆矾", true, Some(-12.66));
+        dict_c.source = CandidateSource::Database as u8;
+        let mut cont_1 = sample_candidate(3, "淡饭粗茶", false, Some(-15.0));
+        cont_1.source = CandidateSource::Database as u8;
+        let mut cont_2 = sample_candidate(4, "淡饭黄齑", false, Some(-15.0));
+        cont_2.source = CandidateSource::Database as u8;
+        let mut split_a = sample_candidate(5, "但反", true, Some(-11.81));
+        split_a.source = CandidateSource::Collocation as u8;
+
+        let mut req = base_request(vec![dict_a, dict_b, dict_c, cont_1, cont_2, split_a]);
+        req.raw_input = "danfan".into();
+        req.segmentation = "dan'fan".into();
+        let resp = NeuralDecodeResponse {
+            ok: true,
+            session: 1,
+            generation: 10,
+            candidate_scores: vec![
+                NeuralScoredCandidate {
+                    text: "但凡".into(),
+                    neural_log_prob: -12.91,
+                },
+                NeuralScoredCandidate {
+                    text: "单反".into(),
+                    neural_log_prob: -16.31,
+                },
+                NeuralScoredCandidate {
+                    text: "胆矾".into(),
+                    neural_log_prob: -23.73,
+                },
+                NeuralScoredCandidate {
+                    text: "但反".into(),
+                    neural_log_prob: -12.82,
+                },
+            ],
+            beam_candidates: vec![],
+        };
+        let out = fuse_neural_response(6, &req, &resp, NeuralFusionWeights::default(), false);
+        assert_eq!(out.top1_text.as_deref(), Some("但凡"));
+        // 前 4 席全为等跨度主候选（0, 5, 1, 2），续写词（3, 4）顺延至第 5–6 席且全员无损保留。
+        let seat_indices: Vec<usize> = out
+            .seats
+            .iter()
+            .map(|s| match s {
+                FusedSeat::Existing { index, .. } => *index,
+                FusedSeat::InjectedBeam { .. } => usize::MAX,
+            })
+            .collect();
+        assert_eq!(seat_indices, vec![0, 5, 1, 2, 3, 4]);
     }
 }

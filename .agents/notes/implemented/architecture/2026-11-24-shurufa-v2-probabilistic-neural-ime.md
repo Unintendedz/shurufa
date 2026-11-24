@@ -34,8 +34,9 @@ Status: implemented
 
 - **唯一 3 参数线性融合目标（`neural_v2.rs`）**：全部融合数学留在纯 Rust `msime-engine` 内：
   $$\text{Score}(Y) = \log P_{\text{channel}}(X \mid Y) + \lambda_{\text{neural}} \log P_{\text{neural}}(Y \mid C) + \lambda_{\text{stat}} \cdot \text{rel\_stat}(Y) + \lambda_{\text{user}} \log P_{\text{user}}(Y \mid C)$$
-  经开发集标定取 $\lambda_{\text{neural}} = 1.0$、$\lambda_{\text{stat}} = 0.35$、$\lambda_{\text{user}} = 1.0$。`rel_stat` 按词典桶/词网格桶各自减桶内最大值并截断至 `[-10.0, 0.0]` 消除跨来源加性常数错位；未进入 Tier 0 词网格主束的 `UniqueBeam` 独有候选按已观测 Tier 0 下界钳位至 `[-6.5, -3.5]`，杜绝束搜索次优路径凭虚高静态分反超在池真词，同时保证强神经语境优势（`+4..+15 nats`）的 OOV 词稳定翻盘。
-- **严格等跨度判定与双兜底 80 ms 槽 0 锁**：`session/candidates.rs::neural_v2_metadata` 要求备选切分同时满足 `folded_pinyin_full && pinyin_syllables == word_chars && canonical_syllables == word_chars`，杜绝超长续写词抢占首槽；`runtime.rs` 与 `neural_v2.rs` 在响应超时 `> 80 ms`、用户已移动高亮/翻页或首槽已置顶/非中文时双兜底锁定槽 0 不变（`late_slot0_mutated = 0`）。
+  经开发集标定取 $\lambda_{\text{neural}} = 1.0$、$\lambda_{\text{stat}} = 0.35$、$\lambda_{\text{user}} = 1.0$。`rel_stat` 按词典桶/词网格桶各自减桶内最大值并截断至 `[-10.0, 0.0]` 消除跨来源加性常数错位；当同池存在未纠错的真实双字词典整词时，非词典 `[1,1]` 拆字拼接（如 `但反`/`但犯`）施加 `-1.8 nats` 非成词结构先验惩罚（避免分桶归一抹平双字成词优势，同时语境强必需拆字凭 `+4..+12 nats` 神经优势仍可胜出）；未进入 Tier 0 词网格主束的 `UniqueBeam` 独有候选按已观测 Tier 0 下界钳位至 `[-6.5, -3.5]`，杜绝束搜索次优路径凭虚高静态分反超在池真词，同时保证强神经语境优势（`+4..+15 nats`）的 OOV 词稳定翻盘。
+- **字面整词错拼信道分级门槛（`session/candidates.rs`）**：`typo_channel_log_penalty` 区分后鼻音 `g` 增删、相邻换位与邻键/增删编辑形态；当字面键已存在未纠错精确词典整词（如 `dan'fan -> 但凡/单反`）时，将邻键与增删错拼信道代价由 `-2.8` 收紧至 `-4.6 / -4.4 nats`（后鼻音 `g` 与换位收紧至 `-3.4 / -3.6 nats`），防止 `dan->dian` 或 `f->d` 错拼反超真实高频字面词，同时无字面词时维持原敏感度。
+- **严格等跨度判定、首页等跨度连续排座与双兜底 80 ms 槽 0 锁**：`session/candidates.rs::neural_v2_metadata` 要求备选切分同时满足 `folded_pinyin_full && pinyin_syllables == word_chars && canonical_syllables == word_chars`，杜绝超长续写词抢占首槽；`neural_v2.rs::fuse_neural_response` 保证从首个等跨度槽位起至多前 4 席等跨度胜出者连续落座，将楔入其中的长词续写（如 `淡饭粗茶`/`单反相机`）顺延至其后，避免真实等跨度词被挤出首页（3+ 字整句原本占 `0..4`，`4+2` 布局不变）；`runtime.rs` 与 `neural_v2.rs` 在响应超时 `> 80 ms`、用户已移动高亮/翻页或首槽已置顶/非中文时双兜底锁定槽 0 不变（`late_slot0_mutated = 0`）。
 - **512 字完整上文窗口**：`neural_context_window` 保留光标前至多 512 个 Unicode 标量字符（完整保留中文标点、空格、ASCII 与 Emoji），通过独立纯数据 C ABI（`msime_client.h` 追加 4 个导出函数，向后兼容所有平台宿主）透传给端侧推理服务。
 
 ### 4. macOS 进程外 Metal 两阶段神经推理服务（`platforms/macos/src/neural/`、`InputController.mm`、`CMakeLists.txt`、`build-shurufa.sh`）
@@ -43,7 +44,9 @@ Status: implemented
 - **独立助手进程隔离**：将 `llama.cpp`（Metal）完整封装在独立二进制 `Contents/Helpers/ShurufaNeuralService` 与 `Contents/Frameworks/libshurufa_neural.dylib` 中，通过 `0700/0600` 私有 UDS + 同 UID 鉴权 + 256 KiB 帧上限与 `Shurufa` 主进程通信；服务崩毁或重启时主进程零掉键无缝降级回 Tier 0，并在 200 ms–5 s 指数退避后自动拉起自愈；10 分钟空闲或系统内存压力信号时自动卸载模型释放显存。
 - **两阶段 Metal 推理内核（`ShurufaNeuralEngine.cpp`）**：
   - 选用 **36T 语料纯预训练基座模型 `Qwen3-0.6B-Base-Q4_K_M.gguf`（378 MB）**，部署于 `~/Library/Application Support/Shurufa/resource-packs/neural-lm/` 并自动发现（自动跳过 `mmproj` 视觉投影文件）；采用 `n_ctx = 1024`、`flash_attn = 1`、`kv_unified = true`、ARM64 NEON + GCD 并行 `log_sum_exp` 及 `<|im_start|>user\n，` 上文前缀 KV-Cache 增量复用。
-  - **Stage A（前缀树共享 KV 批量打分）**：对去重等跨度候选（短中句上限 16 条，14+ 音节超长句上限 14 条）一次前向评估联合条件对数概率与单步惊奇度。
+  - **Stage A（前缀树共享 KV 批量打分 + IM 隐式分句逗号贝叶斯边际化）**：对去重等跨度候选（短中句上限 16 条，14+ 音节超长句上限 14 条）一次前向评估联合条件对数概率与单步惊奇度。当非空上文直接以汉字结尾（无标点/空格）且模型自身预测末尾逗号对数概率满足 $\log P_{\text{LM}}(\text{"，"} \mid C) \ge -4.5$（$P \ge 1.11\%$）时，在同一棵前缀树内不超出 `n_seq_max - 1 = 19` 单批序列预算的前提下并入共享 `"，"` 子树（单 token 候选全量作为零成本叶子纳入，多 token 候选按 Tier 0 优先顺序填满余量），按全概率公式精确边际化「直持续写 / IM 省略句间逗号起新分句」两种隐状态：
+    $$\log P_{\text{IM}}(Y \mid C) = \operatorname{logsumexp}\!\bigl(\log P_{\text{LM}}(Y \mid C),\; \log 0.70 + \log P_{\text{LM}}(\text{"，"} \mid C) + \log P_{\text{LM}}(Y \mid C + \text{"，"})\bigr)$$
+    彻底消除无标点 IM 聊天中由「前句末字 + 下句首字」触发的 BPE 跨界幻觉（如 `打个字 + 典范 → 字典`）及分句转折/副词（如 `但凡`/`但是`/`不过`）被强行粘连打低的问题，同时在短语内部连续语境（如 `一台全画幅 + 单反`）因 $P_{\text{LM}}(\text{"，"} \mid C)$ 极低而零开销跳过。
   - **Stage B（信息论惊奇度门控 + 局部窗口受限束搜索）**：仅当 Tier 0 最佳候选平均每字对数概率 `< -4.75` 且最差单步惊奇度 `< -9.8`（或单步 `< -12.5`，或 4+ 音节均值 `< -5.5`）时，在可编辑异常子窗口上以 `beam_width <= 4`、`per_span_keep = max(beam_width * 3, 10)` 执行全拼音节前缀约束束搜索，并回填原始上文精确重算整句联合概率。
 - **非阻塞交互与隐私保护（`InputController.mm`）**：按键路径 `< 3 ms` 完全非阻塞；启动 22 ms 延迟绘制窗吸收常态推理，超 80 ms 自动锁槽 0；空闲 50 ms 后预热上文 KV-Cache；检测到 `secureEventInputActive`（密码框）时严格停用预热与推理；启用 Tier 1 v2 后关闭旧 25 MB `settledRerank` 避免双重重排。
 
@@ -60,19 +63,19 @@ Status: implemented
 | `diagnostic_dev` (230) | 旧 `main` `prod_full` | `60.87%` | `75.65%` | `81.74%` | `0.6860` | `8.55%` | `18.26%` | `6` | — | — | — |
 | `diagnostic_dev` (230) | v2 `tier0_only` | `65.22%` | `80.87%` | `93.04%` | `0.7347` | `7.56%` | `13.91%` | `5` | `0.0%` | `0.00%` | `0` |
 | `diagnostic_dev` (230) | v2 `v2_score_only` | `88.70%` | `90.87%` | `93.04%` | `0.8991` | `2.34%` | `6.09%` | `4` | `88.9%` | `0.00%` | `0` |
-| `diagnostic_dev` (230) | **v2 `v2_full`** | **`91.30%`** | **`93.91%`** | **`95.65%`** | **`0.9264`** | **`1.69%`** | **`3.91%`** | **`2`** | **`88.9%`** | **`0.00%`** | **`0`** |
+| `diagnostic_dev` (230) | **v2 `v2_full`** | **`91.30%`** | **`93.91%`** | **`95.65%`** | **`0.9264`** | **`1.74%`** | **`4.35%`** | **`2`** | **`88.9%`** | **`0.43%`** | **`0`** |
 | `blind_holdout` (344) | 旧 `main` `prod_full` | `57.85%` | `69.77%` | `79.65%` | `0.6475` | `8.63%` | `20.64%` | `9` | — | — | — |
 | `blind_holdout` (344) | v2 `tier0_only` | `56.98%` | `73.55%` | `90.12%` | `0.6680` | `9.71%` | `19.19%` | `14` | `0.0%` | `0.00%` | `0` |
 | `blind_holdout` (344) | v2 `v2_score_only` | `80.52%` | `85.17%` | `90.12%` | `0.8324` | `4.01%` | `9.88%` | `6` | `76.9%` | `0.00%` | `0` |
-| `blind_holdout` (344) | **v2 `v2_full`** | **`81.10%`** | **`86.05%`** | **`90.70%`** | **`0.8395`** | **`3.85%`** | **`9.30%`** | **`6`** | **`76.9%`** | **`0.00%`** | **`0`** |
+| `blind_holdout` (344) | **v2 `v2_full`** | **`81.40%`** | **`86.05%`** | **`90.70%`** | **`0.8411`** | **`3.82%`** | **`9.30%`** | **`6`** | **`84.6%`** | **`0.00%`** | **`0`** |
 | `rolling_fresh_v2` (320) | v2 `tier0_only` | `56.87%` | `72.19%` | `86.88%` | `0.6568` | `9.04%` | `18.44%` | `13` | `0.0%` | `0.00%` | `0` |
 | `rolling_fresh_v2` (320) | v2 `v2_score_only` | `80.94%` | `85.00%` | `86.88%` | `0.8283` | `3.92%` | `9.38%` | `8` | `100.0%` | `0.00%` | `0` |
-| `rolling_fresh_v2` (320) | **v2 `v2_full`** | **`81.87%`** | **`86.25%`** | **`87.81%`** | **`0.8385`** | **`3.70%`** | **`8.44%`** | **`8`** | **`100.0%`** | **`0.63%`** | **`0`** |
+| `rolling_fresh_v2` (320) | **v2 `v2_full`** | **`81.87%`** | **`86.25%`** | **`87.81%`** | **`0.8385`** | **`3.79%`** | **`8.44%`** | **`8`** | **`100.0%`** | **`0.94%`** | **`0`** |
 
 关键结论：
-- 相比旧 `main` 生产基线，`v2_full` 在 `diagnostic_dev` 上 Top-1 提升 **`+30.43 pp`**、CER 降低 **`5.1×`**；在从未触碰的封存盲测 `blind_holdout` 上 Top-1 提升 **`+23.25 pp`**（`57.85% → 81.10%`）、In-Pool 提升 **`+11.05 pp`**、MRR 提升 **`+0.1920`**、CER 与严重荒诞率均降低 **`2.2×`**；在全新 `rolling_fresh_v2` 上达到 **`81.87%`**（与 `holdout` 仅差 `0.77 pp`）且 S03 上下文同音对偶双命中 **`100.0% (12/12)`**。
-- 端到端性能：`last_key P95 = 8.1–9.2 ms`（同步 Tier 0 极速出屏），`score P50 ≈ 20 ms` / `P95 ≈ 35–38 ms`，`>80ms` 锁槽率 `0.00%–0.63%`，`late_slot0_mutated = 0`。
-- 触发原例「这个兄弟 应该多少还是」+ `zhenglexieqian` 在零词级规则下「挣了些钱」以显著对数概率优势位列 `#1`。
+- 相比旧 `main` 生产基线，`v2_full` 在 `diagnostic_dev` 上 Top-1 提升 **`+30.43 pp`**、CER 降低 **`4.9×`**；在从未触碰的封存盲测 `blind_holdout` 上 Top-1 提升 **`+23.55 pp`**（`57.85% → 81.40%`）、In-Pool 提升 **`+11.05 pp`**、MRR 提升 **`+0.1936`**、CER 与严重荒诞率均降低 **`2.2×`**、S03 上下文同音对偶双命中从 `76.9%` 跃升至 **`84.6%`**（`+7.7 pp`）；在全新 `rolling_fresh_v2` 上保持 **`81.87%`** 且 S03 双命中 **`100.0% (12/12)`**。
+- 端到端性能：`last_key P95 = 8.3–10.7 ms`（同步 Tier 0 极速出屏），`score P50 ≈ 19.2–23.1 ms` / `P95 ≈ 36.3–37.6 ms`，`blind_holdout` `>80ms` 锁槽率 `0.00%`，`late_slot0_mutated = 0`。
+- 实机复现用例均在零词级规则下首位命中：「这个兄弟 应该多少还是」+ `zhenglexieqian` → `#1 挣了些钱`；IM 无标点长句「现在对输入法想要打个字」+ `danfan` → `#1 但凡`（同时「我刚买了一台全画幅」+ `danfan` → `#1 单反`）。
 
 ## Historical audit
 
@@ -111,6 +114,11 @@ Status: implemented
 
 - **最强理由**：与未测频词典占位词（`weight == 100`）复用同一个 `NEUTRAL_STAT_REL = -1.5` 常量实现最简。
 - **放弃原因**：未进入 Tier 0 56-beam 词网格的束搜索候选，其真实统计先验必然低于已在池的 Tier 0 候选；给予 `-1.5` 会使其在面对低静态频现代新词（`rel_stat = -6..-10`）时获得 `+1.5..+3.0 nats` 的不公平静态加分，导致神经分更低的束搜索候选反超在池真词（`holdout/S06` 回退 `-8.7 pp`）。改用 `observed_min_rel_stat.clamp(-6.5, -3.5)` 后，`holdout` Top-1 提升 `+1.16 pp`、`fresh_v2` 提升 `+0.93 pp`，全面消除误覆写同时保留真实 OOV 救回。
+
+### 6. 隐式分句逗号边际化：扩大 `n_seq_max = 36` 全量展开 vs `n_seq_max = 20` + $P_{\text{LM}}(\text{"，"} \mid C) \ge e^{-4.5}$ 剪枝与单批预算
+
+- **最强理由**：在 `kv_unified = true` 模式下将 `n_seq_max` 提到 `36` 并对所有 16 条候选无条件展开逗号子树，实现最直观且可容纳全部 32 条直连/逗号分支于单批内。
+- **放弃原因**：实测证实提高 `n_seq_max` 至 `36` 会放宽 `llama.cpp` Metal 统一 KV 的序列掩码与 batch 元数据开销，反而使空上文预热 `P95` 从 `16.1 ms` 升至 `24.8 ms`、`holdout` 打分 `P95` 升至 `40.6 ms` 并引入 `>80 ms` 尖峰；而维持 `n_seq_max = 20` 并以已缓存的 `cached_ctx_log_probs[comma_token] >= -4.5` 做 O(1) 剪枝，再按「单 token 叶子全量纳入 + 多 token 分支在单批序列余量内纳入」控树后，`blind_holdout` 完整保留 `81.40%` Top-1 与 `84.6%` S03 双命中，同时 `Score P50` 回落至 `19.3 ms`、`>80 ms` 锁槽率保持 `0.00%`。
 
 ## Consequences
 

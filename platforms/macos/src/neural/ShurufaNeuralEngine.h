@@ -21,7 +21,7 @@ SHURUFA_NEURAL_API char *shurufa_neural_discover_model_path(const char *model_di
 
 /// 创建端侧神经解码引擎（`libllama` Apple Metal）。
 /// `cfg_json` 可为 NULL（使用默认参数并从标准资源包目录自动发现 `*.gguf`），或传入 JSON：
-/// `{"model_path":"...", "model_dir":"...", "pinyin_db_path":"...", "n_ctx":1024, "n_batch":512, "n_seq_max":32, "n_gpu_layers":99, "n_threads":4}`。
+/// `{"model_path":"...", "model_dir":"...", "pinyin_db_path":"...", "n_ctx":1024, "n_batch":512, "n_seq_max":20, "n_gpu_layers":99, "n_threads":4}`。
 /// 失败时返回 NULL。
 SHURUFA_NEURAL_API void *shurufa_neural_create(const char *cfg_json, size_t len);
 

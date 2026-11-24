@@ -422,12 +422,15 @@ struct NeuralEngine::Impl {
     // 空上文时额外在起始前缀后附中性中文分句符 `，`，消除 Instruct 模型句首助手提示偏置。
     std::vector<llama_token> prompt_prefix_tokens;
     std::vector<llama_token> empty_prompt_tokens;
+    // 中文 IM 聊天常省略句间逗号，缓存单个中文逗号 token 供前缀树单遍贝叶斯边际化复用。
+    llama_token comma_token = -1;
 
     // `seq_id = 0` 持久化上文状态与末尾 token 的精确 log-softmax 缓存。
     std::vector<llama_token> cached_ctx_tokens;
     std::vector<float> cached_ctx_log_probs;
     bool cached_ctx_valid = false;
     bool cached_ctx_was_empty = true;
+    bool cached_ctx_ends_with_han = false;
 
     // 能力 C：受限束搜索倒排索引（`音节串 -> 合法纯汉字 token 列表`）及每个 token 的纯汉字 UTF-8 文本。
     bool constrained_vocab_ready = false;
@@ -774,9 +777,38 @@ struct NeuralEngine::Impl {
 
         stats.total_tokens = static_cast<int32_t>(target.size());
 
+        // 判断 UTF-8 上文是否直接以汉字结尾（无句间标点或空格），用于决定是否启用隐式分句逗号边际化。
+        auto ends_with_han_utf8 = [](const std::string &s) -> bool {
+            if (s.empty()) return false;
+            size_t i = s.size();
+            while (i > 0 && (static_cast<unsigned char>(s[i - 1]) & 0xC0u) == 0x80u) {
+                --i;
+            }
+            if (i == 0) return false;
+            const size_t start_idx = i - 1;
+            const unsigned char b0 = static_cast<unsigned char>(s[start_idx]);
+            uint32_t cp = 0;
+            if ((b0 & 0xF0u) == 0xE0u && start_idx + 2 < s.size()) {
+                cp = ((b0 & 0x0Fu) << 12)
+                    | ((static_cast<unsigned char>(s[start_idx + 1]) & 0x3Fu) << 6)
+                    | (static_cast<unsigned char>(s[start_idx + 2]) & 0x3Fu);
+            } else if ((b0 & 0xF8u) == 0xF0u && start_idx + 3 < s.size()) {
+                cp = ((b0 & 0x07u) << 18)
+                    | ((static_cast<unsigned char>(s[start_idx + 1]) & 0x3Fu) << 12)
+                    | ((static_cast<unsigned char>(s[start_idx + 2]) & 0x3Fu) << 6)
+                    | (static_cast<unsigned char>(s[start_idx + 3]) & 0x3Fu);
+            } else {
+                return false;
+            }
+            return (cp >= 0x4E00u && cp <= 0x9FFFu) || (cp >= 0x3400u && cp <= 0x4DBFu)
+                || (cp >= 0x20000u && cp <= 0x2A6DFu);
+        };
+        const bool ctx_ends_with_han = !is_empty_context && ends_with_han_utf8(context_utf8);
+
         // 快速路径：完全相同上文（含连续空上文或同句连续按键）0.01 ms 复用。
         if (cached_ctx_valid && cached_ctx_tokens == target) {
             cached_ctx_was_empty = is_empty_context;
+            cached_ctx_ends_with_han = ctx_ends_with_han;
             stats.reused_tokens = stats.total_tokens;
             stats.decoded_tokens = 0;
             stats.elapsed_ms = elapsed_ms_since(start);
@@ -836,6 +868,7 @@ struct NeuralEngine::Impl {
         cached_ctx_tokens = std::move(target);
         cached_ctx_valid = true;
         cached_ctx_was_empty = is_empty_context;
+        cached_ctx_ends_with_han = ctx_ends_with_han;
 
         stats.reused_tokens = static_cast<int32_t>(lcp);
         stats.decoded_tokens = static_cast<int32_t>(total - lcp);
@@ -857,13 +890,17 @@ struct NeuralEngine::Impl {
     };
 
     /// 内部无锁版前缀树共享 KV 批量打分，可选输出每条候选的细粒度惊奇度诊断（零额外 GPU 推理）。
+    /// 当 `marginalize_latent_comma == true` 且非空上文直接以汉字结尾时，在同一棵前缀树内并入单节点
+    /// 隐式分句逗号分支，按全概率公式对「直接续写 / IM 省略逗号起新分句」做精确贝叶斯边际化：
+    /// `P(Y | C) = P_LM(Y | C) + alpha_omit * P_LM("，" | C) * P_LM(Y | C + "，")`。
     bool score_candidates_with_diag_locked(
         const std::string *context_utf8,
         const std::vector<std::string> &candidates,
         std::vector<double> &out_log_probs,
         std::vector<CandidateScoreDiag> *out_diags,
         ScoreStats &stats,
-        std::string &error_out) {
+        std::string &error_out,
+        bool marginalize_latent_comma = false) {
         const auto start = Clock::now();
         stats = ScoreStats{};
         stats.candidate_count = static_cast<int32_t>(candidates.size());
@@ -885,21 +922,51 @@ struct NeuralEngine::Impl {
             return true;
         }
 
+        const int32_t ctx_len = static_cast<int32_t>(cached_ctx_tokens.size());
+        const int32_t max_cand_len = std::max<int32_t>(1, n_ctx - ctx_len - 3);
+        // 仅当模型自身对上文末尾出现分句逗号赋予不可忽略概率（`P_LM("，" | C) >= e^-4.5 ≈ 1.11%`）时
+        // 才在同一前缀树内展开隐式逗号子树；句中连续语境处 `P_LM("，" | C)` 极低，零开销直接跳过。
+        constexpr double kLatentCommaTriggerMinLogProb = -4.5;
+        const bool use_latent_comma = marginalize_latent_comma
+            && !cached_ctx_was_empty
+            && cached_ctx_ends_with_han
+            && comma_token >= 0
+            && comma_token < n_vocab
+            && static_cast<size_t>(comma_token) < cached_ctx_log_probs.size()
+            && static_cast<double>(cached_ctx_log_probs[static_cast<size_t>(comma_token)]) >= kLatentCommaTriggerMinLogProb
+            && max_cand_len >= 2;
+
         // 1. 构造 Token 前缀字典树（根节点 0 代表已预热上文末尾）。
         std::vector<TrieNode> trie;
-        trie.reserve(candidates.size() * 4 + 1);
+        trie.reserve(candidates.size() * (use_latent_comma ? 6 : 4) + 2);
         trie.push_back(TrieNode{});
         trie[0].depth = -1;
         trie[0].scored = true;
 
+        auto insert_child = [&](int32_t parent_id, llama_token tok, int32_t depth) -> int32_t {
+            for (const auto &ch : trie[static_cast<size_t>(parent_id)].children) {
+                if (ch.first == tok) {
+                    return ch.second;
+                }
+            }
+            const int32_t next_id = static_cast<int32_t>(trie.size());
+            TrieNode node{};
+            node.token = tok;
+            node.parent = parent_id;
+            node.depth = depth;
+            trie.push_back(std::move(node));
+            trie[static_cast<size_t>(parent_id)].children.emplace_back(tok, next_id);
+            return next_id;
+        };
+
         std::vector<int32_t> cand_end_node(candidates.size(), -1);
-        std::vector<llama_token> toks;
+        std::vector<int32_t> cand_comma_end_node(candidates.size(), -1);
+        std::vector<std::vector<llama_token>> cand_tokens(candidates.size());
         int32_t total_cand_tokens = 0;
-        const int32_t ctx_len = static_cast<int32_t>(cached_ctx_tokens.size());
-        const int32_t max_cand_len = std::max<int32_t>(1, n_ctx - ctx_len - 2);
 
         for (size_t i = 0; i < candidates.size(); ++i) {
             if (candidates[i].empty()) continue;
+            auto &toks = cand_tokens[i];
             if (!tokenize_raw(candidates[i], toks) || toks.empty()) continue;
             if (static_cast<int32_t>(toks.size()) > max_cand_len) {
                 toks.resize(static_cast<size_t>(max_cand_len));
@@ -908,26 +975,53 @@ struct NeuralEngine::Impl {
 
             int32_t cur = 0;
             for (size_t d = 0; d < toks.size(); ++d) {
-                const llama_token t = toks[d];
-                int32_t next_id = -1;
-                for (const auto &ch : trie[static_cast<size_t>(cur)].children) {
-                    if (ch.first == t) {
-                        next_id = ch.second;
+                cur = insert_child(cur, toks[d], static_cast<int32_t>(d));
+            }
+            cand_end_node[i] = cur;
+        }
+
+        // 在不撑破单批序列上限（`n_seq_max - 1`）的前提下挂载共享隐式逗号子树：
+        // - 单 token 候选（绝大多数中文常用双字词）在逗号节点下直接成为叶子，零额外序列与零额外解码 token，全量纳入；
+        // - 多 token 候选按 Tier 0 优先级在剩余单批序列预算内纳入，杜绝触发二次 Metal 分块前向。
+        int32_t comma_node_id = -1;
+        if (use_latent_comma) {
+            int32_t direct_internal_leaves = 0;
+            for (size_t id = 1; id < trie.size(); ++id) {
+                if (trie[id].children.empty()) continue;
+                bool has_internal_child = false;
+                for (const auto &ch : trie[id].children) {
+                    if (!trie[static_cast<size_t>(ch.second)].children.empty()) {
+                        has_internal_child = true;
                         break;
                     }
                 }
-                if (next_id < 0) {
-                    next_id = static_cast<int32_t>(trie.size());
-                    TrieNode node{};
-                    node.token = t;
-                    node.parent = cur;
-                    node.depth = static_cast<int32_t>(d);
-                    trie.push_back(std::move(node));
-                    trie[static_cast<size_t>(cur)].children.emplace_back(t, next_id);
+                if (!has_internal_child) {
+                    ++direct_internal_leaves;
                 }
-                cur = next_id;
             }
-            cand_end_node[i] = cur;
+            const int32_t max_chunk_seqs = std::max<int32_t>(1, n_seq_max - 1);
+            const int32_t comma_branch_budget = std::max<int32_t>(0, max_chunk_seqs - direct_internal_leaves);
+            if (comma_branch_budget >= 1) {
+                comma_node_id = insert_child(0, comma_token, 0);
+                // 仅当存在至少一条候选时逗号节点本身占 1 个初始内部叶子；每新增一条独立多 token 前缀再消耗 1 预算。
+                int32_t multi_tok_added = 0;
+                const int32_t max_multi_tok_comma = std::max<int32_t>(0, comma_branch_budget);
+                for (size_t i = 0; i < candidates.size(); ++i) {
+                    const auto &toks = cand_tokens[i];
+                    if (toks.empty()) continue;
+                    const size_t c_len = std::min<size_t>(toks.size(), static_cast<size_t>(max_cand_len - 1));
+                    if (c_len == 0) continue;
+                    if (c_len > 1) {
+                        if (multi_tok_added >= max_multi_tok_comma) continue;
+                        ++multi_tok_added;
+                    }
+                    int32_t c_cur = comma_node_id;
+                    for (size_t d = 0; d < c_len; ++d) {
+                        c_cur = insert_child(c_cur, toks[d], static_cast<int32_t>(d + 1));
+                    }
+                    cand_comma_end_node[i] = c_cur;
+                }
+            }
         }
 
         stats.unique_trie_nodes = static_cast<int32_t>(trie.size()) - 1;
@@ -1094,11 +1188,26 @@ struct NeuralEngine::Impl {
             node.cum_log_prob = parent_cum + node.edge_log_prob;
         }
 
+        // 中文 IM 聊天省略句间逗号的先验系数 `alpha_omit = 0.70`（`log(0.70) ≈ -0.3567`）。
+        // 仅当模型自身判断该处适合分句（`P_LM("，" | C)` 足够高）时，逗号分支才显著抬升新分句首词；
+        // 短语内部连续语境下 `P_LM("，" | C)` 极低，直连分支自然主导，零误伤。
+        constexpr double kLatentCommaOmitLogPrior = -0.35667494393873245;
+
         std::vector<int32_t> path_nodes;
         for (size_t i = 0; i < candidates.size(); ++i) {
             const int32_t end_id = cand_end_node[i];
             if (end_id <= 0 || !trie[static_cast<size_t>(end_id)].scored) continue;
-            const double total_lp = trie[static_cast<size_t>(end_id)].cum_log_prob;
+            const double lp_direct = trie[static_cast<size_t>(end_id)].cum_log_prob;
+            double total_lp = lp_direct;
+            bool comma_won = false;
+            const int32_t c_end = use_latent_comma ? cand_comma_end_node[i] : -1;
+            if (c_end > 0 && trie[static_cast<size_t>(c_end)].scored) {
+                const double lp_via_comma = kLatentCommaOmitLogPrior + trie[static_cast<size_t>(c_end)].cum_log_prob;
+                const double hi = std::max(lp_direct, lp_via_comma);
+                const double lo = std::min(lp_direct, lp_via_comma);
+                total_lp = hi + std::log1p(std::exp(lo - hi));
+                comma_won = (lp_via_comma > lp_direct);
+            }
             out_log_probs[i] = total_lp;
 
             if (out_diags) {
@@ -1108,8 +1217,9 @@ struct NeuralEngine::Impl {
                 diag.avg_char_lp = total_lp / static_cast<double>(diag.char_count);
 
                 path_nodes.clear();
-                int32_t cur = end_id;
-                while (cur > 0) {
+                const int32_t stop_parent = comma_won ? comma_node_id : 0;
+                int32_t cur = comma_won ? c_end : end_id;
+                while (cur > 0 && cur != stop_parent) {
                     path_nodes.push_back(cur);
                     cur = trie[static_cast<size_t>(cur)].parent;
                 }
@@ -1117,8 +1227,8 @@ struct NeuralEngine::Impl {
                 diag.token_count = static_cast<int32_t>(path_nodes.size());
 
                 // 计算最差单步惊奇度与异常字区间：
-                // - 有真实用户上文时检查每一步 `t >= 0`；
-                // - 空上文已前置中性 `，`，仅对 `t == 0` 给予温和 +1.5 nat 的分句首词熵裕度，避免正常句首名词误触发。
+                // - 有真实用户上文且直连时检查每一步 `t >= 0`；
+                // - 空上文或由隐式分句逗号主导时，对 `t == 0` 给予温和 +1.5 nat 的分句首词熵裕度。
                 double worst_metric = 0.0;
                 bool has_metric = false;
                 int32_t char_cursor = 0;
@@ -1126,8 +1236,7 @@ struct NeuralEngine::Impl {
                     const TrieNode &nd = trie[static_cast<size_t>(path_nodes[t])];
                     const int32_t tok_chars = token_utf8_chars(nd.token);
                     double metric = nd.edge_log_prob / std::sqrt(static_cast<double>(std::max<int32_t>(1, tok_chars)));
-                    if (cached_ctx_was_empty && t == 0) {
-                        // 空上文已前置中性 `，`，仅保留温和 +1.5 nat 的分句首词熵裕度。
+                    if ((cached_ctx_was_empty || comma_won) && t == 0) {
                         metric += 1.5;
                     }
                     if (!has_metric || metric < worst_metric) {
@@ -1609,7 +1718,7 @@ struct NeuralEngine::Impl {
 
         std::vector<double> full_scores;
         ScoreStats rescore_stats{};
-        if (!score_candidates_with_diag_locked(nullptr, full_texts, full_scores, nullptr, rescore_stats, error_out)) {
+        if (!score_candidates_with_diag_locked(nullptr, full_texts, full_scores, nullptr, rescore_stats, error_out, true)) {
             beam_stats.elapsed_ms = elapsed_ms_since(start);
             return false;
         }
@@ -1729,7 +1838,7 @@ struct NeuralEngine::Impl {
         std::vector<CandidateScoreDiag> diags;
         ScoreStats score_stats{};
         if (!unique_cands.empty()) {
-            if (!score_candidates_with_diag_locked(nullptr, unique_cands, scores, &diags, score_stats, err)) {
+            if (!score_candidates_with_diag_locked(nullptr, unique_cands, scores, &diags, score_stats, err, true)) {
                 return make_err(err);
             }
         }
@@ -1928,6 +2037,12 @@ std::unique_ptr<NeuralEngine> NeuralEngine::create(const EngineConfig &config, s
     impl->seed_token = impl->resolve_seed_token();
     impl->prompt_prefix_tokens = impl->resolve_prompt_prefix();
     impl->empty_prompt_tokens = impl->resolve_empty_prompt_prefix(impl->prompt_prefix_tokens);
+    {
+        std::vector<llama_token> comma_toks;
+        if (impl->tokenize_raw("，", comma_toks) && comma_toks.size() == 1) {
+            impl->comma_token = comma_toks[0];
+        }
+    }
 
     llama_context_params cparams = llama_context_default_params();
     cparams.n_ctx = static_cast<uint32_t>(impl->n_ctx);

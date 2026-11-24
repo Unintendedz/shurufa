@@ -1747,12 +1747,14 @@ if(SHURUFA_LLAMA_INCLUDE_DIR AND SHURUFA_LLAMA_LIBRARY)
 endif()
 
 # InputController.mm 通过 ShurufaNeuralClient.mm 与独立后台神经服务异步通信（纯 Foundation/UDS，零 libllama 依赖）；
-# 自动附加给所有编译 InputController.mm 的目标（含输入法本体与全部控制器单元测试）。
+# 自动附加给所有直接编译或 `#include` 了 InputController.mm 的目标（含输入法本体与全部控制器单元测试）。
 set_source_files_properties(src/neural/ShurufaNeuralClient.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 get_property(MSIME_NEURAL_CLIENT_TARGETS DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
 foreach(msime_target IN LISTS MSIME_NEURAL_CLIENT_TARGETS)
   get_target_property(msime_target_sources ${msime_target} SOURCES)
-  if(msime_target_sources AND "src/input/InputController.mm" IN_LIST msime_target_sources)
+  if(msime_target_sources
+     AND ("src/input/InputController.mm" IN_LIST msime_target_sources
+          OR "src/core/FloatingToolbarPanel.mm" IN_LIST msime_target_sources))
     if(NOT "src/neural/ShurufaNeuralClient.mm" IN_LIST msime_target_sources)
       target_sources(${msime_target} PRIVATE src/neural/ShurufaNeuralClient.mm)
     endif()

@@ -1039,6 +1039,21 @@ impl InputSession {
             .map(|c| c.to_ascii_lowercase())
             .collect();
         let items = self.candidates();
+        // 检查当前字面键是否已存在未纠错的精确词典整词（如 `dan'fan -> 但凡/单反`），
+        // 存在时对同类错拼候选施加更严谨的物理信道门槛，防止偶发邻键/增删纠错反压高频真实字面词。
+        let has_exact_literal_dict = !folded_raw.is_empty()
+            && items.iter().take(8).any(|item| {
+                item.source.is_dictionary()
+                    && item.corrected_from.is_empty()
+                    && !item.fuzzy
+                    && !item.canonical_pinyin.is_empty()
+                    && item
+                        .canonical_pinyin
+                        .chars()
+                        .filter(|&c| c != '\'')
+                        .map(|c| c.to_ascii_lowercase())
+                        .eq(folded_raw.chars())
+            });
         let mut candidates = Vec::with_capacity(items.len());
         for item in items {
             let corrected_full_span =
@@ -1114,7 +1129,13 @@ impl InputSession {
 
             let mut channel_log_prob = 0.0;
             if !item.corrected_from.is_empty() {
-                channel_log_prob += crate::neural_v2::DEFAULT_TYPO_CHANNEL_PENALTY;
+                let target_py = if item.canonical_pinyin.is_empty() {
+                    item.pinyin.as_ref()
+                } else {
+                    item.canonical_pinyin.as_ref()
+                };
+                channel_log_prob +=
+                    typo_channel_log_penalty(&folded_raw, target_py, has_exact_literal_dict);
             }
             if item.fuzzy {
                 channel_log_prob += crate::neural_v2::DEFAULT_FUZZY_CHANNEL_PENALTY;
@@ -1164,6 +1185,70 @@ impl InputSession {
             syllable_paths,
             candidates,
         })
+    }
+}
+
+/// 按物理键盘编辑形态与是否存在精确字面词典整词估算错拼候选的自然对数信道代价（nats）。
+/// - 缺失/多敲后鼻音 `g`（`-2.4`）与相邻键位换位（`-2.6`）保持高敏感度；
+/// - 增删字母与 QWERTY 邻键误触在无精确字面词时维持 `-2.8`，存在精确字面词典整词时提高至 `-4.4 / -4.6 nats`，
+///   避免真实高频双字词（如 `danfan -> 但凡/单反`）被 `dan->dian` 或 `f->d` 错拼误劫持。
+fn typo_channel_log_penalty(
+    folded_raw: &str,
+    canonical_pinyin: &str,
+    has_exact_literal_dict: bool,
+) -> f64 {
+    let raw_bytes = folded_raw.as_bytes();
+    let corr_bytes: Vec<u8> = canonical_pinyin
+        .bytes()
+        .filter(|&b| b != b'\'')
+        .map(|b| b.to_ascii_lowercase())
+        .collect();
+    if raw_bytes.is_empty() || corr_bytes.is_empty() || raw_bytes == corr_bytes.as_slice() {
+        return crate::neural_v2::DEFAULT_TYPO_CHANNEL_PENALTY;
+    }
+    let is_single_nasal_g = |shorter: &[u8], longer: &[u8]| -> bool {
+        if longer.len() != shorter.len() + 1 {
+            return false;
+        }
+        let mut i = 0usize;
+        let mut j = 0usize;
+        let mut used = false;
+        while i < shorter.len() && j < longer.len() {
+            if shorter[i] == longer[j] {
+                i += 1;
+                j += 1;
+            } else if !used && longer[j] == b'g' && j > 0 && longer[j - 1] == b'n' {
+                used = true;
+                j += 1;
+            } else {
+                return false;
+            }
+        }
+        used || (j + 1 == longer.len() && longer[j] == b'g' && j > 0 && longer[j - 1] == b'n')
+    };
+    if is_single_nasal_g(raw_bytes, &corr_bytes) || is_single_nasal_g(&corr_bytes, raw_bytes) {
+        return if has_exact_literal_dict { -3.4 } else { -2.4 };
+    }
+    if raw_bytes.len() == corr_bytes.len() {
+        let diffs: Vec<usize> = raw_bytes
+            .iter()
+            .zip(&corr_bytes)
+            .enumerate()
+            .filter_map(|(idx, (a, b))| (a != b).then_some(idx))
+            .collect();
+        if diffs.len() == 2
+            && diffs[1] == diffs[0] + 1
+            && raw_bytes[diffs[0]] == corr_bytes[diffs[1]]
+            && raw_bytes[diffs[1]] == corr_bytes[diffs[0]]
+        {
+            return if has_exact_literal_dict { -3.6 } else { -2.6 };
+        }
+        return if has_exact_literal_dict { -4.6 } else { -2.8 };
+    }
+    if has_exact_literal_dict {
+        -4.4
+    } else {
+        -2.8
     }
 }
 
