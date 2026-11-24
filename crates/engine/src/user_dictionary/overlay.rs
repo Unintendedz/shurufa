@@ -1,13 +1,13 @@
-//! 独立个人学习叠加层（Stage 4）：永不改写主词库 `msime-pinyin.db` 静态权重。
+//! 独立个人学习叠加层（Stage 4 / Phase 3 抗劫持升级）：永不改写主词库 `msime-pinyin.db` 静态权重。
 //!
 //! 用户明确改选（非空格接受默认首选）写入 `msime_user.db` 的追加式事件表
-//! `personal_selection_events`，查询时按 30 天半衰期做指数衰减计数 `n_user(w)`，
-//! 与静态先验按贝叶斯平滑后验 `alpha * P_static(w) + n_user(w)` 叠加排序：
-//! - 单次误选不会击穿核心高频词（`n_user < 1.8` 不得竞争第 1 槽，且核心词先验质量天然更高）；
-//! - 首次明确选择冷门专名即可稳定获得首屏召回席位（第 2–4 位）；
-//! - 连续 2–3 次明确选择自然竞争第 1 槽，且 30 天半衰期使旧习惯自然回落；
-//! - 显式「置顶」（`pinned_candidates`）保持第 1 槽硬约束；
-//! - 上屏后紧接退格删光刚上屏的字数时，按事件 ID 确定性回滚该次学习记录。
+//! `personal_selection_events`（携带粗粒度 `app_scope` 场景桶），查询时按 30 天半衰期做指数衰减计数 `n_user(w)`：
+//! - **App 场景桶隔离**：同桶事件按 `1.0` 计权，跨桶事件按 `0.5` 计权，避免 `CodeIde` 学到的工程术语劫持 `ImChat` 高频日常词；
+//! - **退格 24 小时衰减负反馈**：上屏后 5 秒内退格删光刚上屏词，既确定性回滚该次学习事件，又写入 `personal_negative_feedback` 标记（24 小时半衰期），重打时即时抑制误选词；
+//! - **贝叶斯平滑与防劫持铁律**：单次误选不会击穿核心高频词（`n_user < 1.8` 不得竞争第 1 槽）；首次明确选择冷门专名稳定召回首屏第 2–3 槽；连续 2–3 次明确选择自然竞争第 1 槽，且 30 天半衰期自然回落；显式「置顶」（`pinned_candidates`）保持第 1 槽硬约束；
+//! - **Neural v2 统一对数概率接口**：`personal_cache_log_bonus` 输出严格有界（`[-1.5, +1.5]` nats）的个人先验对数增益，供统一概率融合层直接叠加。
+
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -21,17 +21,144 @@ use crate::types::WordItem;
 
 /// 个人选择事件的指数衰减半衰期：30 天（秒）。
 pub const HALF_LIFE_SECONDS: f64 = 30.0 * 86_400.0;
+/// 退格删词负反馈的指数衰减半衰期：24 小时（秒）。
+pub const NEGATIVE_FEEDBACK_HALF_LIFE_SECONDS: f64 = 24.0 * 3_600.0;
+/// 超过 7 天（7 个半衰期，残余权重 < 0.008）的负反馈标记在写入时自动裁剪。
+pub const NEGATIVE_FEEDBACK_RETENTION_SECONDS: i64 = 7 * 86_400;
+/// 上屏后触发确定性退格回滚与负反馈的时间窗上限：5 秒。
+pub const BACKSPACE_ROLLBACK_WINDOW_SECONDS: i64 = 5;
 /// 超过 180 天（约 6 个半衰期，残余权重 < 0.016）的历史事件在写入时自动裁剪。
 pub const RETENTION_SECONDS: i64 = 180 * 86_400;
 /// 事件表最大保留条数，防止长期使用无限增长。
 pub const MAX_PERSONAL_EVENTS: i64 = 50_000;
 /// 贝叶斯平滑静态先验等效伪计数 `alpha`：
-/// 跨同码全部静态词分布总质量为 `alpha = 3.0`，单次明确选冷门词（`n_user = 1.0`）
-/// 最多只会排在至多 2 个占比超 1/3 的高频静态词之后，自然保证首屏第 2–4 位召回；
-/// 对占比 ~90% 的超高频核心词（先验质量 ~2.70），连续 3 次明确选择即可自然反超。
+/// 跨同码全部静态词以榜首权重为锚（`alpha = 3.0`），单次明确选冷门词（`n_user = 1.0`）
+/// 稳获首屏第 2–3 位召回而不击穿核心高频词；连续 3 次明确选择可自然竞争第 1 槽。
 pub const BAYESIAN_PRIOR_ALPHA: f64 = 3.0;
 /// 竞争第 1 槽所需的最低衰减明确选择次数（至少 2 次近期明确选择，彻底杜绝单次误选翻首位）。
 pub const SLOT_ZERO_MIN_DECAYED_PICKS: f64 = 1.8;
+/// 跨 App 场景桶的历史选词折算权重（同桶 `1.0`，跨桶 `0.5`）。
+pub const CROSS_SCOPE_WEIGHT: f64 = 0.5;
+/// 单条近期退格负反馈在有效选择计数与后验上的抑制强度（乘以 24 小时衰减系数）。
+pub const NEGATIVE_FEEDBACK_WEIGHT: f64 = 1.5;
+/// Neural v2 融合层个人对数概率增益/抑制的绝对值上限（单位：nat），防止个人偏置压倒强语境。
+pub const MAX_PERSONAL_CACHE_LOG_BONUS: f64 = 1.5;
+/// 单条近期退格负反馈在 Neural v2 对数域施加的抑制基准（单位：nat，乘以 24 小时衰减系数）。
+const NEGATIVE_FEEDBACK_LOG_PENALTY: f64 = 1.2;
+
+/// 粗粒度应用使用场景桶，用于隔离编程/聊天/写作/搜索之间的个人习惯。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum AppScope {
+    #[default]
+    General,
+    ImChat,
+    CodeIde,
+    DocsWriting,
+    BrowserSearch,
+}
+
+impl AppScope {
+    /// 持久化到 SQLite `app_scope` 列的稳定标识符。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::ImChat => "im_chat",
+            Self::CodeIde => "code_ide",
+            Self::DocsWriting => "docs_writing",
+            Self::BrowserSearch => "browser_search",
+        }
+    }
+
+    /// 从持久化字符串解析场景桶；未知值安全回落为 `General`。
+    pub fn from_stored(raw: &str) -> Self {
+        match raw {
+            "im_chat" => Self::ImChat,
+            "code_ide" => Self::CodeIde,
+            "docs_writing" => Self::DocsWriting,
+            "browser_search" => Self::BrowserSearch,
+            _ => Self::General,
+        }
+    }
+
+    /// 按宿主的 bundle identifier（如 macOS `NSRunningApplication.bundleIdentifier`）映射粗粒度场景桶。
+    pub fn from_bundle_id(bundle_id: &str) -> Self {
+        let id = bundle_id.trim().to_ascii_lowercase();
+        if id.is_empty() {
+            return Self::General;
+        }
+        // 编程 IDE 与终端
+        if id.contains("xcode")
+            || id.contains("vscode")
+            || id.contains("vscodium")
+            || id.contains("cursor")
+            || id == "com.todesktop.230313mzl4w4u92"
+            || id.contains("windsurf")
+            || id.contains("jetbrains")
+            || id.contains("intellij")
+            || id.contains("pycharm")
+            || id.contains("clion")
+            || id.contains("rustrover")
+            || id.contains("goland")
+            || id.contains("webstorm")
+            || id.contains("dev.zed.zed")
+            || id.contains("sublimetext")
+            || id.contains("apple.terminal")
+            || id.contains("iterm2")
+            || id.contains("ghostty")
+            || id.contains("dev.warp")
+            || id.contains("alacritty")
+            || id.contains("wezterm")
+            || id.contains("kovidgoyal.kitty")
+        {
+            return Self::CodeIde;
+        }
+        // 即时通讯与聊天
+        if id.contains("xinwechat")
+            || id.contains("wechat")
+            || id.contains("tencent.qq")
+            || id.contains("slack")
+            || id.contains("discord")
+            || id.contains("mobilesms")
+            || id.contains("apple.ichat")
+            || id.contains("telegram")
+            || id.contains("feishu")
+            || id.contains("lark")
+            || id.contains("dingtalk")
+            || id.contains("whatsapp")
+            || id.contains("naver.line")
+        {
+            return Self::ImChat;
+        }
+        // 文档与笔记写作
+        if id.contains("notion")
+            || id.contains("obsidian")
+            || id.contains("iwork.pages")
+            || id.contains("microsoft.word")
+            || id.contains("apple.notes")
+            || id.contains("shinyfrog.bear")
+            || id.contains("typora")
+            || id.contains("ulysses")
+            || id.contains("wpsoffice")
+            || id.contains("yuque")
+        {
+            return Self::DocsWriting;
+        }
+        // 浏览器与搜索
+        if id.contains("apple.safari")
+            || id.contains("google.chrome")
+            || id.contains("thebrowser.browser")
+            || id.contains("mozilla.firefox")
+            || id.contains("microsoft.edgemac")
+            || id.contains("brave.browser")
+            || id.contains("vivaldi")
+            || id.contains("operasoftware")
+            || id.contains("kagi.kagimacos")
+        {
+            return Self::BrowserSearch;
+        }
+        Self::General
+    }
+}
 
 /// 当前 Unix 秒时间戳。
 pub fn unix_now_seconds() -> i64 {
@@ -40,23 +167,40 @@ pub fn unix_now_seconds() -> i64 {
         .map_or(0, |elapsed| elapsed.as_secs() as i64)
 }
 
-/// 追加一条用户明确选词事件，返回自增事件 `id`（供紧接退格回滚使用）。
+/// 追加一条用户明确选词事件（默认 `AppScope::General`），返回自增事件 `id`（供紧接退格回滚使用）。
 pub fn record_personal_selection(
     user_db: &Path,
     entry_key: &str,
     value: &str,
     now_unix: i64,
 ) -> Result<i64> {
+    record_personal_selection_scoped(user_db, entry_key, value, AppScope::General, now_unix)
+}
+
+/// 追加一条带 `AppScope` 场景桶的用户明确选词事件，同时清除该桶下更早的同名负反馈标记。
+pub fn record_personal_selection_scoped(
+    user_db: &Path,
+    entry_key: &str,
+    value: &str,
+    app_scope: AppScope,
+    now_unix: i64,
+) -> Result<i64> {
     if entry_key.is_empty() || value.is_empty() {
         return Err(EngineError::invalid(UNSTORABLE_ENTRY));
     }
+    let scope_str = app_scope.as_str();
     let journal = open_journal(user_db)?;
     let tx = rusqlite::Transaction::new_unchecked(&journal, TransactionBehavior::Immediate)?;
     tx.prepare_cached(
-        "INSERT INTO personal_selection_events(entry_key,value,selected_at) VALUES(?1,?2,?3)",
+        "INSERT INTO personal_selection_events(entry_key,value,selected_at,app_scope) VALUES(?1,?2,?3,?4)",
     )?
-    .execute(params![entry_key, value, now_unix])?;
+    .execute(params![entry_key, value, now_unix, scope_str])?;
     let event_id = tx.last_insert_rowid();
+    // 用户再次明确选择该词时，清除该场景桶下早先残留的退格负反馈标记。
+    tx.prepare_cached(
+        "DELETE FROM personal_negative_feedback WHERE entry_key=?1 AND value=?2 AND app_scope=?3 AND rejected_at<=?4",
+    )?
+    .execute(params![entry_key, value, scope_str, now_unix])?;
     // 定期裁剪超过 180 天或超出上限的陈旧事件（仅在每 64 次写入时触发，避免热路径额外扫描）。
     if event_id % 64 == 0 {
         let cutoff = now_unix.saturating_sub(RETENTION_SECONDS);
@@ -66,27 +210,79 @@ pub fn record_personal_selection(
             "DELETE FROM personal_selection_events WHERE id <= (SELECT id FROM personal_selection_events ORDER BY id DESC LIMIT 1 OFFSET ?1)",
         )?
         .execute(params![MAX_PERSONAL_EVENTS])?;
+        let neg_cutoff = now_unix.saturating_sub(NEGATIVE_FEEDBACK_RETENTION_SECONDS);
+        tx.prepare_cached("DELETE FROM personal_negative_feedback WHERE rejected_at < ?1")?
+            .execute(params![neg_cutoff])?;
     }
     tx.commit()?;
     Ok(event_id)
 }
 
+/// 当用户在 5 秒窗口内退格删光刚上屏词时，确定性撤销对应选词事件（若有）并写入 24 小时半衰期负反馈标记。
+/// 超出 5 秒窗口或键值非法时不做任何写入并返回 `Ok(false)`。
+pub fn record_backspace_rollback_feedback(
+    user_db: &Path,
+    event_id: Option<i64>,
+    entry_key: &str,
+    value: &str,
+    app_scope: AppScope,
+    committed_at_unix: i64,
+    now_unix: i64,
+) -> Result<bool> {
+    if entry_key.is_empty() || value.is_empty() {
+        return Ok(false);
+    }
+    let elapsed = now_unix.saturating_sub(committed_at_unix);
+    if !(0..=BACKSPACE_ROLLBACK_WINDOW_SECONDS).contains(&elapsed) {
+        return Ok(false);
+    }
+    let journal = open_journal(user_db)?;
+    let tx = rusqlite::Transaction::new_unchecked(&journal, TransactionBehavior::Immediate)?;
+    if let Some(id) = event_id {
+        tx.prepare_cached("DELETE FROM personal_selection_events WHERE id=?1")?
+            .execute(params![id])?;
+    }
+    tx.prepare_cached(
+        "INSERT INTO personal_negative_feedback(entry_key,value,app_scope,rejected_at) VALUES(?1,?2,?3,?4) \
+         ON CONFLICT(entry_key,value,app_scope) DO UPDATE SET rejected_at=excluded.rejected_at",
+    )?
+    .execute(params![entry_key, value, app_scope.as_str(), now_unix])?;
+    let neg_cutoff = now_unix.saturating_sub(NEGATIVE_FEEDBACK_RETENTION_SECONDS);
+    tx.prepare_cached("DELETE FROM personal_negative_feedback WHERE rejected_at < ?1")?
+        .execute(params![neg_cutoff])?;
+    tx.commit()?;
+    Ok(true)
+}
+
 /// 当某个多音节词键在 `personal_selection_events` 中已有竞争词记录时，记录一次用户以空格接受
-/// 当前首选的确认事件，消除「只记改选、不记空格接受默认首位」的选择偏差。
-///
-/// - 单字键（不含 `'`）不写确认事件（单字未置顶本身永不抢占第 1 槽）；
-/// - 无日志或该键下没有任何竞争词记录时直接零写入返回（99%+ 常规键零磁盘开销）；
-/// - 当当前首选的衰减计数已领先最高竞争词至少 `2.0` 次时不再追加，避免高频常用词无限刷写日志。
+/// 当前首选的确认事件，消除「只记改选、不记空格接受默认首位」的选择偏差（默认 `AppScope::General`）。
 pub fn record_contested_leader_confirmation(
     user_db: &Path,
     entry_key: &str,
     leader_word: &str,
     now_unix: i64,
 ) -> Result<bool> {
+    record_contested_leader_confirmation_scoped(
+        user_db,
+        entry_key,
+        leader_word,
+        AppScope::General,
+        now_unix,
+    )
+}
+
+/// 带 `AppScope` 场景桶的竞争首选空格确认写入。
+pub fn record_contested_leader_confirmation_scoped(
+    user_db: &Path,
+    entry_key: &str,
+    leader_word: &str,
+    app_scope: AppScope,
+    now_unix: i64,
+) -> Result<bool> {
     if entry_key.is_empty() || leader_word.is_empty() || !entry_key.contains('\'') {
         return Ok(false);
     }
-    let counts = decayed_counts_for_key(user_db, entry_key, now_unix);
+    let counts = decayed_counts_for_key_scoped(user_db, entry_key, app_scope, now_unix);
     if counts.is_empty() {
         return Ok(false);
     }
@@ -102,7 +298,7 @@ pub fn record_contested_leader_confirmation(
     if leader_count >= max_rival + 2.0 {
         return Ok(false);
     }
-    record_personal_selection(user_db, entry_key, leader_word, now_unix)?;
+    record_personal_selection_scoped(user_db, entry_key, leader_word, app_scope, now_unix)?;
     Ok(true)
 }
 
@@ -117,10 +313,68 @@ pub fn delete_personal_selection_event(user_db: &Path, event_id: i64) -> Result<
     Ok(deleted > 0)
 }
 
-/// 计算某个完整拼音键下各词经 30 天半衰期指数衰减后的有效明确选择次数；无日志时不创建文件。
+/// 计算某个完整拼音键在指定场景桶下各词的 24 小时衰减退格负反馈强度（同桶 `1.0`、跨桶 `0.5`）。
+pub fn decayed_negative_feedback_for_key_scoped(
+    user_db: &Path,
+    entry_key: &str,
+    app_scope: AppScope,
+    now_unix: i64,
+) -> HashMap<String, f64> {
+    let mut penalties = HashMap::new();
+    if entry_key.is_empty() {
+        return penalties;
+    }
+    let Some(journal) = existing_journal(user_db) else {
+        return penalties;
+    };
+    let Ok(mut statement) = journal.prepare_cached(
+        "SELECT value, app_scope, rejected_at FROM personal_negative_feedback WHERE entry_key=?1",
+    ) else {
+        return penalties;
+    };
+    let Ok(rows) = statement.query_map(params![entry_key], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    }) else {
+        return penalties;
+    };
+    for row in rows.flatten() {
+        let (value, stored_scope, rejected_at) = row;
+        let age = now_unix.saturating_sub(rejected_at).max(0) as f64;
+        let scope_factor = if AppScope::from_stored(&stored_scope) == app_scope {
+            1.0
+        } else {
+            CROSS_SCOPE_WEIGHT
+        };
+        let strength = scope_factor * 0.5f64.powf(age / NEGATIVE_FEEDBACK_HALF_LIFE_SECONDS);
+        if strength >= 1e-4 {
+            let entry = penalties.entry(value).or_insert(0.0);
+            if strength > *entry {
+                *entry = strength;
+            }
+        }
+    }
+    penalties
+}
+
+/// 计算某个完整拼音键下各词经 30 天半衰期指数衰减后的有效明确选择次数（默认 `AppScope::General`）；无日志时不创建文件。
 pub fn decayed_counts_for_key(
     user_db: &Path,
     entry_key: &str,
+    now_unix: i64,
+) -> HashMap<String, f64> {
+    decayed_counts_for_key_scoped(user_db, entry_key, AppScope::General, now_unix)
+}
+
+/// 计算某个完整拼音键在 `app_scope` 下的有效明确选择次数：同桶按 `1.0` 计权、跨桶按 `0.5` 计权，
+/// 并扣减 24 小时衰减退格负反馈（结果截断至非负且仅保留 `> 0.0` 项）。
+pub fn decayed_counts_for_key_scoped(
+    user_db: &Path,
+    entry_key: &str,
+    app_scope: AppScope,
     now_unix: i64,
 ) -> HashMap<String, f64> {
     let mut counts = HashMap::new();
@@ -131,24 +385,79 @@ pub fn decayed_counts_for_key(
         return counts;
     };
     let Ok(mut statement) = journal.prepare_cached(
-        "SELECT value, selected_at FROM personal_selection_events WHERE entry_key=?1",
+        "SELECT value, selected_at, app_scope FROM personal_selection_events WHERE entry_key=?1",
     ) else {
         return counts;
     };
     let Ok(rows) = statement.query_map(params![entry_key], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, String>(2)?,
+        ))
     }) else {
         return counts;
     };
     for row in rows.flatten() {
-        let (value, selected_at) = row;
+        let (value, selected_at, stored_scope) = row;
         let age = now_unix.saturating_sub(selected_at).max(0) as f64;
-        let weight = 0.5f64.powf(age / HALF_LIFE_SECONDS);
+        let scope_factor = if AppScope::from_stored(&stored_scope) == app_scope {
+            1.0
+        } else {
+            CROSS_SCOPE_WEIGHT
+        };
+        let weight = scope_factor * 0.5f64.powf(age / HALF_LIFE_SECONDS);
         if weight >= 1e-4 {
             *counts.entry(value).or_insert(0.0) += weight;
         }
     }
+    if !counts.is_empty() {
+        let negative =
+            decayed_negative_feedback_for_key_scoped(user_db, entry_key, app_scope, now_unix);
+        if !negative.is_empty() {
+            counts.retain(|word, count| {
+                if let Some(&neg) = negative.get(word) {
+                    *count = (*count - NEGATIVE_FEEDBACK_WEIGHT * neg).max(0.0);
+                }
+                *count > 1e-4
+            });
+        }
+    }
     counts
+}
+
+/// 为 Neural v2 统一融合阶段提供个人贝叶斯缓存对数概率增益/抑制（单位：nat，严格限制在 `[-1.5, +1.5]`）。
+///
+/// - 无个人事件且无退格负反馈时返回 `0.0`；
+/// - 正向增益取平滑对数插值 `ln(1 + n_user / alpha)`（单次同桶选择仅 `+0.29 nat`，跨桶仅 `+0.15 nat`，绝不压倒强语境或核心高频词）；
+/// - 5 秒内退格删词写入的 24 小时衰减负反馈施加 `-1.2 * neg_decay` 抑制，重打时即时避让刚被删除的错误词。
+pub fn personal_cache_log_bonus(
+    user_db: &Path,
+    entry_key: &str,
+    word: &str,
+    app_scope: AppScope,
+    now_unix: i64,
+) -> f64 {
+    if entry_key.is_empty() || word.is_empty() {
+        return 0.0;
+    }
+    let counts = decayed_counts_for_key_scoped(user_db, entry_key, app_scope, now_unix);
+    let negative =
+        decayed_negative_feedback_for_key_scoped(user_db, entry_key, app_scope, now_unix);
+    let pos = counts.get(word).copied().unwrap_or(0.0);
+    let neg = negative.get(word).copied().unwrap_or(0.0);
+    if pos <= 0.0 && neg <= 0.0 {
+        return 0.0;
+    }
+    let lift = if pos > 0.0 {
+        (1.0 + pos / BAYESIAN_PRIOR_ALPHA)
+            .ln()
+            .min(MAX_PERSONAL_CACHE_LOG_BONUS)
+    } else {
+        0.0
+    };
+    let suppress = (NEGATIVE_FEEDBACK_LOG_PENALTY * neg).min(MAX_PERSONAL_CACHE_LOG_BONUS);
+    (lift - suppress).clamp(-MAX_PERSONAL_CACHE_LOG_BONUS, MAX_PERSONAL_CACHE_LOG_BONUS)
 }
 
 /// 独立个人叠加层重排的结果。
@@ -169,27 +478,37 @@ fn is_exact_homophone(item: &WordItem, entry_key: &str) -> bool {
         && candidate_dictionary_key(item, entry_key) == entry_key
 }
 
-/// 为语境同音竞争计算融合了 Stage 4 衰减个人选词事件的等效静态先验权重。
-///
-/// 推导：`alpha * (w_static / w_max) + n_user(w) = (alpha / w_max) * (w_static + (w_max / alpha) * n_user(w))`；
-/// 当所有同音词均无个人选词记录（`n_user == 0`）或属于单字键时返回 `None`，使下游 `ln(weight)` 与冷启动完全等价；
-/// 有明确选词记录时既不改写主词库静态权重，又能防止中性前文把刚学会的常用词打回静态次席。
+/// 为语境同音竞争计算融合了 Stage 4 衰减个人选词事件的等效静态先验权重（默认 `AppScope::General`）。
 pub fn effective_bayesian_weights(
     user_db: &Path,
     entry_key: &str,
     items: &[&WordItem],
     now_unix: i64,
 ) -> Option<Vec<f64>> {
+    effective_bayesian_weights_scoped(user_db, entry_key, items, AppScope::General, now_unix)
+}
+
+/// 带 `AppScope` 场景桶与 24 小时退格负反馈的贝叶斯等效先验权重。
+pub fn effective_bayesian_weights_scoped(
+    user_db: &Path,
+    entry_key: &str,
+    items: &[&WordItem],
+    app_scope: AppScope,
+    now_unix: i64,
+) -> Option<Vec<f64>> {
     if entry_key.is_empty() || !entry_key.contains('\'') || items.len() < 2 {
         return None;
     }
-    let counts = decayed_counts_for_key(user_db, entry_key, now_unix);
-    if counts.is_empty() {
+    let counts = decayed_counts_for_key_scoped(user_db, entry_key, app_scope, now_unix);
+    let negative =
+        decayed_negative_feedback_for_key_scoped(user_db, entry_key, app_scope, now_unix);
+    if counts.is_empty() && negative.is_empty() {
         return None;
     }
-    let any_matched = items
-        .iter()
-        .any(|item| counts.get(item.word.as_str()).is_some_and(|&n| n > 0.0));
+    let any_matched = items.iter().any(|item| {
+        counts.get(item.word.as_str()).is_some_and(|&n| n > 0.0)
+            || negative.get(item.word.as_str()).is_some_and(|&n| n > 0.0)
+    });
     if !any_matched {
         return None;
     }
@@ -204,28 +523,43 @@ pub fn effective_bayesian_weights(
             .map(|item| {
                 let base = item.weight.max(1) as f64;
                 let n_user = counts.get(item.word.as_str()).copied().unwrap_or(0.0);
-                (base + user_unit_weight * n_user).max(1.0)
+                let neg = negative.get(item.word.as_str()).copied().unwrap_or(0.0);
+                let adjusted = base + user_unit_weight * n_user;
+                let damped = if neg > 0.0 {
+                    adjusted * (-NEGATIVE_FEEDBACK_LOG_PENALTY * neg).exp()
+                } else {
+                    adjusted
+                };
+                damped.max(1.0)
             })
             .collect(),
     )
 }
 
-/// 用独立贝叶斯衰减叠加层重排同音词典候选；绝不修改任何 `WordItem::weight`。
-///
-/// 要求第 0 位本身是 `entry_key` 的精确拼音词典命中；随后跨越中间可能夹入的词网格整句与长词补全，
-/// 收集全部精确同音词典行一起参与贝叶斯平滑与手动置顶，避免「登录/登陆」「出发/除法」这类因补全词
-/// 夹层而断开的同音词脱离个人学习与置顶控制。
-///
-/// 关键约束：
-/// 1. 静态先验以榜首静态权重 `w_max` 为锚（`alpha * (w / w_max)`），而非跨全组求和归一化，
-///    避免同音词/字数量多（如 600 个同音字或 5 个同音词）把榜首护城河稀释击穿；
-/// 2. 单字键（`entry_key` 不含 `'`）下未手动置顶的个人选词记录只负责首屏第 2–5 位召回，
-///    **绝不抢占第 1 槽**（防止偶发输入「李」「得」「号」「事」「再」劫持「里」「的」「好」「是」「在」），
-///    单字第 1 槽只由显式置顶或语境同音重排改变。
+/// 用独立贝叶斯衰减叠加层重排同音词典候选（默认 `AppScope::General`）；绝不修改任何 `WordItem::weight`。
 pub fn apply_personal_overlay(
     user_db: &Path,
     entry_key: &str,
     pinned_leader: Option<&str>,
+    candidates: &mut [WordItem],
+    now_unix: i64,
+) -> OverlayOutcome {
+    apply_personal_overlay_scoped(
+        user_db,
+        entry_key,
+        pinned_leader,
+        AppScope::General,
+        candidates,
+        now_unix,
+    )
+}
+
+/// 带 `AppScope` 场景桶隔离与 24 小时退格负反馈抑制的独立个人叠加层重排；绝不修改任何 `WordItem::weight`。
+pub fn apply_personal_overlay_scoped(
+    user_db: &Path,
+    entry_key: &str,
+    pinned_leader: Option<&str>,
+    app_scope: AppScope,
     candidates: &mut [WordItem],
     now_unix: i64,
 ) -> OverlayOutcome {
@@ -235,8 +569,10 @@ pub fn apply_personal_overlay(
     {
         return OverlayOutcome::default();
     }
-    let counts = decayed_counts_for_key(user_db, entry_key, now_unix);
-    if counts.is_empty() && pinned_leader.is_none() {
+    let counts = decayed_counts_for_key_scoped(user_db, entry_key, app_scope, now_unix);
+    let negative =
+        decayed_negative_feedback_for_key_scoped(user_db, entry_key, app_scope, now_unix);
+    if counts.is_empty() && negative.is_empty() && pinned_leader.is_none() {
         return OverlayOutcome::default();
     }
     // 跨越可能夹在同音词之间的整句与长词补全，收集全部精确同音词典行下标。
@@ -254,7 +590,7 @@ pub fn apply_personal_overlay(
             .iter()
             .position(|&raw_idx| candidates[raw_idx].word.as_str() == pin)
     });
-    if counts.is_empty() {
+    if counts.is_empty() && negative.is_empty() {
         let Some(pin_pos) = pinned_pos else {
             return OverlayOutcome::default();
         };
@@ -275,23 +611,29 @@ pub fn apply_personal_overlay(
         .fold(1.0f64, f64::max);
     let mut posteriors = Vec::with_capacity(group_len);
     let mut user_counts = Vec::with_capacity(group_len);
+    let mut neg_strengths = Vec::with_capacity(group_len);
     for &raw_idx in &exact_indices {
         let item = &candidates[raw_idx];
         let p_rel = item.weight.max(1) as f64 / leader_weight;
         let n_user = counts.get(item.word.as_str()).copied().unwrap_or(0.0);
-        posteriors.push(BAYESIAN_PRIOR_ALPHA * p_rel + n_user);
+        let neg = negative.get(item.word.as_str()).copied().unwrap_or(0.0);
+        posteriors.push(BAYESIAN_PRIOR_ALPHA * p_rel + n_user - NEGATIVE_FEEDBACK_WEIGHT * neg);
         user_counts.push(n_user);
+        neg_strengths.push(neg);
     }
 
     let mut leader_pos = pinned_pos.unwrap_or(0);
     let mut overlay_promoted_leader = false;
     if pinned_pos.is_none() && !is_single_char_key {
         let mut best_score = posteriors[0];
+        let leader_suppressed = neg_strengths[0] >= 0.5;
         for pos in 1..group_len {
-            if user_counts[pos] >= SLOT_ZERO_MIN_DECAYED_PICKS && posteriors[pos] > best_score {
+            let eligible = user_counts[pos] >= SLOT_ZERO_MIN_DECAYED_PICKS
+                || (leader_suppressed && neg_strengths[pos] < 0.25);
+            if eligible && posteriors[pos] > best_score {
                 best_score = posteriors[pos];
                 leader_pos = pos;
-                overlay_promoted_leader = true;
+                overlay_promoted_leader = user_counts[pos] >= SLOT_ZERO_MIN_DECAYED_PICKS;
             }
         }
     }
@@ -300,7 +642,8 @@ pub fn apply_personal_overlay(
     let mut exact_order: Vec<usize> = Vec::with_capacity(group_len);
     exact_order.push(leader_pos);
     let mut rest: Vec<usize> = (0..group_len).filter(|&pos| pos != leader_pos).collect();
-    // 余下同音词按贝叶斯后验降序稳定排布：首次明确选择的冷门专名（`n_user ≈ 1.0`）自动进入首屏前排。
+    // 余下同音词按贝叶斯后验降序稳定排布：首次明确选择的冷门专名（`n_user ≈ 1.0`）自动进入首屏前排，
+    // 近期被退格删除的词受 24 小时衰减负反馈压低至后排。
     rest.sort_by(|&a, &b| posteriors[b].total_cmp(&posteriors[a]).then(a.cmp(&b)));
     exact_order.extend(rest);
 
@@ -386,12 +729,47 @@ mod tests {
     }
 
     #[test]
+    fn app_scope_maps_bundle_ids_accurately_and_round_trips_storage() {
+        for (bundle, expected) in [
+            ("com.apple.dt.Xcode", AppScope::CodeIde),
+            ("com.microsoft.VSCode", AppScope::CodeIde),
+            ("com.todesktop.230313mzl4w4u92", AppScope::CodeIde),
+            ("com.jetbrains.rustrover", AppScope::CodeIde),
+            ("com.apple.Terminal", AppScope::CodeIde),
+            ("com.mitchellh.ghostty", AppScope::CodeIde),
+            ("com.tencent.xinWeChat", AppScope::ImChat),
+            ("com.tinyspeck.slackmacgap", AppScope::ImChat),
+            ("com.hnc.Discord", AppScope::ImChat),
+            ("com.apple.MobileSMS", AppScope::ImChat),
+            ("ru.keepcoder.Telegram", AppScope::ImChat),
+            ("com.electron.lark", AppScope::ImChat),
+            ("com.bytedance.feishu", AppScope::ImChat),
+            ("notion.id", AppScope::DocsWriting),
+            ("md.obsidian", AppScope::DocsWriting),
+            ("com.apple.iWork.Pages", AppScope::DocsWriting),
+            ("com.microsoft.Word", AppScope::DocsWriting),
+            ("com.apple.Safari", AppScope::BrowserSearch),
+            ("com.google.Chrome", AppScope::BrowserSearch),
+            ("company.thebrowser.Browser", AppScope::BrowserSearch),
+            ("org.mozilla.firefox", AppScope::BrowserSearch),
+            ("com.apple.finder", AppScope::General),
+            ("", AppScope::General),
+        ] {
+            assert_eq!(
+                AppScope::from_bundle_id(bundle),
+                expected,
+                "bundle={bundle}"
+            );
+            assert_eq!(AppScope::from_stored(expected.as_str()), expected);
+        }
+    }
+
+    #[test]
     fn single_accidental_pick_never_breaks_core_word_and_recalls_rare_proper_noun_to_page_one() {
         let dir = Dir::new();
         let journal = dir.journal();
         let now = 1_800_000_000;
 
-        // 模拟 `yi'ge`：「一个」占 90%+ 静态先验，冷门专名「义戈」埋在第 8 位（第 2 页）。
         let mut list = vec![
             item("yi'ge", "一个", 508_964),
             item("yi'ge", "一格", 20_030),
@@ -404,19 +782,15 @@ mod tests {
         ];
         let original_weights: Vec<i64> = list.iter().map(|row| row.weight).collect();
 
-        // 1 次明确选择冷门专名「义戈」：
         let event_id = record_personal_selection(&journal, "yi'ge", "义戈", now).unwrap();
         let outcome = apply_personal_overlay(&journal, "yi'ge", None, &mut list, now);
         assert!(outcome.moved && !outcome.leader_protected);
-        // 「一个」稳守首位（单次误选不击穿核心词），「义戈」跃升至第 2 位（首屏召回）！
         assert_eq!(list[0].word, "一个");
         assert_eq!(list[1].word, "义戈");
-        // 静态权重逐条保持原值，零污染！
         let mut weights_after: Vec<i64> = list.iter().map(|row| row.weight).collect();
         weights_after.sort_unstable_by(|a, b| b.cmp(a));
         assert_eq!(weights_after, original_weights);
 
-        // 紧接退格删除后按事件 ID 确定性回滚：「义戈」立即回到原静态位次！
         assert!(delete_personal_selection_event(&journal, event_id).unwrap());
         let mut fresh = vec![
             item("yi'ge", "一个", 508_964),
@@ -446,7 +820,6 @@ mod tests {
             ]
         };
 
-        // 第 2 次明确选择仍不击穿 90% 静态先验核心词（后验 2.0 < 2.88）。
         record_personal_selection(&journal, "yi'ge", "义戈", now).unwrap();
         record_personal_selection(&journal, "yi'ge", "义戈", now + 10).unwrap();
         let mut list = make();
@@ -454,22 +827,18 @@ mod tests {
         assert!(out2.moved && !out2.leader_protected);
         assert_eq!(words(&list), ["一个", "义戈", "一格"]);
 
-        // 第 3 次明确选择（后验 3.0 > 2.88）自然升至首位！
         record_personal_selection(&journal, "yi'ge", "义戈", now + 30).unwrap();
         let mut list = make();
         let out3 = apply_personal_overlay(&journal, "yi'ge", None, &mut list, now + 40);
         assert!(out3.moved && out3.leader_protected);
         assert_eq!(words(&list), ["义戈", "一个", "一格"]);
 
-        // 显式置顶「一个」作为 L4 硬约束，即使「义戈」已有 3 次明确选择也不得抢占第 1 槽。
         let mut pinned = make();
         let out_pin =
             apply_personal_overlay(&journal, "yi'ge", Some("一个"), &mut pinned, now + 40);
         assert!(out_pin.moved && out_pin.leader_protected);
         assert_eq!(words(&pinned), ["一个", "义戈", "一格"]);
 
-        // 30 天半衰期后，3 次旧选择衰减为 1.5（< 1.8 首位门槛），核心词「一个」自然恢复首位，
-        // 「义戈」保留在首屏次席。
         let mut decayed = make();
         let out_decay = apply_personal_overlay(
             &journal,
@@ -504,13 +873,11 @@ mod tests {
             ]
         };
 
-        // 未学习、未置顶时保持原序且有效先验权重返回 None。
         let mut untouched = make();
         assert!(!apply_personal_overlay(&journal, "deng'lu", None, &mut untouched, now).moved);
         let refs: Vec<&WordItem> = vec![&untouched[0], &untouched[4]];
         assert!(effective_bayesian_weights(&journal, "deng'lu", &refs, now).is_none());
 
-        // 仅手动置顶夹层后的同音词「登陆」：直接旋至首位且保持「登录」在次席。
         let mut pinned_only = make();
         let out_pin =
             apply_personal_overlay(&journal, "deng'lu", Some("登陆"), &mut pinned_only, now);
@@ -520,7 +887,6 @@ mod tests {
             ["登陆", "登录", "邓禄", "登录时间", "登录名", "等"]
         );
 
-        // 1 次明确改选「登陆」：跨过整句与补全夹层进入第 2 位，「登录」稳守第 1 位。
         record_personal_selection(&journal, "deng'lu", "登陆", now).unwrap();
         let mut after1 = make();
         let out1 = apply_personal_overlay(&journal, "deng'lu", None, &mut after1, now + 1);
@@ -530,7 +896,6 @@ mod tests {
             ["登录", "登陆", "邓禄", "登录时间", "登录名", "等"]
         );
 
-        // 连续 3 次明确改选「登陆」：跃升至第 1 位，「登录」紧随第 2 位，且有效先验权重超过「登录」。
         record_personal_selection(&journal, "deng'lu", "登陆", now + 2).unwrap();
         record_personal_selection(&journal, "deng'lu", "登陆", now + 3).unwrap();
         let mut after3 = make();
@@ -543,10 +908,7 @@ mod tests {
         let pair_refs: Vec<&WordItem> = vec![&after3[0], &after3[1]];
         let weights = effective_bayesian_weights(&journal, "deng'lu", &pair_refs, now + 4)
             .expect("有个人选择记录时应返回有效贝叶斯权重");
-        assert!(
-            weights[0] > weights[1],
-            "3 次选择后的「登陆」有效权重应高于「登录」: {weights:?}"
-        );
+        assert!(weights[0] > weights[1]);
     }
 
     #[test]
@@ -566,7 +928,6 @@ mod tests {
             ]
         };
 
-        // 即使多次明确选择单字「李」（如输入人名），也只能召回到首屏第 2 位，绝不能劫持静态首位「里」。
         for i in 0..5 {
             record_personal_selection(&journal, "li", "李", now + i).unwrap();
         }
@@ -575,11 +936,9 @@ mod tests {
         assert!(out.moved && !out.leader_protected);
         assert_eq!(words(&after), ["里", "李", "力", "理", "离", "立"]);
 
-        // 单字键的 `effective_bayesian_weights` 恒返回 None，避免个人单字选择扭曲语境同音判断。
         let refs: Vec<&WordItem> = after.iter().collect();
         assert!(effective_bayesian_weights(&journal, "li", &refs, now + 10).is_none());
 
-        // 显式手动置顶「李」仍作为 L4 硬约束允许占第 1 槽。
         let mut pinned = make();
         let out_pin = apply_personal_overlay(&journal, "li", Some("李"), &mut pinned, now + 10);
         assert!(out_pin.moved && out_pin.leader_protected);
@@ -602,12 +961,9 @@ mod tests {
             ]
         };
 
-        // 无竞争记录时，空格确认首选必须零写入返回 false。
         assert!(!record_contested_leader_confirmation(&journal, "chu'fa", "出发", now).unwrap());
         assert!(!journal.exists());
 
-        // 多个高频同音词并列时，静态先验以榜首 `w_max` 为锚（先验=3.0），不被其余同音词稀释：
-        // 偶发 2 次选弱词「除法」只能越过更弱的「楚法」进入首屏第 4 位，绝不能劫持「出发」。
         record_personal_selection(&journal, "chu'fa", "除法", now).unwrap();
         record_personal_selection(&journal, "chu'fa", "除法", now + 1).unwrap();
         let mut after2 = make();
@@ -615,7 +971,6 @@ mod tests {
         assert!(out2.moved && !out2.leader_protected);
         assert_eq!(words(&after2), ["出发", "处罚", "触发", "除法", "楚法"]);
 
-        // 有竞争记录后，空格接受「出发」记入确认计数，并在领先竞争词 +2.0 次后自动停止追加。
         let mut written = 0;
         for step in 0..8 {
             if record_contested_leader_confirmation(&journal, "chu'fa", "出发", now + 10 + step)
@@ -624,16 +979,428 @@ mod tests {
                 written += 1;
             }
         }
-        assert_eq!(
-            written, 4,
-            "竞争词计数 2.0 时最多追加 4 条确认即触及 +2.0 上限"
-        );
+        assert_eq!(written, 4);
 
-        // 此时再偶发选一次「除法」（累计 3 次），「出发」因已获 4 次确认（后验 7.0 > 3.05）稳守首位。
         record_personal_selection(&journal, "chu'fa", "除法", now + 20).unwrap();
         let mut defended = make();
         let out_def = apply_personal_overlay(&journal, "chu'fa", None, &mut defended, now + 21);
         assert!(!out_def.leader_protected);
         assert_eq!(defended[0].word, "出发");
+    }
+
+    /// 架构方案 §4.3：50 组确定性合成防劫持回放测试套件，完整验证全部 5 条个人学习防劫持铁律：
+    /// - 铁律 1（10 组）：误选 1 次生僻词对高频核心词误劫持率 0%；
+    /// - 铁律 2（10 组）：首次明确选冷门专名/人名 100% 稳定进入首屏槽 2–3（下标 1–2）；
+    /// - 铁律 3（10 组）：连续 3 次明确选自然竞争第 1 槽且 30 天半衰期后自然回落；
+    /// - 铁律 4（10 组）：5 秒内退格删全词 100% 撤销学习并施加 24 小时衰减负反馈抑制；
+    /// - 铁律 5（10 组）：`CodeIde` 等桶学到的术语跨桶仅 50% 权重，对 `ImChat` 高频核心词误劫持率 0%。
+    #[test]
+    fn anti_hijacking_50_scenario_deterministic_replay_suite() {
+        let now = 1_800_000_000i64;
+        let mut executed = 0usize;
+
+        // ---- 铁律 1（10 组）：单次误选生僻词对高频核心词误劫持率 = 0% ----
+        let core_vs_obscure: [(&str, &str, i64, &str, i64); 10] = [
+            ("yi'ge", "一个", 509_000, "义戈", 40),
+            ("wo'men", "我们", 509_000, "沃门", 35),
+            ("xian'zai", "现在", 503_000, "衔载", 25),
+            ("shi'jian", "时间", 505_000, "矢箭", 80),
+            ("wen'ti", "问题", 505_000, "文蹄", 20),
+            ("yin'wei", "因为", 504_000, "音纬", 30),
+            ("ke'yi", "可以", 506_000, "刻艺", 45),
+            ("mei'you", "没有", 508_000, "梅柚", 50),
+            ("zhi'dao", "知道", 504_000, "纸刀", 60),
+            ("gong'zuo", "工作", 502_000, "弓座", 30),
+        ];
+        for (key, core, core_w, obscure, obs_w) in core_vs_obscure {
+            let dir = Dir::new();
+            let journal = dir.journal();
+            let mut list = vec![
+                item(key, core, core_w),
+                item(key, "次高频", core_w / 10),
+                item(key, "中频词", core_w / 50),
+                item(key, obscure, obs_w),
+            ];
+            let orig_weights: Vec<i64> = list.iter().map(|r| r.weight).collect();
+            record_personal_selection_scoped(&journal, key, obscure, AppScope::ImChat, now)
+                .unwrap();
+            let out = apply_personal_overlay_scoped(
+                &journal,
+                key,
+                None,
+                AppScope::ImChat,
+                &mut list,
+                now + 1,
+            );
+            assert_eq!(
+                list[0].word, core,
+                "铁律 1 违背：{key} 单次误选劫持了核心词"
+            );
+            assert!(!out.leader_protected);
+            // 静态权重完全零污染，且对数增益严格有界且温和（单次约 +0.29 nat）。
+            let bonus = personal_cache_log_bonus(&journal, key, obscure, AppScope::ImChat, now + 1);
+            assert!(
+                bonus > 0.0 && bonus < 0.35,
+                "单次误选对数增益应温和受控：{bonus}"
+            );
+            let mut after_w: Vec<i64> = list.iter().map(|r| r.weight).collect();
+            after_w.sort_unstable_by(|a, b| b.cmp(a));
+            assert_eq!(after_w, orig_weights);
+            executed += 1;
+        }
+
+        // ---- 铁律 2（10 组）：首次明确选埋在第 7–9 位的冷门专名/人名 100% 进入首屏槽 2–3 ----
+        let rare_nouns: [(&str, &str, &str, bool); 10] = [
+            ("lin'xi", "林溪", "临西", false),
+            ("su'ming", "苏明", "宿命", true),
+            ("gu'cheng", "顾城", "古城", false),
+            ("shen'he", "沈河", "审核", true),
+            ("lu'yuan", "陆远", "路缘", false),
+            ("ji'ning", "济宁", "机能", false),
+            ("qing'he", "清河", "轻荷", true),
+            ("ning'bo", "宁波", "凝波", false),
+            ("cheng'ze", "程泽", "承泽", false),
+            ("yun'qi", "云栖", "运气", true),
+        ];
+        for (idx, (key, rare, common, with_interleaved)) in rare_nouns.into_iter().enumerate() {
+            let dir = Dir::new();
+            let journal = dir.journal();
+            let mut list = vec![item(key, common, 500_000)];
+            if with_interleaved {
+                let mut gen = item(key, "拼凑句", -9_000);
+                gen.source = crate::types::CandidateSource::Generated;
+                list.push(gen);
+                list.push(item(&format!("{key}'de"), "前缀补全", 300_000));
+            }
+            for k in 0..6 {
+                list.push(item(
+                    key,
+                    &format!("普通同音{idx}_{k}"),
+                    40_000 - (k as i64) * 5_000,
+                ));
+            }
+            list.push(item(key, rare, 80));
+
+            record_personal_selection_scoped(&journal, key, rare, AppScope::DocsWriting, now)
+                .unwrap();
+            let out = apply_personal_overlay_scoped(
+                &journal,
+                key,
+                None,
+                AppScope::DocsWriting,
+                &mut list,
+                now + 2,
+            );
+            assert!(out.moved && !out.leader_protected);
+            assert_eq!(list[0].word, common, "铁律 2：首次选冷门词不得抢占第 0 槽");
+            let rare_seat = list.iter().position(|r| r.word == rare).unwrap();
+            assert!(
+                (1..=2).contains(&rare_seat),
+                "铁律 2：{key} 首次选冷门专名应进入槽 2–3（下标 1–2），实际下标 {rare_seat}"
+            );
+            executed += 1;
+        }
+
+        // ---- 铁律 3（10 组）：连续 3 次明确选择自然胜出第 1 槽，30 天半衰期后回落 ----
+        let repeated_cases: [(&str, &str, i64, &str, i64); 10] = [
+            ("deng'lu", "登录", 502_000, "登陆", 5_000),
+            ("zuo'ye", "作业", 480_000, "昨夜", 15_000),
+            ("ji'lu", "记录", 495_000, "纪录", 20_000),
+            ("fu'zhi", "复制", 450_000, "副职", 3_000),
+            ("jie'kou", "接口", 420_000, "借口", 40_000),
+            ("biao'da", "表达", 460_000, "表大", 500),
+            ("fen'xi", "分析", 490_000, "分系", 800),
+            ("xiang'mu", "项目", 500_000, "香木", 400),
+            ("pei'zhi", "配置", 440_000, "配制", 6_000),
+            ("mo'xing", "模型", 470_000, "魔性", 12_000),
+        ];
+        for (key, core, core_w, target, target_w) in repeated_cases {
+            let dir = Dir::new();
+            let journal = dir.journal();
+            let make = || {
+                vec![
+                    item(key, core, core_w),
+                    item(key, "陪跑词", core_w / 20),
+                    item(key, target, target_w),
+                ]
+            };
+            for step in 0..3 {
+                record_personal_selection_scoped(
+                    &journal,
+                    key,
+                    target,
+                    AppScope::General,
+                    now + step * 10,
+                )
+                .unwrap();
+            }
+            let mut promoted = make();
+            let out3 = apply_personal_overlay_scoped(
+                &journal,
+                key,
+                None,
+                AppScope::General,
+                &mut promoted,
+                now + 30,
+            );
+            assert!(out3.moved && out3.leader_protected);
+            assert_eq!(
+                promoted[0].word, target,
+                "铁律 3：{key} 连续 3 次选应竞争首位"
+            );
+            // 显式置顶核心词作为 L4 硬约束优先级高于个人叠加层。
+            let mut pinned = make();
+            let out_pin = apply_personal_overlay_scoped(
+                &journal,
+                key,
+                Some(core),
+                AppScope::General,
+                &mut pinned,
+                now + 30,
+            );
+            assert!(out_pin.leader_protected);
+            assert_eq!(pinned[0].word, core);
+            // 30 天后衰减至 1.5 (< 1.8)，核心词自然恢复第 0 槽，目标词保留首屏次席。
+            let mut decayed = make();
+            let out_decay = apply_personal_overlay_scoped(
+                &journal,
+                key,
+                None,
+                AppScope::General,
+                &mut decayed,
+                now + 30 * 86_400 + 30,
+            );
+            assert!(!out_decay.leader_protected);
+            assert_eq!(
+                decayed[0].word, core,
+                "铁律 3：{key} 30 天后核心词应自然回位"
+            );
+            assert_eq!(decayed[1].word, target);
+            executed += 1;
+        }
+
+        // ---- 铁律 4（10 组）：5 秒内退格删全词 100% 撤销学习 + 24 小时衰减负反馈抑制 ----
+        let rollback_cases: [(&str, &str, &str, i64); 10] = [
+            ("yi'ge", "一个", "义戈", 1),
+            ("deng'lu", "登录", "登陆", 2),
+            ("ji'lu", "记录", "纪录", 3),
+            ("chu'fa", "出发", "除法", 4),
+            ("zhi'dao", "知道", "指导", 5),
+            ("mei'you", "没有", "煤油", 0),
+            ("shi'jian", "时间", "事件", 2),
+            ("wen'ti", "问题", "文体", 3),
+            ("ke'yi", "可以", "刻意", 1),
+            ("gong'zuo", "工作", "公座", 4),
+        ];
+        for (idx, (key, core, wrong, delay_secs)) in rollback_cases.into_iter().enumerate() {
+            let dir = Dir::new();
+            let journal = dir.journal();
+            // 场景偶数：先选 3 次已占首位，第 4 次误选后 5 秒内退格删全词；
+            // 场景奇数：单次误选后 5 秒内退格删全词。
+            if idx % 2 == 0 {
+                for step in 0..3 {
+                    record_personal_selection_scoped(
+                        &journal,
+                        key,
+                        wrong,
+                        AppScope::General,
+                        now - 100 + step,
+                    )
+                    .unwrap();
+                }
+            }
+            let commit_at = now;
+            let event_id = record_personal_selection_scoped(
+                &journal,
+                key,
+                wrong,
+                AppScope::General,
+                commit_at,
+            )
+            .unwrap();
+            // 超出 5 秒窗口不得触发回滚。
+            assert!(!record_backspace_rollback_feedback(
+                &journal,
+                Some(event_id),
+                key,
+                wrong,
+                AppScope::General,
+                commit_at,
+                commit_at + BACKSPACE_ROLLBACK_WINDOW_SECONDS + 1,
+            )
+            .unwrap());
+            // 在 5 秒窗口内退格删光：撤销本次学习事件并写入 24h 负反馈标记。
+            assert!(record_backspace_rollback_feedback(
+                &journal,
+                Some(event_id),
+                key,
+                wrong,
+                AppScope::General,
+                commit_at,
+                commit_at + delay_secs,
+            )
+            .unwrap());
+
+            let mut list = vec![
+                item(key, core, 500_000),
+                item(key, "正常备选", 80_000),
+                item(key, wrong, 2_000),
+            ];
+            let check_at = commit_at + delay_secs + 1;
+            let out = apply_personal_overlay_scoped(
+                &journal,
+                key,
+                None,
+                AppScope::General,
+                &mut list,
+                check_at,
+            );
+            assert_eq!(
+                list[0].word, core,
+                "铁律 4：{key} 退格回滚后核心词必须稳守首位"
+            );
+            assert!(!out.leader_protected);
+            if idx % 2 == 1 {
+                // 单次误选撤销后正计数归零，负反馈压低对数增益为负，重打时被抑制在末尾。
+                let counts =
+                    decayed_counts_for_key_scoped(&journal, key, AppScope::General, check_at);
+                assert!(!counts.contains_key(wrong));
+                assert_eq!(list[2].word, wrong);
+                let bonus_now =
+                    personal_cache_log_bonus(&journal, key, wrong, AppScope::General, check_at);
+                let bonus_24h = personal_cache_log_bonus(
+                    &journal,
+                    key,
+                    wrong,
+                    AppScope::General,
+                    check_at + 24 * 3_600,
+                );
+                assert!(bonus_now < -1.0, "刚回滚后应有明显负反馈抑制：{bonus_now}");
+                assert!(
+                    (bonus_24h - bonus_now * 0.5).abs() < 0.05,
+                    "24 小时半衰期后负反馈应衰减一半：now={bonus_now}, 24h={bonus_24h}"
+                );
+            } else {
+                // 原先 3 次已占首位，退格后扣除 1.5 -> 残余 1.5 (< 1.8)，立即让出首位。
+                let counts =
+                    decayed_counts_for_key_scoped(&journal, key, AppScope::General, check_at);
+                let remain = counts.get(wrong).copied().unwrap_or(0.0);
+                assert!(
+                    remain < SLOT_ZERO_MIN_DECAYED_PICKS,
+                    "铁律 4：退格负反馈应将原首位拉回门槛之下，remain={remain}"
+                );
+            }
+            executed += 1;
+        }
+
+        // ---- 铁律 5（10 组）：跨 AppScope 隔离（CodeIde 术语不劫持 ImChat 高频词） ----
+        let cross_scope_cases: [(&str, &str, &str, &str, &str); 10] = [
+            (
+                "com.apple.dt.Xcode",
+                "com.tencent.xinWeChat",
+                "nei'cun",
+                "内存",
+                "内衬",
+            ),
+            (
+                "com.microsoft.VSCode",
+                "com.tinyspeck.slackmacgap",
+                "xian'cheng",
+                "线程",
+                "现成",
+            ),
+            (
+                "com.todesktop.230313mzl4w4u92",
+                "com.hnc.Discord",
+                "bian'yi",
+                "编译",
+                "便宜",
+            ),
+            (
+                "com.jetbrains.rustrover",
+                "com.apple.MobileSMS",
+                "zhi'zhen",
+                "指针",
+                "至真",
+            ),
+            (
+                "com.apple.Terminal",
+                "ru.keepcoder.Telegram",
+                "huan'cun",
+                "缓存",
+                "换村",
+            ),
+            (
+                "com.mitchellh.ghostty",
+                "com.electron.lark",
+                "yi'bu",
+                "异步",
+                "一步",
+            ),
+            (
+                "dev.zed.zed",
+                "com.bytedance.feishu",
+                "jie'gou",
+                "结构",
+                "借狗",
+            ),
+            (
+                "com.jetbrains.intellij",
+                "com.tencent.xinWeChat",
+                "fan'xing",
+                "泛型",
+                "反省",
+            ),
+            ("notion.id", "com.google.Chrome", "yin'yong", "引用", "应用"),
+            ("md.obsidian", "com.apple.Safari", "suo'yin", "索引", "所因"),
+        ];
+        for (src_bundle, dst_bundle, key, term, chat_word) in cross_scope_cases {
+            let dir = Dir::new();
+            let journal = dir.journal();
+            let src_scope = AppScope::from_bundle_id(src_bundle);
+            let dst_scope = AppScope::from_bundle_id(dst_bundle);
+            assert_ne!(src_scope, dst_scope);
+
+            // 在源桶（如 CodeIde）连续明确选术语 3 次：
+            for step in 0..3 {
+                record_personal_selection_scoped(&journal, key, term, src_scope, now + step)
+                    .unwrap();
+            }
+            // 同桶有效计数 ~3.0，跨桶严格折半 ~1.5 (< 1.8)：
+            let src_cnt = decayed_counts_for_key_scoped(&journal, key, src_scope, now + 5)
+                .get(term)
+                .copied()
+                .unwrap_or(0.0);
+            let dst_cnt = decayed_counts_for_key_scoped(&journal, key, dst_scope, now + 5)
+                .get(term)
+                .copied()
+                .unwrap_or(0.0);
+            assert!((src_cnt - 3.0).abs() < 1e-3);
+            assert!((dst_cnt - 1.5).abs() < 1e-3);
+
+            // 在源桶（IDE）里：术语正常夺得第 0 槽！
+            let mut in_src = vec![item(key, chat_word, 500_000), item(key, term, 2_000)];
+            let out_src =
+                apply_personal_overlay_scoped(&journal, key, None, src_scope, &mut in_src, now + 5);
+            assert!(out_src.leader_protected);
+            assert_eq!(in_src[0].word, term, "源桶内应正常习得术语首位");
+
+            // 切到目标桶（ImChat / BrowserSearch）：跨桶 50% 权重（1.5 < 1.8），绝不劫持日常高频词第 0 槽！
+            let mut in_dst = vec![item(key, chat_word, 500_000), item(key, term, 2_000)];
+            let out_dst =
+                apply_personal_overlay_scoped(&journal, key, None, dst_scope, &mut in_dst, now + 5);
+            assert!(!out_dst.leader_protected);
+            assert_eq!(
+                in_dst[0].word, chat_word,
+                "铁律 5 违背：{src_bundle} 学到的「{term}」劫持了 {dst_bundle} 的「{chat_word}」"
+            );
+            // 源桶对数增益高于目标桶，且均受 MAX_PERSONAL_CACHE_LOG_BONUS 严格约束。
+            let bonus_src = personal_cache_log_bonus(&journal, key, term, src_scope, now + 5);
+            let bonus_dst = personal_cache_log_bonus(&journal, key, term, dst_scope, now + 5);
+            assert!(bonus_src > bonus_dst && bonus_src <= MAX_PERSONAL_CACHE_LOG_BONUS);
+            executed += 1;
+        }
+
+        assert_eq!(executed, 50, "必须完整执行全部 50 组防劫持回放场景");
     }
 }

@@ -86,6 +86,16 @@ FOUNDATION_EXPORT NSNotificationName const MSIMEClientSessionDidReplaceSnapshotN
 /// 已离开原组字时传 `accept: NO`，只归还仍适用的模型；完成前返回 `pending`，
 /// 完成后与启动接口的 `done` 结构一致。不联网。
 - (nullable NSDictionary *)pollSettledRerank:(uint64_t)token accept:(BOOL)accept error:(NSError **)error;
+/// 启用或关闭 Shurufa v2 Tier 1 两阶段异步神经解码。
+- (BOOL)setNeuralV2Enabled:(BOOL)enabled error:(NSError **)error;
+/// 取出当前代次的 Tier 1 神经解码请求 JSON 字典；无请求时返回 nil（且 error 为 nil）。
+- (nullable NSDictionary *)takeNeuralRequestWithError:(NSError **)error;
+/// 读取当前会话完整保留标点/空格的 512 字上文，用于空闲 50 ms 预热端侧 KV-Cache。
+- (nullable NSString *)neuralPrefillContextWithError:(NSError **)error;
+/// 将 Tier 1 神经服务回包 JSON 字节交给纯 Rust 引擎执行统一概率融合与排座。
+- (nullable NSDictionary *)applyNeuralResponseData:(NSData *)responseData
+                                         lockSlot0:(BOOL)lockSlot0
+                                             error:(NSError **)error;
 /// Copied Engine query, or nil when ineligible. Does not perform network I/O.
 - (nullable NSDictionary *)onlineQueryWithError:(NSError **)error;
 /// Build a descriptor for the copied query using this session's current AI

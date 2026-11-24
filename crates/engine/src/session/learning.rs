@@ -24,8 +24,8 @@ use crate::types::{
 };
 use crate::user_dictionary::journal::is_user_deleted;
 use crate::user_dictionary::overlay::{
-    delete_personal_selection_event, record_contested_leader_confirmation,
-    record_personal_selection, unix_now_seconds,
+    delete_personal_selection_event, record_backspace_rollback_feedback,
+    record_contested_leader_confirmation, record_personal_selection, unix_now_seconds, AppScope,
 };
 use crate::user_dictionary::picks::{clear_pick_transition, record_pick_transition};
 use crate::user_dictionary::ranking::{
@@ -92,15 +92,27 @@ fn clone_matching_rows(
 }
 
 impl InputSession {
-    /// 上屏后紧接空闲退格时递减刚上屏字数；删光整段即确定性回滚对应的个人学习事件。
+    /// 上屏后紧接空闲退格时递减刚上屏字数；删光整段即确定性回滚对应的个人学习事件，
+    /// 并在 5 秒窗口内同步写入 24 小时半衰期退格负反馈（重打时即时避让刚被删除的错误词）。
     pub(super) fn step_overlay_learning_backspace(&mut self) {
-        let Some(mut last) = self.last_overlay_learning else {
+        let Some(mut last) = self.last_overlay_learning.take() else {
             return;
         };
         last.remaining_chars = last.remaining_chars.saturating_sub(1);
         if last.remaining_chars == 0 {
-            let _ = delete_personal_selection_event(self.journal_path(), last.event_id);
-            self.last_overlay_learning = None;
+            let rolled = record_backspace_rollback_feedback(
+                self.journal_path(),
+                Some(last.event_id),
+                &last.entry_key,
+                &last.word,
+                AppScope::General,
+                last.committed_at_unix,
+                unix_now_seconds(),
+            )
+            .unwrap_or(false);
+            if !rolled {
+                let _ = delete_personal_selection_event(self.journal_path(), last.event_id);
+            }
         } else {
             self.last_overlay_learning = Some(last);
         }
@@ -348,16 +360,21 @@ impl InputSession {
             let selected_word = selected.word.clone();
             let entry_key_owned = entry_key.to_owned();
             let user_db_owned = user_db.to_path_buf();
+            let now_unix = unix_now_seconds();
             match record_personal_selection(
                 &user_db_owned,
                 &entry_key_owned,
                 &selected_word,
-                unix_now_seconds(),
+                now_unix,
             ) {
                 Ok(event_id) => {
+                    let remaining_chars = count_utf8_chars(&selected_word).max(1);
                     self.last_overlay_learning = Some(super::input::LastOverlayLearning {
                         event_id,
-                        remaining_chars: count_utf8_chars(&selected_word).max(1),
+                        entry_key: entry_key_owned,
+                        word: selected_word.to_string(),
+                        committed_at_unix: now_unix,
+                        remaining_chars,
                     });
                     return None;
                 }

@@ -96,6 +96,8 @@ pub fn source_name(source: u8) -> &'static str {
         Some(Source::Contact) => "contact",
         Some(Source::Collocation) => "collocation",
         Some(Source::Multilingual) => "multilingual",
+        Some(Source::NeuralV2) => "neural_v2",
+        Some(Source::NeuralConstrained) => "neural_constrained",
         None => "other",
     }
 }

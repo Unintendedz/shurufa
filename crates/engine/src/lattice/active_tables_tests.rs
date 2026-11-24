@@ -47,7 +47,7 @@ fn active_ngram_options_clone_without_allocating_and_release_with_the_owner() {
                 assert_eq!(allocations, 0);
                 assert_eq!(
                     (options.nbest, options.emit),
-                    (6, usize::from(!alternatives))
+                    (32, usize::from(!alternatives))
                 );
                 assert_eq!(options.beam, old.beam);
                 assert_eq!(options.bigram_weight, old.bigram_weight);

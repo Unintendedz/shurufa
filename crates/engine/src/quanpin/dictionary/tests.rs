@@ -551,7 +551,10 @@ fn short_inputs_compete_with_their_other_segmentations() {
         NONE,
     );
     assert!(contains(&four, "__four_syllable_alternative__"));
-    assert!(!contains(&five, "__five_syllable_alternative__"));
+    assert!(
+        contains(&five, "__five_syllable_alternative__"),
+        "5 音节以上长句也必须保留合法零声母多切分"
+    );
     assert!(!contains(&manual, "__four_syllable_alternative__"));
 }
 
@@ -959,9 +962,11 @@ fn typo_sentence_follows_the_literal_sentence() {
     assert_eq!(item.corrected_from, "meiganxi");
     assert_eq!(item.canonical_pinyin, "mei'guan'xi");
     assert_eq!(item.source, CandidateSource::Generated);
+    // 统一概率尺度下，漏介音高置信纠错句「没关系」以 >15 nats 压倒零散单字拼句「没干系」应领跑首位，同时保留字面句候选。
+    assert_eq!(row, 0, "高置信合法音节纠错句在压倒弱字面拼句时应领跑首位");
     assert!(
-        position(&table_only, "没干系") < row,
-        "the literal sentence leads"
+        contains(&table_only, "没干系"),
+        "原字面整句仍须保留在候选中"
     );
 
     let correct = query(&mut dictionary, "meiguanxi", "mei'guan'xi", legacy);

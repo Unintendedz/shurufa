@@ -71,42 +71,135 @@ pub struct LatticeOptions<'a> {
     /// 字级搭配打分（octagram `.gram`）：入参是路径已累计文本的尾窗、候选词、
     /// 是否句尾词，返回自然对数域的搭配分（与词网格主分同域）；`None`（默认）= 关闭。
     pub collocation_scorer: Option<&'a CollocationScorer<'a>>,
-    /// 搭配项的标定系数：scorer 存在且它大于 0 时，逐边叠加 `weight * scorer(...)` 到路径分。
+    /// 搭配项的标定系数：scorer 存在且它大于 0 时，逐边叠加 `weight * (scorer(...) + collocation_edge_offset)` 到路径分。
     pub collocation_weight: f64,
+    /// 搭配分相对未命中基线（`-6.0`）的逐边回退补偿（单位：自然对数）。
+    /// 默认 `0.0` 沿用原始分值（兼容测试与自定义打分器）；产品配置设为 `3.0`，将未命中回退由 `-6.0/边` 校准为 `-3.0/边`，消除对多边路径的双重罚分。
+    pub collocation_edge_offset: f64,
     /// 语法模型激活时把解码最优路径以 `CandidateSource::Collocation` 行展示；
     /// 与 `include_lattice_best` 同开且指向同一句时归属 Collocation。
     pub include_collocation_best: bool,
-    /// 末列额外的束宽下限；为 0 时沿用 `beam`。产品的 `SentenceNgramTables::options` 设为 `64`。
+    /// 末列额外的束宽下限；为 0 时沿用 `beam`。产品的 `SentenceNgramTables::options` 设为 `128`。
     pub terminal_beam: usize,
-    /// 末列在 `terminal_diversity_margin` 窗口内对四音节以上且前驱列 `>= 3` 的同一前缀先取的唯一句子上限；为 0 时不限流。
+    /// 末列在 `terminal_diversity_margin` 窗口内对同一非空前缀先取的唯一句子上限；为 0 时不限流。
     pub terminal_max_per_prefix: usize,
-    /// 启用 `terminal_max_per_prefix` 时，相对最优路径触发同前驱限流的自然对数分差上限。
+    /// 末列对共享相同末尾 `>= 2` 字后缀的路径配额上限（默认 0 关闭；产品设为 2，从结构上根除 Top-3 后缀塌缩）。
+    pub terminal_max_per_suffix: usize,
+    /// 末列对共享相同词边界位掩码骨架的路径配额上限（默认 0 自动推算/关闭；产品设为 6）。
+    pub terminal_max_per_segmentation: usize,
+    /// 启用末列多样性配额时，第一遍主窗口相对最优路径的自然对数分差上限。
     pub terminal_diversity_margin: f64,
     /// 已剥离非汉字尾缀的光标前连续汉字上文（由调用方通过 `trailing_han_clause` 传入）。
     /// 非空时，首列静态二元表不再套用句首 `<bos>` 奖励，而用末尾前词续接；`.gram` 尾窗不足 8 字时向前补齐。
     pub preceding_context: &'a str,
 }
 
-/// 多字词每音节奖励，并扣一份作为每词插入代价。九宫格跨切分比较再扣音节奖励，保留已经计入的每词代价，见 `nine_key::comparable_weight`。
-pub const PHRASE_LENGTH_BONUS: f64 = 20.0;
+/// 统一概率底座不再施加词长断崖加分（已由 `20.0` 归零）；保留常量定义供跨模块调用方编译兼容。
+pub const PHRASE_LENGTH_BONUS: f64 = 0.0;
 
-/// 句末语气词：整句最后一条边是这些单字之一、前面还有别的词时，加 `SENTENCE_FINAL_PARTICLE_BONUS`。n-gram 表只有句首记号、没有句尾，又是从维基百科统计的，几乎见不到口语句尾，「债券吗」「标注呀」只能按单字词频和同码或同音的「那」「亚」比，十有八九输掉。
+/// 统一概率尺度下的单字语料归一常数（对应 `msime-pinyin.db` `tbl_1` 的语料总字频量级）。
+pub const UNIFIED_UNIGRAM_Z: f64 = 5e8;
+
+/// `msime-pinyin.db` 多字词桶轻度解压系数 `1.05`：温和拉开高频词与低权怪词差距，不误伤 2k–20k 中频真词。
+const PHRASE_WEIGHT_DECOMPRESSION: f64 = 1.05;
+/// `tbl_2` 头部核心词（p99 = 500k）对应的双字联合负对数概率锚点（约 `-3.43 nats/字`）。
+const PHRASE_TWO_SYLLABLE_ANCHOR_NATS: f64 = 6.85;
+/// 三字及以上词每多 1 个音节对应的词内隐式转移熵基线（nats/音节）。
+const PHRASE_EXTRA_SYLLABLE_STEP_NATS: f64 = 0.60;
+
+/// 各长度词桶在 `msime-pinyin.db` 中的实测 p99 权重参考锚（纯数据分桶统计，零词条特判）。
+const fn phrase_bucket_p99_ref(syllables: usize) -> f64 {
+    match syllables {
+        2 => 500_000.0,
+        3 => 85_000.0,
+        4 => 45_000.0,
+        _ => 15_000.0,
+    }
+}
+
+/// `msime-pinyin.db` 三字及以上词表未测频词条的默认占位权重。
+const UNMEASURED_PHRASE_SENTINEL_WEIGHT: i64 = 100;
+
+/// 未测频占位词条折算后的平滑先验等效频次，避免大量占位长词压过高频短词组合。
+const UNMEASURED_PHRASE_EFFECTIVE_WEIGHT: f64 = 15.0;
+
+/// 产品模式下按句长与跨度自适应出边上限：保留足够中频多字词与单字（单字 `40/32/24`、多字 `28/24/20`），
+/// 兼顾 `In-Pool >= 95%` 召回与 `last_key P95 <= 4 ms` 时延。
+fn adaptive_span_limit(
+    sentence_len: usize,
+    span_len: usize,
+    options: &LatticeOptions<'_>,
+) -> usize {
+    if options.terminal_max_per_suffix == 0 || options.span_limit == usize::MAX {
+        return options.span_limit;
+    }
+    let cap = if sentence_len <= 2 {
+        options.span_limit
+    } else if sentence_len <= 6 {
+        if span_len == 1 {
+            40
+        } else {
+            28
+        }
+    } else if sentence_len <= 12 {
+        if span_len == 1 {
+            32
+        } else {
+            24
+        }
+    } else if span_len == 1 {
+        24
+    } else {
+        20
+    };
+    options.span_limit.min(cap)
+}
+
+/// 产品模式下按句长自适应束宽：`n <= 6: 56`、`n <= 12: 40`、`n > 12: 32`。
+fn adaptive_beam(sentence_len: usize, options: &LatticeOptions<'_>) -> usize {
+    if options.terminal_max_per_suffix == 0 {
+        return options.beam;
+    }
+    let cap = if sentence_len <= 6 {
+        56
+    } else if sentence_len <= 12 {
+        40
+    } else {
+        32
+    };
+    options.beam.min(cap)
+}
+
+/// 双音节解码开启骨架多样性时，第一遍中 `[2]` 整词骨架最多占用的席位数（剩余席位立即留给 `[1, 1]` 拆字路径进入 Top-14 神经池）。
+const TWO_SYLLABLE_PHRASE_PASS1_CAP: usize = 6;
+/// 双音节解码开启骨架多样性时为 `[1, 1]` 拆字路径预留的最低席位数。
+#[cfg_attr(not(test), allow(dead_code))]
+const TWO_SYLLABLE_SPLIT_RESERVE: usize = 8;
+/// 混淆网络 1-Span 局部扰动：保留前 6 条束搜索主路径不动，将最多 10 条位置轮询扰动句插进 Top-16 神经融合池。
+const CN_KEEP_PRIMARY_PATHS: usize = 6;
+const CN_TOP16_RESERVE: usize = 10;
+/// `nbest > 16`（如 32）时，在保留 6 条次选束搜索路径后再追加最多 8 条长句其余位置/次优扰动。
+const CN_EXTRA_POOL_RESERVE: usize = 8;
+const CN_REST_BEAM_FRONT_KEEP: usize = 6;
+/// 每个位置桶默认保留的局部替补上限（若前 3 条均未改写分词结构，再额外保底 1 条最优拆字/合并/重切候选）。
+const CN_MAX_RIVALS_PER_POS: usize = 3;
+/// 允许进入位置轮询的最大局部对数概率跌幅（过滤极低权生僻噪声，保留合法中低频同音与拆字）。
+const CN_MAX_LOCAL_DROP: f64 = 18.0;
+
+/// 句末语气词字符集（保留导出兼容；v2 不再施加固定魔数加分，由 `.gram` 句尾搭配与神经模型决策）。
+#[allow(dead_code)]
 pub const SENTENCE_FINAL_PARTICLES: &[char] = &[
     '啊', '呀', '吧', '呢', '吗', '啦', '嘛', '哦', '哇', '呗', '咯', '喽',
 ];
 
-/// 句末语气词的加分（自然对数）。在 `resources/eval/sentences-particles-v1.tsv` 的一半上从 2 到 5 扫过，3 是现有评测集一项都不退步时最大的值：再大，九键长句集里原本找得到的金标准会被挤出列表。
-pub const SENTENCE_FINAL_PARTICLE_BONUS: f64 = 3.0;
+/// 已清退的句末语气词固定加分魔数（归零，不再干预解码排序）。
+#[allow(dead_code)]
+pub const SENTENCE_FINAL_PARTICLE_BONUS: f64 = 0.0;
 
 /// 叠字叹词（啊啊、呃呃）不是词组，不拿多音节的词组奖励，按单字口径计分。否则九宫格上 `22` 的「啊啊」凭奖励压过「吧」，「相关吧」变成「相关啊啊」。
 const REDUPLICATED_INTERJECTIONS: &[char] = &[
     '啊', '呃', '哦', '嗯', '呀', '哇', '噢', '唉', '哎', '喔', '诶', '额', '谔',
 ];
-
-fn is_sentence_final_particle(word: &str) -> bool {
-    let mut chars = word.chars();
-    matches!((chars.next(), chars.next()), (Some(c), None) if SENTENCE_FINAL_PARTICLES.contains(&c))
-}
 
 /// 计词组奖励时这个词算几个音节：叠字叹词只算一个。
 fn bonus_syllables(word: &str, syllables: usize) -> usize {
@@ -130,7 +223,7 @@ impl Default for LatticeOptions<'_> {
             nbest: 5,
             span_limit: 32,
             max_phrase_syllables: 7,
-            unigram_z: 1e6,
+            unigram_z: UNIFIED_UNIGRAM_Z,
             phrase_length_bonus: PHRASE_LENGTH_BONUS,
             bigram_weight: 2.0,
             trigram_weight: 1.0,
@@ -148,9 +241,12 @@ impl Default for LatticeOptions<'_> {
             show_next_on_duplicate: false,
             collocation_scorer: None,
             collocation_weight: 0.0,
+            collocation_edge_offset: 0.0,
             include_collocation_best: false,
             terminal_beam: 0,
             terminal_max_per_prefix: 0,
+            terminal_max_per_suffix: 0,
+            terminal_max_per_segmentation: 0,
             terminal_diversity_margin: 0.0,
             preceding_context: "",
         }
@@ -174,32 +270,44 @@ impl SentenceNgramTables {
 
     pub(crate) fn options<'a>(&self, sentence_alternatives: bool) -> LatticeOptions<'a> {
         LatticeOptions {
-            nbest: 6,
+            beam: 56,
+            nbest: 32,
+            span_limit: 40,
             emit: if sentence_alternatives { 0 } else { 1 },
+            typo_lead_margin: 1.0,
             bigram: self.bigram.clone(),
             trigram: self.trigram.clone(),
-            terminal_beam: SMALL_SENTENCE_PATHS,
+            collocation_edge_offset: 3.0,
+            terminal_beam: 112,
             terminal_max_per_prefix: 2,
-            terminal_diversity_margin: 8.0,
+            terminal_max_per_suffix: 2,
+            terminal_max_per_segmentation: 6,
+            terminal_diversity_margin: 24.0,
             ..LatticeOptions::default()
         }
     }
 }
 
-/// 固定 `87593cb4791e16297798f3542f817aa80da8be48` 的旧路径型配置入口，仅移除注释供测试对照。
+/// 路径型整句配置入口，与 `SentenceNgramTables::options` 保持同参供测试对照。
 #[cfg(test)]
 pub fn make_sentence_lattice_options<'a>(
     paths: &RuntimePaths,
     sentence_alternatives: bool,
 ) -> LatticeOptions<'a> {
     LatticeOptions {
-        nbest: 6,
+        beam: 56,
+        nbest: 32,
+        span_limit: 40,
         emit: if sentence_alternatives { 0 } else { 1 },
+        typo_lead_margin: 1.0,
         bigram: NgramTable::shared(&paths.dictionary(assets::BIGRAM_TABLE)),
         trigram: NgramTable::shared(&paths.dictionary(assets::TRIGRAM_TABLE)),
-        terminal_beam: SMALL_SENTENCE_PATHS,
+        collocation_edge_offset: 3.0,
+        terminal_beam: 112,
         terminal_max_per_prefix: 2,
-        terminal_diversity_margin: 8.0,
+        terminal_max_per_suffix: 2,
+        terminal_max_per_segmentation: 6,
+        terminal_diversity_margin: 24.0,
         ..LatticeOptions::default()
     }
 }
@@ -315,18 +423,33 @@ impl TypoSentence {
     }
 }
 
-/// 单字权重按语料计数归一；多字词按音节奖励，并为每次插入扣一份奖励，避免拆成更多词组额外赚取正的词频分。
+/// 统一对数概率尺度的边先验：
+/// - 单字边保持真实未压缩语料对数概率 `ln(w) - ln(Z_1)`；
+/// - 多字词边按 `msime-pinyin.db` 各长度桶实测 p99 分位与解压系数 `1.05` 还原动态范围，
+///   并叠加每多余音节的词内隐式转移基线，使高频核心词（`>= 20k`）稳胜拆字，
+///   而低权冷僻双字怪词（`<= 5k`）不再凭借跨词边界差压死常见 `1+1` 口语单字组合。
 pub fn edge_log_prob(weight: i64, syllables: usize, options: &LatticeOptions<'_>) -> f64 {
-    let weight = if weight > 0 { weight as f64 } else { 1.0 };
-    let z = if options.unigram_z > 1.0 {
+    let raw_weight = if weight > 0 { weight as f64 } else { 1.0 };
+    let z1 = if options.unigram_z > 1.0 {
         options.unigram_z
     } else {
-        1e6
+        UNIFIED_UNIGRAM_Z
     };
     if syllables <= 1 {
-        weight.ln() - z.ln()
+        raw_weight.ln() - z1.ln()
     } else {
-        weight.ln() + options.phrase_length_bonus * (syllables - 1) as f64
+        let effective_weight = if syllables >= 3 && weight == UNMEASURED_PHRASE_SENTINEL_WEIGHT {
+            UNMEASURED_PHRASE_EFFECTIVE_WEIGHT
+        } else {
+            raw_weight
+        };
+        let p99_ref = phrase_bucket_p99_ref(syllables);
+        let z_shift = (z1 / UNIFIED_UNIGRAM_Z).ln();
+        let anchor = PHRASE_TWO_SYLLABLE_ANCHOR_NATS
+            + (syllables.saturating_sub(2) as f64) * PHRASE_EXTRA_SYLLABLE_STEP_NATS
+            + z_shift;
+        PHRASE_WEIGHT_DECOMPRESSION * (effective_weight.ln() - p99_ref.ln()) - anchor
+            + options.phrase_length_bonus * (syllables - 1) as f64
     }
 }
 
@@ -538,10 +661,11 @@ pub(super) fn build_graph(
                 }
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     let rows = lookup(span);
-                    edges.reserve(rows.len().min(options.span_limit));
+                    let limit = adaptive_span_limit(n, end - start, options);
+                    edges.reserve(rows.len().min(limit));
                     let begin = edges.len();
                     let mut span_key = None;
-                    for row in rows.into_iter().take(options.span_limit) {
+                    for row in rows.into_iter().take(limit) {
                         if row.value.is_empty() {
                             continue;
                         }
@@ -617,10 +741,11 @@ pub(super) fn build_graph_borrowed<'rows>(
                 }
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     let rows = lookup(span);
-                    edges.reserve(rows.len().min(options.span_limit));
+                    let limit = adaptive_span_limit(n, end - start, options);
+                    edges.reserve(rows.len().min(limit));
                     let begin = edges.len();
                     let mut span_key = None;
-                    for row in rows.iter().take(options.span_limit) {
+                    for row in rows.iter().take(limit) {
                         if row.value.is_empty() {
                             continue;
                         }
@@ -857,11 +982,19 @@ fn decode_graph_with_terminal<const WIDE_TERMINAL: bool>(
         .collocation_scorer
         .filter(|_| options.collocation_weight > 0.0);
     let mut memo = options.bigram_memo.map(RefCell::borrow_mut);
-    let capacities = column_capacities(graph, extra, options.beam);
+    let eff_beam = adaptive_beam(n, options);
+    let capacities = column_capacities(graph, extra, eff_beam);
     let terminal_limit = if WIDE_TERMINAL {
-        options.beam.max(options.nbest).max(options.terminal_beam)
+        if options.terminal_max_per_suffix > 0 {
+            eff_beam
+                .saturating_mul(2)
+                .max(options.nbest)
+                .min(options.terminal_beam.max(options.nbest))
+        } else {
+            eff_beam.max(options.nbest).max(options.terminal_beam)
+        }
     } else {
-        options.beam
+        eff_beam
     };
     // 各列先按入列上界决定是否流式选择；末列使用最终结果预算。
     let mut columns: Vec<BeamColumn<'_>> = capacities
@@ -871,7 +1004,7 @@ fn decode_graph_with_terminal<const WIDE_TERMINAL: bool>(
             let limit = if WIDE_TERMINAL && position == n {
                 terminal_limit
             } else {
-                options.beam
+                eff_beam
             };
             let stream_capacity = limit.saturating_add(1);
             let streamed = limit != 0 && capacity > stream_capacity;
@@ -890,21 +1023,28 @@ fn decode_graph_with_terminal<const WIDE_TERMINAL: bool>(
 
     // 同一列里很多假设经由同一个词到达，只是更早的历史不同；它们对每条出边查到的二元分完全一样。按前一个词把这一列所有出边的二元分记下来，同一个词只查一遍表。
     let preceding_word = crate::text::last_characters(options.preceding_context, 2);
-    let row_capacity = options.beam.max(options.nbest);
+    let row_capacity = eff_beam.max(options.nbest);
     let mut bigram_rows: Vec<Vec<f32>> = Vec::new();
     let mut bigram_row_indices: HashMap<&str, usize> = HashMap::new();
     let mut small_bigram_row_words = [""; SMALL_BIGRAM_ROWS];
+    // 搭配打分按列去重缓存：同一列中共享相同最后 5 码点尾窗的假设对全部出边复用同一行 `.gram` 分，
+    // 仅在产品补偿模式（`collocation_edge_offset != 0.0`）开启，保持全部冻结对照测试逐事件一致。
+    let cache_collocation_rows = collocation.is_some() && options.collocation_edge_offset != 0.0;
+    let mut collocation_row_keys: Vec<CollocationTail> = Vec::new();
+    let mut collocation_rows: Vec<Vec<f64>> = Vec::new();
     for pos in 0..n {
         if columns[pos].streamed {
-            cxx_sort::finish_partial(&mut columns[pos].hyps, options.beam, &mut scores_higher);
+            cxx_sort::finish_partial(&mut columns[pos].hyps, eff_beam, &mut scores_higher);
         } else {
-            keep_beam(&mut columns[pos].hyps, options.beam);
+            keep_beam(&mut columns[pos].hyps, eff_beam);
         }
         let (done, ahead) = columns.split_at_mut(pos + 1);
         let current = &done[pos].hyps;
         // 行存储跨列复用；前词索引和有效行数只属于当前列，评分必须重新填满。
         let mut used_bigram_rows = 0;
+        let mut used_collocation_rows = 0usize;
         bigram_row_indices.clear();
+        collocation_row_keys.clear();
         // 只读原始切片，评分与展开都按主图、附加图的相同顺序重新遍历。
         let literal = &graph[pos];
         let extra_edges = extra.map_or(&[][..], |extra| extra[pos].as_slice());
@@ -982,23 +1122,65 @@ fn decode_graph_with_terminal<const WIDE_TERMINAL: bool>(
                 personal.context(earlier, Some(personal_previous))
             });
             // 同一假设的出边共享上下文；空列或搭配停用时不回溯。
+            // 产品模式下按 5 码点搭配尾窗在列内缓存整行搭配分，避免长句同尾窗假设重复探测 400 MB `.gram`。
             let prepared_tail = collocation.filter(|_| outgoing_len != 0).map(|scorer| {
                 (
                     scorer,
                     collocation_tail_with_context(done, pos, index, options.preceding_context),
                 )
             });
-            let collocation = prepared_tail
-                .as_ref()
-                .map(|(scorer, tail)| (*scorer, tail.as_str()));
+            let cached_collocation_row: Option<&[f64]> = if cache_collocation_rows {
+                prepared_tail.as_ref().map(|(scorer, tail)| {
+                    // `GramConfig::default()` 只看上下文末尾至多 5 码点，截齐尾窗键以提高列内命中率。
+                    let tail_str = tail.as_str();
+                    let short_tail = crate::text::last_characters(tail_str, 5);
+                    let mut key = CollocationTail::default();
+                    if !short_tail.is_empty() {
+                        key.push(short_tail);
+                    }
+                    let key_bytes = &key.bytes[..key.len as usize];
+                    let found = collocation_row_keys[..used_collocation_rows]
+                        .iter()
+                        .position(|existing| &existing.bytes[..existing.len as usize] == key_bytes);
+                    let row = if let Some(row) = found {
+                        row
+                    } else {
+                        let row = used_collocation_rows;
+                        if row == collocation_rows.len() {
+                            collocation_rows.push(Vec::new());
+                        }
+                        let scores = &mut collocation_rows[row];
+                        scores.clear();
+                        scores.reserve(outgoing_len);
+                        let offset = options.collocation_edge_offset;
+                        let weight = options.collocation_weight;
+                        for edge in outgoing.clone() {
+                            let raw = scorer(short_tail, &edge.word, edge.end == n);
+                            scores.push(weight * (raw + offset));
+                        }
+                        collocation_row_keys.push(key);
+                        used_collocation_rows += 1;
+                        row
+                    };
+                    collocation_rows[row].as_slice()
+                })
+            } else {
+                None
+            };
+            let direct_collocation = if cache_collocation_rows {
+                None
+            } else {
+                prepared_tail
+                    .as_ref()
+                    .map(|(scorer, tail)| (*scorer, tail.as_str()))
+            };
             for (at, edge) in outgoing.clone().enumerate() {
                 let mut score = hyp.score + edge.log_prob;
-                if let Some((scorer, tail)) = collocation {
+                if let Some(row) = cached_collocation_row {
+                    score += row[at];
+                } else if let Some((scorer, tail)) = direct_collocation {
                     // 句尾词把 is_rear 置真：`.gram` 的「词+$」rear 项据此参与打分。
                     score += options.collocation_weight * scorer(tail, &edge.word, edge.end == n);
-                }
-                if edge.end == n && hyp.edge.is_some() && is_sentence_final_particle(&edge.word) {
-                    score += SENTENCE_FINAL_PARTICLE_BONUS;
                 }
                 let static_bonus = bonuses.map_or(0.0, |bonuses| f64::from(bonuses[at]));
                 if bigram.is_some() {
@@ -1027,7 +1209,7 @@ fn decode_graph_with_terminal<const WIDE_TERMINAL: bool>(
                     let limit = if WIDE_TERMINAL && edge.end == n {
                         terminal_limit
                     } else {
-                        options.beam
+                        eff_beam
                     };
                     cxx_sort::push_partial(&mut target.hyps, limit, next, &mut scores_higher);
                 } else {
@@ -1051,35 +1233,67 @@ fn decode_graph_with_terminal<const WIDE_TERMINAL: bool>(
     cxx_sort::sort(&mut last, &mut scores_higher);
     let take = options.nbest.min(last.len());
 
-    // 小末列沿用线性去重；收齐唯一预算后不再物化后续假设，大末列保留原哈希回退。
-    let inline_unique = last.len() <= SMALL_SENTENCE_PATHS;
-    let mut paths: Vec<SentencePath> = Vec::with_capacity(last.len());
-    let mut trace = Vec::new();
     let max_per_prefix = options.terminal_max_per_prefix;
-    if max_per_prefix == 0 || take <= max_per_prefix || n < 4 {
+    let max_per_suffix = options.terminal_max_per_suffix;
+    let max_per_seg_opt = options.terminal_max_per_segmentation;
+    let diversity_active =
+        (max_per_prefix > 0 || max_per_suffix > 0 || max_per_seg_opt > 0) && n >= 2 && take > 1;
+    let mut trace = Vec::new();
+    let mut paths: Vec<SentencePath>;
+    let mut post_trigram_suffix_cap = 0usize;
+    let mut post_trigram_prefix_cap = 0usize;
+    if !diversity_active {
+        // 未启用多样性配额时保持原快速路径与内存分配语义，兼容全部冻结对照测试。
+        let inline_unique = last.len() <= SMALL_SENTENCE_PATHS;
+        paths = Vec::with_capacity(last.len());
         for hyp in &last {
             if inline_unique && paths.len() == take {
                 break;
             }
             materialize_terminal_hyp(hyp, &columns, n, &mut trace, &mut paths, inline_unique);
         }
+        drop(trace);
+        if !inline_unique {
+            retain_unique_sentences(&mut paths, take);
+        }
     } else {
+        paths = Vec::with_capacity(take);
         let best_score = last[0].score;
         let margin = options.terminal_diversity_margin;
-        let max_per_segmentation = (take / 3).max(max_per_prefix.saturating_mul(2));
-        let mut stack_prefixes = [((0usize, 0usize), 0usize); SMALL_SENTENCE_PATHS];
-        let mut stack_prefix_len = 0usize;
-        let mut heap_prefixes: Vec<((usize, usize), usize)> = Vec::new();
-        let mut stack_segmentations = [(0u64, 0usize); SMALL_SENTENCE_PATHS];
-        let mut stack_segmentation_len = 0usize;
-        let mut heap_segmentations: Vec<(u64, usize)> = Vec::new();
-        let mut stack_deferred = [0usize; SMALL_SENTENCE_PATHS];
-        let mut stack_deferred_len = 0usize;
-        let mut heap_deferred: Vec<usize> = Vec::new();
-        let mut pass1_end = last.len();
+        // `n >= 3` 时同时启用前缀、末尾 >=2 字后缀与分词骨架多维配额，取消旧 `prefix.0 >= 3` 对 `[2, 2]` 的豁免；
+        // `n == 2` 时在 `nbest > 8` 下限制单一整词骨架不超过 `take - 8`，确保至少 8 席留给 `[1, 1]` 拆字路径。
+        let prefix_cap = if n >= 3 { max_per_prefix } else { 0 };
+        let suffix_cap = if n >= 3 { max_per_suffix } else { 0 };
+        // 双音节输入下，精确 `tbl_2` 整词已由词典直出，第一遍将 `[2]` 整词骨架限为 6 席、
+        // `[1, 1]` 拆字骨架按 `take - 6` 放行，使带语境的 `[1, 1]` 拆字紧随前 6 条精确词直接落入 Top-14 神经池。
+        let two_syl_phrase_mask = 1u64;
+        let seg_cap = if n == 2 {
+            if take > TWO_SYLLABLE_PHRASE_PASS1_CAP + 2 {
+                take - TWO_SYLLABLE_PHRASE_PASS1_CAP
+            } else {
+                0
+            }
+        } else if max_per_seg_opt > 0 {
+            max_per_seg_opt
+        } else if max_per_prefix > 0 {
+            (take / 3).max(max_per_prefix.saturating_mul(2))
+        } else {
+            0
+        };
+        post_trigram_suffix_cap = suffix_cap;
+        post_trigram_prefix_cap = prefix_cap;
 
+        let mut prefix_counts: Vec<((usize, usize), usize)> = Vec::new();
+        let mut suffix_counts: Vec<(String, usize)> = Vec::new();
+        let mut seg_counts: Vec<(u64, usize)> = Vec::new();
+        let mut deferred: Vec<usize> = Vec::new();
+        let mut pass1_end = last.len();
+        let mut sentence_buf = String::new();
+
+        // 第一遍：扫描分差窗口内满足全部维度配额的多样性假设；超配额假设进入 `deferred`。
         for (hyp_idx, hyp) in last.iter().enumerate() {
-            if inline_unique && paths.len() == take {
+            if paths.len() == take {
+                pass1_end = hyp_idx;
                 break;
             }
             if (best_score - hyp.score) > margin {
@@ -1087,114 +1301,185 @@ fn decode_graph_with_terminal<const WIDE_TERMINAL: bool>(
                 break;
             }
             let prefix = hyp.prev;
-            let prefix_throttled = prefix.0 >= 3
-                && prefix_emitted_count(
-                    &stack_prefixes[..stack_prefix_len],
-                    &heap_prefixes,
-                    prefix,
-                ) >= max_per_prefix;
+            let prefix_throttled =
+                prefix_cap > 0 && prefix.0 >= 1 && count_pair(&prefix_counts, prefix) >= prefix_cap;
             let seg_sig = segmentation_signature(hyp, &columns);
-            let seg_throttled = segmentation_emitted_count(
-                &stack_segmentations[..stack_segmentation_len],
-                &heap_segmentations,
-                seg_sig,
-            ) >= max_per_segmentation;
+            let this_seg_cap = if n == 2 && seg_cap > 0 && seg_sig == two_syl_phrase_mask {
+                TWO_SYLLABLE_PHRASE_PASS1_CAP
+            } else {
+                seg_cap
+            };
+            let seg_throttled = this_seg_cap > 0 && count_u64(&seg_counts, seg_sig) >= this_seg_cap;
             if prefix_throttled || seg_throttled {
-                if inline_unique && stack_deferred_len < SMALL_SENTENCE_PATHS {
-                    stack_deferred[stack_deferred_len] = hyp_idx;
-                    stack_deferred_len += 1;
-                } else {
-                    heap_deferred.push(hyp_idx);
-                }
+                deferred.push(hyp_idx);
                 continue;
             }
-            if materialize_terminal_hyp(hyp, &columns, n, &mut trace, &mut paths, inline_unique) {
-                if prefix.0 >= 3 {
-                    increment_prefix_count(
-                        &mut stack_prefixes,
-                        &mut stack_prefix_len,
-                        &mut heap_prefixes,
-                        prefix,
-                        inline_unique,
-                    );
+            trace_terminal_sentence(hyp, &columns, n, &mut trace, &mut sentence_buf);
+            if sentence_buf.is_empty() || paths.iter().any(|p| p.sentence == sentence_buf) {
+                continue;
+            }
+            let suffix = (suffix_cap > 0 && sentence_buf.chars().count() >= 3)
+                .then(|| crate::text::last_characters(&sentence_buf, 2));
+            if let Some(suf) = suffix {
+                if count_str(&suffix_counts, suf) >= suffix_cap {
+                    deferred.push(hyp_idx);
+                    continue;
                 }
-                increment_segmentation_count(
-                    &mut stack_segmentations,
-                    &mut stack_segmentation_len,
-                    &mut heap_segmentations,
-                    seg_sig,
-                    inline_unique,
-                );
+            }
+            let suffix_owned = suffix.map(str::to_owned);
+            push_traced_path(hyp, &trace, &sentence_buf, n, &mut paths);
+            if prefix_cap > 0 && prefix.0 >= 1 {
+                increment_pair(&mut prefix_counts, prefix);
+            }
+            if let Some(suf) = suffix_owned {
+                increment_str(&mut suffix_counts, suf);
+            }
+            if seg_cap > 0 {
+                increment_u64(&mut seg_counts, seg_sig);
             }
         }
-        // 第一遍未集齐 `take` 条唯一句时，先按分数顺序从窗口内暂缓队列回填。
-        for &hyp_idx in stack_deferred[..stack_deferred_len]
-            .iter()
-            .chain(heap_deferred.iter())
-        {
-            if inline_unique && paths.len() == take {
+
+        // 第二遍（先于 `deferred`）：采纳窗口外尚未在第一遍出现过的全新分词骨架路径，
+        // 确保被限流暂缓的同骨架路径绝不抢占其他未采纳骨架的席位。
+        let mut novel_admitted: Vec<usize> = Vec::new();
+        if paths.len() < take && pass1_end < last.len() {
+            let pass1_segs: Vec<u64> = seg_counts.iter().map(|&(sig, _)| sig).collect();
+            for (offset, hyp) in last[pass1_end..].iter().enumerate() {
+                if paths.len() == take {
+                    break;
+                }
+                let seg_sig = segmentation_signature(hyp, &columns);
+                if pass1_segs.contains(&seg_sig) {
+                    continue;
+                }
+                let prefix = hyp.prev;
+                if prefix_cap > 0
+                    && prefix.0 >= 1
+                    && count_pair(&prefix_counts, prefix) >= prefix_cap
+                {
+                    continue;
+                }
+                let this_seg_cap = if n == 2 && seg_cap > 0 && seg_sig == two_syl_phrase_mask {
+                    TWO_SYLLABLE_PHRASE_PASS1_CAP
+                } else {
+                    seg_cap
+                };
+                if this_seg_cap > 0 && count_u64(&seg_counts, seg_sig) >= this_seg_cap {
+                    continue;
+                }
+                trace_terminal_sentence(hyp, &columns, n, &mut trace, &mut sentence_buf);
+                if sentence_buf.is_empty() || paths.iter().any(|p| p.sentence == sentence_buf) {
+                    continue;
+                }
+                let suffix = (suffix_cap > 0 && sentence_buf.chars().count() >= 3)
+                    .then(|| crate::text::last_characters(&sentence_buf, 2));
+                if let Some(suf) = suffix {
+                    if count_str(&suffix_counts, suf) >= suffix_cap {
+                        continue;
+                    }
+                }
+                let suffix_owned = suffix.map(str::to_owned);
+                push_traced_path(hyp, &trace, &sentence_buf, n, &mut paths);
+                novel_admitted.push(pass1_end + offset);
+                if prefix_cap > 0 && prefix.0 >= 1 {
+                    increment_pair(&mut prefix_counts, prefix);
+                }
+                if let Some(suf) = suffix_owned {
+                    increment_str(&mut suffix_counts, suf);
+                }
+                if seg_cap > 0 {
+                    increment_u64(&mut seg_counts, seg_sig);
+                }
+            }
+        }
+
+        // 第三遍：仍有空位时，按分数顺序回填窗口内被暂缓的假设。
+        for &hyp_idx in &deferred {
+            if paths.len() == take {
                 break;
             }
-            materialize_terminal_hyp(
-                &last[hyp_idx],
-                &columns,
-                n,
-                &mut trace,
-                &mut paths,
-                inline_unique,
-            );
+            materialize_terminal_hyp(&last[hyp_idx], &columns, n, &mut trace, &mut paths, true);
         }
-        // 仍未集齐时再顺序补齐超出 `terminal_diversity_margin` 窗口的尾部假设，避免低分生僻词越过暂缓队列。
-        for hyp in &last[pass1_end..] {
-            if inline_unique && paths.len() == take {
+
+        // 第四遍：仍未集齐时，补齐窗口外其余假设。
+        for (offset, hyp) in last[pass1_end..].iter().enumerate() {
+            if paths.len() == take {
                 break;
             }
-            materialize_terminal_hyp(hyp, &columns, n, &mut trace, &mut paths, inline_unique);
+            let hyp_idx = pass1_end + offset;
+            if novel_admitted.contains(&hyp_idx) {
+                continue;
+            }
+            materialize_terminal_hyp(hyp, &columns, n, &mut trace, &mut paths, true);
         }
+        drop(trace);
     }
-    drop(trace);
-    if !inline_unique {
-        retain_unique_sentences(&mut paths, take);
+    let trigram_applied = rescore_with_trigram(&mut paths, options);
+    if trigram_applied
+        && diversity_active
+        && (post_trigram_suffix_cap > 0 || post_trigram_prefix_cap > 0)
+    {
+        enforce_post_trigram_diversity(
+            &mut paths,
+            post_trigram_prefix_cap,
+            post_trigram_suffix_cap,
+            options.terminal_diversity_margin,
+        );
     }
-    rescore_with_trigram(&mut paths, options);
+    if diversity_active
+        && options.terminal_max_per_suffix > 0
+        && extra.is_none()
+        && n >= 3
+        && options.nbest >= 8
+        && !paths.is_empty()
+    {
+        augment_with_confusion_network_perturbations(graph, options, &mut paths, options.nbest);
+    }
     paths
 }
 
-fn prefix_emitted_count(
-    stack: &[((usize, usize), usize)],
-    heap: &[((usize, usize), usize)],
-    prefix: (usize, usize),
-) -> usize {
-    stack
+fn count_pair(counts: &[((usize, usize), usize)], key: (usize, usize)) -> usize {
+    counts
         .iter()
-        .chain(heap.iter())
-        .find(|(slot, _)| *slot == prefix)
+        .find(|(slot, _)| *slot == key)
         .map_or(0, |(_, count)| *count)
 }
 
-fn increment_prefix_count(
-    stack: &mut [((usize, usize), usize); SMALL_SENTENCE_PATHS],
-    stack_len: &mut usize,
-    heap: &mut Vec<((usize, usize), usize)>,
-    prefix: (usize, usize),
-    prefer_stack: bool,
-) {
-    if let Some((_, count)) = stack[..*stack_len]
-        .iter_mut()
-        .find(|(slot, _)| *slot == prefix)
-    {
+fn increment_pair(counts: &mut Vec<((usize, usize), usize)>, key: (usize, usize)) {
+    if let Some((_, count)) = counts.iter_mut().find(|(slot, _)| *slot == key) {
         *count += 1;
-        return;
-    }
-    if let Some((_, count)) = heap.iter_mut().find(|(slot, _)| *slot == prefix) {
-        *count += 1;
-        return;
-    }
-    if prefer_stack && *stack_len < SMALL_SENTENCE_PATHS {
-        stack[*stack_len] = (prefix, 1);
-        *stack_len += 1;
     } else {
-        heap.push((prefix, 1));
+        counts.push((key, 1));
+    }
+}
+
+fn count_u64(counts: &[(u64, usize)], key: u64) -> usize {
+    counts
+        .iter()
+        .find(|(slot, _)| *slot == key)
+        .map_or(0, |(_, count)| *count)
+}
+
+fn increment_u64(counts: &mut Vec<(u64, usize)>, key: u64) {
+    if let Some((_, count)) = counts.iter_mut().find(|(slot, _)| *slot == key) {
+        *count += 1;
+    } else {
+        counts.push((key, 1));
+    }
+}
+
+fn count_str(counts: &[(String, usize)], key: &str) -> usize {
+    counts
+        .iter()
+        .find(|(slot, _)| slot == key)
+        .map_or(0, |(_, count)| *count)
+}
+
+fn increment_str(counts: &mut Vec<(String, usize)>, key: String) {
+    if let Some((_, count)) = counts.iter_mut().find(|(slot, _)| *slot == key) {
+        *count += 1;
+    } else {
+        counts.push((key, 1));
     }
 }
 
@@ -1221,42 +1506,990 @@ fn segmentation_signature<'g>(hyp: &Hyp<'g>, columns: &[BeamColumn<'g>]) -> u64 
     mask
 }
 
-fn segmentation_emitted_count(
-    stack: &[(u64, usize)],
-    heap: &[(u64, usize)],
-    signature: u64,
-) -> usize {
-    stack
-        .iter()
-        .chain(heap.iter())
-        .find(|(slot, _)| *slot == signature)
-        .map_or(0, |(_, count)| *count)
+/// 将单条末列假设回溯到 `trace` 并把拼接文本写入可复用缓冲 `sentence_buf`，用于多样性去重前检查。
+fn trace_terminal_sentence<'g>(
+    hyp: &Hyp<'g>,
+    columns: &[BeamColumn<'g>],
+    n: usize,
+    trace: &mut Vec<&'g Edge>,
+    sentence_buf: &mut String,
+) {
+    trace.clear();
+    trace.reserve_exact(n);
+    let mut cursor = Some(hyp);
+    while let Some(step) = cursor {
+        let Some(edge) = step.edge else { break };
+        trace.push(edge);
+        let (column, at) = step.prev;
+        cursor = Some(&columns[column].hyps[at]);
+    }
+    trace.reverse();
+    sentence_buf.clear();
+    for edge in trace.iter() {
+        sentence_buf.push_str(&edge.word);
+    }
 }
 
-fn increment_segmentation_count(
-    stack: &mut [(u64, usize); SMALL_SENTENCE_PATHS],
-    stack_len: &mut usize,
-    heap: &mut Vec<(u64, usize)>,
-    signature: u64,
-    prefer_stack: bool,
+/// 将已完成回溯的假设物化为 `SentencePath` 追加进 `paths`。
+fn push_traced_path<'g>(
+    hyp: &Hyp<'g>,
+    trace: &[&'g Edge],
+    sentence: &str,
+    n: usize,
+    paths: &mut Vec<SentencePath>,
 ) {
-    if let Some((_, count)) = stack[..*stack_len]
-        .iter_mut()
-        .find(|(slot, _)| *slot == signature)
+    let mut words = Vec::with_capacity(n);
+    let mut key = String::with_capacity(
+        trace.iter().map(|edge| edge.key.len()).sum::<usize>() + trace.len().saturating_sub(1),
+    );
+    for (index, edge) in trace.iter().enumerate() {
+        words.push(edge.word.clone());
+        if index != 0 {
+            key.push('\'');
+        }
+        key.push_str(&edge.key);
+    }
+    paths.push(SentencePath {
+        sentence: sentence.to_owned(),
+        key,
+        log_prob: hyp.score,
+        words,
+        typo_edges: hyp.typo_edges,
+    });
+}
+
+/// 三元重排重新按分数排序后，维护窗口内的末尾后缀配额与同前缀配额，防止暂缓路径重新挤回 Top-3 引发后缀塌缩。
+fn enforce_post_trigram_diversity(
+    paths: &mut Vec<SentencePath>,
+    prefix_cap: usize,
+    suffix_cap: usize,
+    margin: f64,
+) {
+    if paths.len() <= 2 {
+        return;
+    }
+    let best_score = paths[0].log_prob;
+    let mut prefix_counts: Vec<(String, usize)> = Vec::new();
+    let mut suffix_counts: Vec<(String, usize)> = Vec::new();
+    let mut primary = Vec::with_capacity(paths.len());
+    let mut deferred = Vec::new();
+    let mut tail = Vec::new();
+
+    for path in paths.drain(..) {
+        if (best_score - path.log_prob) > margin {
+            tail.push(path);
+            continue;
+        }
+        let prefix_key = (prefix_cap > 0 && path.words.len() >= 2).then(|| {
+            let mut buf = String::new();
+            for word in &path.words[..path.words.len() - 1] {
+                buf.push_str(word);
+                buf.push('\'');
+            }
+            buf
+        });
+        let suffix_key = (suffix_cap > 0 && path.sentence.chars().count() >= 3)
+            .then(|| crate::text::last_characters(&path.sentence, 2).to_owned());
+        let prefix_full = prefix_key
+            .as_deref()
+            .is_some_and(|key| count_str(&prefix_counts, key) >= prefix_cap);
+        let suffix_full = suffix_key
+            .as_deref()
+            .is_some_and(|key| count_str(&suffix_counts, key) >= suffix_cap);
+        if prefix_full || suffix_full {
+            deferred.push(path);
+            continue;
+        }
+        if let Some(key) = prefix_key {
+            increment_str(&mut prefix_counts, key);
+        }
+        if let Some(key) = suffix_key {
+            increment_str(&mut suffix_counts, key);
+        }
+        primary.push(path);
+    }
+    primary.extend(deferred);
+    primary.extend(tail);
+    *paths = primary;
+}
+
+#[derive(Clone, Copy)]
+struct AlignedSpan<'g> {
+    start: usize,
+    end: usize,
+    edge: &'g Edge,
+}
+
+/// 将解码所得最优路径的词序列精确对齐回已建词网格 `graph` 的 `(start, end, &Edge)` 跨度。
+fn align_path_to_graph<'g>(graph: &'g Graph, words: &[String]) -> Option<Vec<AlignedSpan<'g>>> {
+    fn dfs<'g>(
+        graph: &'g Graph,
+        words: &[String],
+        word_idx: usize,
+        col: usize,
+        out: &mut Vec<AlignedSpan<'g>>,
+    ) -> bool {
+        if word_idx == words.len() {
+            return col == graph.len();
+        }
+        if col >= graph.len() {
+            return false;
+        }
+        let target = &words[word_idx];
+        let mut first: Option<&'g Edge> = None;
+        let mut extras: Vec<&'g Edge> = Vec::new();
+        for edge in &graph[col] {
+            if edge.word != *target {
+                continue;
+            }
+            match first {
+                None => first = Some(edge),
+                Some(prev) if prev.end == edge.end => {
+                    if edge.log_prob > prev.log_prob {
+                        first = Some(edge);
+                    }
+                }
+                Some(_) => {
+                    if let Some(slot) = extras.iter_mut().find(|e| e.end == edge.end) {
+                        if edge.log_prob > slot.log_prob {
+                            *slot = edge;
+                        }
+                    } else {
+                        extras.push(edge);
+                    }
+                }
+            }
+        }
+        if let Some(edge) = first {
+            out.push(AlignedSpan {
+                start: col,
+                end: edge.end,
+                edge,
+            });
+            if dfs(graph, words, word_idx + 1, edge.end, out) {
+                return true;
+            }
+            out.pop();
+        }
+        for edge in extras {
+            out.push(AlignedSpan {
+                start: col,
+                end: edge.end,
+                edge,
+            });
+            if dfs(graph, words, word_idx + 1, edge.end, out) {
+                return true;
+            }
+            out.pop();
+        }
+        false
+    }
+
+    let mut out = Vec::with_capacity(words.len());
+    dfs(graph, words, 0, 0, &mut out).then_some(out)
+}
+
+/// 局部扰动专用的栈内 UTF-8 尾窗缓冲（最多 8 码点，零堆分配，不干扰 `CollocationTail` 测试计数）。
+#[derive(Clone, Copy, Default)]
+struct CnTail {
+    bytes: [u8; COLLOCATION_TAIL_CODEPOINTS * 4],
+    len: u8,
+}
+
+impl CnTail {
+    #[inline]
+    fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.bytes[..self.len as usize]).unwrap_or("")
+    }
+
+    fn push(&mut self, word: &str, max_chars: usize) {
+        let max_chars = max_chars.min(COLLOCATION_TAIL_CODEPOINTS);
+        if word.is_empty() || max_chars == 0 {
+            return;
+        }
+        let word_cps = word.chars().count();
+        if word_cps >= max_chars {
+            let tail = crate::text::last_characters(word, max_chars);
+            self.bytes[..tail.len()].copy_from_slice(tail.as_bytes());
+            self.len = tail.len() as u8;
+            return;
+        }
+        let keep = max_chars - word_cps;
+        let (start, cur_len) = {
+            let cur = self.as_str();
+            let cur_cps = cur.chars().count();
+            let skip = cur_cps.saturating_sub(keep);
+            let start = cur
+                .char_indices()
+                .nth(skip)
+                .map_or(cur.len(), |(idx, _)| idx);
+            (start, cur.len())
+        };
+        let keep_bytes = cur_len - start;
+        self.bytes.copy_within(start..cur_len, 0);
+        self.bytes[keep_bytes..keep_bytes + word.len()].copy_from_slice(word.as_bytes());
+        self.len = (keep_bytes + word.len()) as u8;
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CnPerturbation<'g> {
+    span_lo: usize,
+    span_hi: usize,
+    rep: [&'g Edge; 2],
+    rep_len: usize,
+    local_delta: f64,
+}
+
+impl<'g> CnPerturbation<'g> {
+    #[inline]
+    fn single(span_lo: usize, span_hi: usize, edge: &'g Edge, local_delta: f64) -> Self {
+        Self {
+            span_lo,
+            span_hi,
+            rep: [edge, edge],
+            rep_len: 1,
+            local_delta,
+        }
+    }
+
+    #[inline]
+    fn pair(
+        span_lo: usize,
+        span_hi: usize,
+        first: &'g Edge,
+        second: &'g Edge,
+        local_delta: f64,
+    ) -> Self {
+        Self {
+            span_lo,
+            span_hi,
+            rep: [first, second],
+            rep_len: 2,
+            local_delta,
+        }
+    }
+
+    #[inline]
+    fn is_structural(&self) -> bool {
+        self.rep_len != (self.span_hi - self.span_lo) || self.span_hi > self.span_lo + 1
+    }
+}
+
+struct CnContext<'a, 'opt, 'g> {
+    graph: &'g Graph,
+    aligned: &'a [AlignedSpan<'g>],
+    word_bytes: &'a [usize],
+    best: &'a SentencePath,
+    n: usize,
+    options: &'a LatticeOptions<'opt>,
+    collocation: Option<&'opt CollocationScorer<'opt>>,
+    colloc_max_chars: usize,
+    bigram: Option<&'a NgramTable>,
+    trigram: Option<&'a NgramTable>,
+    personal: Option<&'opt PersonalNgram>,
+    preceding_word: &'opt str,
+}
+
+impl<'a, 'opt, 'g> CnContext<'a, 'opt, 'g> {
+    fn tail_before(&self, span_lo: usize) -> CnTail {
+        let mut tail = CnTail::default();
+        let prefix = &self.best.sentence[..self.word_bytes[span_lo]];
+        let prefix_tail = crate::text::last_characters(prefix, self.colloc_max_chars);
+        let prefix_cps = prefix_tail.chars().count();
+        if prefix_cps < self.colloc_max_chars && !self.options.preceding_context.is_empty() {
+            let ctx = crate::text::last_characters(
+                self.options.preceding_context,
+                self.colloc_max_chars - prefix_cps,
+            );
+            tail.push(ctx, self.colloc_max_chars);
+        }
+        tail.push(prefix_tail, self.colloc_max_chars);
+        tail
+    }
+
+    #[inline]
+    fn prev_word_before(&self, span_lo: usize) -> &str {
+        if span_lo > 0 {
+            self.aligned[span_lo - 1].edge.word.as_str()
+        } else if self.preceding_word.is_empty() {
+            SENTENCE_START
+        } else {
+            self.preceding_word
+        }
+    }
+
+    #[inline]
+    fn colloc_term(&self, tail: &str, word: &str, is_rear: bool) -> f64 {
+        match self.collocation {
+            Some(scorer) => {
+                self.options.collocation_weight
+                    * (scorer(tail, word, is_rear) + self.options.collocation_edge_offset)
+            }
+            None => 0.0,
+        }
+    }
+
+    #[inline]
+    fn bigram_term(&self, prev: &str, word: &str) -> f64 {
+        match self.bigram {
+            Some(table) => {
+                self.options.bigram_weight * f64::from(table.bigram(prev, word)).max(0.0)
+            }
+            None => 0.0,
+        }
+    }
+
+    /// 精确计算替换窗口 `aligned[span_lo..span_hi]`（含受其影响的后续 `.gram`/bigram/trigram/personal 上下文窗口）
+    /// 的局部总分，使 `rep_score - orig_score` 与整句重解码的分数差严格一致。
+    fn score_window(&self, span_lo: usize, span_hi: usize, edges: &[&'g Edge]) -> f64 {
+        let mut tail = self.tail_before(span_lo);
+        let mut prev_word: &str = self.prev_word_before(span_lo);
+        let (mut personal_before, mut personal_prev): (Option<&str>, &str) = match span_lo {
+            0 => (None, SENTENCE_START),
+            1 => (None, self.aligned[0].edge.word.as_str()),
+            _ => (
+                Some(self.aligned[span_lo - 2].edge.word.as_str()),
+                self.aligned[span_lo - 1].edge.word.as_str(),
+            ),
+        };
+        let (mut trigram_before, mut trigram_prev): (&str, &str) = match span_lo {
+            0 => (
+                SENTENCE_START,
+                if !self.preceding_word.is_empty() {
+                    self.preceding_word
+                } else {
+                    SENTENCE_START
+                },
+            ),
+            1 => (
+                if !self.preceding_word.is_empty() {
+                    self.preceding_word
+                } else {
+                    SENTENCE_START
+                },
+                self.aligned[0].edge.word.as_str(),
+            ),
+            _ => (
+                self.aligned[span_lo - 2].edge.word.as_str(),
+                self.aligned[span_lo - 1].edge.word.as_str(),
+            ),
+        };
+        let mut word_index = span_lo;
+        let mut score = 0.0;
+
+        // 计算受替换词影响的后续固定词数量（覆盖 trigram/personal 及完整 `.gram` 尾窗字符数）。
+        let mut suffix_count = 0usize;
+        let mut suffix_chars = 0usize;
+        for span in &self.aligned[span_hi..] {
+            let need_trigram = suffix_count < 2
+                && (self.trigram.is_some()
+                    || self.personal.is_some()
+                    || (suffix_count == 0 && self.bigram.is_some()));
+            let need_colloc = self.collocation.is_some() && suffix_chars < self.colloc_max_chars;
+            if !need_trigram && !need_colloc {
+                break;
+            }
+            suffix_chars += span.edge.word.chars().count();
+            suffix_count += 1;
+        }
+
+        let steps = edges.iter().copied().map(|edge| (true, edge)).chain(
+            self.aligned[span_hi..span_hi + suffix_count]
+                .iter()
+                .map(|span| (false, span.edge)),
+        );
+        for (add_unigram, edge) in steps {
+            if add_unigram {
+                score += edge.log_prob;
+            }
+            if let Some(scorer) = self.collocation {
+                let raw = scorer(tail.as_str(), &edge.word, edge.end == self.n);
+                score +=
+                    self.options.collocation_weight * (raw + self.options.collocation_edge_offset);
+            }
+            let static_bonus = self
+                .bigram
+                .map_or(0.0, |table| f64::from(table.bigram(prev_word, &edge.word)));
+            if self.bigram.is_some() {
+                score += self.options.bigram_weight * static_bonus.max(0.0);
+            }
+            if let Some(personal) = self.personal {
+                let ctx = personal.context(personal_before, Some(personal_prev));
+                if ctx.confidence > 0.0 {
+                    score +=
+                        personal_transition(personal, &ctx, &edge.word, static_bonus, self.options);
+                }
+            }
+            if let Some(trigram) = self.trigram {
+                if self.options.trigram_weight != 0.0
+                    && (self.preceding_word.is_empty() || word_index > 0)
+                {
+                    score += self.options.trigram_weight
+                        * f64::from(trigram.trigram(trigram_before, trigram_prev, &edge.word));
+                }
+            }
+            tail.push(&edge.word, self.colloc_max_chars);
+            prev_word = edge.word.as_str();
+            if word_index == 0 {
+                personal_before = None;
+                personal_prev = edge.word.as_str();
+            } else {
+                personal_before = Some(personal_prev);
+                personal_prev = edge.word.as_str();
+            }
+            trigram_before = trigram_prev;
+            trigram_prev = edge.word.as_str();
+            word_index += 1;
+        }
+        score
+    }
+
+    /// 双向 2-stage 局部 DP：对跨度 `(s..e)` 在切点 `mid` 搜索最优两词组合 `(e1, e2)`，
+    /// 同步结合左上下文 (`left_tail -> e1`)、内部转移 (`e1 -> e2`) 与右邻词前瞻 (`e2 -> next`)。
+    #[allow(clippy::too_many_arguments)]
+    fn collect_two_edge_splits(
+        &self,
+        span_lo: usize,
+        span_hi: usize,
+        s: usize,
+        mid: usize,
+        e: usize,
+        orig_score: f64,
+        max_left: usize,
+        full_right_cap: usize,
+        secondary_right_cap: usize,
+        top_pairs_cap: usize,
+        bucket: &mut Vec<CnPerturbation<'g>>,
+        primary: &[SentencePath],
+    ) {
+        let tail_before = self.tail_before(span_lo);
+        let tail_before_str = tail_before.as_str();
+        let prev_word = self.prev_word_before(span_lo);
+
+        let mut left_cands: Vec<(&'g Edge, f64)> = self.graph[s]
+            .iter()
+            .filter(|edge| edge.end == mid)
+            .map(|edge| {
+                let s1 = edge.log_prob
+                    + self.colloc_term(tail_before_str, &edge.word, false)
+                    + self.bigram_term(prev_word, &edge.word);
+                (edge, s1)
+            })
+            .collect();
+        if left_cands.is_empty() {
+            return;
+        }
+        left_cands.sort_by(|a, b| b.1.total_cmp(&a.1));
+        left_cands.truncate(max_left);
+
+        let next_span = self.aligned.get(span_hi);
+        let mut right_cands: Vec<(&'g Edge, f64)> = self.graph[mid]
+            .iter()
+            .filter(|edge| edge.end == e)
+            .map(|edge| {
+                // 预计算右邻词前瞻分（只做一遍 O(K)），使被右文强预测的中频单字（如「补 -> 政策」「洗 -> 掉」）也能稳进前排。
+                let lookahead = next_span.map_or(0.0, |next| {
+                    let is_next_rear = next.end == self.n;
+                    self.bigram_term(&edge.word, &next.edge.word)
+                        + self.colloc_term(&edge.word, &next.edge.word, is_next_rear)
+                });
+                (edge, edge.log_prob + lookahead)
+            })
+            .collect();
+        if right_cands.is_empty() {
+            return;
+        }
+        right_cands.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+        let mut top_pairs: Vec<(f64, &'g Edge, &'g Edge)> = Vec::with_capacity(top_pairs_cap + 1);
+        for (li, &(e1, s1)) in left_cands.iter().enumerate() {
+            let right_limit = if li < 4 {
+                right_cands.len().min(full_right_cap)
+            } else {
+                right_cands.len().min(secondary_right_cap)
+            };
+            if right_limit == 0 {
+                continue;
+            }
+            let mut tail_mid = tail_before;
+            tail_mid.push(&e1.word, self.colloc_max_chars);
+            let tail_mid_str = tail_mid.as_str();
+            for &(e2, r_prior) in &right_cands[..right_limit] {
+                let quick_score = s1
+                    + r_prior
+                    + self.colloc_term(tail_mid_str, &e2.word, e == self.n)
+                    + self.bigram_term(&e1.word, &e2.word);
+                if top_pairs.len() < top_pairs_cap {
+                    top_pairs.push((quick_score, e1, e2));
+                } else if let Some((min_idx, &(min_score, _, _))) = top_pairs
+                    .iter()
+                    .enumerate()
+                    .min_by(|a, b| (a.1).0.total_cmp(&(b.1).0))
+                {
+                    if quick_score > min_score {
+                        top_pairs[min_idx] = (quick_score, e1, e2);
+                    }
+                }
+            }
+        }
+
+        top_pairs.sort_by(|a, b| b.0.total_cmp(&a.0));
+        for (_, e1, e2) in top_pairs {
+            let delta = self.score_window(span_lo, span_hi, &[e1, e2]) - orig_score;
+            offer_cn_perturbation(
+                bucket,
+                CnPerturbation::pair(span_lo, span_hi, e1, e2, delta),
+                self.aligned,
+                self.best,
+                self.word_bytes,
+                primary,
+            );
+        }
+    }
+}
+
+fn matches_sentence_parts(sentence: &str, prefix: &str, rep: &[&Edge], suffix: &str) -> bool {
+    let rep_bytes: usize = rep.iter().map(|edge| edge.word.len()).sum();
+    if sentence.len() != prefix.len() + rep_bytes + suffix.len() {
+        return false;
+    }
+    if !sentence.starts_with(prefix) || !sentence.ends_with(suffix) {
+        return false;
+    }
+    let mut mid = &sentence[prefix.len()..sentence.len() - suffix.len()];
+    for edge in rep {
+        let Some(rest) = mid.strip_prefix(edge.word.as_str()) else {
+            return false;
+        };
+        mid = rest;
+    }
+    mid.is_empty()
+}
+
+fn cn_segment_bytes<'a, 'g>(
+    aligned: &'a [AlignedSpan<'g>],
+    cand: &'a CnPerturbation<'g>,
+    hi: usize,
+) -> impl Iterator<Item = u8> + 'a {
+    cand.rep[..cand.rep_len]
+        .iter()
+        .flat_map(|edge| edge.word.bytes())
+        .chain(
+            aligned[cand.span_hi..hi]
+                .iter()
+                .flat_map(|span| span.edge.word.bytes()),
+        )
+}
+
+fn offer_cn_perturbation<'g>(
+    bucket: &mut Vec<CnPerturbation<'g>>,
+    cand: CnPerturbation<'g>,
+    aligned: &[AlignedSpan<'g>],
+    best: &SentencePath,
+    word_bytes: &[usize],
+    primary: &[SentencePath],
+) {
+    if !cand.local_delta.is_finite() || cand.local_delta < -CN_MAX_LOCAL_DROP {
+        return;
+    }
+    let rep = &cand.rep[..cand.rep_len];
+    let orig_bytes = aligned[cand.span_lo..cand.span_hi]
+        .iter()
+        .flat_map(|span| span.edge.word.bytes());
+    let rep_bytes = rep.iter().flat_map(|edge| edge.word.bytes());
+    if orig_bytes.eq(rep_bytes) {
+        return;
+    }
+    let prefix = &best.sentence[..word_bytes[cand.span_lo]];
+    let suffix = &best.sentence[word_bytes[cand.span_hi]..];
+    if primary
+        .iter()
+        .any(|path| matches_sentence_parts(&path.sentence, prefix, rep, suffix))
     {
-        *count += 1;
         return;
     }
-    if let Some((_, count)) = heap.iter_mut().find(|(slot, _)| *slot == signature) {
-        *count += 1;
+    if let Some(existing) = bucket.iter_mut().find(|other| {
+        let hi = other.span_hi.max(cand.span_hi);
+        cn_segment_bytes(aligned, other, hi).eq(cn_segment_bytes(aligned, &cand, hi))
+    }) {
+        if cand.local_delta > existing.local_delta {
+            *existing = cand;
+        }
         return;
     }
-    if prefer_stack && *stack_len < SMALL_SENTENCE_PATHS {
-        stack[*stack_len] = (signature, 1);
-        *stack_len += 1;
+    bucket.push(cand);
+}
+
+fn finalize_cn_bucket(bucket: &mut Vec<CnPerturbation<'_>>) {
+    bucket.sort_by(|a, b| b.local_delta.total_cmp(&a.local_delta));
+    if bucket.len() <= CN_MAX_RIVALS_PER_POS {
+        return;
+    }
+    let has_structural_in_top = bucket[..CN_MAX_RIVALS_PER_POS]
+        .iter()
+        .any(|cand| cand.is_structural());
+    if !has_structural_in_top {
+        if let Some(rel) = bucket[CN_MAX_RIVALS_PER_POS..]
+            .iter()
+            .position(|cand| cand.is_structural())
+        {
+            let best_structural = bucket.remove(CN_MAX_RIVALS_PER_POS + rel);
+            bucket.truncate(CN_MAX_RIVALS_PER_POS);
+            bucket.push(best_structural);
+            return;
+        }
+    }
+    bucket.truncate(CN_MAX_RIVALS_PER_POS);
+}
+
+fn materialize_cn_perturbation(
+    aligned: &[AlignedSpan<'_>],
+    best: &SentencePath,
+    cand: &CnPerturbation<'_>,
+) -> SentencePath {
+    let rep = &cand.rep[..cand.rep_len];
+    let edge_count = cand.span_lo + rep.len() + (aligned.len() - cand.span_hi);
+    let mut sentence = String::with_capacity(best.sentence.len() + 8);
+    let mut key = String::with_capacity(best.key.len() + 8);
+    let mut words = Vec::with_capacity(edge_count);
+    let mut first = true;
+    for edge in aligned[..cand.span_lo]
+        .iter()
+        .map(|span| span.edge)
+        .chain(rep.iter().copied())
+        .chain(aligned[cand.span_hi..].iter().map(|span| span.edge))
+    {
+        sentence.push_str(&edge.word);
+        words.push(edge.word.clone());
+        if !first {
+            key.push('\'');
+        }
+        first = false;
+        key.push_str(&edge.key);
+    }
+    SentencePath {
+        sentence,
+        key,
+        log_prob: best.log_prob + cand.local_delta,
+        words,
+        typo_edges: 0,
+    }
+}
+
+/// 混淆网络 1-Span 局部扰动：复用已建词网格 `graph`，沿 1-best 路径的每个词跨度生成同跨度同音、
+/// `[2] -> [1, 1]` 拆字、`[1, 1] -> [2]` 合并与三音节局部重切替补，按位置轮询注入 Top-16 神经融合池
+/// （同时保留前 6 条束搜索主路径不动），彻底消除长句前/中段被束搜索剪枝锁死的问题。
+fn augment_with_confusion_network_perturbations(
+    graph: &Graph,
+    options: &LatticeOptions<'_>,
+    paths: &mut Vec<SentencePath>,
+    take: usize,
+) {
+    let keep_primary = CN_KEEP_PRIMARY_PATHS.min(paths.len()).min(take);
+    let top16_target = (keep_primary + CN_TOP16_RESERVE).min(take);
+    let top16_cn_budget = top16_target.saturating_sub(keep_primary);
+    if top16_cn_budget == 0 {
+        return;
+    }
+    let extra_cn_budget = if take > top16_target {
+        CN_EXTRA_POOL_RESERVE.min(take - top16_target)
     } else {
-        heap.push((signature, 1));
+        0
+    };
+    let total_cn_budget = top16_cn_budget + extra_cn_budget;
+
+    let best = &paths[0];
+    let Some(aligned) = align_path_to_graph(graph, &best.words) else {
+        return;
+    };
+    let m = aligned.len();
+    if m == 0 {
+        return;
     }
+
+    let mut word_bytes = Vec::with_capacity(m + 1);
+    let mut byte_cursor = 0usize;
+    word_bytes.push(0);
+    for span in &aligned {
+        byte_cursor += span.edge.word.len();
+        word_bytes.push(byte_cursor);
+    }
+    if byte_cursor != best.sentence.len() {
+        return;
+    }
+
+    let collocation = options
+        .collocation_scorer
+        .filter(|_| options.collocation_weight > 0.0);
+    let colloc_max_chars = if options.collocation_edge_offset != 0.0 {
+        5
+    } else {
+        COLLOCATION_TAIL_CODEPOINTS
+    };
+    let ctx = CnContext {
+        graph,
+        aligned: &aligned,
+        word_bytes: &word_bytes,
+        best,
+        n: graph.len(),
+        options,
+        collocation,
+        colloc_max_chars,
+        bigram: options.bigram.as_deref(),
+        trigram: options.trigram.as_deref(),
+        personal: active_personal(options),
+        preceding_word: crate::text::last_characters(options.preceding_context, 2),
+    };
+    let primary_slice = &paths[..keep_primary];
+    let mut buckets: Vec<Vec<CnPerturbation<'_>>> = (0..m).map(|_| Vec::new()).collect();
+
+    for i in 0..m {
+        let span = aligned[i];
+        let s = span.start;
+        let e = span.end;
+        let len = e - s;
+        let orig_score = ctx.score_window(i, i + 1, &[span.edge]);
+
+        // 算子 A：同跨度竞争词边替换（扫描全部 `graph[s]` 中落点为 `e` 的同音词/字）。
+        for edge in &graph[s] {
+            if edge.end != e || edge.word == span.edge.word {
+                continue;
+            }
+            let delta = ctx.score_window(i, i + 1, &[edge]) - orig_score;
+            offer_cn_perturbation(
+                &mut buckets[i],
+                CnPerturbation::single(i, i + 1, edge, delta),
+                &aligned,
+                best,
+                &word_bytes,
+                primary_slice,
+            );
+        }
+
+        // 算子 B：双音节整词拆分为 `[1, 1]`（双向语境 2-stage DP）。
+        if len == 2 {
+            ctx.collect_two_edge_splits(
+                i,
+                i + 1,
+                s,
+                s + 1,
+                e,
+                orig_score,
+                8,
+                24,
+                8,
+                10,
+                &mut buckets[i],
+                primary_slice,
+            );
+        }
+
+        // 算子 D1：三音节整词拆分为 `[1, 2]` 与 `[2, 1]`。
+        if len == 3 {
+            ctx.collect_two_edge_splits(
+                i,
+                i + 1,
+                s,
+                s + 1,
+                e,
+                orig_score,
+                4,
+                8,
+                0,
+                6,
+                &mut buckets[i],
+                primary_slice,
+            );
+            ctx.collect_two_edge_splits(
+                i,
+                i + 1,
+                s,
+                s + 2,
+                e,
+                orig_score,
+                4,
+                8,
+                0,
+                6,
+                &mut buckets[i],
+                primary_slice,
+            );
+        }
+
+        // 相邻双词跨度算子（`[1, 1] -> [2]` 合并与 `[2, 1] / [1, 2]` 三音节局部重切/合并）。
+        if i + 1 < m {
+            let next = aligned[i + 1];
+            let next_len = next.end - next.start;
+            let pair_len = len + next_len;
+            if pair_len == 2 {
+                // 算子 C：相邻两单字合并为双字词 `[1, 1] -> [2]`。
+                let orig_pair_score = ctx.score_window(i, i + 2, &[span.edge, next.edge]);
+                for edge in &graph[s] {
+                    if edge.end != next.end {
+                        continue;
+                    }
+                    let delta = ctx.score_window(i, i + 2, &[edge]) - orig_pair_score;
+                    offer_cn_perturbation(
+                        &mut buckets[i],
+                        CnPerturbation::single(i, i + 2, edge, delta),
+                        &aligned,
+                        best,
+                        &word_bytes,
+                        primary_slice,
+                    );
+                }
+            } else if pair_len == 3 {
+                // 算子 D2/D3：三音节 `[2, 1]` 或 `[1, 2]` 合并为 `[3]`，或翻转切点重切为 `[1, 2]`/`[2, 1]`。
+                let orig_pair_score = ctx.score_window(i, i + 2, &[span.edge, next.edge]);
+                for edge in &graph[s] {
+                    if edge.end != next.end {
+                        continue;
+                    }
+                    let delta = ctx.score_window(i, i + 2, &[edge]) - orig_pair_score;
+                    offer_cn_perturbation(
+                        &mut buckets[i],
+                        CnPerturbation::single(i, i + 2, edge, delta),
+                        &aligned,
+                        best,
+                        &word_bytes,
+                        primary_slice,
+                    );
+                }
+                let alt_mid = if len == 2 { s + 1 } else { s + 2 };
+                ctx.collect_two_edge_splits(
+                    i,
+                    i + 2,
+                    s,
+                    alt_mid,
+                    next.end,
+                    orig_pair_score,
+                    4,
+                    8,
+                    0,
+                    6,
+                    &mut buckets[i],
+                    primary_slice,
+                );
+            }
+        }
+
+        finalize_cn_bucket(&mut buckets[i]);
+    }
+
+    // 按位置轮询排序：优先服务 Top-6 中尚未出现任何变体的前/中段位置（`base_round = 0`），
+    // 已在 Top-6 中产生变体的尾部位置自动后移轮次，防止高熵末字抢光 Top-16 席位。
+    let mut ranked: Vec<(usize, f64, CnPerturbation<'_>)> = Vec::new();
+    for (i, bucket) in buckets.iter().enumerate() {
+        if bucket.is_empty() {
+            continue;
+        }
+        let prefix = &best.sentence[..word_bytes[i]];
+        let suffix = &best.sentence[word_bytes[i + 1]..];
+        let existing_variants = primary_slice[1..]
+            .iter()
+            .filter(|path| {
+                path.sentence.starts_with(prefix)
+                    && path.sentence.ends_with(suffix)
+                    && path.sentence.len() > prefix.len() + suffix.len()
+            })
+            .count();
+        let base_round = existing_variants.min(2);
+        for (rank, &cand) in bucket.iter().enumerate() {
+            ranked.push((base_round + rank, cand.local_delta, cand));
+        }
+    }
+    if ranked.is_empty() {
+        return;
+    }
+    ranked.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.total_cmp(&a.1)));
+
+    let mut cn_selected: Vec<SentencePath> = Vec::with_capacity(total_cn_budget);
+    for (_, _, cand) in ranked {
+        if cn_selected.len() == total_cn_budget {
+            break;
+        }
+        let path = materialize_cn_perturbation(&aligned, best, &cand);
+        if primary_slice.iter().any(|p| p.sentence == path.sentence)
+            || cn_selected.iter().any(|p| p.sentence == path.sentence)
+        {
+            continue;
+        }
+        cn_selected.push(path);
+    }
+    if cn_selected.is_empty() {
+        return;
+    }
+
+    // 组装最终路径：
+    // 1. `[0..keep_primary]`：Top-6 束搜索主路径保持原序不动；
+    // 2. 紧接插入至多 10 条轮询 1-Span 扰动进入 Top-16（直达 Tier 1 神经池）；
+    // 3. 保留至多 6 条其余束搜索路径，随后补入余下轮询扰动，最后以剩余束搜索路径填满 `take`。
+    let mut drained = std::mem::take(paths).into_iter();
+    let mut result: Vec<SentencePath> = Vec::with_capacity(take);
+    for _ in 0..keep_primary {
+        if let Some(path) = drained.next() {
+            result.push(path);
+        }
+    }
+    let mut rest_beam: Vec<Option<SentencePath>> = drained.map(Some).collect();
+
+    let mut cn_iter = cn_selected.into_iter();
+    for path in cn_iter.by_ref().take(top16_cn_budget) {
+        if result.len() == take {
+            break;
+        }
+        result.push(path);
+    }
+
+    let mut front_beam_added = 0usize;
+    for slot in &mut rest_beam {
+        if result.len() == take || front_beam_added >= CN_REST_BEAM_FRONT_KEEP {
+            break;
+        }
+        let Some(path) = slot.as_ref() else {
+            continue;
+        };
+        if result
+            .iter()
+            .any(|existing| existing.sentence == path.sentence)
+        {
+            *slot = None;
+            continue;
+        }
+        if let Some(owned) = slot.take() {
+            result.push(owned);
+            front_beam_added += 1;
+        }
+    }
+
+    for path in cn_iter {
+        if result.len() == take {
+            break;
+        }
+        if result
+            .iter()
+            .any(|existing| existing.sentence == path.sentence)
+        {
+            continue;
+        }
+        result.push(path);
+    }
+
+    for path in rest_beam.into_iter().flatten() {
+        if result.len() == take {
+            break;
+        }
+        if result
+            .iter()
+            .any(|existing| existing.sentence == path.sentence)
+        {
+            continue;
+        }
+        result.push(path);
+    }
+
+    *paths = result;
 }
 
 fn materialize_terminal_hyp<'g>(
@@ -1356,12 +2589,12 @@ fn contains_sentence(paths: &[SentencePath], sentence: &str) -> bool {
 }
 
 /// WL:168-186. The beam carries one word of history, so a third word of context cannot be searched without widening every hypothesis into (position, last two words); the survivors are rescored instead. Each entry holds what the third word adds over the second, so summing it onto a path that already carries its bigram score is the whole model, not a second opinion.
-fn rescore_with_trigram(paths: &mut [SentencePath], options: &LatticeOptions<'_>) {
+fn rescore_with_trigram(paths: &mut [SentencePath], options: &LatticeOptions<'_>) -> bool {
     let Some(trigram) = options.trigram.as_deref() else {
-        return;
+        return false;
     };
     if options.trigram_weight == 0.0 || paths.len() < 2 {
-        return;
+        return false;
     }
     let preceding_word = crate::text::last_characters(options.preceding_context, 2);
     for path in paths.iter_mut() {
@@ -1388,6 +2621,7 @@ fn rescore_with_trigram(paths: &mut [SentencePath], options: &LatticeOptions<'_>
         path.log_prob += options.trigram_weight * bonus;
     }
     paths.sort_by(|a, b| b.log_prob.total_cmp(&a.log_prob));
+    true
 }
 
 /// WL:490-525. Typo edges keep the literal edge scale minus their penalty, so the comparison with the literal sentence is on the same terms as everything else in the decode.
@@ -1455,32 +2689,8 @@ pub(super) fn decode_typo_on_graph_with_policy(
     if best.typo_edges == 0 || best.sentence == literal_best.sentence {
         return None;
     }
-    if !allow_nonleading {
-        // 单字边在 `edge_log_prob` 中扣减了 `ln(unigram_z)`，而多音节纠错词边的 `penalty` 只抵消词长加分、未做同等归一；
-        // 当纠错路径比字面最优路径合并掉了单字词时，每条纠错边须补齐一份 `ln(unigram_z)` 的尺度差，避免低频双字纠错词压过合法常用单字。
-        let literal_single_chars = literal_best
-            .words
-            .iter()
-            .filter(|word| word.chars().count() == 1)
-            .count();
-        let typo_single_chars = best
-            .words
-            .iter()
-            .filter(|word| word.chars().count() == 1)
-            .count();
-        let normalization_gap = if typo_single_chars < literal_single_chars {
-            let z = if options.unigram_z > 1.0 {
-                options.unigram_z
-            } else {
-                1e6
-            };
-            z.ln() * (best.typo_edges as f64)
-        } else {
-            0.0
-        };
-        if best.log_prob <= literal_best.log_prob + normalization_gap {
-            return None;
-        }
+    if !allow_nonleading && best.log_prob <= literal_best.log_prob {
+        return None;
     }
     Some(TypoSentence {
         sentence: best.sentence,
@@ -1644,15 +2854,48 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn edge_log_prob_projects_unigrams_and_rewards_phrases() {
+    fn edge_log_prob_uses_unified_length_neutral_log_prior() {
         let options = LatticeOptions::default();
-        assert!((edge_log_prob(1_000_000, 1, &options) - 0.0).abs() < 1e-12);
-        assert_eq!(edge_log_prob(0, 1, &options), -(1e6f64).ln());
+        assert!((edge_log_prob(500_000_000, 1, &options) - 0.0).abs() < 1e-12);
+        assert_eq!(edge_log_prob(0, 1, &options), -UNIFIED_UNIGRAM_Z.ln());
         assert_eq!(
             edge_log_prob(-5, 1, &options),
             edge_log_prob(1, 1, &options)
         );
-        assert!((edge_log_prob(100, 2, &options) - (100f64.ln() + 20.0)).abs() < 1e-12);
+        // R3 温和分桶校准刻度下：高频核心双字词与 5k-20k 中频真词均受保护，
+        // 同时「血铅(3985)」「过不(3333)」等低权双字怪词在静态先验上即低于高频单字组合「些+钱」「国+补」。
+        let xie_qian =
+            edge_log_prob(3_750_000, 1, &options) + edge_log_prob(1_030_000, 1, &options);
+        let xue_qian = edge_log_prob(3_985, 2, &options);
+        assert!(
+            xie_qian > xue_qian + 0.5,
+            "些+钱 ({xie_qian:.3}) 应高于血铅 ({xue_qian:.3})"
+        );
+        let guo_bu_split =
+            edge_log_prob(5_000_000, 1, &options) + edge_log_prob(400_000, 1, &options);
+        let guo_bu_noise = edge_log_prob(3_333, 2, &options);
+        assert!(
+            guo_bu_split > guo_bu_noise,
+            "国+补 ({guo_bu_split:.3}) 应高于过不 ({guo_bu_noise:.3})"
+        );
+        let medium_real_phrase = edge_log_prob(15_000, 2, &options);
+        let rare_split = edge_log_prob(300_000, 1, &options) + edge_log_prob(300_000, 1, &options);
+        assert!(
+            medium_real_phrase > rare_split + 2.0,
+            "中频真词 15k ({medium_real_phrase:.3}) 应稳胜普通拆字 ({rare_split:.3})"
+        );
+        let xian_zai_phrase = edge_log_prob(503_000, 2, &options);
+        let xian_zai_split =
+            edge_log_prob(1_660_000, 1, &options) + edge_log_prob(19_200_000, 1, &options);
+        assert!(
+            xian_zai_phrase > xian_zai_split,
+            "高频双字词现在 ({xian_zai_phrase:.3}) 应胜过先+在 ({xian_zai_split:.3})"
+        );
+        // 三字及以上未测频占位档 `w == 100` 按平滑先验 `15.0` 与桶 p99 解压计算。
+        let expected_placeholder = PHRASE_WEIGHT_DECOMPRESSION
+            * (UNMEASURED_PHRASE_EFFECTIVE_WEIGHT.ln() - phrase_bucket_p99_ref(3).ln())
+            - (PHRASE_TWO_SYLLABLE_ANCHOR_NATS + PHRASE_EXTRA_SYLLABLE_STEP_NATS);
+        assert!((edge_log_prob(100, 3, &options) - expected_placeholder).abs() < 1e-12);
         let odd = LatticeOptions {
             unigram_z: 0.5,
             ..LatticeOptions::default()
@@ -1763,14 +3006,16 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn a_sentence_final_particle_beats_a_commoner_homophone() {
+    fn sentence_final_particles_carry_no_hardcoded_magic_bonus() {
         let rows = table(&[
             ("zhai'quan", &[("债券", 5000)]),
             ("ma", &[("马", 9000), ("吗", 3000)]),
         ]);
+        // 清退旧 +3.0 句末语气词魔数后，无搭配/神经信号时按真实词频排序，再由 `.gram` 或神经模型决定语境偏好。
+        assert_eq!(SENTENCE_FINAL_PARTICLE_BONUS, 0.0);
         assert_eq!(
             best("zhai'quan'ma", &rows, &LatticeOptions::default()),
-            "债券吗"
+            "债券马"
         );
     }
 
@@ -2007,22 +3252,27 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn sentence_options_search_six() {
+    fn sentence_options_use_v2_diverse_budget() {
         let paths = RuntimePaths::default();
         let shown = make_sentence_lattice_options(&paths, false);
         assert_eq!(
             (shown.nbest, shown.emit),
-            (6, 1),
-            "the default searches six and shows one"
+            (32, 1),
+            "v2 默认搜索 32 条多样性路径，单行模式输出 1 条"
         );
         let all = make_sentence_lattice_options(&paths, true);
         assert_eq!(
             (all.nbest, all.emit),
-            (6, 0),
-            "alternatives search the same six and show them"
+            (32, 0),
+            "多候选模式搜索并输出全部 32 条路径"
         );
         assert!(all.bigram.is_none() && all.trigram.is_none());
-        assert_eq!(all.beam, 32);
+        assert_eq!(all.beam, 56);
+        assert_eq!(all.terminal_beam, 112);
+        assert_eq!(all.span_limit, 40);
+        assert_eq!(all.terminal_max_per_prefix, 2);
+        assert_eq!(all.terminal_max_per_suffix, 2);
+        assert_eq!(all.terminal_max_per_segmentation, 6);
         assert!(all.include_lattice_best && !all.show_next_on_duplicate);
     }
 
@@ -2466,7 +3716,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn typo_decode_requires_unigram_normalization_gap_when_fusing_single_chars() {
+    fn typo_decode_uses_unified_probability_scale_without_normalization_gap_hack() {
         let options = LatticeOptions::default();
         let rows = table(&[
             ("xin'ji", &[("心急", 50_000)]),
@@ -2477,14 +3727,14 @@ pub(super) mod tests {
         let mut rows_lookup = lookup(&rows);
         let literal = decode(text, &rows, &options);
         assert_eq!(literal[0].sentence, "心急求快");
-        // 「区块」仅因合并掉两个单字而规避 `-ln(unigram_z)` 惩罚，真实频率并不足以压过合法字面输入，应拒绝产出纠错句。
+        // 在统一对数概率尺度下，正常信道代价（3.0 nats）即可自然拦住中频误纠「区块(50k)」，无需旧 `ln(1e6)` 补丁。
         let false_positive = TypoEdge {
             start: 2,
             end: 4,
             key: "qu'kuai".into(),
             value: "区块".into(),
             weight: 50_000,
-            penalty: 24.0,
+            penalty: 3.0,
         };
         assert!(decode_typo_sentence(
             &syllables(text),
@@ -2495,7 +3745,7 @@ pub(super) mod tests {
         )
         .is_none());
 
-        // 当真实高频纠错词跨越单字归一差（如低频单字拼凑 vs 超高频词组）时仍照常产出纠错句。
+        // 真实高频错拼词（如低频「干+系」对高频「关系(100k)」）在真实信道代价 `3.0` 下自然胜出。
         let genuine_rows = table(&[
             ("mei", &[("没", 1_000)]),
             ("gan", &[("干", 1_000)]),
@@ -2509,7 +3759,7 @@ pub(super) mod tests {
             key: "guan'xi".into(),
             value: "关系".into(),
             weight: 100_000,
-            penalty: 24.0,
+            penalty: 3.0,
         };
         let accepted = decode_typo_sentence(
             &syllables("mei'gan'xi"),
@@ -2518,94 +3768,175 @@ pub(super) mod tests {
             &genuine_literal[0],
             &[genuine_edge],
         )
-        .expect("跨过单字归一差的真实错拼仍应产出纠错整句");
+        .expect("统一尺度下真实错拼应正常产出纠错整句");
         assert_eq!(accepted.sentence, "没关系");
     }
 
     #[test]
-    fn separable_vo_edges_are_synthesized_from_single_char_evidence_and_lead_competitors() {
-        let options = LatticeOptions::default();
-        let rows = table(&[
-            ("xu", &[("许", 1_300_000), ("续", 600_000)]),
-            ("ge", &[("个", 14_789_000), ("各", 856_000)]),
-            ("le", &[("了", 12_000_000)]),
-            ("guo", &[("过", 8_000_000)]),
+    fn unified_scoring_and_2d_diversity_prevent_suffix_collapse_and_reserve_two_char_splits() {
+        // 1. 构造 `zheng'le'xie'qian` 场景：即使用 3 个同尾 `[2, 2]`（共享后缀「血铅」）包围，
+        //    统一尺度 + 后缀 2 席配额 + 新骨架优先回填也能彻底消灭 Top-3 后缀塌缩并召回「挣了些钱」。
+        let suffix_rows = table(&[
             (
-                "yuan",
-                &[("原", 1_473_000), ("院", 672_000), ("愿", 597_000)],
+                "zheng'le",
+                &[("挣了", 12_630), ("争了", 8_715), ("整了", 7_165)],
             ),
-            ("ge'yuan", &[("各院", 10_030)]),
-            ("xu'ge", &[("许哥", 10_000), ("许个", 3_333)]),
-            ("qing", &[("请", 1_000_000)]),
-            ("jia", &[("假", 400_000), ("家", 900_000)]),
-            ("ge'jia", &[("各家", 12_000)]),
-            ("shui", &[("睡", 800_000)]),
-            ("jiao", &[("觉", 600_000), ("脚", 700_000)]),
-            ("ge'jiao", &[("各角", 9_000)]),
-            // 已有真实三字词条时不得重复插入或覆盖原权重。
-            ("xi", &[("洗", 500_000)]),
-            ("zao", &[("澡", 300_000)]),
-            ("xi'ge'zao", &[("洗个澡", 42_000)]),
+            ("xie'qian", &[("血铅", 3_985), ("斜前", 200)]),
+            ("xie", &[("些", 3_750_000), ("写", 2_000_000)]),
+            ("qian", &[("钱", 1_030_000), ("前", 3_970_000)]),
         ]);
-
-        // 即使存在「各院」「许哥」等高分双字拼凑竞争项，三音节拆插「许个愿 / 许了愿 / 许过愿 / 请个假」均稳居第 1 名。
-        for (input, expected) in [
-            ("xu'ge'yuan", "许个愿"),
-            ("xu'le'yuan", "许了愿"),
-            ("xu'guo'yuan", "许过愿"),
-            ("qing'ge'jia", "请个假"),
-            ("shui'le'ge'jiao", "睡了个觉"),
-        ] {
-            let decoded = decode(input, &rows, &options);
-            assert_eq!(
-                decoded.first().map(|p| p.sentence.as_str()),
-                Some(expected),
-                "input={input}, decoded={decoded:?}"
-            );
-        }
-
-        // 单字缺失时不得虚构离合词边（如 `"le"` 只有「乐」没有「了」）。
-        let missing_le_rows = table(&[
-            ("xu", &[("许", 1_300_000)]),
-            ("le", &[("乐", 1_000_000)]),
-            ("yuan", &[("愿", 597_000)]),
-        ]);
-        let missing_le = decode("xu'le'yuan", &missing_le_rows, &options);
+        let v2_opts = LatticeOptions {
+            beam: 64,
+            nbest: 16,
+            terminal_beam: 128,
+            terminal_max_per_prefix: 2,
+            terminal_max_per_suffix: 2,
+            terminal_max_per_segmentation: 6,
+            terminal_diversity_margin: 24.0,
+            ..LatticeOptions::default()
+        };
+        let decoded: Vec<String> = decode("zheng'le'xie'qian", &suffix_rows, &v2_opts)
+            .into_iter()
+            .map(|p| p.sentence)
+            .collect();
+        let pos_xieqian = decoded
+            .iter()
+            .position(|s| s == "挣了些钱")
+            .expect("统一概率下应召回「挣了些钱」");
+        let pos_xueqian = decoded
+            .iter()
+            .position(|s| s == "挣了血铅")
+            .expect("应保留「挣了血铅」备选");
         assert!(
-            missing_le.iter().all(|p| p.sentence != "许了愿"),
-            "缺少「了」单字证据时不应合成许了愿: {missing_le:?}"
+            pos_xieqian < pos_xueqian && pos_xieqian < 6,
+            "即使无 .gram，「挣了些钱」(#{pos_xieqian}) 也应领先「挣了血铅」(#{pos_xueqian}): {decoded:?}"
+        );
+        let xueqian_in_top3 = decoded
+            .iter()
+            .take(3)
+            .filter(|s| s.ends_with("血铅"))
+            .count();
+        assert!(
+            xueqian_in_top3 <= 2,
+            "Top-3 共享「血铅」后缀不得超过 2 席: {decoded:?}"
+        );
+        // 叠加 `.gram` 搭配信号后（含边回退补偿 `collocation_edge_offset = 3.0`），「挣了些钱」稳居第 1。
+        let gram_scorer = |tail: &str, word: &str, _is_rear: bool| match (tail, word) {
+            (t, "挣了") if t.ends_with("是") => -0.62,
+            (t, "些") if t.ends_with("挣了") => -0.55,
+            (t, "钱") if t.ends_with("挣了些") => 0.54,
+            _ => -6.0,
+        };
+        let gram_opts = LatticeOptions {
+            collocation_scorer: Some(&gram_scorer),
+            collocation_weight: 1.0,
+            collocation_edge_offset: 3.0,
+            preceding_context: "应该多少还是",
+            ..v2_opts.clone()
+        };
+        let gram_decoded = decode("zheng'le'xie'qian", &suffix_rows, &gram_opts);
+        assert_eq!(
+            gram_decoded[0].sentence, "挣了些钱",
+            "叠加 .gram 搭配后「挣了些钱」应稳居 #1: {gram_decoded:?}"
         );
 
-        // 已有真实三字词条「洗个澡」时保留原边权重，不重复插入。
-        let existing_graph = build_graph(&syllables("xi'ge'zao"), &mut lookup(&rows), &options);
-        let existing_edges: Vec<&Edge> = existing_graph[0]
-            .iter()
-            .filter(|e| e.end == 3 && e.word == "洗个澡")
-            .collect();
-        assert_eq!(existing_edges.len(), 1);
-        assert!((existing_edges[0].log_prob - edge_log_prob(42_000, 3, &options)).abs() < 1e-12);
-
-        // 含重复跨度时 `build_graph` 与 `build_graph_borrowed` 结果逐项一致。
-        let repeated = syllables("xu'ge'yuan'xu'ge'yuan");
-        let owned_graph = build_graph(&repeated, &mut lookup(&rows), &options);
-        let mut borrowed_lookup = |span: &[String]| -> &[LatticeLexeme] {
-            rows.get(&span.join("'")).map(Vec::as_slice).unwrap_or(&[])
+        // 2. 即使人为把 `[2, 2]` 权重抬高到远超窗口，后缀配额 + 新骨架优先于 deferred 回填仍保证
+        //    Top-3 最多 2 条「血铅」且 `[2, 1, 1]` 在 deferred 之前入池。
+        let extreme_rows = table(&[
+            (
+                "zheng'le",
+                &[("挣了", 500_000), ("争了", 480_000), ("整了", 460_000)],
+            ),
+            ("xie'qian", &[("血铅", 5_000_000)]),
+            ("xie", &[("些", 300_000)]),
+            ("qian", &[("钱", 300_000)]),
+        ]);
+        let tight_margin = LatticeOptions {
+            terminal_diversity_margin: 1.0,
+            ..v2_opts.clone()
         };
-        let borrowed_graph = build_graph_borrowed(&repeated, &mut borrowed_lookup, &options);
-        for col in [0usize, 3usize] {
-            let owned_vo: Vec<_> = owned_graph[col]
+        let extreme: Vec<String> = decode("zheng'le'xie'qian", &extreme_rows, &tight_margin)
+            .into_iter()
+            .map(|p| p.sentence)
+            .collect();
+        assert_eq!(
+            extreme
                 .iter()
-                .filter(|e| e.word == "许个愿")
-                .map(|e| (e.end, &e.key, e.log_prob.to_bits()))
-                .collect();
-            let borrowed_vo: Vec<_> = borrowed_graph[col]
+                .take(3)
+                .filter(|s| s.ends_with("血铅"))
+                .count(),
+            2,
+            "即使 [2,2] 大幅领先，Top-3 同后缀也绝不超过 2 席: {extreme:?}"
+        );
+        let pos_novel = extreme
+            .iter()
+            .position(|s| s == "挣了些钱")
+            .expect("应召回新骨架");
+        let pos_deferred = extreme
+            .iter()
+            .position(|s| s == "整了血铅")
+            .expect("应回填暂缓路径");
+        assert!(
+            pos_novel < pos_deferred,
+            "未采纳的新骨架路径必须优先于 deferred 同骨架路径入池: {extreme:?}"
+        );
+
+        // 3. `n == 2` 时，30 条精确双字词不得把 `[1, 1]` 拆字路径挤出 `nbest = 32`（至少预留 8 席）。
+        let dict_two: Vec<(&str, i64)> = [
+            "格式", "歌诗", "隔世", "各市", "革室", "葛氏", "割尸", "阁室", "格氏", "戈什", "格事",
+            "歌室", "隔室", "各室", "革事", "葛事", "割事", "阁事", "格世", "歌世", "隔事", "各世",
+            "革世", "葛世", "割世", "阁世", "格诗", "隔诗", "各诗", "革诗",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, &w)| (w, 500_000 - (i as i64) * 1_000))
+        .collect();
+        let mut two_rows = Table::new();
+        two_rows.insert(
+            "ge'shi".into(),
+            dict_two
                 .iter()
-                .filter(|e| e.word == "许个愿")
-                .map(|e| (e.end, &e.key, e.log_prob.to_bits()))
-                .collect();
-            assert_eq!(owned_vo.len(), 1);
-            assert_eq!(owned_vo, borrowed_vo);
-        }
+                .map(|&(w, wt)| row("ge'shi", w, wt))
+                .collect(),
+        );
+        two_rows.insert(
+            "ge".into(),
+            [
+                ("个", 14_000_000),
+                ("各", 800_000),
+                ("哥", 500_000),
+                ("歌", 400_000),
+            ]
+            .iter()
+            .map(|&(w, wt)| row("ge", w, wt))
+            .collect(),
+        );
+        two_rows.insert(
+            "shi".into(),
+            [("事", 2_000_000), ("是", 20_000_000), ("时", 3_000_000)]
+                .iter()
+                .map(|&(w, wt)| row("shi", w, wt))
+                .collect(),
+        );
+        let two_opts = LatticeOptions {
+            nbest: 32,
+            ..v2_opts
+        };
+        let two_decoded = decode("ge'shi", &two_rows, &two_opts);
+        let split_count = two_decoded.iter().filter(|p| p.words.len() == 2).count();
+        assert!(
+            split_count >= TWO_SYLLABLE_SPLIT_RESERVE,
+            "双音节 nbest=32 应至少保留 {TWO_SYLLABLE_SPLIT_RESERVE} 席 [1,1] 拆字路径，实际 {split_count}"
+        );
+        assert!(
+            two_decoded.iter().take(14).any(|p| p.sentence == "个事"),
+            "双音节 `[1,1]` 拆字路径「个事」应直接落入 Top-14 神经融合池: {:?}",
+            two_decoded
+                .iter()
+                .take(14)
+                .map(|p| &p.sentence)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -2651,6 +3982,160 @@ pub(super) mod tests {
         assert!(observed
             .iter()
             .any(|(tail, word, is_rear)| tail == "常认真地培养忠实" && word == "顾客" && *is_rear));
+    }
+
+    #[test]
+    fn confusion_network_1span_perturbation_recovers_early_and_medial_rivals_into_top16() {
+        // 构造 14 音节长句：末位与近末位充满高熵同音（`改/盖/该/概/钙` × `的/地/得`），
+        // 窄束宽前向搜索会把末列耗在尾部同音上；混淆网络 1-Span 轮询扰动必须把句首同音、
+        // 句中 `[2]->[1,1]` 拆字与 `[1,1]->[2]` 合并全部召回进 Top-16，且分值与整句重算完全一致。
+        let rows = table(&[
+            ("wo", &[("我", 29_000_000)]),
+            (
+                "xiang",
+                &[("向", 2_200_000), ("想", 1_600_000), ("像", 900_000)],
+            ),
+            ("qu'kan", &[("去看", 60_000)]),
+            ("yi'xia", &[("一下", 450_000)]),
+            ("na'ge", &[("那个", 400_000)]),
+            ("wan'xi", &[("惋惜", 200_000)]),
+            (
+                "wan",
+                &[
+                    ("万", 4_000_000),
+                    ("完", 3_500_000),
+                    ("晚", 2_500_000),
+                    ("玩", 1_800_000),
+                    ("弯", 900_000),
+                    ("碗", 650_000),
+                ],
+            ),
+            (
+                "xi",
+                &[
+                    ("西", 4_200_000),
+                    ("息", 3_100_000),
+                    ("希", 2_400_000),
+                    ("习", 1_900_000),
+                    ("戏", 1_200_000),
+                    ("洗", 700_000),
+                ],
+            ),
+            ("he", &[("和", 18_000_000), ("合", 2_000_000)]),
+            ("li", &[("里", 3_200_000), ("理", 2_400_000)]),
+            ("he'li", &[("湖里", 3_500)]),
+            (
+                "de",
+                &[("的", 28_000_000), ("地", 9_000_000), ("得", 8_500_000)],
+            ),
+            (
+                "gai",
+                &[
+                    ("改", 2_500_000),
+                    ("盖", 2_400_000),
+                    ("该", 2_300_000),
+                    ("概", 2_200_000),
+                    ("钙", 2_100_000),
+                ],
+            ),
+        ]);
+        let gram_scorer = |tail: &str, word: &str, _is_rear: bool| match (tail, word) {
+            (t, "碗") if t.ends_with("那个") => -2.2,
+            (t, "洗") if t.ends_with("碗") => -2.5,
+            _ => -6.0,
+        };
+        let v2_opts = LatticeOptions {
+            beam: 12,
+            nbest: 32,
+            terminal_beam: 24,
+            terminal_max_per_prefix: 2,
+            terminal_max_per_suffix: 2,
+            terminal_max_per_segmentation: 6,
+            terminal_diversity_margin: 24.0,
+            collocation_scorer: Some(&gram_scorer),
+            collocation_weight: 1.0,
+            collocation_edge_offset: 3.0,
+            ..LatticeOptions::default()
+        };
+        let input = "wo'xiang'qu'kan'yi'xia'na'ge'wan'xi'he'li'de'gai";
+        let paths = decode(input, &rows, &v2_opts);
+        assert!(paths.len() >= 16, "应产出足够候选: {}", paths.len());
+        assert_eq!(paths[0].sentence, "我向去看一下那个惋惜和里的改");
+
+        // 校验全部候选去重且读音跨度严格覆盖 14 音节。
+        let unique: HashSet<&str> = paths.iter().map(|p| p.sentence.as_str()).collect();
+        assert_eq!(
+            unique.len(),
+            paths.len(),
+            "混淆网络扰动结果不得出现重复整句"
+        );
+        for path in &paths {
+            assert_eq!(
+                path.key.split('\'').count(),
+                14,
+                "扰动句读音必须严格覆盖 14 音节: {} ({})",
+                path.sentence,
+                path.key
+            );
+        }
+
+        let top16: Vec<&str> = paths.iter().take(16).map(|p| p.sentence.as_str()).collect();
+        // 1. 句首同跨度同音替补 `向 -> 想` 落入 Top-16 且局部增量分值严格精确。
+        let xiang_path = paths
+            .iter()
+            .take(16)
+            .find(|p| p.sentence == "我想去看一下那个惋惜和里的改")
+            .unwrap_or_else(|| panic!("句首同音替补应落入 Top-16: {top16:?}"));
+        let expected_xiang_lp = paths[0].log_prob
+            + (edge_log_prob(1_600_000, 1, &v2_opts) - edge_log_prob(2_200_000, 1, &v2_opts));
+        assert!(
+            (xiang_path.log_prob - expected_xiang_lp).abs() < 1e-9,
+            "句首同音替补对数概率应与精确整句重算一致: got {}, expect {}",
+            xiang_path.log_prob,
+            expected_xiang_lp
+        );
+
+        // 2. 句中 `[2] -> [1, 1]` 拆字替补 `惋惜 -> 碗+洗`（两单字均为 #6 非首位）凭借双向语境 DP 落入 Top-16。
+        let wanxi_path = paths
+            .iter()
+            .take(16)
+            .find(|p| p.sentence == "我向去看一下那个碗洗和里的改")
+            .unwrap_or_else(|| panic!("句中 [2]->[1,1] 拆字替补应落入 Top-16: {top16:?}"));
+        let expected_wanxi_lp = paths[0].log_prob
+            + (edge_log_prob(650_000, 1, &v2_opts)
+                + (-2.2 + 3.0)
+                + edge_log_prob(700_000, 1, &v2_opts)
+                + (-2.5 + 3.0)
+                - (edge_log_prob(200_000, 2, &v2_opts) + (-6.0 + 3.0)));
+        assert!(
+            (wanxi_path.log_prob - expected_wanxi_lp).abs() < 1e-9,
+            "句中拆字替补对数概率应与精确整句重算一致: got {}, expect {}",
+            wanxi_path.log_prob,
+            expected_wanxi_lp
+        );
+
+        // 3. 句中 `[1, 1] -> [2]` 合并替补 `和+里 -> 湖里` 落入 Top-16。
+        assert!(
+            top16.contains(&"我向去看一下那个惋惜湖里的改"),
+            "句中 [1,1]->[2] 合并替补应落入 Top-16: {top16:?}"
+        );
+
+        // 4. 验证 `terminal_max_per_suffix == 0` 时扰动通道严格关闭（冻结测试零扰动）。
+        let legacy_opts = LatticeOptions {
+            terminal_max_per_prefix: 0,
+            terminal_max_per_suffix: 0,
+            terminal_max_per_segmentation: 0,
+            beam: 4,
+            nbest: 8,
+            terminal_beam: 8,
+            ..v2_opts
+        };
+        let legacy = decode(input, &rows, &legacy_opts);
+        assert!(
+            legacy.len() <= 8,
+            "关闭后缀多样性时不得触发混淆网络扩展: {}",
+            legacy.len()
+        );
     }
 }
 

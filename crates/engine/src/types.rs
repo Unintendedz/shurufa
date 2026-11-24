@@ -35,6 +35,10 @@ pub enum CandidateSource {
     Collocation = 17,
     /// 连续多语言转换的完整路径；整段消费，不调频、不学习跨语言整句，也不参与候选管理。
     Multilingual = 18,
+    /// `neural_v2` 统一概率神经重排选出的候选行（Tier 1 共享上文前缀树打分融合）。
+    NeuralV2 = 19,
+    /// `neural_v2` 拼音约束束搜索（Tier 1 受限解码）新生成的整句路径。
+    NeuralConstrained = 20,
 }
 
 impl CandidateSource {
@@ -58,6 +62,8 @@ impl CandidateSource {
             16 => Self::Contact,
             17 => Self::Collocation,
             18 => Self::Multilingual,
+            19 => Self::NeuralV2,
+            20 => Self::NeuralConstrained,
             _ => return None,
         })
     }
@@ -80,10 +86,17 @@ impl CandidateSource {
         self.is_online() || matches!(self, Self::AiPending | Self::CloudPending)
     }
 
-    /// 整句猜出来的行：词格 `Generated`/`Collocation`、解码器 `Fallback`。
+    /// 整句猜出来的行：词格 `Generated`/`Collocation`、`NeuralV2`/`NeuralConstrained`、解码器 `Fallback`。
     /// 它们的选中都整段上屏、按词边界记进个人上下文、不落词库调频。
     pub fn is_generated_or_fallback(self) -> bool {
-        matches!(self, Self::Generated | Self::Fallback | Self::Collocation)
+        matches!(
+            self,
+            Self::Generated
+                | Self::Fallback
+                | Self::Collocation
+                | Self::NeuralV2
+                | Self::NeuralConstrained
+        )
     }
 
     /// Rows a direct selection stores as a user phrase, because there is no dictionary row whose frequency could be adjusted instead.
@@ -808,6 +821,7 @@ pub struct WordItem {
 
 impl WordItem {
     /// 只把真实词网格整句的分交给独立模型；字典权重和其它来源没有同一计分单位。
+    /// v2 统一对数概率底座下 `self.weight` 已是长度中性的自然对数毫 nat，直接透传，不再扣旧词长奖励或 `-30 nats` 隔音重罚。
     pub fn static_evidence(&self) -> Option<crate::ordering::StaticEvidence> {
         if !self.sentence_association
             || !matches!(
@@ -815,25 +829,16 @@ impl WordItem {
                 CandidateSource::Generated
                     | CandidateSource::NeuralKeyboard
                     | CandidateSource::Collocation
+                    | CandidateSource::NeuralV2
+                    | CandidateSource::NeuralConstrained
             )
             || self.canonical_pinyin.is_empty()
             || self.word.is_empty()
         {
             return None;
         }
-        let syllables = self.canonical_pinyin.split('\'').count();
-        let bonus =
-            (crate::lattice::decode::PHRASE_LENGTH_BONUS * 1000.0 * syllables as f64) as i64;
-        // 隔音多拆出的音节若凑成双字词，会比主切分单字边少受一次 `ln(unigram_z)` 归一惩罚并稀释字数分母；
-        // 按每多一音节额外扣除 1.5 倍词长奖励（30 nats），压住低频隔音误切并保留高频专名语境晋升空间。
-        let extra_hiatus_penalty = (crate::lattice::decode::PHRASE_LENGTH_BONUS
-            * 1500.0
-            * f64::from(self.extra_syllables)) as i64;
         Some(crate::ordering::StaticEvidence {
-            log_prob_milli_nats: self
-                .weight
-                .saturating_sub(bonus)
-                .saturating_sub(extra_hiatus_penalty),
+            log_prob_milli_nats: self.weight,
             characters: self.word.chars().count(),
             keyboard_neural: self.keyboard_neural,
         })
@@ -1659,7 +1664,7 @@ mod tests {
         for value in 0..=u8::MAX {
             match CandidateSource::from_u8(value) {
                 Some(source) => assert_eq!(source as u8, value),
-                None => assert!(value == 10 || value > 14, "{value}"),
+                None => assert!(value == 10 || value > 20, "{value}"),
             }
         }
         let japanese = CandidateSource::MixedJapanese;
@@ -2278,18 +2283,29 @@ mod tests {
     }
 
     #[test]
-    fn lattice_static_evidence_removes_syllable_bonus_and_counts_unicode_characters() {
-        let mut item = WordItem::new("xian", "西安", 36000, CandidateSource::Generated, "xi'an");
+    fn lattice_static_evidence_preserves_unified_log_prob_and_counts_unicode_characters() {
+        let mut item = WordItem::new("xian", "西安", -8500, CandidateSource::Generated, "xi'an");
         assert_eq!(item.static_evidence(), None);
         item.sentence_association = true;
+        item.extra_syllables = 1;
         let expected = Some(crate::ordering::StaticEvidence {
-            log_prob_milli_nats: -4000,
+            log_prob_milli_nats: -8500,
             characters: 2,
             keyboard_neural: None,
         });
         assert_eq!(item.static_evidence(), expected);
-        item.source = CandidateSource::NeuralKeyboard;
-        assert_eq!(item.static_evidence(), expected);
+        for source in [
+            CandidateSource::NeuralKeyboard,
+            CandidateSource::NeuralV2,
+            CandidateSource::NeuralConstrained,
+        ] {
+            item.source = source;
+            assert_eq!(item.static_evidence(), expected);
+        }
+        assert!(CandidateSource::NeuralV2.is_generated_or_fallback());
+        assert!(CandidateSource::NeuralV2.is_sentence_learning());
+        assert!(CandidateSource::NeuralConstrained.is_generated_or_fallback());
+        assert!(CandidateSource::NeuralConstrained.is_sentence_learning());
         item.source = CandidateSource::Database;
         assert_eq!(item.static_evidence(), None);
         item.source = CandidateSource::Generated;

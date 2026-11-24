@@ -38,6 +38,7 @@
 #import "../voice/LocalVoiceRequest.h"
 #import "../voice/VoiceContextCapture.h"
 #import "../voice/LocalPolishServer.h"
+#import "../neural/ShurufaNeuralClient.h"
 #import "../voice/VoicePolishClient.h"
 #import "../voice/VoicePipelineHelper.h"
 #import "../voice/VoiceEditTracker.h"
@@ -1934,6 +1935,14 @@ static NSImage *MSIMECandidateLogoImage() {
     NSTimer *_settledTimer;
     // 单独轮询后台评分；取消停顿计时不得丢失评分中的模型。
     NSTimer *_settledPollTimer;
+    // Shurufa v2 Tier 1 非阻塞异步神经解码状态（仅在 Shurufa 版本且后台服务可用时启用）。
+    BOOL _neuralV2Enabled;
+    BOOL _neuralDeferredRenderPending;
+    uint64_t _neuralInFlightGeneration;
+    uint64_t _neuralDispatchedAtNs;
+    dispatch_source_t _neuralDeferredRenderTimer;
+    dispatch_source_t _neuralPrefillTimer;
+    NSString *_lastNeuralPrefilledContext;
     uint64_t _settledToken;
     uint64_t _settledPollEpoch;
     MSIMEClientSession *_settledPollSession;
@@ -2123,12 +2132,19 @@ static NSImage *MSIMECandidateLogoImage() {
     NSString *bundle = [(id)client respondsToSelector:@selector(bundleIdentifier)]
         ? [(id)client bundleIdentifier] : nil;
     if (msime::mac::IsTerminalBundleIdentifier(bundle)) return;
+    const NSUInteger maxContextUnits = _neuralV2Enabled ? 512 : 96;
     BOOL provedReadable = NO;
     NSString *preceding = MSIMETextClientPrecedingContext(
-        client, 96, _readableDocumentClient == client, &provedReadable);
+        client, maxContextUnits, _readableDocumentClient == client, &provedReadable);
     if (provedReadable) _readableDocumentClient = client;
-    if (!preceding) preceding = [self readAXPrecedingContextForBundle:bundle maxUTF16Units:96];
-    if (preceding) [_session setSurroundingContext:preceding error:nil];
+    if (!preceding) preceding = [self readAXPrecedingContextForBundle:bundle maxUTF16Units:maxContextUnits];
+    if (preceding) {
+        [_session setSurroundingContext:preceding error:nil];
+        if ([self neuralV2Active] && (!_lastNeuralPrefilledContext || ![preceding isEqualToString:_lastNeuralPrefilledContext])) {
+            _lastNeuralPrefilledContext = [preceding copy];
+            [[ShurufaNeuralClient sharedClient] prefillContext:preceding];
+        }
+    }
 }
 
 // Replaces the character left of the caret when the host exposes no text there and the shadow says it is `expected`. Returns NO, having posted nothing, when the document is readable (including a selection or a caret at its start), the shadow disagrees or is unknown, or the posted rewrite is not available.
@@ -4181,10 +4197,213 @@ static const NSTimeInterval kSettledRerankPoll = 1.0 / 60.0;
     [self scheduleSettledRerank];
 }
 
+/// Shurufa v2 Tier 1 非阻塞端侧神经解码状态判定（安全密码框、英文模式与缺失模型时严格关闭）。
+- (BOOL)neuralV2Active {
+    return MSIMEEditionIsShurufa() && _neuralV2Enabled && _session && _activeClient && !_focusPending &&
+        !_appearance.englishMode && ![self secureEventInputActive] && [ShurufaNeuralClient sharedClient].available;
+}
+
+- (void)cancelNeuralDeferredRender {
+    if (_neuralDeferredRenderTimer) {
+        dispatch_source_cancel(_neuralDeferredRenderTimer);
+        _neuralDeferredRenderTimer = nil;
+    }
+    _neuralDeferredRenderPending = NO;
+}
+
+/// 当用户在 22 ms 延迟绘制窗口内按下空格、数字选词或导航键时立即同步落画 Tier 0 候选，
+/// 确保面板渲染代次与当前视图严格对齐，绝不出现快打吞键或误判过期。
+- (void)flushPendingNeuralDeferredRender {
+    if (!_neuralDeferredRenderPending) return;
+    [self cancelNeuralDeferredRender];
+    if (_activeClient && _session) {
+        [self renderCandidates];
+        [self synchronizeCandidateServices];
+    }
+}
+
+- (void)cancelNeuralPrefill {
+    if (_neuralPrefillTimer) {
+        dispatch_source_cancel(_neuralPrefillTimer);
+        _neuralPrefillTimer = nil;
+    }
+}
+
+- (void)stopNeuralV2Activity {
+    [self cancelNeuralDeferredRender];
+    [self cancelNeuralPrefill];
+    _neuralInFlightGeneration = 0;
+    if (MSIMEEditionIsShurufa() && _neuralV2Enabled) {
+        [[ShurufaNeuralClient sharedClient] cancelPendingDecodeRequests];
+    }
+}
+
+/// 根据当前会话与后台服务就绪度开关 Tier 1 神经解码；不可用时零副作用回退纯 Tier 0。
+- (void)configureNeuralV2ForSession {
+    if (!_session || ![_session respondsToSelector:@selector(setNeuralV2Enabled:error:)]) {
+        _neuralV2Enabled = NO;
+        return;
+    }
+    if (!MSIMEEditionIsShurufa()) {
+        _neuralV2Enabled = NO;
+        return;
+    }
+    ShurufaNeuralClient *client = [ShurufaNeuralClient sharedClient];
+    NSDictionary *hostOptions = [_session respondsToSelector:@selector(hostOptions)] ? _session.hostOptions : nil;
+    NSString *resources = [hostOptions isKindOfClass:NSDictionary.class] ? hostOptions[@"resources"] : nil;
+    if ([resources isKindOfClass:NSString.class] && resources.length) {
+        [client configureResourcesDirectory:resources];
+    }
+    const BOOL available = client.available;
+    _neuralV2Enabled = available && [_session setNeuralV2Enabled:YES error:nil];
+    if (!_neuralV2Enabled) {
+        [_session setNeuralV2Enabled:NO error:nil];
+    } else if (![self secureEventInputActive]) {
+        [self scheduleNeuralContextPrefill];
+    }
+}
+
+/// 空闲 50 ms 防抖后向独立后台服务预热完整含标点上文的 `seq_0` KV-Cache（安全密码框永不预热）。
+- (void)scheduleNeuralContextPrefill {
+    [self cancelNeuralPrefill];
+    if (![self neuralV2Active]) return;
+    if (![_session respondsToSelector:@selector(neuralPrefillContextWithError:)]) return;
+    MSIMEClientSession *session = _session;
+    id client = _activeClient;
+    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    dispatch_source_set_timer(timer,
+                              dispatch_time(DISPATCH_TIME_NOW, static_cast<int64_t>(50ULL * NSEC_PER_MSEC)),
+                              DISPATCH_TIME_FOREVER,
+                              5ULL * NSEC_PER_MSEC);
+    __weak MSIMEInputController *weakSelf = self;
+    dispatch_source_set_event_handler(timer, ^{
+        MSIMEInputController *controller = weakSelf;
+        if (!controller || controller->_neuralPrefillTimer != timer) return;
+        [controller cancelNeuralPrefill];
+        if (![controller neuralV2Active] || controller->_session != session || controller->_activeClient != client) return;
+        if ([controller->_view[@"editing_text"] isKindOfClass:NSString.class] && [controller->_view[@"editing_text"] length] > 0) return;
+        NSString *context = [session neuralPrefillContextWithError:nil];
+        if (![context isKindOfClass:NSString.class]) return;
+        if (controller->_lastNeuralPrefilledContext && [context isEqualToString:controller->_lastNeuralPrefilledContext]) return;
+        controller->_lastNeuralPrefilledContext = [context copy];
+        [[ShurufaNeuralClient sharedClient] prefillContext:context];
+    });
+    _neuralPrefillTimer = timer;
+    dispatch_resume(timer);
+}
+
+/// 判断本次视图迁移是否应异步派发 Tier 1 神经解码：仅在组成串/预编辑发生实质变化且用户停留在首页首槽时触发。
+- (BOOL)shouldDispatchNeuralV2ForTransition:(NSDictionary *)displayTransition previousView:(NSDictionary *)previousView {
+    if (![self neuralV2Active]) return NO;
+    if (![_session respondsToSelector:@selector(takeNeuralRequestWithError:)] ||
+        ![_session respondsToSelector:@selector(applyNeuralResponseData:lockSlot0:error:)]) return NO;
+    if ([displayTransition[@"commit"] isKindOfClass:NSString.class] && [displayTransition[@"commit"] length] > 0) return NO;
+    if (_expandedCandidates || [self glossSensePageActive] || MSIMECandidateListOpen(_view)) return NO;
+    NSString *editing = [_view[@"editing_text"] isKindOfClass:NSString.class] ? _view[@"editing_text"] : nil;
+    if (!editing.length) return NO;
+    NSUInteger page = 0;
+    MSIMEStrictUnsignedIntegerValue(_view[@"page"], &page);
+    if (page != 0) return NO;
+    NSArray *candidates = [_view[@"candidates"] isKindOfClass:NSArray.class] ? _view[@"candidates"] : nil;
+    if (!candidates.count) return NO;
+    // 用户主动用方向键移动高亮后，不再因纯导航重发神经请求。
+    if (![candidates.firstObject isKindOfClass:NSDictionary.class] ||
+        !MSIMEStrictBoolean(candidates.firstObject[@"highlighted"])) return NO;
+    NSString *prevEditing = [previousView[@"editing_text"] isKindOfClass:NSString.class] ? previousView[@"editing_text"] : @"";
+    NSString *prevPreedit = [previousView[@"preedit"] isKindOfClass:NSString.class] ? previousView[@"preedit"] : @"";
+    NSString *prevPrefix = [previousView[@"phrase_prefix"] isKindOfClass:NSString.class] ? previousView[@"phrase_prefix"] : @"";
+    NSString *curPreedit = [_view[@"preedit"] isKindOfClass:NSString.class] ? _view[@"preedit"] : @"";
+    NSString *curPrefix = [_view[@"phrase_prefix"] isKindOfClass:NSString.class] ? _view[@"phrase_prefix"] : @"";
+    return ![editing isEqualToString:prevEditing] || ![curPreedit isEqualToString:prevPreedit] || ![curPrefix isEqualToString:prevPrefix];
+}
+
+/// 异步派发 Tier 1 神经解码并武装 22 ms 无感延迟绘制定时器；超过 80 ms 回包自动硬锁槽 0，服务异常零感知回落 Tier 0。
+- (BOOL)tryDispatchNeuralV2Decode {
+    NSDictionary *request = [_session takeNeuralRequestWithError:nil];
+    if (![request isKindOfClass:NSDictionary.class]) return NO;
+    uint64_t generation = 0;
+    if (!MSIMEStrictUnsignedInteger(request[@"generation"], &generation)) return NO;
+    NSData *requestData = [NSJSONSerialization dataWithJSONObject:request options:0 error:nil];
+    if (!requestData.length) return NO;
+
+    [self cancelNeuralPrefill];
+    [self cancelNeuralDeferredRender];
+    _neuralInFlightGeneration = generation;
+    _neuralDispatchedAtNs = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    _neuralDeferredRenderPending = YES;
+
+    MSIMEClientSession *session = _session;
+    id client = _activeClient;
+    const uint64_t dispatchedAtNs = _neuralDispatchedAtNs;
+    __weak MSIMEInputController *weakSelf = self;
+
+    // 22 ms 无感延迟绘制窗口：若端侧 Metal 推理在 22 ms 内回包则取消定时器单次绘制（0% 闪烁）；
+    // 若超过 22 ms 则准时先绘出 Tier 0 候选，绝不拖慢视觉反馈。
+    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    dispatch_source_set_timer(timer,
+                              dispatch_time(DISPATCH_TIME_NOW, static_cast<int64_t>(22ULL * NSEC_PER_MSEC)),
+                              DISPATCH_TIME_FOREVER,
+                              1ULL * NSEC_PER_MSEC);
+    dispatch_source_set_event_handler(timer, ^{
+        MSIMEInputController *controller = weakSelf;
+        if (!controller || controller->_neuralDeferredRenderTimer != timer) return;
+        [controller cancelNeuralDeferredRender];
+        if (controller->_activeClient == client && controller->_session == session) {
+            [controller renderCandidates];
+            [controller synchronizeCandidateServices];
+        }
+    });
+    _neuralDeferredRenderTimer = timer;
+    dispatch_resume(timer);
+
+    [[ShurufaNeuralClient sharedClient] decodeRequestData:requestData
+                                               generation:generation
+                                               completion:^(NSData * _Nullable responseData,
+                                                            uint64_t respGen,
+                                                            double ipcMs) {
+        (void)ipcMs;
+        MSIMEInputController *controller = weakSelf;
+        if (!controller) return;
+        if (controller->_session != session || controller->_activeClient != client ||
+            controller->_neuralInFlightGeneration != respGen ||
+            ![controller->_view[@"generation"] isEqual:@(respGen)] ||
+            controller->_focusPending || controller->_appearance.englishMode ||
+            [controller secureEventInputActive]) {
+            return;
+        }
+        const BOOL wasDeferred = controller->_neuralDeferredRenderPending;
+        [controller cancelNeuralDeferredRender];
+        const double elapsedMs = static_cast<double>(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - dispatchedAtNs) / 1e6;
+        // 超过 80 ms 迟到回包强制锁定槽 0，防止用户扫视确认首选后发生首槽跳动。
+        const BOOL lockSlot0 = (elapsedMs > 80.0);
+        BOOL appliedMoved = NO;
+        if (responseData.length > 0) {
+            NSDictionary *applied = [session applyNeuralResponseData:responseData lockSlot0:lockSlot0 error:nil];
+            if (MSIMEStrictBoolean(applied[@"moved"]) && [applied[@"view"] isKindOfClass:NSDictionary.class]) {
+                controller->_view = applied[@"view"];
+                appliedMoved = YES;
+            }
+        }
+        if (msime_macos_diagnostic_enabled()) {
+            msime_macos_diagnostic_writef(
+                "[neural-v2] gen=%llu elapsed_ms=%.2f deferred=%d lock_slot0=%d moved=%d ok=%d",
+                static_cast<unsigned long long>(respGen), elapsedMs,
+                wasDeferred ? 1 : 0, lockSlot0 ? 1 : 0, appliedMoved ? 1 : 0,
+                responseData.length > 0 ? 1 : 0);
+        }
+        if (appliedMoved || wasDeferred) {
+            [controller renderCandidates];
+            [controller synchronizeCandidateServices];
+        }
+    }];
+    return YES;
+}
+
 /// 每次刷新都重新等待真实输入停顿，再在后台评分；新按键继续立即处理。
 /// 结果仅发布到仍匹配的组字；未安装模型时立即结束，仅顺序变化才重绘候选窗口。
 - (void)scheduleSettledRerank {
     [self cancelSettledRerank];
+    if (_neuralV2Enabled) return;
     if (_settledToken != 0) return;
     if (!_activeClient || !_session || _focusPending || _appearance.englishMode) return;
     const uint64_t epoch = _cloudEpoch;
@@ -5614,6 +5833,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     [MSIMEInputSessionRecoveryPanel dismissForDelegate:self];
     [self stopEditableShiftMouseMonitoring];
     [self stopSettledScoring];
+    [self stopNeuralV2Activity];
     [_capsLockTapTimer invalidate];
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [NSDistributedNotificationCenter.defaultCenter removeObserver:self];
@@ -7059,6 +7279,7 @@ static NSString *MSIMEVoiceArchiveFailureReason(MSIMEVoiceFailure failure, NSStr
         [self apply:finished];
         [_session setFocused:NO error:nil];
         [self stopSettledScoring];
+        [self stopNeuralV2Activity];
         [_session closeWithError:nil];
         _session = nil;
         [_preferencesTimer invalidate];
@@ -7157,6 +7378,8 @@ static constexpr NSUInteger MSIMEIdleDictionarySessionLimit = 4;
     _managedEnglishComposition = NO;
     [_session setFocused:NO error:nil];
     [self stopSettledScoring];
+    [self stopNeuralV2Activity];
+    _neuralV2Enabled = NO;
     [_session closeWithError:nil];
     _session = nil;
     _focusPending = YES;
@@ -7182,6 +7405,8 @@ static constexpr NSUInteger MSIMEIdleDictionarySessionLimit = 4;
     else if (![self ownsPersistentVoiceRecording]) { _voicePermissionToken = nil; _voiceHoldShortcut.reset(); _configuredVoiceShortcut.reset(); }
     [self cancelCandidateTranslations];
     [self cancelCloudCandidates];
+    [self stopNeuralV2Activity];
+    _lastNeuralPrefilledContext = nil;
     [self resetCandidateAnchor];
     [self claimCandidatePanel];
     [self resetModifierTap];
@@ -7359,6 +7584,8 @@ static __weak MSIMEInputController *MSIMEMusicOwner;
     [self resetCandidateAnchor];
     [self cancelCandidateTranslations];
     [self cancelCloudCandidates];
+    [self stopNeuralV2Activity];
+    _neuralV2Enabled = NO;
     [self resetModifierTap];
     [self abandonCapsLockTap];
     _requestedPageSize = 0;
@@ -7586,6 +7813,7 @@ static NSString *MSIMESessionUnavailableReason(NSDictionary *options, NSError *e
         [self confirmFieldTraitsBeforeFocus];
         [self apply:[_session setFocused:YES error:nil]];
         _focusPending = NO;
+        [self configureNeuralV2ForSession];
         [self refreshTypingEffectSettings];
         // 激活时若处于英文模式就还没有会话，那次 claimBackgroundMusic 发给的是 nil，播放器从没被告知输入法处于活动状态；会话在之后切回中文、按键或菜单操作时才建好，这里补上，否则背景音乐要等下一次偏好变化才响。
         if (created && MSIMEMusicOwner == self) [self claimBackgroundMusic];
@@ -7950,6 +8178,8 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
             MSIMEVoiceProviderSocket(), _voiceGeneration);
     [self cancelCandidateTranslations];
     [self cancelCloudCandidates];
+    [self stopNeuralV2Activity];
+    _lastNeuralPrefilledContext = nil;
     [self discardGlossSensePage];
     [self discardExpandedCandidates];
     [self resetModifierTap];
@@ -8542,6 +8772,8 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         [self suspendVoiceForFocusChange];
         [self cancelCandidateTranslations];
         [self cancelCloudCandidates];
+        [self stopNeuralV2Activity];
+        _lastNeuralPrefilledContext = nil;
         [self resetCandidateAnchor];
         [self resetModifierTap];
         _preferenceLoadState.reset();
@@ -8620,6 +8852,15 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         return YES;
     }
     if (event.type != NSEventTypeKeyDown) return NO;
+    if (_neuralDeferredRenderPending) {
+        const NSEventModifierFlags mods = event.modifierFlags &
+            (NSEventModifierFlagShift | NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagCommand);
+        const unichar ch = event.characters.length == 1 ? [event.characters characterAtIndex:0] : 0;
+        const BOOL plainLetter = (mods == 0) && (ch >= 'a' && ch <= 'z');
+        if (!plainLetter) {
+            [self flushPendingNeuralDeferredRender];
+        }
+    }
     [_voiceEditTracker noteKeyEvent:event];
     if (MSIMEEditionIsShurufa()) {
         const auto flags = event.modifierFlags & (NSEventModifierFlagShift | NSEventModifierFlagControl |
@@ -9534,6 +9775,7 @@ static NSRange MSIMEVoiceReplacementRangeForClient(id client, BOOL replaceSelect
 - (void)apply:(NSDictionary *)transition {
     ++_applySequence;
     if (!transition || !_activeClient) return;
+    [self cancelNeuralDeferredRender];
     // An Engine answer replaces the view the sense page was drawn over, so the page goes with it.
     [self discardGlossSensePage];
     // A commit ends the conversion it belonged to; so does a composition that has gone away.
@@ -9700,8 +9942,18 @@ static NSRange MSIMEVoiceReplacementRangeForClient(id client, BOOL replaceSelect
     if (![_view[@"candidates"] isKindOfClass:NSArray.class] || ![_view[@"candidates"] count])
         _armedGlossColumn = 0;
     [self refreshFloatingToolbarState];
+    const BOOL hadCommit = [displayTransition[@"commit"] isKindOfClass:NSString.class] &&
+                           [displayTransition[@"commit"] length] > 0;
+    if ([self shouldDispatchNeuralV2ForTransition:displayTransition previousView:previousView] &&
+        [self tryDispatchNeuralV2Decode]) {
+        // Preedit 与提交文本已同步落盘（<3 ms），候选窗交由 22 ms 延迟窗口或提前回包的神经结果单次绘制（0% 闪烁）。
+        return;
+    }
     [self renderCandidates];
     [self synchronizeCandidateServices];
+    if (hadCommit && [self neuralV2Active]) {
+        [self scheduleNeuralContextPrefill];
+    }
 }
 
 // Everything that follows the candidates on screen. Each one returns at once when its request has not changed.

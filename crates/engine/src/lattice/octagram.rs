@@ -62,6 +62,8 @@ impl Default for GramConfig {
 
 /// `gram_encoding.cc` / `gram_db.cc` 的常量。
 pub const MAX_ENCODED_UNICODE: usize = 8;
+/// 单码点最长编码 6 字节（1 前缀 + 至多 5 个 7bit 组），8 码点栈缓冲上限 48 字节，实现查询零堆分配。
+const MAX_ENCODED_BYTES: usize = MAX_ENCODED_UNICODE * 6;
 const MAX_RESULTS: usize = 8;
 const VALUE_SCALE: f64 = 10000.0;
 
@@ -208,97 +210,115 @@ impl GramDb {
         Some(node_pos)
     }
 
-    /// `commonPrefixSearch`：从 `node_pos` 出发沿 `key` 走，每个节点若有 `\0`
-    /// 叶孩子就记录一条命中（值 = 叶单元的 value，长度 = 已匹配键的字节数）。
-    fn common_prefix_search(&self, key: &[u8], mut node_pos: usize, results: &mut Vec<GramMatch>) {
+    /// `commonPrefixSearch`（栈缓冲零堆分配版）：从 `node_pos` 出发沿 `key` 走，
+    /// 将所有命中写入定长数组 `results` 并返回命中条数。
+    fn common_prefix_search(
+        &self,
+        key: &[u8],
+        mut node_pos: usize,
+        results: &mut [GramMatch; MAX_RESULTS],
+    ) -> usize {
+        let mut count = 0usize;
         let mut unit = match self.unit(node_pos) {
             Some(unit) => unit,
-            None => return,
+            None => return 0,
         };
         node_pos ^= offset_of(unit) as usize;
         for (index, &byte) in key.iter().enumerate() {
             node_pos ^= usize::from(byte);
             let Some(next) = self.unit(node_pos) else {
-                return;
+                return count;
             };
             unit = next;
             if label_of(unit) != u32::from(byte) {
-                return;
+                return count;
             }
             node_pos ^= offset_of(unit) as usize;
-            if has_leaf(unit) && results.len() < MAX_RESULTS {
+            if has_leaf(unit) && count < MAX_RESULTS {
                 if let Some(leaf) = self.unit(node_pos) {
-                    results.push(GramMatch {
+                    results[count] = GramMatch {
                         value: leaf as i32 & 0x7FFF_FFFF,
                         length: index + 1,
-                    });
+                    };
+                    count += 1;
                 }
             }
         }
+        count
     }
 
-    /// `GramDb::Lookup`：先 `traverse` 整段上下文，再从落点做词首的公共前缀查找。
-    fn lookup(&self, context_encoded: &[u8], word_encoded: &[u8], results: &mut Vec<GramMatch>) {
+    /// `GramDb::Lookup`（零堆分配版）：先 `traverse` 整段上下文，再从落点做词首公共前缀查找。
+    fn lookup(
+        &self,
+        context_encoded: &[u8],
+        word_encoded: &[u8],
+        results: &mut [GramMatch; MAX_RESULTS],
+    ) -> usize {
         if context_encoded.is_empty() {
-            return;
+            return 0;
         }
         let Some(node_pos) = self.traverse(context_encoded, 0) else {
-            return;
+            return 0;
         };
-        self.common_prefix_search(word_encoded, node_pos, results);
+        self.common_prefix_search(word_encoded, node_pos, results)
     }
 
-    /// `Octagram::Query`。`context`、`word` 都是原始 UTF-8；`is_rear` 对应句尾
-    /// 词的「词+$」rear 项。返回值是自然对数域的搭配强度，未命中为
-    /// `config.non_collocation_penalty`。
+    /// `Octagram::Query`（全栈缓冲零堆分配）。`context`、`word` 都是原始 UTF-8；`is_rear` 对应句尾
+    /// 词的「词+$」rear 项。返回值是自然对数域的搭配强度，未命中为 `config.non_collocation_penalty`。
     pub fn query(&self, context: &str, word: &str, is_rear: bool, config: &GramConfig) -> f64 {
         let mut result = config.non_collocation_penalty;
-        if context.is_empty() {
+        if context.is_empty() && !is_rear {
             return result;
         }
-        // 上下文取尾部 collocation_max_length-1 个码点，词取头部同样数量，
-        // 再各自 encode。collocation_len = 上下文现存码点数 + 命中键的码点数，
-        // 决定吃 collocation 惩罚还是更狠的 weak 惩罚。
         let n = MAX_ENCODED_UNICODE
             .min(config.collocation_max_length.saturating_sub(1).max(0) as usize);
         if n < 1 {
             return result;
         }
-        let context_tail = last_codepoints(context, n);
-        let mut remaining_windows = codepoint_count(context_tail) as i32;
-        let context_query = encode(context_tail);
         let word_head = first_codepoints(word, n);
         let word_head_len = codepoint_count(word_head) as i32;
-        let word_query = encode(word_head);
+        let mut word_buf = [0u8; MAX_ENCODED_BYTES];
+        let word_len = encode_into(word_head, &mut word_buf);
+        let word_query = &word_buf[..word_len];
 
-        let mut context_ptr = 0usize;
-        let mut matches = Vec::with_capacity(MAX_RESULTS);
-        while remaining_windows > 0 && context_ptr < context_query.len() {
-            let at_window_start = context_ptr == 0;
-            matches.clear();
-            self.lookup(&context_query[context_ptr..], &word_query, &mut matches);
-            for m in &matches {
-                let scaled = scale_value(m.value);
-                let match_len = unicode_length(&word_query, m.length) as i32;
-                let collocation_len = remaining_windows + match_len;
-                let whole_query = at_window_start && m.length == word_query.len();
-                let penalty = if collocation_len >= config.collocation_min_length || whole_query {
-                    config.collocation_penalty
-                } else {
-                    config.weak_collocation_penalty
-                };
-                result = result.max(scaled + penalty);
+        let mut matches = [GramMatch {
+            value: 0,
+            length: 0,
+        }; MAX_RESULTS];
+        if !context.is_empty() {
+            let context_tail = last_codepoints(context, n);
+            let mut remaining_windows = codepoint_count(context_tail) as i32;
+            let mut context_buf = [0u8; MAX_ENCODED_BYTES];
+            let context_len = encode_into(context_tail, &mut context_buf);
+            let context_query = &context_buf[..context_len];
+            let mut context_ptr = 0usize;
+            while remaining_windows > 0 && context_ptr < context_query.len() {
+                let at_window_start = context_ptr == 0;
+                let hit_count =
+                    self.lookup(&context_query[context_ptr..], word_query, &mut matches);
+                for m in &matches[..hit_count] {
+                    let scaled = scale_value(m.value);
+                    let match_len = unicode_length(word_query, m.length) as i32;
+                    let collocation_len = remaining_windows + match_len;
+                    let whole_query = at_window_start && m.length == word_query.len();
+                    let penalty = if collocation_len >= config.collocation_min_length || whole_query
+                    {
+                        config.collocation_penalty
+                    } else {
+                        config.weak_collocation_penalty
+                    };
+                    result = result.max(scaled + penalty);
+                }
+                remaining_windows -= 1;
+                context_ptr = next_unicode(context_query, context_ptr);
             }
-            remaining_windows -= 1;
-            context_ptr = next_unicode(&context_query, context_ptr);
         }
 
         if is_rear && word_head_len == codepoint_count(word) as i32 {
             // 句尾标记只在「词未被头部截断」时查：截过的词查 $ 无意义。
-            matches.clear();
-            self.lookup(&word_query, b"$", &mut matches);
-            if let Some(first) = matches.first() {
-                result = result.max(scale_value(first.value) + config.rear_penalty);
+            let hit_count = self.lookup(word_query, b"$", &mut matches);
+            if hit_count > 0 {
+                result = result.max(scale_value(matches[0].value) + config.rear_penalty);
             }
         }
         result
@@ -364,6 +384,55 @@ fn next_codepoint(text: &str, i: &mut usize) -> u32 {
         return (u32::from(lead & 0x07) << 18) | (b1 << 12) | (b2 << 6) | b3;
     }
     u32::from(lead)
+}
+
+/// 将至多 `MAX_ENCODED_UNICODE` 个码点编码写入固定栈缓冲 `out`，返回写入字节数（零堆分配）。
+fn encode_into(text: &str, out: &mut [u8; MAX_ENCODED_BYTES]) -> usize {
+    let mut len = 0usize;
+    let mut i = 0usize;
+    while i < text.len() {
+        let u = next_codepoint(text, &mut i);
+        if u < 0x80 {
+            if len + 1 > out.len() {
+                break;
+            }
+            out[len] = if u == 0 { 0xE0 } else { u as u8 };
+            len += 1;
+        } else if (0x4000..0xA000).contains(&u) {
+            if len + 2 > out.len() {
+                break;
+            }
+            if (u & 0xFF) == 0 {
+                out[len] = 0xE1;
+                out[len + 1] = ((u >> 8) + 0x40) as u8;
+            } else {
+                out[len] = ((u >> 8) + 0x40) as u8;
+                out[len + 1] = (u & 0xFF) as u8;
+            }
+            len += 2;
+        } else {
+            let mut u = u;
+            let mut bits = 32i32;
+            while bits > 0 && (u & 0xFE00_0000) == 0 {
+                bits -= 7;
+                u <<= 7;
+            }
+            let mut bytes_to_encode = (bits + 6) / 7;
+            let needed = 1 + bytes_to_encode.max(0) as usize;
+            if len + needed > out.len() {
+                break;
+            }
+            out[len] = 0xE0 | bytes_to_encode as u8;
+            len += 1;
+            while bytes_to_encode > 0 {
+                bytes_to_encode -= 1;
+                out[len] = (((u >> 25) & 0x7F) | 0x80) as u8;
+                len += 1;
+                u <<= 7;
+            }
+        }
+    }
+    len
 }
 
 pub fn encode(text: &str) -> Vec<u8> {
@@ -776,8 +845,9 @@ mod tests {
             &[([encode("人民"), encode("$")].concat(), 160000)],
         );
         let db = GramDb::load(&path).expect("fixture loads");
-        // 词+$ 命中：scaled 16 + (-18) = -2，比 non_collocation -6 高。
+        // 词+$ 命中：scaled 16 + (-18) = -2，比 non_collocation -6 高；无前文的单整句同样查句尾 $ 项。
         assert!((db.query("无关上下文", "人民", true, &config) + 2.0).abs() < 1e-6);
+        assert!((db.query("", "人民", true, &config) + 2.0).abs() < 1e-6);
         // 非句尾不查 $。
         assert_eq!(
             db.query("无关上下文", "人民", false, &config),

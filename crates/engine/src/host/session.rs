@@ -397,6 +397,10 @@ impl Session {
         })
     }
 
+    pub fn neural_v2_metadata(&self) -> Option<crate::neural_v2::EngineNeuralMetadata> {
+        self.inner.neural_v2_metadata()
+    }
+
     pub fn reset_cache(&mut self) {
         self.inner.reset_cache();
     }

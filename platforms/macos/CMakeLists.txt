@@ -1693,6 +1693,72 @@ target_link_libraries(voice-resilience-test PRIVATE msime-voice-local-asr "-fram
 add_test(NAME voice-resilience COMMAND voice-resilience-test)
 set_tests_properties(voice-resilience PROPERTIES TIMEOUT 30)
 
+# Shurufa v2 Tier 1 端侧神经解码共享库（libllama Apple Metal）与微基准测试。
+# 仅在本机检测到 `llama.h` 与 `libllama` 时启用，缺失依赖的机器自动跳过，不影响纯 Tier 0 构建。
+find_path(SHURUFA_LLAMA_INCLUDE_DIR llama.h
+  HINTS "${CMAKE_PREFIX_PATH}/include" /opt/homebrew/include /usr/local/include)
+find_library(SHURUFA_LLAMA_LIBRARY NAMES llama
+  HINTS "${CMAKE_PREFIX_PATH}/lib" /opt/homebrew/lib /usr/local/lib)
+if(SHURUFA_LLAMA_INCLUDE_DIR AND SHURUFA_LLAMA_LIBRARY)
+  get_filename_component(SHURUFA_LLAMA_LIB_DIR "${SHURUFA_LLAMA_LIBRARY}" DIRECTORY)
+  add_library(shurufa_neural SHARED src/neural/ShurufaNeuralEngine.cpp)
+  target_compile_features(shurufa_neural PRIVATE cxx_std_17)
+  target_compile_options(shurufa_neural PRIVATE -Wall -Wextra -Werror -fvisibility=hidden)
+  target_include_directories(shurufa_neural
+    PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src/neural"
+    PRIVATE "${SHURUFA_LLAMA_INCLUDE_DIR}")
+  target_link_libraries(shurufa_neural PRIVATE "${SHURUFA_LLAMA_LIBRARY}" ${SQLITE_TARGET} "-framework CoreFoundation")
+  set_target_properties(shurufa_neural PROPERTIES
+    OUTPUT_NAME "shurufa_neural"
+    INSTALL_NAME_DIR "@rpath"
+    BUILD_RPATH "@loader_path;${SHURUFA_LLAMA_LIB_DIR}")
+
+  add_executable(shurufa-neural-bench src/neural/NeuralEngineBench.cpp)
+  target_compile_features(shurufa-neural-bench PRIVATE cxx_std_17)
+  target_compile_options(shurufa-neural-bench PRIVATE -Wall -Wextra -Werror)
+  target_link_libraries(shurufa-neural-bench PRIVATE shurufa_neural)
+  set_target_properties(shurufa-neural-bench PROPERTIES
+    BUILD_RPATH "@executable_path;${SHURUFA_LLAMA_LIB_DIR}")
+
+  # 独立无特权后台神经解码子进程：打包至 `Shurufa.app/Contents/Helpers/ShurufaNeuralService`，
+  # 共享库 `libshurufa_neural.dylib` 打包至 `Contents/Frameworks/`，与主输入法进程彻底隔离 Metal 显存。
+  add_executable(ShurufaNeuralService src/neural/ShurufaNeuralServiceMain.mm)
+  target_compile_features(ShurufaNeuralService PRIVATE cxx_std_17)
+  target_compile_options(ShurufaNeuralService PRIVATE -fobjc-arc -Wall -Wextra -Werror)
+  target_link_libraries(ShurufaNeuralService PRIVATE shurufa_neural "-framework Foundation")
+  set_target_properties(ShurufaNeuralService PROPERTIES
+    BUILD_RPATH "@executable_path/../Frameworks;@executable_path;${SHURUFA_LLAMA_LIB_DIR}")
+
+  add_dependencies(MSIMEClientInputMethod shurufa_neural ShurufaNeuralService)
+  add_custom_command(TARGET MSIMEClientInputMethod POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>/Contents/Frameworks"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>/Contents/Helpers"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:shurufa_neural>" "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>/Contents/Frameworks/libshurufa_neural.dylib"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:ShurufaNeuralService>" "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>/Contents/Helpers/ShurufaNeuralService")
+
+  # UDS IPC 客户端与独立后台服务集成单测（使用 `--test-mock`，无 378 MB 模型依赖亦可完整验证崩溃自愈与帧协议）。
+  add_executable(neural-service-ipc-test tests/neural/NeuralServiceIPCTest.mm src/neural/ShurufaNeuralClient.mm)
+  target_compile_features(neural-service-ipc-test PRIVATE cxx_std_17)
+  target_compile_options(neural-service-ipc-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
+  target_link_libraries(neural-service-ipc-test PRIVATE "-framework AppKit" "-framework Foundation")
+  add_dependencies(neural-service-ipc-test ShurufaNeuralService)
+  add_test(NAME neural-service-ipc COMMAND neural-service-ipc-test "$<TARGET_FILE:ShurufaNeuralService>")
+  set_tests_properties(neural-service-ipc PROPERTIES TIMEOUT 30)
+endif()
+
+# InputController.mm 通过 ShurufaNeuralClient.mm 与独立后台神经服务异步通信（纯 Foundation/UDS，零 libllama 依赖）；
+# 自动附加给所有编译 InputController.mm 的目标（含输入法本体与全部控制器单元测试）。
+set_source_files_properties(src/neural/ShurufaNeuralClient.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+get_property(MSIME_NEURAL_CLIENT_TARGETS DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+foreach(msime_target IN LISTS MSIME_NEURAL_CLIENT_TARGETS)
+  get_target_property(msime_target_sources ${msime_target} SOURCES)
+  if(msime_target_sources AND "src/input/InputController.mm" IN_LIST msime_target_sources)
+    if(NOT "src/neural/ShurufaNeuralClient.mm" IN_LIST msime_target_sources)
+      target_sources(${msime_target} PRIVATE src/neural/ShurufaNeuralClient.mm)
+    endif()
+  endif()
+endforeach()
+
 # 构建产物不能成为系统按 bundle id 查找的输入法副本。
 if(MSIME_EDITION STREQUAL "shurufa")
   add_custom_command(TARGET MSIMEClientInputMethod POST_BUILD

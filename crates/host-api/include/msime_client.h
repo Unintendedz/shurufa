@@ -978,6 +978,16 @@ char *msime_client_start_settled_rerank(uint64_t session);
  * 未知令牌返回 {"status":"done","moved":false,"current":false}。
  * 宿主已离开原组字时传 accept=false，只归还仍适用的模型。必须在会话线程调用。 */
 char *msime_client_poll_settled_rerank(uint64_t session, uint64_t token, bool accept);
+/* Shurufa v2 Tier 1 两阶段异步神经解码开关：开启时废除旧停顿锁首策略，由宿主 22 ms 延迟绘制与 80 ms 槽 0 锁防闪烁。 */
+char *msime_client_set_neural_v2_enabled(uint64_t session, bool enabled);
+/* 取出当前代次的 Tier 1 神经解码请求（含完整保留标点/空格的 512 字上文、音节 DAG 路径与 Top-32 候选）；不可用时返回 value=null。 */
+char *msime_client_take_neural_request(uint64_t session);
+/* 读取当前会话完整保留标点/空格的 512 字上文，供宿主在空闲 50 ms 后预热端侧 KV-Cache。返回 {"context": "..."}。 */
+char *msime_client_neural_prefill_context(uint64_t session);
+/* 将 Tier 1 神经服务返回的 NeuralDecodeResponse JSON 交给纯 Rust 引擎执行统一概率融合；
+ * lock_slot_0 为 true（>80 ms 迟到）时严格保留原槽 0 不跳动，仅升级槽 1 及以后；代次过期自动丢弃。 */
+char *msime_client_apply_neural_response(uint64_t session, const uint8_t *response,
+                                         size_t length, bool lock_slot_0);
 /* Pass the generation and global index from the displayed candidate's id. */
 char *msime_client_select(uint64_t session, uint64_t generation, size_t index);
 /* Select any entry copied by msime_client_all_candidates for this exact

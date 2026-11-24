@@ -37,6 +37,8 @@ impl SlotCandidateKind {
             || source == CandidateSource::Generated as u8
             || source == CandidateSource::NeuralKeyboard as u8
             || source == CandidateSource::Collocation as u8
+            || source == CandidateSource::NeuralV2 as u8
+            || source == CandidateSource::NeuralConstrained as u8
         {
             Self::PrimaryChinese
         } else {

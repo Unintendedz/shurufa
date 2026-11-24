@@ -237,6 +237,7 @@ pub mod ios_settings;
 pub mod lifecycle;
 pub mod mcp;
 pub mod moderation;
+pub mod neural;
 pub mod pack_downloads;
 pub mod plugins;
 pub mod providers;

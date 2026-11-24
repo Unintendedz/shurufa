@@ -11,11 +11,50 @@ use super::decode::{
 };
 use super::neural::{NeuralReranker, MAX_RERANK_PATHS};
 use super::{LatticeLookup, TypoEdgeSource};
-use crate::pinyin::syllables::has_only_complete_pinyin_segments;
+use crate::pinyin::syllables::{has_only_complete_pinyin_segments, is_intact};
 use crate::types::{CandidateSource, WordItem};
 
 // 短句子合并直接扫描已有行，避免默认小批次为临时哈希表分配堆内存。
 const SMALL_SENTENCE_MERGE: usize = 64;
+/// 双音节输入下排在整句网格之前的精确双字词典行上限（与首页 6 格对齐），确保带语境的 `[1, 1]` 拆字读法紧随第 6 槽稳进 Top-14 神经融合池。
+const MAX_LEADING_EXACT_TWO_SYLLABLE_DICT: usize = 6;
+
+/// 判断单个片段是否为合法拼音声母（含单字母声母与 `zh`/`ch`/`sh`）。
+fn is_pinyin_initial(segment: &str) -> bool {
+    matches!(
+        segment,
+        "b" | "p"
+            | "m"
+            | "f"
+            | "d"
+            | "t"
+            | "n"
+            | "l"
+            | "g"
+            | "k"
+            | "h"
+            | "j"
+            | "q"
+            | "x"
+            | "z"
+            | "c"
+            | "s"
+            | "r"
+            | "y"
+            | "w"
+            | "zh"
+            | "ch"
+            | "sh"
+    )
+}
+
+/// 判断音节序列是否由完整拼音音节或合法声母组成，供简全混拼跨度进入词网格解码。
+pub(crate) fn has_only_pinyin_or_initial_segments(segments: &[String]) -> bool {
+    !segments.is_empty()
+        && segments
+            .iter()
+            .all(|segment| is_intact(segment) || is_pinyin_initial(segment))
+}
 
 /// Decode `syllables` and insert the sentence rows (Generated, and the NeuralKeyboard pick when the keyboard reranker is given) as one block at `whole_sentence_insert_position`. Nothing for fewer than two syllables or an incomplete one. With `typo_source` and three or more syllables, also returns the typo sentence for the caller to place; the source receives the literal best path and returns the planned typo edges.
 #[allow(clippy::too_many_arguments)]
@@ -112,6 +151,27 @@ fn decode_lattice_with_typo_policy(
     ))
 }
 
+/// 允许完整音节与声母混排（简全混拼）的词网格解码入口；调用方词典查词须返回完整规范读音 `DictRow.key`。
+#[allow(dead_code)]
+pub(crate) fn decode_lattice_mixed(
+    syllables: &[String],
+    lookup: &mut LatticeLookup<'_>,
+    options: &LatticeOptions<'_>,
+    typo_source: Option<&mut TypoEdgeSource<'_>>,
+) -> Option<DecodedSentences> {
+    if syllables.len() < 2 || !has_only_pinyin_or_initial_segments(syllables) {
+        return None;
+    }
+    let graph = build_graph(syllables, lookup, options);
+    Some(decode_graph_sentences_with_policy(
+        syllables,
+        options,
+        typo_source,
+        &graph,
+        false,
+    ))
+}
+
 /// 借用缓存行建图的 `decode_lattice`：词典缓存行在建图期间保持借用，避免缓存命中先复制整页行再复制图边字段。
 pub(crate) fn decode_lattice_borrowed<'rows>(
     syllables: &[String],
@@ -120,6 +180,27 @@ pub(crate) fn decode_lattice_borrowed<'rows>(
     typo_source: Option<&mut TypoEdgeSource<'_>>,
 ) -> Option<DecodedSentences> {
     if syllables.len() < 2 || !has_only_complete_pinyin_segments(syllables) {
+        return None;
+    }
+    let graph = build_graph_borrowed(syllables, lookup, options);
+    Some(decode_graph_sentences_with_policy(
+        syllables,
+        options,
+        typo_source,
+        &graph,
+        false,
+    ))
+}
+
+/// 借用缓存行建图的简全混拼词网格解码入口。
+#[allow(dead_code)]
+pub(crate) fn decode_lattice_mixed_borrowed<'rows>(
+    syllables: &[String],
+    lookup: &mut impl FnMut(&[String]) -> &'rows [super::decode::LatticeLexeme],
+    options: &LatticeOptions<'_>,
+    typo_source: Option<&mut TypoEdgeSource<'_>>,
+) -> Option<DecodedSentences> {
+    if syllables.len() < 2 || !has_only_pinyin_or_initial_segments(syllables) {
         return None;
     }
     let graph = build_graph_borrowed(syllables, lookup, options);
@@ -153,9 +234,9 @@ fn decode_graph_sentences_with_policy(
     if paths.is_empty() {
         return DecodedSentences { paths, typo: None };
     }
-    // Typo spans cover two or three syllables, so a shorter input would only ever be replaced whole. Decoded from the same graph so the dictionary is not asked twice, and from the unreranked best so the typo sentence answers the literal reading.
+    // 两音节及以上输入均允许参与词网格纠错（覆蓋双音节错拼如 `diannai`/`penyou`/`yijin`），复用同一张词网格避免重复查库。
     let typo = match typo_source {
-        Some(source) if syllables.len() >= 3 => {
+        Some(source) if syllables.len() >= 2 => {
             let edges = source(&paths[0]);
             if edges.is_empty() {
                 None
@@ -651,25 +732,50 @@ fn reranked_block_with_neural<'a>(
     block
 }
 
-/// The count of leading dictionary rows that answer the whole key: canonical key equal to the joined syllables, or covering every syllable (WL:625-641, WL:372-381). A prefix-range row with the same character count (滚球 for typed gun'qi) is not an exact hit and must not pin a correctly pronounced sentence behind it.
+/// 逐段比较候选规范拼音与输入音节（完整音节要求全等，声母简拼允许前缀匹配），零堆分配。
+fn canonical_matches_segments(canonical_pinyin: &str, syllables: &[String]) -> bool {
+    let mut canon = canonical_pinyin.split('\'');
+    for seg in syllables {
+        let Some(piece) = canon.next() else {
+            return false;
+        };
+        let matched = if is_intact(seg) {
+            piece == seg
+        } else if is_pinyin_initial(seg) {
+            piece.starts_with(seg.as_str())
+        } else {
+            piece == seg
+        };
+        if !matched {
+            return false;
+        }
+    }
+    canon.next().is_none()
+}
+
+/// 统计位于整句词网格之前的领跑词典精确命中行数：要求逐音节匹配（兼容简全混拼声母前缀）或覆盖全部音节。
+/// 双音节输入下领跑精确词典行至多占 `MAX_LEADING_EXACT_TWO_SYLLABLE_DICT`（8）席，确保 `[1, 1]` 拆字整句稳落 Top-24/32 融合池。
 pub fn whole_sentence_insert_position(candidates: &[WordItem], syllables: &[String]) -> usize {
     if syllables.is_empty() {
         return 0;
     }
     let n = syllables.len();
-    candidates
+    let count = candidates
         .iter()
         .take_while(|item| {
             item.source.is_dictionary()
-                && if item.canonical_pinyin.is_empty() {
+                && if item.canonical_pinyin.is_empty() || item.fuzzy {
                     covers_all_syllables(item, n)
                 } else {
-                    item.canonical_pinyin
-                        .split('\'')
-                        .eq(syllables.iter().map(|syllable| syllable.as_str()))
+                    canonical_matches_segments(&item.canonical_pinyin, syllables)
                 }
         })
-        .count()
+        .count();
+    if n == 2 {
+        count.min(MAX_LEADING_EXACT_TWO_SYLLABLE_DICT)
+    } else {
+        count
+    }
 }
 
 /// WL:372-381.
@@ -942,16 +1048,12 @@ mod tests {
     fn weight_is_truncated_log_prob() {
         let rows = table(&[("ni", &[("你", 500_000)]), ("hao", &[("好", 250_000)])]);
         let mut candidates = Vec::new();
-        merge(
-            &mut candidates,
-            "ni'hao",
-            &rows,
-            "nihao",
-            &LatticeOptions::default(),
-        );
-        let expected = ((0.5f64).ln() + (0.25f64).ln()) * 1000.0;
+        let options = LatticeOptions::default();
+        merge(&mut candidates, "ni'hao", &rows, "nihao", &options);
+        let expected = (super::super::decode::edge_log_prob(500_000, 1, &options)
+            + super::super::decode::edge_log_prob(250_000, 1, &options))
+            * 1000.0;
         assert_eq!(candidates[0].weight, expected as i64);
-        assert_eq!(candidates[0].weight, -2079);
     }
 
     #[test]
@@ -1085,12 +1187,19 @@ mod tests {
     }
 
     #[test]
-    fn typo_decode_needs_three_syllables() {
+    fn typo_decode_supports_two_syllables_and_mixed_segments() {
         let rows = table(&[("shi", &[("是", 900000)]), ("jian", &[("见", 500000)])]);
         let mut called = false;
         let mut source = |_: &SentencePath| {
             called = true;
-            Vec::new()
+            vec![TypoEdge {
+                start: 0,
+                end: 2,
+                key: "shi'jian".into(),
+                value: "时间".into(),
+                weight: 500_000,
+                penalty: 2.0,
+            }]
         };
         let mut candidates = Vec::new();
         let typo = merge_lattice_candidates(
@@ -1103,9 +1212,51 @@ mod tests {
             &mut [],
             "",
         );
-        assert!(typo.is_none());
-        assert!(!called);
+        assert!(called, "双音节输入应触发纠错边规划");
+        assert_eq!(typo.expect("应产出双音节纠错句").sentence, "时间");
         assert_eq!(candidates.len(), 1);
+
+        // 简全混拼 `w'xiang'qu` 允许通过 `decode_lattice_mixed` 解码且 `whole_sentence_insert_position` 零分配兼容。
+        let mixed_rows = table(&[
+            ("w", &[("我", 5_000_000)]),
+            ("xiang'qu", &[("想去", 50_000)]),
+        ]);
+        let mut mixed_lookup = |span: &[String]| {
+            mixed_rows
+                .get(&span.join("'"))
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|mut r| {
+                    if r.key == "w" {
+                        r.key = "wo".into();
+                    }
+                    r
+                })
+                .collect()
+        };
+        let mixed = decode_lattice_mixed(
+            &syllables("w'xiang'qu"),
+            &mut mixed_lookup,
+            &LatticeOptions::default(),
+            None,
+        )
+        .expect("简全混拼应进入词网格");
+        assert_eq!(mixed.paths[0].sentence, "我想去");
+        assert_eq!(mixed.paths[0].key, "wo'xiang'qu");
+        let mixed_dict = [dictionary_row("wxiangqu", "我想去", 10, "wo'xiang'qu")];
+        assert_eq!(
+            whole_sentence_insert_position(&mixed_dict, &syllables("w'xiang'qu")),
+            1
+        );
+        // 双音节大量精确词典行封顶至 8 席，保证 [1,1] 拆字读法稳进前 24 融合池。
+        let many_two: Vec<WordItem> = (0..20)
+            .map(|i| dictionary_row("geshi", &format!("词{i}"), 100 - i as i64, "ge'shi"))
+            .collect();
+        assert_eq!(
+            whole_sentence_insert_position(&many_two, &syllables("ge'shi")),
+            MAX_LEADING_EXACT_TWO_SYLLABLE_DICT
+        );
     }
 
     fn path(sentence: &str, log_prob: f64) -> SentencePath {

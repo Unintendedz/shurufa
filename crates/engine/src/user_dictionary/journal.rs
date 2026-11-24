@@ -78,8 +78,15 @@ CREATE TABLE IF NOT EXISTS personal_selection_events(\
 id INTEGER PRIMARY KEY AUTOINCREMENT,\
 entry_key TEXT NOT NULL,\
 value TEXT NOT NULL,\
-selected_at INTEGER NOT NULL DEFAULT(unixepoch()));\
-CREATE INDEX IF NOT EXISTS personal_selection_events_key ON personal_selection_events(entry_key,value);";
+selected_at INTEGER NOT NULL DEFAULT(unixepoch()),\
+app_scope TEXT NOT NULL DEFAULT 'general');\
+CREATE INDEX IF NOT EXISTS personal_selection_events_key ON personal_selection_events(entry_key,value);\
+CREATE TABLE IF NOT EXISTS personal_negative_feedback(\
+entry_key TEXT NOT NULL,\
+value TEXT NOT NULL,\
+app_scope TEXT NOT NULL DEFAULT 'general',\
+rejected_at INTEGER NOT NULL,\
+PRIMARY KEY(entry_key,value,app_scope));";
 
 /// J:96-102. A ranking change on a user word keeps `user_inserted = 1`, so the conflict branch leaves that column alone.
 pub(crate) const UPSERT_JOURNAL_SQL: &str = "INSERT INTO user_dictionary_operations(dictionary,key,value,operation,weight,display) VALUES(?1,?2,?3,'upsert',?4,?5) ON CONFLICT(dictionary,key,value) DO UPDATE SET operation='upsert',weight=excluded.weight, display=excluded.display,updated_at=unixepoch()";
@@ -288,6 +295,24 @@ pub fn ensure_schema(connection: &Connection) -> Result<()> {
     if !has_user_inserted {
         connection.execute_batch(
             "ALTER TABLE user_dictionary_operations ADD COLUMN user_inserted INTEGER NOT NULL DEFAULT 0",
+        )?;
+    }
+    // 兼容旧版个人选词事件表：缺少 `app_scope` 列时幂等补充，默认归入 `general` 桶。
+    let has_app_scope = {
+        let mut columns = connection.prepare("PRAGMA table_info(personal_selection_events)")?;
+        let names = columns.query_map([], |row| row.get::<_, String>(1))?;
+        let mut found = false;
+        for name in names {
+            if name? == "app_scope" {
+                found = true;
+                break;
+            }
+        }
+        found
+    };
+    if !has_app_scope {
+        connection.execute_batch(
+            "ALTER TABLE personal_selection_events ADD COLUMN app_scope TEXT NOT NULL DEFAULT 'general'",
         )?;
     }
     // Informational only: nothing reads it, and every table is created with IF NOT EXISTS, so an older engine that writes its own number back simply ignores the tables it does not know (J:177-178).
@@ -709,6 +734,37 @@ mod tests {
             "ni",
             "你"
         ));
+    }
+
+    #[test]
+    fn legacy_personal_selection_events_migrates_app_scope_and_creates_negative_feedback_table() {
+        let dir = Dir::new();
+        let journal = dir.journal();
+        Connection::open(&journal)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE personal_selection_events(id INTEGER PRIMARY KEY AUTOINCREMENT,entry_key TEXT NOT NULL,value TEXT NOT NULL,selected_at INTEGER NOT NULL DEFAULT(unixepoch()));                 INSERT INTO personal_selection_events(entry_key,value,selected_at) VALUES('deng''lu','登陆',1700000000);",
+            )
+            .unwrap();
+        ensure_user_database(&journal).unwrap();
+        // 再次打开同样幂等，旧记录自动补齐为 `'general'`，并建好负反馈表。
+        ensure_user_database(&journal).unwrap();
+        let conn = Connection::open(&journal).unwrap();
+        let scope: String = conn
+            .query_row(
+                "SELECT app_scope FROM personal_selection_events WHERE value='登陆'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(scope, "general");
+        assert_eq!(
+            count(
+                &journal,
+                "SELECT count(*) FROM sqlite_master WHERE name='personal_negative_feedback'"
+            ),
+            1
+        );
     }
 
     #[test]

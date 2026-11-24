@@ -47,10 +47,13 @@ use crate::zhuyin::scheme::ZhuyinKey;
 /// The weight an English word typed out and committed raw enters `msime-english.db` with (user_dictionary_journal.h:137).
 const ENTERED_ENGLISH_WORD_WEIGHT: i64 = 10;
 
-/// 最近一次写入独立个人叠加层事件表的记录，供上屏后紧接退格删光整段词时确定性回滚。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// 最近一次写入独立个人叠加层事件表的记录，供上屏后 5 秒内退格删光整段词时确定性回滚并写入 24 小时负反馈。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct LastOverlayLearning {
     pub event_id: i64,
+    pub entry_key: String,
+    pub word: String,
+    pub committed_at_unix: i64,
     pub remaining_chars: usize,
 }
 

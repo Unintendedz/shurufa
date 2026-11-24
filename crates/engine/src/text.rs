@@ -1,6 +1,6 @@
-//! UTF-8 and Han character helpers several modules share. They reproduce the C++ helpers' exact counting rules, including the ones whose names mislead.
+//! UTF-8 与汉字文本辅助函数，供词网格、重排器与 `neural_v2` 上下文窗口共用。
 
-/// Han code points as the helpcode tables and candidate edges see them: U+3007, the CJK blocks and extensions up to U+323AF.
+/// 判断码点是否为汉字（含 U+3007、CJK 基本区与扩展区至 U+323AF）。
 pub fn is_han_code_point(code_point: u32) -> bool {
     matches!(code_point, 0x3007 | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF | 0x20000..=0x2FA1F | 0x30000..=0x323AF)
 }
@@ -9,14 +9,14 @@ pub fn is_han(character: char) -> bool {
     is_han_code_point(character as u32)
 }
 
-/// The first Han character of `text`, empty when there is none.
+/// 返回 `text` 中第一个汉字的切片，无汉字时为空。
 pub fn first_han_char(text: &str) -> &str {
     text.char_indices()
         .find(|(_, c)| is_han(*c))
         .map_or("", |(at, c)| &text[at..at + c.len_utf8()])
 }
 
-/// The last Han character of `text`, empty when there is none.
+/// 返回 `text` 中最后一个汉字的切片，无汉字时为空。
 pub fn last_han_char(text: &str) -> &str {
     text.char_indices()
         .rev()
@@ -24,7 +24,7 @@ pub fn last_han_char(text: &str) -> &str {
         .map_or("", |(at, c)| &text[at..at + c.len_utf8()])
 }
 
-/// Character count by UTF-8 lead byte, whatever the characters are. The C++ `count_han_chars` counts this way despite its name, and callers use it as a character count (shuangpin doubles it into a key count), so the port keeps the rule rather than a Han filter.
+/// 按 UTF-8 首字节统计字符数（保留与旧 C++ `count_han_chars` 一致的计数语义，双拼等调用方将其用作字符计数）。
 pub fn count_han_chars(text: &str) -> usize {
     let bytes = text.as_bytes();
     let mut count = 0;
@@ -49,7 +49,7 @@ pub fn count_utf8_chars(text: &str) -> usize {
     text.chars().count()
 }
 
-/// Non-empty and every character Han.
+/// 非空且每个字符均为汉字。
 pub fn is_all_han(text: &str) -> bool {
     !text.is_empty() && text.chars().all(is_han)
 }
@@ -59,7 +59,7 @@ pub fn is_han_phrase(text: &str) -> bool {
     text.chars().nth(1).is_some() && text.chars().any(is_han)
 }
 
-/// The last `count` Unicode scalars of `text`; empty for zero.
+/// 返回 `text` 末尾至多 `count` 个 Unicode 标量值的切片；`count == 0` 时返回空串。
 pub fn last_characters(text: &str, count: usize) -> &str {
     if count == 0 {
         return "";
@@ -70,8 +70,16 @@ pub fn last_characters(text: &str, count: usize) -> &str {
     }
 }
 
+/// 返回 `text` 末尾至多 `max_chars` 个 Unicode 标量值的完整上下文窗口切片，
+/// 完整保留中文标点、空格、ASCII 字母、数字与表情符号，供 `neural_v2` 因果语言模型（最多 512 字符）消费。
+/// `trailing_han_clause` 仍保留给 octagram `.gram` 尾窗与旧字级模型。
+#[allow(dead_code)]
+pub fn recent_context_window(text: &str, max_chars: usize) -> &str {
+    last_characters(text, max_chars)
+}
+
 /// 返回 `text` 末尾连续汉字子句的切片；若末字符不是汉字（如标点、空格、ASCII、表情符号）或无汉字则返回 `""`。
-/// 句子模型 vocab 不含空格、标点和表情符号，剥离末尾非汉字前缀可防止 `<unk>` 词元污染前文语境。
+/// 旧字级句子模型 vocab 不含空格、标点和表情符号，剥离末尾非汉字前缀可防止 `<unk>` 词元污染前文语境。
 pub fn trailing_han_clause(text: &str) -> &str {
     let mut start = text.len();
     for (at, ch) in text.char_indices().rev() {
@@ -111,5 +119,20 @@ mod tests {
         assert_eq!(trailing_han_clause("ASCII only"), "");
         assert_eq!(trailing_han_clause(""), "");
         assert_eq!(trailing_han_clause("难道说没有"), "难道说没有");
+    }
+
+    #[test]
+    fn recent_context_window_preserves_punctuation_spaces_ascii_and_digits() {
+        let mixed = "我昨天花了 128.5 元，买了一台 M3 Max！今天打算继续写 Rust 2024 代码，";
+        assert_eq!(recent_context_window(mixed, 512), mixed);
+        assert_eq!(recent_context_window(mixed, 0), "");
+        assert_eq!(recent_context_window("你好，世界！", 4), "，世界！");
+        assert_eq!(recent_context_window("🧐 培养，", 5), "🧐 培养，");
+        assert_eq!(recent_context_window("Hello, 世界 42!", 6), "世界 42!");
+        // 超长混合上下文按字符边界截断至 512 字符且不截断多字节 UTF-8。
+        let long = "甲乙，ab 12！".repeat(80);
+        let window = recent_context_window(&long, 512);
+        assert_eq!(window.chars().count(), 512);
+        assert!(long.ends_with(window));
     }
 }

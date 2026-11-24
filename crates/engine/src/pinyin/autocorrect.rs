@@ -4,7 +4,13 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::OnceLock;
 
 use super::active_helpcode::strip_active_helpcodes;
+use super::segment::{cut_one_piece_min_segments, is_complete_pinyin_input};
 use super::syllables::{intact_piece, intact_pinyin_list, is_intact, MAX_SYLLABLE_LENGTH};
+use super::typos::{
+    two_letter_neighbor_typos, CHANNEL_MISSING_MEDIAL_PENALTY, CHANNEL_MISSING_NASAL_G_PENALTY,
+    CHANNEL_MISSING_OR_EXTRA_PENALTY, CHANNEL_NEIGHBOR_BASE_PENALTY, CHANNEL_REPEATED_KEY_PENALTY,
+    CHANNEL_TRANSPOSITION_PENALTY,
+};
 use crate::types::autocorrect_type;
 
 /// Tie-break weights; the corrected-edge count is always the primary key (QUH:73-84).
@@ -274,6 +280,220 @@ fn correction_index() -> &'static HashMap<&'static str, Vec<CorrectionTarget>> {
     })
 }
 
+/// 为 `SyllableDag` 返回非法片段在当前掩码下按自然对数信道惩罚排序的前 `limit` 个候选合法音节。
+pub(crate) fn correction_targets_for_piece(
+    piece: &str,
+    autocorrect_types: u32,
+    limit: usize,
+) -> Vec<(&'static str, f64)> {
+    if limit == 0 || autocorrect_types == 0 {
+        return Vec::new();
+    }
+    let Some(targets) = correction_index().get(piece) else {
+        return Vec::new();
+    };
+    let mut ranked = Vec::new();
+    for target in targets {
+        let enabled_bits = autocorrect_types & target.type_bits;
+        if enabled_bits == 0 {
+            continue;
+        }
+        let penalty = if enabled_bits & autocorrect_type::TRANSPOSITION != 0 {
+            CHANNEL_TRANSPOSITION_PENALTY
+        } else if enabled_bits & autocorrect_type::INSERTION != 0
+            && is_repeated_insertion(piece, target.syllable)
+        {
+            CHANNEL_REPEATED_KEY_PENALTY
+        } else if enabled_bits & autocorrect_type::NEIGHBOR != 0 {
+            CHANNEL_NEIGHBOR_BASE_PENALTY + 0.10
+        } else if enabled_bits & autocorrect_type::DELETION != 0 {
+            if super::typos::is_missing_nasal_g(piece, target.syllable) {
+                CHANNEL_MISSING_NASAL_G_PENALTY
+            } else if super::typos::is_missing_medial(piece, target.syllable) {
+                CHANNEL_MISSING_MEDIAL_PENALTY
+            } else {
+                CHANNEL_MISSING_OR_EXTRA_PENALTY
+            }
+        } else {
+            CHANNEL_MISSING_OR_EXTRA_PENALTY
+        };
+        ranked.push((target.syllable, penalty));
+    }
+    ranked.sort_by(|lhs, rhs| lhs.1.total_cmp(&rhs.1));
+    ranked.truncate(limit);
+    ranked
+}
+
+/// 跨音节相邻换位恢复（如 `kyei -> ke'yi`、`wmoen -> wo'men`、`nhiao -> ni'hao`）。
+/// 仅在原串本身不是完整拼音且栈上单次对调后可完整切分为合法音节时返回，失败时零堆分配。
+fn cross_syllable_transposition_cuts(pinyin: &str, k: usize) -> Vec<AutocorrectCut> {
+    let bytes = pinyin.as_bytes();
+    let length = bytes.len();
+    if k == 0
+        || !(3..=MAX_AUTOCORRECT_INPUT_LENGTH).contains(&length)
+        || !bytes.iter().all(u8::is_ascii_lowercase)
+        || is_complete_pinyin_input(pinyin)
+    {
+        return Vec::new();
+    }
+    let mut buf = [0u8; MAX_AUTOCORRECT_INPUT_LENGTH];
+    buf[..length].copy_from_slice(bytes);
+    let mut cuts: Vec<AutocorrectCut> = Vec::new();
+    for i in 0..length - 1 {
+        if buf[i] == buf[i + 1] {
+            continue;
+        }
+        buf.swap(i, i + 1);
+        if let Ok(swapped) = std::str::from_utf8(&buf[..length]) {
+            if is_complete_pinyin_input(swapped) {
+                let syllables = cut_one_piece_min_segments(swapped, true);
+                let mut boundary = 0usize;
+                let mut crosses_boundary = false;
+                for syl in &syllables[..syllables.len().saturating_sub(1)] {
+                    boundary += syl.len();
+                    if boundary == i + 1 {
+                        crosses_boundary = true;
+                        break;
+                    }
+                }
+                if crosses_boundary
+                    && !syllables.is_empty()
+                    && !cuts.iter().any(|existing: &AutocorrectCut| {
+                        existing.segments.len() == syllables.len()
+                            && existing
+                                .segments
+                                .iter()
+                                .zip(&syllables)
+                                .all(|(seg, syl)| seg.syllable == *syl)
+                    })
+                {
+                    let mut offset = 0usize;
+                    let mut segments = Vec::with_capacity(syllables.len());
+                    for syllable in syllables {
+                        let end = offset + syllable.len();
+                        let touched = offset <= i + 1 && i < end;
+                        segments.push(AutocorrectCutSegment {
+                            syllable,
+                            raw_text: pinyin[offset..end].to_owned(),
+                            start: offset,
+                            corrected: touched,
+                        });
+                        offset = end;
+                    }
+                    cuts.push(AutocorrectCut {
+                        segments,
+                        edge_count: 1,
+                        weight: TRANSPOSITION_WEIGHT,
+                    });
+                    if cuts.len() >= k {
+                        buf.swap(i, i + 1);
+                        break;
+                    }
+                }
+            }
+        }
+        buf.swap(i, i + 1);
+    }
+    cuts
+}
+
+/// 多音节输入中的两字母非法邻键片段恢复（如 `meiwentj -> mei'wen'ti`、`haodr -> hao'de`、`shenmr -> shen'me`）。
+/// 要求总长度 `>= 4` 且其余部分均为合法完整音节，绝不误触独立两字母或三字母纯简拼。
+pub fn neighbor_two_letter_cuts(
+    pinyin: &str,
+    autocorrect_types: u32,
+    limit: usize,
+) -> Vec<(AutocorrectCut, f64)> {
+    let bytes = pinyin.as_bytes();
+    let length = bytes.len();
+    if limit == 0
+        || autocorrect_types & autocorrect_type::NEIGHBOR == 0
+        || !(4..=MAX_AUTOCORRECT_INPUT_LENGTH).contains(&length)
+        || pinyin.contains('\'')
+        || !bytes.iter().all(u8::is_ascii_lowercase)
+        || is_complete_pinyin_input(pinyin)
+    {
+        return Vec::new();
+    }
+    let mut results: Vec<(AutocorrectCut, f64)> = Vec::new();
+    // 优先检查尾部两字母（最常见如 `meiwentj`/`haodr`/`shenmr`），再检查句中两字母。
+    for pos in (0..=length - 2).rev() {
+        let prefix = &pinyin[..pos];
+        let piece = &pinyin[pos..pos + 2];
+        let suffix = &pinyin[pos + 2..];
+        if is_intact(piece) {
+            continue;
+        }
+        if (!prefix.is_empty() && !is_complete_pinyin_input(prefix))
+            || (!suffix.is_empty() && !is_complete_pinyin_input(suffix))
+        {
+            continue;
+        }
+        let head = if prefix.is_empty() {
+            Vec::new()
+        } else {
+            cut_one_piece_min_segments(prefix, true)
+        };
+        let tail = if suffix.is_empty() {
+            Vec::new()
+        } else {
+            cut_one_piece_min_segments(suffix, true)
+        };
+        for typo in two_letter_neighbor_typos(piece, limit) {
+            let mut segments = Vec::with_capacity(head.len() + 1 + tail.len());
+            let mut offset = 0usize;
+            for syl in &head {
+                let end = offset + syl.len();
+                segments.push(AutocorrectCutSegment {
+                    syllable: syl.clone(),
+                    raw_text: pinyin[offset..end].to_owned(),
+                    start: offset,
+                    corrected: false,
+                });
+                offset = end;
+            }
+            segments.push(AutocorrectCutSegment {
+                syllable: typo.syllable.to_owned(),
+                raw_text: piece.to_owned(),
+                start: pos,
+                corrected: true,
+            });
+            offset = pos + 2;
+            for syl in &tail {
+                let end = offset + syl.len();
+                segments.push(AutocorrectCutSegment {
+                    syllable: syl.clone(),
+                    raw_text: pinyin[offset..end].to_owned(),
+                    start: offset,
+                    corrected: false,
+                });
+                offset = end;
+            }
+            let duplicate = results.iter().any(|(existing, _)| {
+                existing.segments.len() == segments.len()
+                    && existing
+                        .segments
+                        .iter()
+                        .zip(&segments)
+                        .all(|(a, b)| a.syllable == b.syllable)
+            });
+            if !duplicate {
+                results.push((
+                    AutocorrectCut {
+                        segments,
+                        edge_count: 1,
+                        weight: NEIGHBOR_WEIGHT,
+                    },
+                    typo.penalty,
+                ));
+            }
+        }
+    }
+    results.sort_by(|lhs, rhs| lhs.1.total_cmp(&rhs.1));
+    results.truncate(limit);
+    results
+}
+
 const NO_PREDECESSOR: usize = usize::MAX;
 const SMALL_FINALIZE_BEAM: usize = 36;
 
@@ -467,6 +687,17 @@ pub fn autocorrect_cut_kbest(
         }
     }
     search.finalize(length);
+
+    if autocorrect_types & autocorrect_type::TRANSPOSITION != 0
+        && search.best[length]
+            .first()
+            .is_none_or(|best| best.edge_count > 1)
+    {
+        let cross = cross_syllable_transposition_cuts(pinyin, k);
+        if !cross.is_empty() {
+            return cross;
+        }
+    }
 
     search.best[length]
         .iter()
@@ -996,6 +1227,23 @@ mod tests {
                 segment("ni", "ni", 6, false)
             ]
         );
+    }
+
+    #[test]
+    fn cross_syllable_transposition_and_two_letter_neighbor_recover_typos() {
+        assert_eq!(cut("kyei", TRANSPOSITION), "ke'yi");
+        assert_eq!(cut("wmoen", TRANSPOSITION), "wo'men");
+        assert_eq!(cut("nhiao", TRANSPOSITION), "ni'hao");
+        assert_eq!(cut("kyeiquchifan", TRANSPOSITION), "ke'yi'qu'chi'fan");
+        assert_eq!(cut("kyei", NEIGHBOR), "");
+
+        let meiwentj = neighbor_two_letter_cuts("meiwentj", NEIGHBOR, 3);
+        assert!(
+            meiwentj.iter().any(|(c, _)| reading(c) == "mei'wen'ti"),
+            "{meiwentj:?}"
+        );
+        assert!(neighbor_two_letter_cuts("tj", NEIGHBOR, 3).is_empty());
+        assert!(neighbor_two_letter_cuts("wm", NEIGHBOR, 3).is_empty());
     }
 
     #[test]

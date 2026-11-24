@@ -1,0 +1,1114 @@
+//! Shurufa v2 Tier 1 两阶段异步神经解码协议与统一概率融合纯核心。
+//!
+//! 严守 `docs/ARCHITECTURE.md` 边界：全部融合公式、等跨度竞争、80 ms 槽 0 锁与去重并集排座
+//! 均保留在纯 Rust `msime-engine` 内；`msime-input-runtime` 仅做代次编排，macOS/平台宿主仅做
+//! 非阻塞 IPC 传输与 22 ms 延迟绘制计时，不含任何排序或融合数学。
+
+use std::collections::{HashMap, HashSet};
+
+use serde::{Deserialize, Serialize};
+
+use crate::pinyin::graph::{
+    build_syllable_graph, enumerate_kbest_complete_segmentations, SYLLABLE_GRAPH_PATH_LIMIT,
+};
+use crate::pinyin::syllables::is_intact;
+use crate::text::is_all_han;
+use crate::types::CandidateSource;
+
+/// Tier 1 重排后的神经候选来源号（与 `CandidateSource::NeuralV2` 与基准脚本契约对齐）。
+pub const SOURCE_NEURAL_V2: u8 = 19;
+/// Tier 1 受限束搜索独有召回候选来源号（与 `CandidateSource::NeuralConstrained` 对齐）。
+pub const SOURCE_NEURAL_CONSTRAINED: u8 = 20;
+
+/// Tier 1 上文窗口上限（按 Unicode 标量字符数计，完整保留中文标点、空格、ASCII 与 Emoji）。
+pub const NEURAL_CONTEXT_MAX_CHARS: usize = 512;
+/// 单次发往 Tier 1 神经打分的去重等跨度 Tier 0 候选上限（稳定压在 <= 18 ms 零闪烁窗内）。
+pub const DEFAULT_MAX_NEURAL_CANDIDATES: usize = 16;
+/// 受限束搜索默认束宽。
+pub const DEFAULT_BEAM_WIDTH: u32 = 3;
+/// 受限束搜索默认最多注入的整句数。
+pub const DEFAULT_MAX_BEAM_RESULTS: u32 = 4;
+/// 受限束搜索单次最多携带的候选音节切分路径数。
+pub const DEFAULT_MAX_SYLLABLE_PATHS: usize = 2;
+
+/// 统一桶归一尺度常量（与 Tier 0 `lattice::decode` 保持同一真概率自然对数刻度）。
+const UNIFIED_UNIGRAM_Z: f64 = 5e8;
+const UNIFIED_MULTI_SYLLABLE_Z: f64 = 0.70 * UNIFIED_UNIGRAM_Z;
+
+/// 隔音多切分路径每增加一处切分的通道先验代价（nats）。
+const HIATUS_SPLIT_CHANNEL_PENALTY: f64 = -0.6;
+/// 纠错候选默认信道代价（nats），要求神经语境优势明显大于误触发成本。
+pub const DEFAULT_TYPO_CHANNEL_PENALTY: f64 = -2.8;
+/// 模糊音候选默认信道代价（nats）。
+pub const DEFAULT_FUZZY_CHANNEL_PENALTY: f64 = -0.8;
+/// 用户个人词库条目的温和个人先验增益（nats）。
+pub const DEFAULT_USER_DICTIONARY_LOG_PRIOR: f64 = 1.2;
+
+fn default_true() -> bool {
+    true
+}
+
+/// 全局 3 参数统一概率融合权重（仅允许在开发集上科学标定，严禁词级特判）。
+///
+/// 统一评分目标：
+/// `Score(Y) = log P_channel(X | Y) + lambda_neural * log P_neural(Y | C) + lambda_stat * log P_stat(Y | C) + lambda_user * log P_user(Y | C)`
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct NeuralFusionWeights {
+    pub lambda_neural: f64,
+    pub lambda_stat: f64,
+    pub lambda_user: f64,
+}
+
+impl Default for NeuralFusionWeights {
+    fn default() -> Self {
+        Self {
+            lambda_neural: 1.0,
+            lambda_stat: 0.35,
+            lambda_user: 1.0,
+        }
+    }
+}
+
+impl NeuralFusionWeights {
+    /// 读取可选环境变量覆盖（供离线标定脚本对 3 个全局权重做网格搜索，不改变线上默认值）。
+    pub fn from_env_or_default() -> Self {
+        let mut weights = Self::default();
+        if let Ok(raw) = std::env::var("SHURUFA_NEURAL_LAMBDA_NEURAL") {
+            if let Ok(value) = raw.parse::<f64>() {
+                if value.is_finite() && value >= 0.0 {
+                    weights.lambda_neural = value;
+                }
+            }
+        }
+        if let Ok(raw) = std::env::var("SHURUFA_NEURAL_LAMBDA_STAT") {
+            if let Ok(value) = raw.parse::<f64>() {
+                if value.is_finite() && value >= 0.0 {
+                    weights.lambda_stat = value;
+                }
+            }
+        }
+        if let Ok(raw) = std::env::var("SHURUFA_NEURAL_LAMBDA_USER") {
+            if let Ok(value) = raw.parse::<f64>() {
+                if value.is_finite() && value >= 0.0 {
+                    weights.lambda_user = value;
+                }
+            }
+        }
+        weights
+    }
+}
+
+/// 发往 Tier 1 约束束搜索的一条候选音节路径。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NeuralSyllablePath {
+    pub syllables: Vec<String>,
+    #[serde(default)]
+    pub channel_log_prob: f64,
+    #[serde(default = "default_true")]
+    pub is_complete: bool,
+}
+
+/// 发往 Tier 1 批量打分与统一融合的单条 Tier 0 候选。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NeuralCandidateInput {
+    /// 在剥离投影 Emoji 后的基础候选列表中的原始下标。
+    pub index: usize,
+    pub text: String,
+    #[serde(default)]
+    pub pinyin: String,
+    #[serde(default)]
+    pub source: u8,
+    #[serde(default)]
+    pub char_count: usize,
+    /// 是否严格覆盖当前整段输入且非超长续写词（等跨度竞争核心判据）。
+    #[serde(default)]
+    pub exact_span: bool,
+    /// Tier 0 统一自然对数静态先验（nats）；非词格或缺失时为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stat_log_prob: Option<f64>,
+    /// 输入信道对数概率（完全匹配为 0.0，隔音拆分/纠错/模糊音为负值）。
+    #[serde(default)]
+    pub channel_log_prob: f64,
+    /// 个人词库/习惯对数先验增益（无个人偏好时为 0.0）。
+    #[serde(default)]
+    pub user_log_prob: f64,
+    /// L4 硬约束：是否被用户显式固定位置或置顶。
+    #[serde(default)]
+    pub pinned: bool,
+}
+
+/// 引擎会话侧为单条候选提供的权威元数据（按引擎原始候选顺序对齐）。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct EngineNeuralCandidateMeta {
+    pub stat_log_prob: Option<f64>,
+    pub channel_log_prob: f64,
+    pub user_log_prob: f64,
+    pub exact_span: bool,
+    pub pinned: bool,
+}
+
+/// 引擎会话侧为当前组字态提取的 Tier 1 辅助元数据。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct EngineNeuralMetadata {
+    pub raw_input: String,
+    pub segmentation: String,
+    pub syllable_paths: Vec<NeuralSyllablePath>,
+    pub candidates: Vec<EngineNeuralCandidateMeta>,
+}
+
+/// Stage 1 -> Tier 1 神经解码请求（纯数据，可跨 FFI / UDS / 离线评测零损耗透传）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NeuralDecodeRequest {
+    pub session: u64,
+    pub generation: u64,
+    /// 光标前完整上文（至多 512 字，保留中文标点、空格、ASCII 与 Emoji）。
+    pub context: String,
+    pub raw_input: String,
+    pub segmentation: String,
+    #[serde(default)]
+    pub syllable_paths: Vec<NeuralSyllablePath>,
+    pub candidates: Vec<NeuralCandidateInput>,
+    #[serde(default = "default_beam_width")]
+    pub beam_width: u32,
+    #[serde(default = "default_max_beam_results")]
+    pub max_beam_results: u32,
+    /// 消融与降级开关：为 `false` 时仅执行前缀树批量打分，跳过受限束搜索。
+    #[serde(default = "default_true")]
+    pub enable_constrained_decode: bool,
+}
+
+fn default_beam_width() -> u32 {
+    DEFAULT_BEAM_WIDTH
+}
+
+fn default_max_beam_results() -> u32 {
+    DEFAULT_MAX_BEAM_RESULTS
+}
+
+/// Tier 1 返回的单条候选条件对数概率。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NeuralScoredCandidate {
+    pub text: String,
+    pub neural_log_prob: f64,
+}
+
+/// Tier 1 受限束搜索生成的整句候选。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NeuralBeamCandidate {
+    pub text: String,
+    pub neural_log_prob: f64,
+    #[serde(default)]
+    pub path_index: usize,
+    #[serde(default)]
+    pub token_count: usize,
+}
+
+/// Tier 1 -> Stage 2 神经解码响应。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NeuralDecodeResponse {
+    #[serde(default = "default_true")]
+    pub ok: bool,
+    #[serde(default)]
+    pub session: u64,
+    #[serde(default)]
+    pub generation: u64,
+    #[serde(default)]
+    pub candidate_scores: Vec<NeuralScoredCandidate>,
+    #[serde(default)]
+    pub beam_candidates: Vec<NeuralBeamCandidate>,
+}
+
+/// 离线同步评测与单元测试用的神经解码后端抽象。
+pub trait NeuralDecoderBackend {
+    fn prefill_context(&mut self, context: &str) -> Result<(), String>;
+    fn decode(&mut self, request: &NeuralDecodeRequest) -> Result<NeuralDecodeResponse, String>;
+}
+
+/// 融合后的单个候选席位来源。
+#[derive(Debug, Clone, PartialEq)]
+pub enum FusedSeat {
+    /// 指向原 Tier 0 基础候选列表的 `index` 项。
+    Existing {
+        index: usize,
+        promoted_by_neural: bool,
+    },
+    /// Tier 1 受限束搜索独有召回的新候选（原 Tier 0 池中不存在）。
+    InjectedBeam {
+        text: String,
+        pinyin: String,
+        neural_log_prob: f64,
+        channel_log_prob: f64,
+    },
+}
+
+/// 统一概率融合输出。
+#[derive(Debug, Clone, PartialEq)]
+pub struct NeuralFusionOutcome {
+    pub seats: Vec<FusedSeat>,
+    pub moved: bool,
+    pub slot0_locked: bool,
+    pub tier1_rescued: bool,
+    pub top1_text: Option<String>,
+}
+
+/// 截取光标前至多 `NEURAL_CONTEXT_MAX_CHARS`（512）个 Unicode 标量字符，
+/// 完整保留中文标点、空格、ASCII 与 Emoji，绝不按标点截断。
+pub fn neural_context_window(text: &str) -> &str {
+    neural_context_window_limit(text, NEURAL_CONTEXT_MAX_CHARS)
+}
+
+/// 按字符数上限截取尾部窗口，始终落在合法 UTF-8 字符边界。
+pub fn neural_context_window_limit(text: &str, max_chars: usize) -> &str {
+    if text.is_empty() || max_chars == 0 {
+        return "";
+    }
+    let mut count = 0usize;
+    for (byte_idx, _) in text.char_indices().rev() {
+        count += 1;
+        if count >= max_chars {
+            return &text[byte_idx..];
+        }
+    }
+    text
+}
+
+/// 将词典权重映射到与 Tier 0 词网格一致的统一自然对数先验刻度（nats）。
+pub fn dictionary_unified_stat_log_prob(weight: i64, syllables: usize) -> f64 {
+    let w = if syllables >= 3 && weight == 100 {
+        // 与 Tier 0 保持一致：未测频多字词占位权重 100 平滑折算，避免虚高。
+        15.0
+    } else {
+        (weight.max(1)) as f64
+    };
+    let z = if syllables <= 1 {
+        UNIFIED_UNIGRAM_Z
+    } else {
+        UNIFIED_MULTI_SYLLABLE_Z
+    };
+    w.ln() - z.ln()
+}
+
+/// 判断候选来源是否属于可参与 Tier 1 中文统一融合的来源。
+pub fn is_neural_v2_source(source: u8) -> bool {
+    source == CandidateSource::Database as u8
+        || source == CandidateSource::UserDatabase as u8
+        || source == CandidateSource::Generated as u8
+        || source == CandidateSource::NeuralKeyboard as u8
+        || source == CandidateSource::Collocation as u8
+        || source == SOURCE_NEURAL_V2
+        || source == SOURCE_NEURAL_CONSTRAINED
+}
+
+/// 从原始拼音与主切分构造供受限束搜索使用的候选音节路径（含主切分与零声母隔音备选切分）。
+pub fn build_syllable_paths(
+    raw_input: &str,
+    primary_segmentation: &str,
+    max_paths: usize,
+) -> Vec<NeuralSyllablePath> {
+    if max_paths == 0 {
+        return Vec::new();
+    }
+    let mut paths = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    let primary_pieces: Vec<String> = primary_segmentation
+        .split('\'')
+        .filter(|piece| !piece.is_empty())
+        .map(|piece| piece.to_ascii_lowercase())
+        .collect();
+    let primary_len = primary_pieces.len();
+
+    if !primary_pieces.is_empty() {
+        let complete = primary_pieces.iter().all(|piece| is_intact(piece));
+        let key = primary_pieces.join("'");
+        seen.insert(key);
+        paths.push(NeuralSyllablePath {
+            syllables: primary_pieces,
+            channel_log_prob: 0.0,
+            is_complete: complete,
+        });
+    }
+
+    // 若用户输入不含手动 `'`，使用任意句长 A* K-best 切分器枚举合法替代切分
+    // （如 `xian -> xi'an`、`fangan -> fan'gan` 以及 10+ 音节长句中的零声母隔音切分）。
+    let trimmed = raw_input.trim();
+    if paths.len() < max_paths
+        && !trimmed.is_empty()
+        && !trimmed.contains('\'')
+        && trimmed.bytes().all(|b| b.is_ascii_lowercase())
+    {
+        let graph = build_syllable_graph(trimmed);
+        let alt_limit = SYLLABLE_GRAPH_PATH_LIMIT.min(16);
+        for dag_path in enumerate_kbest_complete_segmentations(&graph, 2, alt_limit) {
+            if paths.len() >= max_paths {
+                break;
+            }
+            if dag_path.syllables.is_empty() {
+                continue;
+            }
+            let key = dag_path.syllables.join("'");
+            if !seen.insert(key) {
+                continue;
+            }
+            let extra_splits = dag_path.syllables.len().saturating_sub(primary_len.max(1));
+            let channel_log_prob = dag_path
+                .channel_log_prob
+                .min(HIATUS_SPLIT_CHANNEL_PENALTY * extra_splits as f64);
+            paths.push(NeuralSyllablePath {
+                syllables: dag_path.syllables,
+                channel_log_prob,
+                is_complete: dag_path.is_complete,
+            });
+        }
+    }
+
+    paths
+}
+
+#[derive(Debug, Clone)]
+enum CompetitorKind {
+    Tier0 {
+        index: usize,
+        original_rank: usize,
+    },
+    Beam {
+        text: String,
+        pinyin: String,
+        neural_log_prob: f64,
+        channel_log_prob: f64,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct ScoredCompetitor {
+    kind: CompetitorKind,
+    text: String,
+    total_score: f64,
+}
+
+/// 纯函数统一概率融合与排座：
+/// - 将 `Tier 0 ∪ Tier 1` 按去重并集在统一自然对数目标下竞争；
+/// - 严格保障等跨度主候选不被超长续写词或单字前缀词抢占首槽；
+/// - 当 `lock_slot_0 == true`（迟到 >80 ms 或用户已翻页/移高亮）或首槽为置顶/非中文候选时，严格锁定槽 0 不动，仅升级槽 `1..`；
+/// - 保证基础列表 `0..total_base_len` 中每一条原候选均完整保留、零丢失、零重复。
+pub fn fuse_neural_response(
+    total_base_len: usize,
+    request: &NeuralDecodeRequest,
+    response: &NeuralDecodeResponse,
+    weights: NeuralFusionWeights,
+    lock_slot_0: bool,
+) -> NeuralFusionOutcome {
+    let identity = |locked: bool| NeuralFusionOutcome {
+        seats: (0..total_base_len)
+            .map(|index| FusedSeat::Existing {
+                index,
+                promoted_by_neural: false,
+            })
+            .collect(),
+        moved: false,
+        slot0_locked: locked,
+        tier1_rescued: false,
+        top1_text: request
+            .candidates
+            .iter()
+            .find(|c| c.index == 0)
+            .map(|c| c.text.clone()),
+    };
+
+    if !response.ok || total_base_len == 0 {
+        return identity(lock_slot_0);
+    }
+
+    // 1. 汇总前缀树批量打分结果（仅采纳有限浮点值）。
+    let mut neural_scores: HashMap<&str, f64> =
+        HashMap::with_capacity(response.candidate_scores.len());
+    for scored in &response.candidate_scores {
+        if !scored.text.is_empty() && scored.neural_log_prob.is_finite() {
+            neural_scores
+                .entry(scored.text.as_str())
+                .and_modify(|prev| {
+                    if scored.neural_log_prob > *prev {
+                        *prev = scored.neural_log_prob;
+                    }
+                })
+                .or_insert(scored.neural_log_prob);
+        }
+    }
+
+    // 2. 索引 Tier 0 中所有出现过的文本，确保 `Tier 0 ∪ Tier 1` 严格去重。
+    let mut tier0_texts: HashSet<&str> = HashSet::with_capacity(request.candidates.len());
+    for cand in &request.candidates {
+        tier0_texts.insert(cand.text.as_str());
+    }
+
+    // 3. 校验并分类受限束搜索结果：命中 Tier 0 同文本则升级其神经分，未命中则作为 Tier 1 独有注入候选。
+    let mut unique_beams: Vec<(String, String, f64, f64)> = Vec::new();
+    let mut seen_beam_texts: HashSet<&str> = HashSet::new();
+    for beam in &response.beam_candidates {
+        if beam.text.is_empty() || !beam.neural_log_prob.is_finite() || !is_all_han(&beam.text) {
+            continue;
+        }
+        let path = request
+            .syllable_paths
+            .get(beam.path_index)
+            .or_else(|| request.syllable_paths.first());
+        let Some(path) = path else {
+            continue;
+        };
+        if !path.is_complete || beam.text.chars().count() != path.syllables.len() {
+            continue;
+        }
+        if tier0_texts.contains(beam.text.as_str()) {
+            neural_scores
+                .entry(beam.text.as_str())
+                .and_modify(|prev| {
+                    if beam.neural_log_prob > *prev {
+                        *prev = beam.neural_log_prob;
+                    }
+                })
+                .or_insert(beam.neural_log_prob);
+            continue;
+        }
+        if !seen_beam_texts.insert(beam.text.as_str()) {
+            continue;
+        }
+        unique_beams.push((
+            beam.text.clone(),
+            path.syllables.join("'"),
+            beam.neural_log_prob,
+            path.channel_log_prob,
+        ));
+    }
+
+    // 4. 筛选可参与等跨度竞争的 Tier 0 候选，并决定槽 0 是否必须锁定。
+    let slot0_candidate = request.candidates.iter().find(|c| c.index == 0);
+    let slot0_eligible = slot0_candidate.is_some_and(|c| {
+        c.exact_span
+            && !c.pinned
+            && is_neural_v2_source(c.source)
+            && neural_scores.contains_key(c.text.as_str())
+    });
+    // 若槽 0 被用户置顶或为英文/表情/非等跨度行，强制锁定槽 0 不允许抢占。
+    let slot0_protected =
+        slot0_candidate.is_none_or(|c| c.pinned || !is_neural_v2_source(c.source));
+    let effective_lock_slot_0 = lock_slot_0 || slot0_protected;
+
+    let mut competing_tier0: Vec<(usize, &NeuralCandidateInput, f64)> = Vec::new();
+    for (rank, cand) in request.candidates.iter().enumerate() {
+        if cand.index >= total_base_len
+            || !cand.exact_span
+            || cand.pinned
+            || !is_neural_v2_source(cand.source)
+        {
+            continue;
+        }
+        if let Some(&neural_lp) = neural_scores.get(cand.text.as_str()) {
+            competing_tier0.push((rank, cand, neural_lp));
+        }
+    }
+
+    if competing_tier0.is_empty() && unique_beams.is_empty() {
+        return identity(effective_lock_slot_0);
+    }
+
+    // 5. 跨来源静态先验分桶相对归一：
+    //    `Database/UserDatabase` 与 `Lattice(Generated/Collocation/NeuralKeyboard)` 的原始绝对偏移不同
+    //    （后者含 `.gram` 边常数偏移），按来源桶各自减去桶内最大值并截断至 `[-10.0, 0.0]`，
+    //    彻底消灭跨来源加性常数错位；未测频词典占位条目（`stat_log_prob == None`）给予温和中性相对先验 `-1.5`，
+    //    而未进入 Tier 0 词网格主束的 `UniqueBeam` 独有候选按已观测 Tier 0 下界钳位至 `[-6.5, -3.5]`，
+    //    既杜绝束搜索次优路径凭虚高静态分反超在池真词，又让强神经语境优势的真实 OOV 词稳定翻盘。
+    const STAT_REL_FLOOR: f64 = -10.0;
+    const NEUTRAL_STAT_REL: f64 = -1.5;
+    const BEAM_OOV_STAT_REL_CEILING: f64 = -3.5;
+    const BEAM_OOV_STAT_REL_FLOOR: f64 = -6.5;
+
+    let is_dict_bucket = |source: u8| -> bool {
+        source == CandidateSource::Database as u8 || source == CandidateSource::UserDatabase as u8
+    };
+    let mut dict_max: Option<f64> = None;
+    let mut lattice_max: Option<f64> = None;
+    for &(_, cand, _) in &competing_tier0 {
+        if let Some(s) = cand.stat_log_prob.filter(|v| v.is_finite()) {
+            let slot = if is_dict_bucket(cand.source) {
+                &mut dict_max
+            } else {
+                &mut lattice_max
+            };
+            *slot = Some(slot.map_or(s, |cur| cur.max(s)));
+        }
+    }
+
+    // 6. 按唯一统一概率公式为 `Tier 0 ∪ Tier 1` 计分并排序。
+    let mut competitors: Vec<ScoredCompetitor> =
+        Vec::with_capacity(competing_tier0.len() + unique_beams.len());
+    let mut observed_min_rel_stat: Option<f64> = None;
+
+    for (orig_rank, cand, neural_lp) in &competing_tier0 {
+        let rel_stat = match cand.stat_log_prob.filter(|v| v.is_finite()) {
+            Some(s) => {
+                let bucket_max = if is_dict_bucket(cand.source) {
+                    dict_max.unwrap_or(s)
+                } else {
+                    lattice_max.unwrap_or(s)
+                };
+                (s - bucket_max).clamp(STAT_REL_FLOOR, 0.0)
+            }
+            None => NEUTRAL_STAT_REL,
+        };
+        observed_min_rel_stat =
+            Some(observed_min_rel_stat.map_or(rel_stat, |cur| cur.min(rel_stat)));
+        let total = cand.channel_log_prob
+            + weights.lambda_neural * (*neural_lp)
+            + weights.lambda_stat * rel_stat
+            + weights.lambda_user * cand.user_log_prob;
+        competitors.push(ScoredCompetitor {
+            kind: CompetitorKind::Tier0 {
+                index: cand.index,
+                original_rank: *orig_rank,
+            },
+            text: cand.text.clone(),
+            total_score: total,
+        });
+    }
+
+    let beam_stat_rel = observed_min_rel_stat
+        .unwrap_or(BEAM_OOV_STAT_REL_CEILING)
+        .clamp(BEAM_OOV_STAT_REL_FLOOR, BEAM_OOV_STAT_REL_CEILING);
+    for (text, pinyin, neural_lp, channel_lp) in unique_beams {
+        let total =
+            channel_lp + weights.lambda_neural * neural_lp + weights.lambda_stat * beam_stat_rel;
+        competitors.push(ScoredCompetitor {
+            kind: CompetitorKind::Beam {
+                text: text.clone(),
+                pinyin,
+                neural_log_prob: neural_lp,
+                channel_log_prob: channel_lp,
+            },
+            text,
+            total_score: total,
+        });
+    }
+
+    competitors.sort_by(|a, b| {
+        b.total_score
+            .total_cmp(&a.total_score)
+            .then_with(|| match (&a.kind, &b.kind) {
+                (
+                    CompetitorKind::Tier0 {
+                        original_rank: ra, ..
+                    },
+                    CompetitorKind::Tier0 {
+                        original_rank: rb, ..
+                    },
+                ) => ra.cmp(rb),
+                (CompetitorKind::Tier0 { .. }, CompetitorKind::Beam { .. }) => {
+                    std::cmp::Ordering::Less
+                }
+                (CompetitorKind::Beam { .. }, CompetitorKind::Tier0 { .. }) => {
+                    std::cmp::Ordering::Greater
+                }
+                (CompetitorKind::Beam { .. }, CompetitorKind::Beam { .. }) => a.text.cmp(&b.text),
+            })
+    });
+
+    // 若要求锁槽 0 且原槽 0 在竞争集合中，将其牢牢固定在竞争列表首位，其余席位按融合分升序更新。
+    if effective_lock_slot_0 && slot0_eligible {
+        if let Some(pos) = competitors
+            .iter()
+            .position(|c| matches!(c.kind, CompetitorKind::Tier0 { index: 0, .. }))
+        {
+            if pos > 0 {
+                competitors[..=pos].rotate_right(1);
+            }
+        }
+    }
+
+    // 7. 将排序后的等跨度竞争结果无损回填至原等跨度槽位，非等跨度行（前缀/续写/英文/置顶）保持原相对位置。
+    let mut exact_slots: Vec<usize> = competing_tier0.iter().map(|(_, c, _)| c.index).collect();
+    exact_slots.sort_unstable();
+    exact_slots.dedup();
+
+    let mut seats: Vec<FusedSeat> = Vec::with_capacity(total_base_len + competitors.len());
+
+    if exact_slots.is_empty() {
+        // 极端情况：Tier 0 没有任何等跨度候选（例如仅剩前缀单字），而 Tier 1 受限束搜索召回了完整整句。
+        let insert_at = if effective_lock_slot_0 {
+            1.min(total_base_len)
+        } else {
+            0
+        };
+        for idx in 0..insert_at {
+            seats.push(FusedSeat::Existing {
+                index: idx,
+                promoted_by_neural: false,
+            });
+        }
+        for comp in &competitors {
+            if let CompetitorKind::Beam {
+                text,
+                pinyin,
+                neural_log_prob,
+                channel_log_prob,
+            } = &comp.kind
+            {
+                seats.push(FusedSeat::InjectedBeam {
+                    text: text.clone(),
+                    pinyin: pinyin.clone(),
+                    neural_log_prob: *neural_log_prob,
+                    channel_log_prob: *channel_log_prob,
+                });
+            }
+        }
+        for idx in insert_at..total_base_len {
+            seats.push(FusedSeat::Existing {
+                index: idx,
+                promoted_by_neural: false,
+            });
+        }
+    } else {
+        let exact_slot_set: HashSet<usize> = exact_slots.iter().copied().collect();
+        let mut comp_iter = competitors.into_iter();
+        let last_exact_slot = *exact_slots.last().unwrap_or(&0);
+        // 把被新注入束搜索候选挤出的尾部项紧跟在等跨度组之后插入，既保留完整候选池，又不打散首页前缀。
+        let mut overflow_inserted = false;
+
+        for base_idx in 0..total_base_len {
+            if exact_slot_set.contains(&base_idx) {
+                if let Some(comp) = comp_iter.next() {
+                    let seat = match comp.kind {
+                        CompetitorKind::Tier0 { index, .. } => FusedSeat::Existing {
+                            index,
+                            promoted_by_neural: index != base_idx,
+                        },
+                        CompetitorKind::Beam {
+                            text,
+                            pinyin,
+                            neural_log_prob,
+                            channel_log_prob,
+                        } => FusedSeat::InjectedBeam {
+                            text,
+                            pinyin,
+                            neural_log_prob,
+                            channel_log_prob,
+                        },
+                    };
+                    seats.push(seat);
+                }
+                if base_idx == last_exact_slot && !overflow_inserted {
+                    overflow_inserted = true;
+                    for extra in comp_iter.by_ref() {
+                        let seat = match extra.kind {
+                            CompetitorKind::Tier0 { index, .. } => FusedSeat::Existing {
+                                index,
+                                promoted_by_neural: false,
+                            },
+                            CompetitorKind::Beam {
+                                text,
+                                pinyin,
+                                neural_log_prob,
+                                channel_log_prob,
+                            } => FusedSeat::InjectedBeam {
+                                text,
+                                pinyin,
+                                neural_log_prob,
+                                channel_log_prob,
+                            },
+                        };
+                        seats.push(seat);
+                    }
+                }
+            } else {
+                seats.push(FusedSeat::Existing {
+                    index: base_idx,
+                    promoted_by_neural: false,
+                });
+            }
+        }
+    }
+
+    // 二次兜底校验：若 `effective_lock_slot_0` 为真，硬性保证槽 0 必为原索引 0。
+    if effective_lock_slot_0 {
+        if let Some(pos) = seats
+            .iter()
+            .position(|s| matches!(s, FusedSeat::Existing { index: 0, .. }))
+        {
+            if pos > 0 {
+                seats[..=pos].rotate_right(1);
+            }
+        }
+    }
+
+    let moved = seats.len() != total_base_len
+        || seats
+            .iter()
+            .enumerate()
+            .any(|(pos, seat)| !matches!(seat, FusedSeat::Existing { index, .. } if *index == pos));
+
+    let tier1_rescued = seats
+        .iter()
+        .take(4)
+        .any(|seat| matches!(seat, FusedSeat::InjectedBeam { .. }));
+
+    let top1_text = seats.first().and_then(|seat| match seat {
+        FusedSeat::InjectedBeam { text, .. } => Some(text.clone()),
+        FusedSeat::Existing { index, .. } => request
+            .candidates
+            .iter()
+            .find(|c| c.index == *index)
+            .map(|c| c.text.clone()),
+    });
+
+    NeuralFusionOutcome {
+        seats,
+        moved,
+        slot0_locked: effective_lock_slot_0,
+        tier1_rescued,
+        top1_text,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_candidate(
+        index: usize,
+        text: &str,
+        exact_span: bool,
+        stat_log_prob: Option<f64>,
+    ) -> NeuralCandidateInput {
+        NeuralCandidateInput {
+            index,
+            text: text.to_owned(),
+            pinyin: "zheng'le'xie'qian".to_owned(),
+            source: CandidateSource::Generated as u8,
+            char_count: text.chars().count(),
+            exact_span,
+            stat_log_prob,
+            channel_log_prob: 0.0,
+            user_log_prob: 0.0,
+            pinned: false,
+        }
+    }
+
+    fn base_request(candidates: Vec<NeuralCandidateInput>) -> NeuralDecodeRequest {
+        NeuralDecodeRequest {
+            session: 1,
+            generation: 10,
+            context: "这个兄弟 应该多少还是".to_owned(),
+            raw_input: "zhenglexieqian".to_owned(),
+            segmentation: "zheng'le'xie'qian".to_owned(),
+            syllable_paths: vec![NeuralSyllablePath {
+                syllables: vec!["zheng".into(), "le".into(), "xie".into(), "qian".into()],
+                channel_log_prob: 0.0,
+                is_complete: true,
+            }],
+            candidates,
+            beam_width: 5,
+            max_beam_results: 4,
+            enable_constrained_decode: true,
+        }
+    }
+
+    #[test]
+    fn unified_fusion_promotes_contextual_homophone() {
+        let req = base_request(vec![
+            sample_candidate(0, "整了血铅", true, Some(-11.4)),
+            sample_candidate(1, "整了些钱", true, Some(-12.1)),
+            sample_candidate(2, "挣了些钱", true, Some(-12.5)),
+            sample_candidate(3, "整", false, Some(-4.0)),
+        ]);
+        let resp = NeuralDecodeResponse {
+            ok: true,
+            session: 1,
+            generation: 10,
+            candidate_scores: vec![
+                NeuralScoredCandidate {
+                    text: "整了血铅".into(),
+                    neural_log_prob: -24.0,
+                },
+                NeuralScoredCandidate {
+                    text: "整了些钱".into(),
+                    neural_log_prob: -14.2,
+                },
+                NeuralScoredCandidate {
+                    text: "挣了些钱".into(),
+                    neural_log_prob: -11.3,
+                },
+                NeuralScoredCandidate {
+                    text: "整".into(),
+                    neural_log_prob: -2.0,
+                },
+            ],
+            beam_candidates: vec![],
+        };
+        let out = fuse_neural_response(4, &req, &resp, NeuralFusionWeights::default(), false);
+        assert!(out.moved);
+        assert!(!out.slot0_locked);
+        assert_eq!(out.top1_text.as_deref(), Some("挣了些钱"));
+        assert!(matches!(out.seats[0], FusedSeat::Existing { index: 2, .. }));
+        assert!(matches!(out.seats[1], FusedSeat::Existing { index: 1, .. }));
+        assert!(matches!(out.seats[2], FusedSeat::Existing { index: 0, .. }));
+        // 非等跨度单字前缀留在原地，绝不抢占等跨度主候选位。
+        assert!(matches!(out.seats[3], FusedSeat::Existing { index: 3, .. }));
+    }
+
+    #[test]
+    fn tier1_constrained_beam_rescues_missing_sentence_without_losing_tier0_rows() {
+        let req = base_request(vec![
+            sample_candidate(0, "整了血铅", true, Some(-11.4)),
+            sample_candidate(1, "整了些钱", true, Some(-12.1)),
+            sample_candidate(2, "整", false, Some(-4.0)),
+        ]);
+        let resp = NeuralDecodeResponse {
+            ok: true,
+            session: 1,
+            generation: 10,
+            candidate_scores: vec![
+                NeuralScoredCandidate {
+                    text: "整了血铅".into(),
+                    neural_log_prob: -24.0,
+                },
+                NeuralScoredCandidate {
+                    text: "整了些钱".into(),
+                    neural_log_prob: -15.0,
+                },
+            ],
+            beam_candidates: vec![NeuralBeamCandidate {
+                text: "挣了些钱".into(),
+                neural_log_prob: -11.1,
+                path_index: 0,
+                token_count: 3,
+            }],
+        };
+        let out = fuse_neural_response(3, &req, &resp, NeuralFusionWeights::default(), false);
+        assert!(out.moved);
+        assert!(out.tier1_rescued);
+        assert_eq!(out.top1_text.as_deref(), Some("挣了些钱"));
+        assert_eq!(out.seats.len(), 4);
+        assert!(matches!(
+            &out.seats[0],
+            FusedSeat::InjectedBeam { text, .. } if text == "挣了些钱"
+        ));
+        // 原 0, 1, 2 三条 Tier 0 候选必须无一丢失。
+        let kept: HashSet<usize> = out
+            .seats
+            .iter()
+            .filter_map(|s| match s {
+                FusedSeat::Existing { index, .. } => Some(*index),
+                FusedSeat::InjectedBeam { .. } => None,
+            })
+            .collect();
+        assert_eq!(kept, HashSet::from([0, 1, 2]));
+    }
+
+    #[test]
+    fn beam_candidate_duplicate_of_tier0_is_deduplicated_not_injected() {
+        let req = base_request(vec![
+            sample_candidate(0, "整了些钱", true, Some(-12.0)),
+            sample_candidate(1, "挣了些钱", true, Some(-12.4)),
+        ]);
+        let resp = NeuralDecodeResponse {
+            ok: true,
+            session: 1,
+            generation: 10,
+            candidate_scores: vec![
+                NeuralScoredCandidate {
+                    text: "整了些钱".into(),
+                    neural_log_prob: -14.0,
+                },
+                NeuralScoredCandidate {
+                    text: "挣了些钱".into(),
+                    neural_log_prob: -11.5,
+                },
+            ],
+            beam_candidates: vec![NeuralBeamCandidate {
+                text: "挣了些钱".into(),
+                neural_log_prob: -11.2,
+                path_index: 0,
+                token_count: 3,
+            }],
+        };
+        let out = fuse_neural_response(2, &req, &resp, NeuralFusionWeights::default(), false);
+        assert_eq!(out.seats.len(), 2);
+        assert!(!out.tier1_rescued);
+        assert!(matches!(out.seats[0], FusedSeat::Existing { index: 1, .. }));
+        assert!(matches!(out.seats[1], FusedSeat::Existing { index: 0, .. }));
+    }
+
+    #[test]
+    fn late_arrival_lock_slot_0_strictly_preserves_leader_and_upgrades_tail() {
+        let req = base_request(vec![
+            sample_candidate(0, "整了血铅", true, Some(-11.4)),
+            sample_candidate(1, "政了血铅", true, Some(-12.0)),
+            sample_candidate(2, "挣了些钱", true, Some(-12.5)),
+        ]);
+        let resp = NeuralDecodeResponse {
+            ok: true,
+            session: 1,
+            generation: 10,
+            candidate_scores: vec![
+                NeuralScoredCandidate {
+                    text: "整了血铅".into(),
+                    neural_log_prob: -24.0,
+                },
+                NeuralScoredCandidate {
+                    text: "政了血铅".into(),
+                    neural_log_prob: -26.0,
+                },
+                NeuralScoredCandidate {
+                    text: "挣了些钱".into(),
+                    neural_log_prob: -11.0,
+                },
+            ],
+            beam_candidates: vec![],
+        };
+        let out = fuse_neural_response(3, &req, &resp, NeuralFusionWeights::default(), true);
+        assert!(out.slot0_locked);
+        assert!(out.moved);
+        // 槽 0 严格保持原首候选不动，槽 1 立即升级为神经首选。
+        assert!(matches!(out.seats[0], FusedSeat::Existing { index: 0, .. }));
+        assert!(matches!(out.seats[1], FusedSeat::Existing { index: 2, .. }));
+        assert!(matches!(out.seats[2], FusedSeat::Existing { index: 1, .. }));
+    }
+
+    #[test]
+    fn overlong_continuation_never_hijacks_equal_span_slot_0() {
+        let mut req = base_request(vec![
+            sample_candidate(0, "现在", true, Some(-6.5)),
+            sample_candidate(1, "显在", true, Some(-11.0)),
+            sample_candidate(2, "现在已经", false, Some(-5.0)),
+        ]);
+        req.raw_input = "xianzai".into();
+        req.segmentation = "xian'zai".into();
+        req.syllable_paths = vec![NeuralSyllablePath {
+            syllables: vec!["xian".into(), "zai".into()],
+            channel_log_prob: 0.0,
+            is_complete: true,
+        }];
+        let resp = NeuralDecodeResponse {
+            ok: true,
+            session: 1,
+            generation: 10,
+            candidate_scores: vec![
+                NeuralScoredCandidate {
+                    text: "现在".into(),
+                    neural_log_prob: -6.0,
+                },
+                NeuralScoredCandidate {
+                    text: "显在".into(),
+                    neural_log_prob: -12.0,
+                },
+                NeuralScoredCandidate {
+                    text: "现在已经".into(),
+                    neural_log_prob: -3.0,
+                },
+            ],
+            beam_candidates: vec![],
+        };
+        let out = fuse_neural_response(3, &req, &resp, NeuralFusionWeights::default(), false);
+        assert!(!out.moved);
+        assert!(matches!(out.seats[0], FusedSeat::Existing { index: 0, .. }));
+    }
+
+    #[test]
+    fn pinned_slot_0_is_never_displaced() {
+        let mut pinned = sample_candidate(0, "整了血铅", true, Some(-11.4));
+        pinned.pinned = true;
+        let req = base_request(vec![
+            pinned,
+            sample_candidate(1, "挣了些钱", true, Some(-12.0)),
+        ]);
+        let resp = NeuralDecodeResponse {
+            ok: true,
+            session: 1,
+            generation: 10,
+            candidate_scores: vec![
+                NeuralScoredCandidate {
+                    text: "整了血铅".into(),
+                    neural_log_prob: -25.0,
+                },
+                NeuralScoredCandidate {
+                    text: "挣了些钱".into(),
+                    neural_log_prob: -10.0,
+                },
+            ],
+            beam_candidates: vec![],
+        };
+        let out = fuse_neural_response(2, &req, &resp, NeuralFusionWeights::default(), false);
+        assert!(out.slot0_locked);
+        assert!(matches!(out.seats[0], FusedSeat::Existing { index: 0, .. }));
+    }
+
+    #[test]
+    fn context_window_preserves_punctuation_spaces_ascii_and_emoji() {
+        let ctx = "昨天刚聊完，这个兄弟 API 2.0 应该多少还是🙂，";
+        assert_eq!(neural_context_window(ctx), ctx);
+        let long: String = (0..600)
+            .map(|i| if i % 5 == 0 { '，' } else { '字' })
+            .collect();
+        let clipped = neural_context_window(&long);
+        assert_eq!(clipped.chars().count(), NEURAL_CONTEXT_MAX_CHARS);
+        assert!(clipped.contains('，'));
+    }
+
+    #[test]
+    fn build_syllable_paths_enumerates_hiatus_alternatives_with_channel_cost() {
+        let paths = build_syllable_paths("xian", "xian", 4);
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0].syllables, vec!["xian"]);
+        assert_eq!(paths[0].channel_log_prob, 0.0);
+        assert_eq!(paths[1].syllables, vec!["xi", "an"]);
+        assert!(paths[1].channel_log_prob < 0.0);
+    }
+
+    #[test]
+    fn cross_source_bucket_alignment_prevents_collocation_and_rare_word_bias() {
+        // 模拟 Collocation(+2.60) 与未测频 Database(None) 同台竞争，以及 UniqueBeam 与极冷僻词(-19.67) 共池。
+        let mut coll = sample_candidate(0, "我没高兴", true, Some(2.60));
+        coll.source = CandidateSource::Collocation as u8;
+        let mut dict_unmeasured = sample_candidate(1, "我没关系", true, None);
+        dict_unmeasured.source = CandidateSource::Database as u8;
+        let mut dict_rare = sample_candidate(2, "我每管席", true, Some(-19.67));
+        dict_rare.source = CandidateSource::Database as u8;
+
+        let mut req = base_request(vec![coll, dict_unmeasured, dict_rare]);
+        req.syllable_paths = vec![NeuralSyllablePath {
+            syllables: vec!["wo".into(), "mei".into(), "guan".into(), "xi".into()],
+            channel_log_prob: 0.0,
+            is_complete: true,
+        }];
+        let resp = NeuralDecodeResponse {
+            ok: true,
+            session: 1,
+            generation: 10,
+            candidate_scores: vec![
+                NeuralScoredCandidate {
+                    text: "我没高兴".into(),
+                    neural_log_prob: -12.5,
+                },
+                NeuralScoredCandidate {
+                    text: "我没关系".into(),
+                    neural_log_prob: -9.3,
+                },
+                NeuralScoredCandidate {
+                    text: "我每管席".into(),
+                    neural_log_prob: -26.0,
+                },
+            ],
+            beam_candidates: vec![NeuralBeamCandidate {
+                text: "我没观息".into(),
+                neural_log_prob: -11.0,
+                path_index: 0,
+                token_count: 3,
+            }],
+        };
+        let out = fuse_neural_response(3, &req, &resp, NeuralFusionWeights::default(), false);
+        assert_eq!(out.top1_text.as_deref(), Some("我没关系"));
+        // UniqueBeam 不受极冷僻词 -19.67 拖累，稳居第二。
+        assert!(matches!(
+            &out.seats[1],
+            FusedSeat::InjectedBeam { text, .. } if text == "我没观息"
+        ));
+    }
+}

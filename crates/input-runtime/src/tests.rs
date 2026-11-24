@@ -5008,9 +5008,9 @@ fn a_long_sentence_keeps_three_readings_together_on_the_first_page() {
             "根据官方新闻稿",
             "根据官房新闻稿",
             "根据关防新闻稿",
+            "根据官方新闻高",
             "根据",
             "跟",
-            "根据官方新闻高",
             "根据官方新闻告",
         ]
     );
@@ -5033,8 +5033,8 @@ fn the_kept_readings_follow_the_first_one_wherever_it_sits() {
             "通过虚开发票",
             "通过需开发票",
             "通过虚开发飘",
-            "跟",
             "通过需开发飘",
+            "跟",
         ]
     );
 }
@@ -5080,9 +5080,9 @@ fn only_readings_that_answer_the_whole_key_are_counted() {
             "根据官方新闻稿",
             "根据官房新闻稿",
             "根据关防新闻稿",
+            "根据官方新闻高",
             "根据官方",
             "根据",
-            "根据官方新闻高",
         ]
     );
 
@@ -5102,10 +5102,10 @@ fn only_readings_that_answer_the_whole_key_are_counted() {
             "根据官方词",
             "跟据方圆",
             "跟聚芳园",
+            "根据官方辞",
             "根据词",
             "根剧",
             "跟居",
-            "根据官方辞",
             "根",
         ]
     );
@@ -5129,7 +5129,7 @@ fn a_regrouped_reading_commits_what_its_seat_shows() {
     ]);
     let view = runtime.view();
     assert_eq!(view.candidates[1].text, "根据官房新闻稿");
-    assert_eq!(view.candidates[3].text, "根据");
+    assert_eq!(view.candidates[4].text, "根据");
     let transition = runtime
         .dispatch(Action::Select(view.candidates[1].id))
         .unwrap();
@@ -5144,7 +5144,7 @@ fn a_regrouped_reading_commits_what_its_seat_shows() {
     ]);
     let view = runtime.view();
     let transition = runtime
-        .dispatch(Action::Select(view.candidates[3].id))
+        .dispatch(Action::Select(view.candidates[4].id))
         .unwrap();
     assert_eq!(transition.commit.as_deref(), Some("根据"));
 }
@@ -6414,7 +6414,7 @@ fn korean_lists_are_never_reranked_or_demoted() {
     };
     assert_eq!(
         reordered(0, &sentences, sources(), None),
-        ["韓國語", "漢國語", "寒國語", "國", "語"]
+        ["韓國語", "漢國語", "寒國語", "閑國語", "國"]
     );
     assert_eq!(
         reordered(KOREAN_SCHEME, &sentences, sources(), None),
@@ -9381,7 +9381,7 @@ fn cantonese_lists_are_never_reranked_or_demoted() {
     };
     assert_eq!(
         reordered(0, &sentences, sources(), None),
-        ["你好嗎", "妳好嗎", "尼好嗎", "你", "好"]
+        ["你好嗎", "妳好嗎", "尼好嗎", "你號嗎", "你"]
     );
     assert_eq!(
         reordered(CANTONESE_SCHEME, &sentences, sources(), None),

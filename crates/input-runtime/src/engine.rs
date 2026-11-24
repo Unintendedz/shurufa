@@ -176,6 +176,10 @@ pub trait InputEngine {
         })
     }
     fn snapshot(&self) -> Result<EngineSnapshot, RuntimeError>;
+    /// 为 Tier 1 两阶段异步神经解码提供权威音节路径与候选静态分；未实现时由 runtime 按快照降级推导。
+    fn neural_v2_metadata(&self) -> Option<msime_engine::neural_v2::EngineNeuralMetadata> {
+        None
+    }
     /// 后续按键能继续当前五笔混输拼音时保留组字；没有混输的引擎沿用顶字。
     fn wubi_pinyin_continues(&self, _value: u8, _shift: bool) -> bool {
         false
@@ -412,6 +416,9 @@ impl InputEngine for Session {
     }
     fn snapshot(&self) -> Result<EngineSnapshot, RuntimeError> {
         Session::snapshot(self).map_err(|error| RuntimeError::Engine(error.to_string()))
+    }
+    fn neural_v2_metadata(&self) -> Option<msime_engine::neural_v2::EngineNeuralMetadata> {
+        Session::neural_v2_metadata(self)
     }
     fn wubi_pinyin_continues(&self, value: u8, shift: bool) -> bool {
         Session::wubi_pinyin_continues(self, value, shift)

@@ -23,6 +23,7 @@ pub mod language_dictionary;
 mod lattice;
 mod local;
 pub mod multilingual;
+pub mod neural_v2;
 mod nine_key;
 mod nine_key_shuangpin;
 pub mod ordering;

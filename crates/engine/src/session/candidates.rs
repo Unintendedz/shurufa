@@ -20,7 +20,8 @@ use crate::types::{
 };
 use crate::user_dictionary::journal::has_matching_user_weight;
 use crate::user_dictionary::overlay::{
-    apply_personal_overlay, effective_bayesian_weights, unix_now_seconds,
+    apply_personal_overlay, effective_bayesian_weights, personal_cache_log_bonus, unix_now_seconds,
+    AppScope,
 };
 use crate::user_dictionary::positions::{
     apply_fixed_positions_with_state, clear_fixed_position, is_pinned_candidate,
@@ -295,15 +296,25 @@ impl InputSession {
             SchemeType::Shuangpin => self.engine.request().normalized_segmentation.as_str(),
             _ => return None,
         };
-        if !typed_segmentation
-            .split('\'')
-            .filter(|piece| !piece.is_empty())
-            .all(crate::pinyin::syllables::is_intact)
-        {
-            return None;
-        }
         let characters = first.word.chars().count();
         if characters == 0 {
+            return None;
+        }
+        let pieces: Vec<&str> = typed_segmentation
+            .split('\'')
+            .filter(|piece| !piece.is_empty())
+            .collect();
+        let all_intact = pieces
+            .iter()
+            .all(|piece| crate::pinyin::syllables::is_intact(piece));
+        // 允许完整音节以及与字数严格对齐的纯简拼/混拼多字词参与语境同音消歧，仍拒绝半截单音节输入。
+        let aligned_jianpin = characters >= 2
+            && pieces.len() == characters
+            && pieces.iter().all(|piece| {
+                crate::pinyin::syllables::is_intact(piece)
+                    || (piece.len() == 1 && piece.as_bytes()[0].is_ascii_lowercase())
+            });
+        if !all_intact && !aligned_jianpin {
             return None;
         }
         let scheme = first.scheme;
@@ -982,6 +993,177 @@ impl InputSession {
         };
         let menu = self.local_mode_options.date_time_menu.then_some(keyword);
         insert_inline_date_time(items, anchor, kind, raw, || self.local_now(), menu);
+    }
+
+    /// 为 Tier 1 两阶段异步神经解码提取当前组字态的权威音节路径、统一静态分、信道代价与等跨度标记。
+    pub(super) fn neural_v2_metadata(&self) -> Option<crate::neural_v2::EngineNeuralMetadata> {
+        if self.local_mode != LocalInputMode::None
+            || self.dedicated_english
+            || self.prefix_active
+            || self.caret_edit.active
+            || self.conversion.is_some()
+            || !self.has_composition()
+        {
+            return None;
+        }
+        let scheme = self.scheme();
+        if !scheme.is_pinyin()
+            && !(scheme == SchemeType::Wubi && self.answered_by_pinyin_fallback())
+        {
+            return None;
+        }
+        let request = self.engine.request();
+        let raw_input = request.raw_input.clone();
+        let segmentation = if !request.normalized_segmentation.is_empty() {
+            request.normalized_segmentation.clone()
+        } else {
+            request.raw_segmentation.clone()
+        };
+        let syllable_paths = crate::neural_v2::build_syllable_paths(
+            &raw_input,
+            &segmentation,
+            crate::neural_v2::DEFAULT_MAX_SYLLABLE_PATHS,
+        );
+        let primary_syllables = segmentation
+            .split('\'')
+            .filter(|piece| !piece.is_empty())
+            .count();
+        let journal = self.journal_path();
+        let rank_context = self.pinyin_ranking_context();
+        let pinned_word = pinned_candidate_for(journal, &rank_context);
+        let now_unix = unix_now_seconds();
+
+        let folded_raw: String = raw_input
+            .chars()
+            .filter(|&c| c != '\'')
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        let items = self.candidates();
+        let mut candidates = Vec::with_capacity(items.len());
+        for item in items {
+            let corrected_full_span =
+                !item.corrected_from.is_empty() && !folded_raw.is_empty() && {
+                    let folded_from: String = item
+                        .corrected_from
+                        .chars()
+                        .filter(|&c| c != '\'')
+                        .map(|c| c.to_ascii_lowercase())
+                        .collect();
+                    folded_from == folded_raw
+                };
+            // 备选零声母切分行完整覆盖全部原始输入字母且非长词续写时，同样属于合法等跨度竞争候选，
+            // 绝不因 `extra_syllables == 0` 被踢出神经池进而锁死在槽 0。
+            let folded_pinyin_full = !folded_raw.is_empty() && {
+                let folded_py: String = item
+                    .pinyin
+                    .chars()
+                    .filter(|&c| c != '\'')
+                    .map(|c| c.to_ascii_lowercase())
+                    .collect();
+                folded_py == folded_raw
+            };
+            let answers_key = self.selection_completes_composition(item)
+                && (self.reading_answers_key(item) || corrected_full_span || folded_pinyin_full);
+            let word_chars = item.word.chars().count();
+            let pinyin_syllables = item
+                .pinyin
+                .split('\'')
+                .filter(|piece| !piece.is_empty())
+                .count();
+            let max_allowed_syllables =
+                primary_syllables.saturating_add(usize::from(item.extra_syllables));
+            let canonical_syllables = if item.canonical_pinyin.is_empty() {
+                word_chars
+            } else {
+                item.canonical_pinyin
+                    .split('\'')
+                    .filter(|piece| !piece.is_empty())
+                    .count()
+            };
+            // 等跨度判定：必须完整回答当前输入且不是超长续写词（避免长续写词如 `xingba -> 星巴克`
+            // 借 `folded_pinyin_full` 或纠错标记抢占首槽；备选切分须同时满足 `pinyin_syllables == word_chars`）。
+            let span_ceiling = if corrected_full_span {
+                max_allowed_syllables.saturating_add(1)
+            } else {
+                max_allowed_syllables
+            };
+            let exact_alt_seg = folded_pinyin_full
+                && pinyin_syllables == word_chars
+                && canonical_syllables == word_chars;
+            let exact_span = answers_key
+                && word_chars > 0
+                && (primary_syllables == 0
+                    || exact_alt_seg
+                    || (word_chars <= span_ceiling && canonical_syllables <= span_ceiling));
+
+            let stat_log_prob = if let Some(ev) = item.static_evidence() {
+                Some(ev.log_prob_milli_nats as f64 / 1000.0)
+            } else if item.source.is_dictionary() {
+                // 3+ 字词典条目的占位权重 `100` 表示未测频，交由融合阶段按中性相对先验处理，不被误罚 `-16.97 nats`。
+                if word_chars >= 3 && item.weight == 100 {
+                    None
+                } else {
+                    Some(crate::neural_v2::dictionary_unified_stat_log_prob(
+                        item.weight,
+                        word_chars.max(1),
+                    ))
+                }
+            } else {
+                None
+            };
+
+            let mut channel_log_prob = 0.0;
+            if !item.corrected_from.is_empty() {
+                channel_log_prob += crate::neural_v2::DEFAULT_TYPO_CHANNEL_PENALTY;
+            }
+            if item.fuzzy {
+                channel_log_prob += crate::neural_v2::DEFAULT_FUZZY_CHANNEL_PENALTY;
+            }
+            let extra_hiatus =
+                usize::from(item.extra_syllables).max(if exact_alt_seg && primary_syllables > 0 {
+                    word_chars.saturating_sub(primary_syllables)
+                } else {
+                    0
+                });
+            if extra_hiatus > 0 {
+                channel_log_prob += -0.6 * (extra_hiatus as f64);
+            }
+
+            let mut user_log_prob = if item.source == CandidateSource::UserDatabase {
+                crate::neural_v2::DEFAULT_USER_DICTIONARY_LOG_PRIOR
+            } else {
+                0.0
+            };
+            if self.decoupled_personal_learning
+                && !rank_context.is_empty()
+                && item.source.is_dictionary()
+            {
+                user_log_prob += personal_cache_log_bonus(
+                    journal,
+                    &rank_context,
+                    &item.word,
+                    AppScope::General,
+                    now_unix,
+                );
+            }
+            let pinned =
+                item.fixed_position > 0 || pinned_word.as_deref() == Some(item.word.as_str());
+
+            candidates.push(crate::neural_v2::EngineNeuralCandidateMeta {
+                stat_log_prob,
+                channel_log_prob,
+                user_log_prob,
+                exact_span,
+                pinned,
+            });
+        }
+
+        Some(crate::neural_v2::EngineNeuralMetadata {
+            raw_input,
+            segmentation,
+            syllable_paths,
+            candidates,
+        })
     }
 }
 

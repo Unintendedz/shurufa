@@ -191,6 +191,11 @@ fn literal_alternative_series_reuses_prefix_rows_across_dense_paths() {
         let mut rows =
             dictionary.merge_alternative_full(raw, primary, &segments, &alternatives, primary_rows);
         let mut supplemental = Vec::new();
+        let mut alt_sentences = Vec::new();
+        let legacy_phrase_bonus_milli =
+            (crate::lattice::decode::PHRASE_LENGTH_BONUS * 1000.0).round() as i64;
+        let split_cost_milli =
+            (crate::pinyin::graph::DAG_HIATUS_SPLIT_COST * 1000.0).round() as i64;
         for path in &alternatives {
             let rows_for_path = dictionary.query_series_with_typos(
                 raw,
@@ -200,19 +205,24 @@ fn literal_alternative_series_reuses_prefix_rows_across_dense_paths() {
                 None,
                 None,
             );
-            if path.len() > segments.len() {
-                let extra = (path.len() - segments.len()).min(usize::from(u8::MAX)) as u8;
-                for mut item in rows_for_path {
-                    if item.sentence_association {
-                        item.extra_syllables = extra;
+            let extra = path.len().saturating_sub(segments.len());
+            let adjust = (extra as i64)
+                .saturating_mul(split_cost_milli.saturating_sub(legacy_phrase_bonus_milli));
+            for mut item in rows_for_path {
+                if item.sentence_association {
+                    if extra > 0 {
+                        item.weight = item.weight.saturating_add(adjust);
                     }
+                    alt_sentences.push(item);
+                } else {
                     supplemental.push(item);
                 }
-            } else {
-                supplemental.extend(rows_for_path);
             }
         }
         merge_series_by_coverage(&mut rows, supplemental);
+        if !alt_sentences.is_empty() {
+            merge_alternative_sentences_by_score(&mut rows, raw, &segments, alt_sentences);
+        }
         rows
     };
     let primary_rows = before.query_series(raw, primary, &segments);
@@ -228,7 +238,7 @@ fn literal_alternative_series_reuses_prefix_rows_across_dense_paths() {
     });
     assert_eq!(actual, expected);
     // 行字段改成 `SharedString` 后，逐路径查询的对照克隆重复前缀行只加引用计数，共享前缀不再省下申请；剩下的差额是前缀表 `queried_prefixes` 自身的哈希表和键。
-    assert_eq!(new, old + 19, "共享前缀的额外申请变化：{old}→{new}");
+    assert_eq!(new, old + 15, "共享前缀的额外申请变化：{old}→{new}");
 }
 
 #[test]
@@ -292,10 +302,9 @@ fn extra_syllable_literal_cut_sentences_follow_primary_runner_ups_with_length_de
         .position(|row| row.word == "主案吧" && row.sentence_association)
         .expect("多拆音节的字面备选切分仍应生成整句");
 
-    assert!(primary_pos < extra_cut);
     assert!(
-        extra_cut < prefix_pos,
-        "无重排器时全覆盖备选整句仍在主切分前缀之前: {rows:?}"
+        primary_pos < prefix_pos && extra_cut < prefix_pos,
+        "主切分与零声母备选整句均应在主切分前缀之前平等竞争: {rows:?}"
     );
     let extra_row = &rows[extra_cut];
     let raw_segments = ["zhu", "an", "ba"].map(str::to_owned);
@@ -311,18 +320,15 @@ fn extra_syllable_literal_cut_sentences_follow_primary_runner_ups_with_length_de
         .iter()
         .find(|row| row.word == "主案吧" && row.sentence_association)
         .expect("直接按备选切分查询应得到未扣分的整句");
-    assert_eq!(
-        extra_row.weight, raw_extra.weight,
-        "不能直接改写原始 weight，以免破坏静态权重合约"
-    );
-    assert_eq!(extra_row.extra_syllables, 1);
+    let expected_channel_deduction = (-crate::pinyin::graph::DAG_HIATUS_SPLIT_COST * 1000.0).round()
+        as i64
+        + (crate::lattice::decode::PHRASE_LENGTH_BONUS * 1000.0).round() as i64;
+    assert_eq!(extra_row.extra_syllables, 0);
     assert!(!extra_row.keyboard_runner_up);
-    let expected_deduction = (crate::lattice::decode::PHRASE_LENGTH_BONUS * 1500.0).round() as i64;
     assert_eq!(
-        raw_extra.static_evidence().unwrap().log_prob_milli_nats
-            - extra_row.static_evidence().unwrap().log_prob_milli_nats,
-        expected_deduction,
-        "多出 1 个音节应仅在 static_evidence 中精确扣除 1.5 倍 PHRASE_LENGTH_BONUS"
+        raw_extra.weight - extra_row.weight,
+        expected_channel_deduction,
+        "多出 1 个零声母切分边界应仅扣除小额真实信道代价（-0.60 nats），不再施加 -30 nats 死刑"
     );
 
     let model = Arc::new(crate::lattice::merge::block_buffer_tests::favouring_model(
@@ -343,19 +349,100 @@ fn extra_syllable_literal_cut_sentences_follow_primary_runner_ups_with_length_de
         .position(|row| row.word == "主案吧" && row.sentence_association)
         .expect("启用重排器后多拆音节备选整句仍应保留");
     assert!(
-        reranked_prefix_pos < reranked_extra_cut,
-        "启用重排器后多拆音节备选整句应让位到主切分前缀之后: {reranked_rows:?}"
+        reranked_extra_cut < reranked_prefix_pos,
+        "启用重排器后零声母备选整句应与主切分整句一同留在前缀词之前平等竞争: {reranked_rows:?}"
     );
     let reranked_extra = &reranked_rows[reranked_extra_cut];
-    assert!(reranked_extra.keyboard_runner_up);
-    assert_eq!(reranked_extra.extra_syllables, 1);
-    assert_eq!(reranked_extra.weight, raw_extra.weight);
+    assert!(!reranked_extra.keyboard_runner_up);
+    assert_eq!(reranked_extra.extra_syllables, 0);
     assert_eq!(
-        raw_extra.static_evidence().unwrap().log_prob_milli_nats
-            - reranked_extra
-                .static_evidence()
-                .unwrap()
-                .log_prob_milli_nats,
-        expected_deduction
+        raw_extra.weight - reranked_extra.weight,
+        expected_channel_deduction
     );
+}
+
+#[test]
+fn mixed_jianpin_and_competing_typo_cuts_produce_full_span_candidates() {
+    let fixture = Fixture::new();
+    for (key, word, weight) in [
+        ("wo", "我", 5_000_000),
+        ("wo'xiang'qu", "我想去", 300_000),
+        ("chi'fan", "吃饭", 400_000),
+        ("ni'zen'me", "你怎么", 200_000),
+        ("hai'mei", "还没", 300_000),
+        ("lai", "来", 2_000_000),
+        ("ming'tian", "明天", 600_000),
+        ("zai'shuo", "再说", 300_000),
+        ("zao'shang", "早上", 350_000),
+        ("xie'xie", "谢谢", 800_000),
+        ("mei'wen'ti", "没问题", 500_000),
+        ("zhe'ge", "这个", 1_000_000),
+        ("zu'ge", "阻隔", 200),
+        ("xie", "些", 100_000),
+        ("xi", "西", 100_000),
+        ("mei", "没", 500_000),
+        ("wen", "问", 300_000),
+        ("ta", "他", 500_000),
+        ("jia", "家", 500_000),
+    ] {
+        fixture.insert(key, word, weight);
+    }
+    let mut dictionary = QuanpinDictionary::new(&fixture.paths);
+    let all = autocorrect_type::TRANSPOSITION
+        | autocorrect_type::NEIGHBOR
+        | autocorrect_type::MISSING_OR_EXTRA;
+
+    let wxq = dictionary.query("wxiangquchifan", "", all, FuzzyPinyinOptions::default());
+    assert_eq!(wxq[0].word, "我想去吃饭", "{wxq:?}");
+    assert_eq!(wxq[0].canonical_pinyin, "wo'xiang'qu'chi'fan");
+
+    let nzm = dictionary.query("nzmhaimeilai", "", all, FuzzyPinyinOptions::default());
+    assert_eq!(nzm[0].word, "你怎么还没来", "{nzm:?}");
+
+    let mt = dictionary.query("mingtianzs", "", all, FuzzyPinyinOptions::default());
+    assert!(mt.iter().any(|row| row.word == "明天再说"), "{mt:?}");
+    assert!(mt.iter().any(|row| row.word == "明天早上"), "{mt:?}");
+
+    let xiexiw = dictionary.query("xiexiw", "", all, FuzzyPinyinOptions::default());
+    assert_eq!(xiexiw[0].word, "谢谢", "{xiexiw:?}");
+    assert_eq!(xiexiw[0].corrected_from, "xiexiw");
+
+    let meiwentj = dictionary.query("meiwentj", "", all, FuzzyPinyinOptions::default());
+    assert_eq!(meiwentj[0].word, "没问题", "{meiwentj:?}");
+    assert_eq!(meiwentj[0].corrected_from, "meiwentj");
+
+    // 真实简拼尾 `zheg -> 这个` 绝不能被邻键误翻成 `阻隔`。
+    let zheg = dictionary.query("zheg", "", all, FuzzyPinyinOptions::default());
+    assert_eq!(zheg[0].word, "这个", "{zheg:?}");
+}
+
+#[test]
+fn full_span_typo_upgrades_existing_strict_prefix_row_even_as_runner_up() {
+    let fixture = Fixture::new();
+    for (key, word, weight) in [
+        ("mei'wen", "美文", 500_000),
+        ("tui'jian", "推荐", 500_000),
+        // 模拟三字词表占位权重较低且已有严格前缀 `mei'wen't` 命中「没问题」的场景。
+        ("mei'wen'ti", "没问题", 100),
+        ("mei", "没", 2_000_000),
+        ("wen'ti", "问题", 500_000),
+    ] {
+        fixture.insert(key, word, weight);
+    }
+    let mut dictionary = QuanpinDictionary::new(&fixture.paths);
+    let all = autocorrect_type::TRANSPOSITION
+        | autocorrect_type::NEIGHBOR
+        | autocorrect_type::MISSING_OR_EXTRA;
+    let rows = dictionary.query("meiwentj", "", all, FuzzyPinyinOptions::default());
+    let pos = rows
+        .iter()
+        .position(|row| row.word == "没问题")
+        .expect("没问题必须留在前排候选池中");
+    assert!(pos <= 4, "没问题应位于前排竞争区: {rows:?}");
+    assert_eq!(
+        rows[pos].corrected_from, "meiwentj",
+        "严格前缀 `mei'wen't` 必须升级为消费完整输入的全跨度纠错行: {rows:?}"
+    );
+    assert_eq!(rows[pos].canonical_pinyin, "mei'wen'ti");
+    assert_eq!(rows[pos].source, CandidateSource::Database);
 }

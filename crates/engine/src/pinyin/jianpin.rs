@@ -1,4 +1,4 @@
-//! 词典级联查询的简拼谓词（quanpin.md §5.1）。全拼与双拼都接受双字母声母，双拼仍严格区分平翘舌的单字母。
+//! 词典级联查询与简全混拼词网格准入谓词（quanpin.md §5.1）。全拼与双拼都接受双字母声母，双拼仍严格区分平翘舌的单字母。
 
 use super::syllables::is_intact;
 
@@ -12,9 +12,35 @@ fn is_initial_token(segment: &str) -> bool {
     matches!(segment, "zh" | "ch" | "sh")
 }
 
+/// 单个片段是否为合法的拼音声母或单字母首码（排除无词典分表的 `i`/`u`/`v`）。
+pub fn is_valid_initial_segment(segment: &str) -> bool {
+    if is_initial_token(segment) {
+        return true;
+    }
+    let bytes = segment.as_bytes();
+    bytes.len() == 1 && bytes[0].is_ascii_lowercase() && !matches!(bytes[0], b'i' | b'u' | b'v')
+}
+
 /// Every segment has length 1.
 pub fn is_pure_jianpin(segments: &[String]) -> bool {
-    segments.iter().all(|segment| segment.len() == 1)
+    !segments.is_empty() && segments.iter().all(|segment| segment.len() == 1)
+}
+
+/// 至少两个音节，且每段均是完整音节或合法声母简拼（供简全混拼与纯简拼词网格解码准入）。
+pub fn is_mixed_jianpin_lattice_eligible(segments: &[String]) -> bool {
+    segments.len() >= 2
+        && segments
+            .iter()
+            .all(|segment| is_intact(segment) || is_valid_initial_segment(segment))
+        && segments.iter().any(|segment| !is_intact(segment))
+}
+
+/// 同时包含至少一个完整多字母全拼音节与至少一个非完整声母段（如 `w'xiang'qu'chi'fan`、`ming'tian'z's`）。
+pub fn has_mixed_complete_and_initial(segments: &[String]) -> bool {
+    is_mixed_jianpin_lattice_eligible(segments)
+        && segments
+            .iter()
+            .any(|segment| segment.len() >= 2 && is_intact(segment))
 }
 
 /// 至少两个音节，且非末尾音节含单字母或 `zh/ch/sh` 声母。
@@ -162,7 +188,17 @@ mod tests {
     #[test]
     fn jianpin_shapes() {
         assert!(is_pure_jianpin(&segments(&["n", "h"])));
+        assert!(!is_pure_jianpin(&[]));
         assert!(!is_pure_jianpin(&segments(&["n", "hao"])));
+        assert!(has_mixed_complete_and_initial(&segments(&[
+            "w", "xiang", "qu", "chi", "fan"
+        ])));
+        assert!(has_mixed_complete_and_initial(&segments(&[
+            "ming", "tian", "z", "s"
+        ])));
+        assert!(!has_mixed_complete_and_initial(&segments(&["w", "m"])));
+        assert!(!has_mixed_complete_and_initial(&segments(&["ni", "hao"])));
+        assert!(!is_mixed_jianpin_lattice_eligible(&segments(&["ni", "v"])));
         assert!(needs_mixed_jianpin_query(
             &segments(&["n", "hao"]),
             QuerySource::Quanpin

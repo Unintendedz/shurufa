@@ -786,6 +786,14 @@ impl Session {
         self.input.online_query()
     }
 
+    /// 提取当前组字态的 Tier 1 神经解码元数据；九宫格或上屏后联想态返回 `None`。
+    pub fn neural_v2_metadata(&self) -> Option<crate::neural_v2::EngineNeuralMetadata> {
+        if self.nine_key.active() || !self.prediction.rows.is_empty() {
+            return None;
+        }
+        self.input.neural_v2_metadata()
+    }
+
     /// Whether an apostrophe now separates a unit from its target or one `/fy` word from the next, so a host or runtime that would finish the composition on punctuation hands it over as a character instead.
     pub fn takes_local_separator(&self) -> bool {
         !self.nine_key.active() && self.input.takes_local_separator()

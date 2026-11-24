@@ -9,8 +9,8 @@ pub use chinese_ime_lm::{CandidateFacts, Reranker, SentenceModel, DICTIONARY_SOU
 /// `CandidateSource::Generated`：词网格解码出的整句路径。
 pub const LATTICE_SOURCE: u8 = 8;
 
-/// 会产生回答完整按键的整句或长词读法的来源集合：`Generated`、`NeuralKeyboard`、`Collocation`。
-const SENTENCE_READING_SOURCES: [u8; 3] = [LATTICE_SOURCE, 11, 17];
+/// 会产生回答完整按键的整句或长词读法的来源集合：`Generated`、`NeuralKeyboard`、`Collocation`、`NeuralV2`、`NeuralConstrained`。
+const SENTENCE_READING_SOURCES: [u8; 5] = [LATTICE_SOURCE, 11, 17, 19, 20];
 
 /// `CandidateSource::QuickPhrase`, `Emoji` and `Kaomoji`: entries a keyword finds in a catalog, listed in the catalog's order. They are not readings of the key, so the reranker neither compares them nor promotes them: typing `kiss` in kaomoji mode had the model seat the catalog's 646th entry, `French Kiss!(*￣(￣　*)`, above its first.
 const CATALOG_SOURCES: [u8; 3] = [5, 6, 7];
@@ -61,31 +61,79 @@ pub(crate) fn static_leader_promote_margin_mean_nats(total_clause_characters: us
     }
 }
 
+/// 统一概率底座下的线性融合评分：已移除旧 `0.50/字` 静态赤字重罚，不再焊死 `[2, 1, 1]` 合法拆字路径。
 fn fill_guarded_combined_scores(
-    texts: &[&str],
+    _texts: &[&str],
     statik: &[f64],
     neural: &[f32],
     combined: &mut [f64],
 ) {
-    let max_statik = statik.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     for index in 0..statik.len() {
-        let free_deficit = static_prior_free_deficit_mean_nats(texts[index].chars().count());
-        let deficit = (max_statik - statik[index]).max(0.0);
-        let excess = (deficit - free_deficit).max(0.0);
-        combined[index] =
-            (statik[index] + f64::from(neural[index])) * 0.5 - STATIC_PRIOR_EXCESS_PENALTY * excess;
+        combined[index] = (statik[index] + f64::from(neural[index])) * 0.5;
     }
 }
 
+/// 统一概率底座下直接按综合分择优晋升，不再对短子句附加人工防抖阻拦。
 fn leader_promotion_allowed(
-    total_clause_characters: usize,
-    leader_statik: f64,
-    challenger_statik: f64,
+    _total_clause_characters: usize,
+    _leader_statik: f64,
+    _challenger_statik: f64,
     leader_combined: f64,
     challenger_combined: f64,
 ) -> bool {
-    let margin = static_leader_promote_margin_mean_nats(total_clause_characters);
-    challenger_statik >= leader_statik || challenger_combined - leader_combined >= margin
+    challenger_combined > leader_combined
+}
+
+/// `neural_v2` 统一概率重排前置判断：不因 `Database` 首位一刀切免重排，仅排除非中文拼音方案、英文/日文/字面领衔及不足两行的列表。
+pub fn rerank_needs_model_v2<'a, R: OrderRowSource<'a> + ?Sized>(
+    scheme: u8,
+    answered_by_pinyin_fallback: bool,
+    rows: &'a R,
+) -> bool {
+    if !reorders_candidates(scheme) {
+        return false;
+    }
+    if scheme_type(scheme) == Some(SchemeType::Wubi) && !answered_by_pinyin_fallback {
+        return false;
+    }
+    if rows.len() < 2 {
+        return false;
+    }
+    let leader = rows.get(0);
+    if matches!(leader.source, ENGLISH_SOURCE | MIXED_JAPANESE_SOURCE) {
+        return false;
+    }
+    row_answers_key(scheme, leader)
+}
+
+/// `neural_v2` 统一概率融合排序：`score = neural_weight * neural + static_weight * statik + channel`。
+/// 不设 `lock_leader` 瘫痪锁，也不设旧静态赤字重罚；当列表已有序或长度非法时返回 `None`。
+pub fn neural_v2_fused_order(
+    neural_log_probs: &[f64],
+    static_log_probs: &[f64],
+    channel_log_probs: &[f64],
+    neural_weight: f64,
+    static_weight: f64,
+) -> Option<Vec<usize>> {
+    let count = neural_log_probs.len();
+    if count < 2 || static_log_probs.len() != count || channel_log_probs.len() != count {
+        return None;
+    }
+    let mut scores = Vec::with_capacity(count);
+    for i in 0..count {
+        scores.push(
+            neural_weight * neural_log_probs[i]
+                + static_weight * static_log_probs[i]
+                + channel_log_probs[i],
+        );
+    }
+    let mut order: Vec<usize> = (0..count).collect();
+    order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]));
+    if order.iter().enumerate().all(|(seat, &idx)| seat == idx) {
+        None
+    } else {
+        Some(order)
+    }
 }
 
 /// The traits of the scheme behind `scheme`, which the Engine reports as its `SchemeType` ordinal. Only the placeholder snapshot of a failed refresh carries an ordinal no scheme has; each caller decides what that placeholder means, the way the ordinal comparisons this replaces did.
@@ -782,12 +830,12 @@ where
 /// 拼凑切分（如「许个愿」对「许各院 / 许哥原」差 `> 3.8` nats/字），不再占用首屏读法席位，改排在第 2 页次选区
 /// 开头；四字及以上短语与长句（合法 `[1, 1, 2]` 组合常与 `[2, 2]` 同音词竞争）保留全部 3 个首屏读法席位。
 const RUNNER_UP_MAX_MEAN_GAP_NATS: f64 = 3.8;
-/// 双字精确词典词已领先时，词网格在「去重后补充次选」下产出的单字+单字（`1+1`）拼凑读法
-/// （如「楚伐」「邓禄」「豹寸」「艘所」）缺少 `PHRASE_LENGTH_BONUS (20)` 且双边各扣 `ln(1e6)`，
-/// 每字静态证据恒低于 `-16 nats/字`；而任何双字整词边（含指物代词「它」双证据合成边）每字静态证据
-/// 恒不低于 `-13 nats/字`。居中取 `-14.5 nats/字` 仅让 `1+1` 拼凑句退出首屏，既保住「它在」等双字合成边，
-/// 又避免双字词第 2 格被无意义单字拼凑抢占。
-const TWO_CHAR_SPLIT_FALLBACK_MAX_MEAN_NATS: f64 = -14.5;
+/// 统一概率尺度下双字词典命中领先时，极低频生僻单字拼凑（如「楚伐」「豹寸」，每字均分低于 `-8.5 nats/字`）
+/// 才退让至精确词典词之后；常见高频 `1+1` 拆字组合（如「个事」「点事」「些钱」，约 `-4.5 ~ -7.0 nats/字`）
+/// 与双字合成边均保持正常竞争席位。
+const TWO_CHAR_SPLIT_FALLBACK_MAX_MEAN_NATS: f64 = -8.5;
+/// 首页整句读法从 `4 + 2` 扩展到 `5 + 1` 时，第 5 条整句均分相对首条读法的最大允许落差（nats/字）。
+const EXPAND_FIFTH_READING_MAX_MEAN_GAP_NATS: f64 = 1.2;
 /// 双字精确词典词领先且首页读法全部让位时，首页前排总席位上限（保证多次调用幂等）。
 const TWO_CHAR_DEFERRED_PAGE_BUDGET: usize = 6;
 
@@ -915,10 +963,11 @@ pub fn runner_up_order<'a, R: OrderRowSource<'a> + ?Sized>(
 ) -> Option<Vec<usize>> {
     // 词网格从两音节开始解码；假名单字等长度不足的行不按整句读法归组。
     const SENTENCE_SYLLABLES: usize = 2;
-    // 达到三个汉字时在首页保留 `SENTENCE_READINGS` 条整句读法与至多 `FRONT_NON_READING_LIMIT` 条前排非读法行（满 6 格首屏），其余全键读法紧随第 2 页开头。
+    // 达到三个汉字时在首页默认保留 4 条整句读法（槽 0–3）与至多 2 条前排前缀词典项（槽 4–5）；
+    // 当第 5 条整句读法分差接近且第 2 条非读法项并非多字前缀词时，幂等扩展至 5 + 1，解放被挤至第 2 页的整句正解。
     const LONG_SENTENCE_CHARACTERS: usize = 3;
-    const SENTENCE_READINGS: usize = 3;
-    const FRONT_NON_READING_LIMIT: usize = 3;
+    const SENTENCE_READINGS: usize = 4;
+    const FRONT_NON_READING_LIMIT: usize = 2;
     const SHORT_FRONT_ROW_LIMIT: usize = 4;
 
     if !reorders_candidates(scheme) {
@@ -948,16 +997,6 @@ pub fn runner_up_order<'a, R: OrderRowSource<'a> + ?Sized>(
                 && rows.get(index).text.chars().count() == width
         }
     };
-    let keep = if width >= LONG_SENTENCE_CHARACTERS {
-        SENTENCE_READINGS
-    } else {
-        1
-    };
-    let front_limit = if width >= LONG_SENTENCE_CHARACTERS {
-        FRONT_NON_READING_LIMIT
-    } else {
-        SHORT_FRONT_ROW_LIMIT
-    };
     let expand_front_with_unused_keep = width >= LONG_SENTENCE_CHARACTERS;
     let defer_two_char_splits = width == SENTENCE_SYLLABLES
         && first_reading > 0
@@ -968,11 +1007,11 @@ pub fn runner_up_order<'a, R: OrderRowSource<'a> + ?Sized>(
 
     let defer_corrected = !rows.get(first_reading).corrected;
     let is_deferred_reading = |index: usize| defer_corrected && rows.get(index).corrected;
+    let first_reading_mean = rows
+        .static_evidence(first_reading)
+        .and_then(StaticEvidence::mean);
     let leader_mean = (width == LONG_SENTENCE_CHARACTERS)
-        .then(|| {
-            rows.static_evidence(first_reading)
-                .and_then(StaticEvidence::mean)
-        })
+        .then_some(first_reading_mean)
         .flatten();
     let far_below_leader = |index: usize| {
         if defer_two_char_splits {
@@ -989,6 +1028,35 @@ pub fn runner_up_order<'a, R: OrderRowSource<'a> + ?Sized>(
                 (Some(leader), Some(candidate)) => leader - candidate > RUNNER_UP_MAX_MEAN_GAP_NATS,
                 _ => false,
             }
+    };
+    // 幂等判定是否从 4+2 扩展到 5+1：仅依赖重排前后不变的主读法相对顺序、静态均分与第 2 非读法行字数。
+    let expand_to_five_readings = if width >= LONG_SENTENCE_CHARACTERS {
+        let fifth_close = first_reading_mean.is_some_and(|leader| {
+            (first_reading..count)
+                .filter(|&idx| {
+                    is_reading(idx) && !is_deferred_reading(idx) && !far_below_leader(idx)
+                })
+                .nth(SENTENCE_READINGS)
+                .and_then(|idx| rows.static_evidence(idx).and_then(StaticEvidence::mean))
+                .is_some_and(|fifth| leader - fifth <= EXPAND_FIFTH_READING_MAX_MEAN_GAP_NATS)
+        });
+        let second_front_weak = ((first_reading + 1)..count)
+            .filter(|&idx| !is_reading(idx))
+            .nth(1)
+            .is_none_or(|idx| rows.get(idx).text.chars().count() <= 1);
+        fifth_close && second_front_weak
+    } else {
+        false
+    };
+    let keep = if width >= LONG_SENTENCE_CHARACTERS {
+        SENTENCE_READINGS + usize::from(expand_to_five_readings)
+    } else {
+        1
+    };
+    let front_limit = if width >= LONG_SENTENCE_CHARACTERS {
+        FRONT_NON_READING_LIMIT.saturating_sub(usize::from(expand_to_five_readings))
+    } else {
+        SHORT_FRONT_ROW_LIMIT
     };
     let is_promoted_exact_non_reading = |index: usize| {
         let row = rows.get(index);
@@ -1321,17 +1389,60 @@ mod tests {
     }
 
     #[test]
-    fn long_sentences_keep_three_readings_after_the_first() {
-        // 第一条整句留在原位，其后两条紧跟着；前排保留不超过三条非读法行，其余整句紧随其后。
+    fn long_sentences_keep_four_readings_and_two_prefixes_and_can_expand_to_five_plus_one() {
+        // 4+2 默认布局：前 4 槽保留整句读法（0,2,3,4），后 2 槽保留前排前缀项（1,5），第 5 整句（6）紧随第 2 页开头。
         let rows = [
             row("今天天气", LATTICE_SOURCE),
             row("今天", 0),
             row("金天天气", LATTICE_SOURCE),
             row("今天添气", LATTICE_SOURCE),
             row("今添天气", LATTICE_SOURCE),
+            row("金天", 0),
+            row("近天天气", LATTICE_SOURCE),
             row("金", 0),
         ];
-        assert_eq!(runner_up_order(0, &rows), Some(vec![0, 2, 3, 1, 5, 4]));
+        assert_eq!(
+            runner_up_order(0, &rows),
+            Some(vec![0, 2, 3, 4, 1, 5, 6, 7])
+        );
+        let reordered: Vec<_> = [0, 2, 3, 4, 1, 5, 6, 7]
+            .iter()
+            .map(|&idx| rows[idx])
+            .collect();
+        assert_eq!(runner_up_order(0, &reordered), None);
+
+        // 动态 5+1 扩展：当第 5 整句静态均分距首行 <= 1.2 nats/字且第 2 非读法项为单字（非多字前缀）时，
+        // 首页扩展为 5 条整句 + 1 条前缀，且再次调用保持幂等零分配。
+        let expand_rows = [
+            row("今天天气", LATTICE_SOURCE),
+            row("今天", 0),
+            row("金天天气", LATTICE_SOURCE),
+            row("今天添气", LATTICE_SOURCE),
+            row("今添天气", LATTICE_SOURCE),
+            row("今", 0),
+            row("近天天气", LATTICE_SOURCE),
+            row("金", 0),
+        ];
+        let expand_scores = [
+            Some(StaticEvidence::new(-16_000, 4)),
+            None,
+            Some(StaticEvidence::new(-17_000, 4)),
+            Some(StaticEvidence::new(-18_000, 4)),
+            Some(StaticEvidence::new(-19_000, 4)),
+            None,
+            Some(StaticEvidence::new(-20_000, 4)),
+            None,
+        ];
+        let expand_scored = ScoredOrderRows::new(&expand_rows, &expand_scores);
+        let expand_order = runner_up_order(0, &expand_scored).expect("应动态扩展为 5+1");
+        assert_eq!(expand_order, vec![0, 2, 3, 4, 6, 1, 5, 7]);
+        let r_rows: Vec<_> = expand_order.iter().map(|&i| expand_rows[i]).collect();
+        let r_scores: Vec<_> = expand_order.iter().map(|&i| expand_scores[i]).collect();
+        let (again, allocs) = crate::ime::personal_rerank::allocations::count(|| {
+            runner_up_order(0, &ScoredOrderRows::new(&r_rows, &r_scores))
+        });
+        assert_eq!(again, None);
+        assert_eq!(allocs, 0);
     }
 
     fn favouring_model(characters: &[char], favoured: &[char]) -> SentenceModel {
@@ -1396,12 +1507,14 @@ mod tests {
             row("甲", 0),
             row("假乙丙", 11),
             row("加乙丙", 17),
-            row("佳乙丙", 11),
+            row("佳乙丙", 19),
+            row("嘉乙丙", 20),
             row("乙", 0),
             row("丙", 0),
         ];
+        // 4 条首页整句（含 Generated/NeuralKeyboard/Collocation/NeuralV2）+ 2 条前排词（1,2）+ 其余整句（6）+ 剩余单字（7,8）。
         let order = runner_up_order(0, &rows).expect("应重排神经/搭配次选与单字顺序");
-        assert_eq!(order, vec![0, 3, 4, 1, 2, 6, 5, 7]);
+        assert_eq!(order, vec![0, 3, 4, 5, 1, 2, 6, 7, 8]);
         let reordered: Vec<_> = order.iter().map(|&index| rows[index]).collect();
         assert_eq!(runner_up_order(0, &reordered), None);
     }
@@ -1422,14 +1535,13 @@ mod tests {
             row("乙丙丁", 17),
             row("甲丙", 11),
         ];
-        // 首行后保留 2 条回答整码的非同长度整句（下标 6、7），接着至多 3 条前排非读法行（1、2、3），
-        // 第 4 条词（4）和单字（5）排到余下的整句（8）之后。
+        // 4+2 布局：首行后保留 3 条回答整码的整句（6、7、8），接着至多 2 条前排非读法行（1、2），其余非读法行（3、4、5）收尾。
         assert_eq!(
             runner_up_order(0, &rows),
-            Some(vec![0, 6, 7, 1, 2, 3, 8, 4, 5])
+            Some(vec![0, 6, 7, 8, 1, 2, 3, 4, 5])
         );
 
-        // 光标后编辑等场景整表 answers_key 均为假时，退回按同字数归组整句读法。
+        // 光标后编辑等场景整表 answers_key 均为假时，退回按同字数归组整句读法（4 整句 + 2 非读法 + 其余整句/单字）。
         let suffix_rows: Vec<_> = [
             row("丙丁戊", LATTICE_SOURCE),
             row("丙定戊", 11),
@@ -1439,6 +1551,7 @@ mod tests {
             row("己", 0),
             row("并丁戊", 17),
             row("柄丁戊", LATTICE_SOURCE),
+            row("秉丁戊", 19),
         ]
         .into_iter()
         .map(|mut candidate| {
@@ -1448,7 +1561,7 @@ mod tests {
         .collect();
         assert_eq!(
             runner_up_order(0, &suffix_rows),
-            Some(vec![0, 1, 6, 2, 3, 4, 7, 5])
+            Some(vec![0, 1, 6, 7, 2, 3, 8, 4, 5])
         );
     }
 
@@ -1598,16 +1711,25 @@ mod tests {
             .expect("停顿重排应重排未纠错字面读法");
         assert_eq!(settled, vec![3, 1, 2, 4, 0, 5]);
 
-        // 首页满 3 条未纠错读法时，纠错整句退居前排前缀词之后的次选区，且再次调用保持恒等零分配。
-        let page_order = runner_up_order(0, &rows).expect("首页应优先保留三条未纠错整句");
-        assert_eq!(page_order, vec![0, 3, 4, 2, 5, 1]);
-        let reordered: Vec<_> = page_order.iter().map(|&idx| rows[idx]).collect();
+        // 首页满 4 条未纠错读法时，纠错整句退居前排前缀词之后的次选区，且再次调用保持恒等零分配。
+        let full_rows = [
+            row("甲甲甲", LATTICE_SOURCE),
+            typo,
+            prefix,
+            row("甲乙甲", 11),
+            row("甲甲乙", LATTICE_SOURCE),
+            row("乙甲甲", LATTICE_SOURCE),
+            single,
+        ];
+        let page_order = runner_up_order(0, &full_rows).expect("首页应优先保留四条未纠错整句");
+        assert_eq!(page_order, vec![0, 3, 4, 5, 2, 6, 1]);
+        let reordered: Vec<_> = page_order.iter().map(|&idx| full_rows[idx]).collect();
         let (again, allocations) =
             crate::ime::personal_rerank::allocations::count(|| runner_up_order(0, &reordered));
         assert_eq!(again, None);
         assert_eq!(allocations, 0);
 
-        // 未纠错读法不足 3 条时（如 `meiganxi`），纠错整句仍保留在首页字面读法之后。
+        // 未纠错读法不足 4 条时（如 `meiganxi`），纠错整句仍保留在首页字面读法之后。
         let short_list = [row("没干系", LATTICE_SOURCE), typo, row("没", 0)];
         assert_eq!(runner_up_order(0, &short_list), None);
     }
@@ -1933,96 +2055,48 @@ mod tests {
     }
 
     #[test]
-    fn static_prior_guardrail_blocks_low_frequency_hallucination_and_marginal_jitter() {
-        // Case 1：短词组（< 6 字）对比「合理同音（赤字 0.35）」与「深静态赤字幻觉（赤字 1.20）」。
-        // 在无护栏下「丙」(neural 领先 +1.50, 静态赤字 1.20) 会凭 0.5*(1.50-1.20)=+0.15 反超；
-        // 加入赤字护栏（excess=0.70, 额外扣 0.35）后「丙」综合落败，而赤字仅 0.35 的「乙」(+1.30) 正常晋升。
+    fn unified_linear_fusion_and_neural_v2_order_allow_genuine_promotions() {
+        // 放开旧 0.50/字 静态赤字重罚后，4 字合法拆字路径（静态 -4.70，神经领先 +1.50）按真实线性融合正常翻盘。
         let short_texts = ["甲甲甲甲", "乙甲乙甲", "丙丙丙丙"];
         let statik = [-3.50, -3.85, -4.70];
         let neural = [-5.00f32, -3.70, -3.50];
         let mut combined = [0.0; 3];
         fill_guarded_combined_scores(&short_texts, &statik, &neural, &mut combined);
-        assert!(combined[1] > combined[0]);
+        assert!((combined[0] - (-4.25)).abs() < 1e-6);
+        assert!((combined[1] - (-3.775)).abs() < 1e-6);
+        assert!((combined[2] - (-4.10)).abs() < 1e-6);
+        assert!(combined[2] > combined[0]);
         assert!(leader_promotion_allowed(
             4,
             statik[0],
-            statik[1],
-            combined[0],
-            combined[1]
-        ));
-        assert!(
-            combined[2] < combined[0],
-            "短串深静态赤字候选（-4.70）在 +1.50 神经偏置下仍应被护栏压在首行之后: {combined:?}"
-        );
-
-        // Case 2：短词组挑战者静态分低于首行时，无上文场景综合分仅微弱领先 0.04 (< 0.06) 不得翻盘；
-        // 但若（a）挑战者静态分高于首行，或（b）拼入 2 字汉字上文后总长达到 6 字完整子句，均取消额外防抖门槛正常胜出。
-        let jitter_texts = ["甲甲", "乙甲", "丙甲"];
-        let jitter_statik = [-3.50, -3.60, -3.40];
-        let jitter_neural = [-5.00f32, -4.82, -5.08];
-        fill_guarded_combined_scores(&jitter_texts, &jitter_statik, &jitter_neural, &mut combined);
-        assert!(combined[1] > combined[0] && combined[1] - combined[0] < 0.06);
-        assert!(!leader_promotion_allowed(
-            2,
-            jitter_statik[0],
-            jitter_statik[1],
-            combined[0],
-            combined[1]
-        ));
-        assert!(
-            !leader_promotion_allowed(
-                4,
-                jitter_statik[0],
-                jitter_statik[1],
-                combined[0],
-                combined[1]
-            ),
-            "4 字候选在无上文（总长 4 < 6）下仍须越过 0.06 防抖门槛"
-        );
-        assert!(
-            leader_promotion_allowed(
-                2 + 4,
-                jitter_statik[0],
-                jitter_statik[1],
-                combined[0],
-                combined[1]
-            ),
-            "2 字汉字上文 + 4 字候选凑满 6 字完整子句时放开防抖门槛"
-        );
-        assert!(combined[2] > combined[0] && combined[2] - combined[0] < 0.06);
-        assert!(leader_promotion_allowed(
-            2,
-            jitter_statik[0],
-            jitter_statik[2],
+            statik[2],
             combined[0],
             combined[2]
         ));
 
-        // Case 3：6 字及以上完整子句使用放宽后的免费赤字上限（2.00）并取消按字倍增的晋升门槛（0.0），
-        // 避免误伤专名或长句单点同音词替换的微弱每字分差（例如 +0.04/字，6 字共 +0.24 nats）。
-        let clause_texts = ["甲甲甲甲甲甲", "乙乙乙乙乙乙"];
-        let clause_statik = [-3.50, -4.70];
-        let clause_neural = [-5.00f32, -3.72];
-        let mut clause_combined = [0.0; 2];
-        fill_guarded_combined_scores(
-            &clause_texts,
-            &clause_statik,
-            &clause_neural,
-            &mut clause_combined,
+        // `neural_v2_fused_order` 按统一概率线性融合排序且不锁第 0 槽。
+        assert_eq!(
+            neural_v2_fused_order(
+                &[-15.0, -8.0, -10.0],
+                &[-12.0, -13.0, -11.0],
+                &[0.0, 0.0, -2.5],
+                1.0,
+                0.25
+            ),
+            Some(vec![1, 2, 0])
         );
-        assert!(
-            clause_combined[1] > clause_combined[0]
-                && clause_combined[1] - clause_combined[0] < 0.06
+        assert_eq!(
+            neural_v2_fused_order(&[-5.0, -9.0], &[-6.0, -7.0], &[0.0, 0.0], 1.0, 0.25),
+            None
         );
-        assert!(leader_promotion_allowed(
-            6,
-            clause_statik[0],
-            clause_statik[1],
-            clause_combined[0],
-            clause_combined[1]
-        ));
 
-        // Case 4：经 settled_rerank_order 端到端验证：明显大优势正常重排。
+        // `rerank_needs_model_v2` 允许精确 `Database` 首位在多候选下进入神经语境融合，但仍拒绝英文/字面领衔。
+        let dict_led = [row("格式", 0), row("个事", LATTICE_SOURCE)];
+        assert!(rerank_needs_model_v2(0, false, &dict_led));
+        let english_led = [row("hello", ENGLISH_SOURCE), row("黑楼", LATTICE_SOURCE)];
+        assert!(!rerank_needs_model_v2(0, false, &english_led));
+
+        // 经 settled_rerank_order 端到端验证：明显大优势正常重排。
         let rows = [row("甲甲", LATTICE_SOURCE), row("乙乙", LATTICE_SOURCE)];
         let weak_scores = [
             Some(StaticEvidence {
@@ -2042,7 +2116,7 @@ mod tests {
         assert_eq!(
             settled_rerank_order(&mut reranker, "", 0, false, &weak_scored),
             Some(vec![1, 0]),
-            "favouring_model 给出远超 0.06 的神经增益时应正常重排"
+            "favouring_model 给出明显神经增益时应正常重排"
         );
     }
 
@@ -2147,20 +2221,20 @@ mod tests {
             row("除法", 0),
             single,
         ];
-        // `1+1` 拼凑句「楚伐」每字静态分 -16.9 nats（< -14.5）：让位到首页词典/补全与其余精确同音词「除法」之后，
+        // 生僻单字拼凑句「楚伐」每字静态分 -10.5 nats（< -8.5）：让位到首页词典/补全与其余精确同音词「除法」之后，
         // 且仍在单字「出」之前；再次调用必须零分配返回 None。
         let scores = [
             None,
             None,
             None,
-            Some(StaticEvidence::new(-33_800, 2)),
+            Some(StaticEvidence::new(-21_000, 2)),
             None,
             None,
             None,
             None,
         ];
         let scored = ScoredOrderRows::new(&rows, &scores);
-        let order = runner_up_order(0, &scored).expect("双字 1+1 拼凑次选应让出首屏");
+        let order = runner_up_order(0, &scored).expect("双字极低频 1+1 拼凑次选应让出首屏");
         assert_eq!(order, vec![0, 1, 2, 4, 5, 6, 3, 7]);
 
         let reordered: Vec<_> = order.iter().map(|&idx| rows[idx]).collect();
@@ -2172,17 +2246,17 @@ mod tests {
         assert_eq!(again, None);
         assert_eq!(allocations, 0);
 
-        // 双字整词合成边（如指物代词「它在」，每字 -11.5 nats >= -14.5）必须保留在首屏次选位。
+        // 常见高频 1+1 拆字与双字整词合成边（每字 -5.5 nats >= -8.5）必须保留在首屏次选位。
         let pronoun_rows = [row("他在", 0), row("它在", LATTICE_SOURCE), longer1, single];
-        let pronoun_scores = [None, Some(StaticEvidence::new(-23_000, 2)), None, None];
+        let pronoun_scores = [None, Some(StaticEvidence::new(-11_000, 2)), None, None];
         assert_eq!(
             runner_up_order(0, &ScoredOrderRows::new(&pronoun_rows, &pronoun_scores)),
             None
         );
 
-        // 未登录双字短语（`first_reading == 0`，词典无领先精确命中）即使为 1+1 拼凑也稳守第 0 位。
+        // 未登录双字短语（`first_reading == 0`，词典无领先精确命中）即使为低频 1+1 拼凑也稳守第 0 位。
         let oov_rows = [row("未录", LATTICE_SOURCE), single];
-        let oov_scores = [Some(StaticEvidence::new(-33_800, 2)), None];
+        let oov_scores = [Some(StaticEvidence::new(-21_000, 2)), None];
         assert_eq!(
             runner_up_order(0, &ScoredOrderRows::new(&oov_rows, &oov_scores)),
             None

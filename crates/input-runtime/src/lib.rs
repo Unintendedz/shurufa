@@ -105,4 +105,6 @@ pub use transform::*;
 pub use types::*;
 
 #[cfg(test)]
+mod neural_v2_tests;
+#[cfg(test)]
 mod tests;

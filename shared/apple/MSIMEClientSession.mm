@@ -156,6 +156,35 @@ static NSDictionary *decode(char *response, NSError **error) {
     id value = decodeValue(msime_client_poll_settled_rerank(_handle, token, accept), error);
     return [value isKindOfClass:NSDictionary.class] ? value : nil;
 }
+- (BOOL)setNeuralV2Enabled:(BOOL)enabled error:(NSError **)error {
+    return decodeValue(msime_client_set_neural_v2_enabled(_handle, enabled), error) != nil;
+}
+- (NSDictionary *)takeNeuralRequestWithError:(NSError **)error {
+    id value = decodeValue(msime_client_take_neural_request(_handle), error);
+    return [value isKindOfClass:NSDictionary.class] ? value : nil;
+}
+- (NSString *)neuralPrefillContextWithError:(NSError **)error {
+    id value = decodeValue(msime_client_neural_prefill_context(_handle), error);
+    if (![value isKindOfClass:NSDictionary.class]) return nil;
+    id ctx = value[@"context"];
+    return [ctx isKindOfClass:NSString.class] ? ctx : @"";
+}
+- (NSDictionary *)applyNeuralResponseData:(NSData *)responseData
+                                lockSlot0:(BOOL)lockSlot0
+                                    error:(NSError **)error {
+    if (![responseData isKindOfClass:NSData.class] || responseData.length == 0 || responseData.length > 262144) {
+        setError(error, @"神经解码响应数据无效");
+        return nil;
+    }
+    id value = decodeValue(
+        msime_client_apply_neural_response(
+            _handle,
+            static_cast<const uint8_t *>(responseData.bytes),
+            responseData.length,
+            lockSlot0),
+        error);
+    return [value isKindOfClass:NSDictionary.class] ? value : nil;
+}
 - (NSDictionary *)onlineQueryWithError:(NSError **)error {
     id value = decodeValue(msime_client_online_query(_handle), error);
     return [value isKindOfClass:NSDictionary.class] ? value : nil;

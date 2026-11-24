@@ -4098,38 +4098,38 @@ mod tests {
     }
 
     #[test]
-    fn sentences_from_different_paths_compare_without_the_phrase_bonus() {
-        let bonus = (PHRASE_LENGTH_BONUS * 1000.0) as i64;
-        // 五个音节的读法每个音节都在词组里，多拿一份奖励；扣掉之后四个音节的读法分更高就该排在前面。
+    fn sentences_from_different_paths_compare_directly_under_unified_log_prob() {
+        // v2 统一对数概率底座下 `PHRASE_LENGTH_BONUS == 0`，跨音节数路径的 `weight` 本身已长度中性，直接按真概率比。
+        assert_eq!(PHRASE_LENGTH_BONUS, 0.0);
         let mut longer = item(
             "洗噩梦算吗",
             "9436364782662",
-            5 * bonus - 30_000,
+            -30_000,
             CandidateSource::Generated,
         );
         longer.canonical_pinyin = "xi'e'meng'suan'ma".into();
         let mut shorter = item(
             "这能算吗",
             "9436364782662",
-            4 * bonus - 20_000,
+            -20_000,
             CandidateSource::Generated,
         );
         shorter.canonical_pinyin = "zhe'neng'suan'ma".into();
-        assert!(longer.weight > shorter.weight);
+        assert_eq!(comparable_weight(&longer), -30_000);
+        assert_eq!(comparable_weight(&shorter), -20_000);
         assert_eq!(
             ranked(vec![longer, shorter], false),
             ["这能算吗", "洗噩梦算吗"]
         );
-        // 词库行不带这份奖励，按原权重比。
+        // 词库行按原权重比。
         let mut word = item("西安", "9426", 500, CandidateSource::Database);
         word.canonical_pinyin = "xi'an".into();
         assert_eq!(comparable_weight(&word), 500);
     }
 
-    /// 每词插入代价由词网格计入，跨切分比较不能再扣一次。
+    /// 统一概率底座下跨切分比较保持原词网格对数概率，不再叠加或重复扣除词长常数。
     #[test]
     fn phrase_insertion_cost_is_not_deducted_again_across_paths() {
-        let bonus = (PHRASE_LENGTH_BONUS * 1000.0) as i64;
         let sentence = |word: &str, pinyin: &str, words: &[&str], weight: i64| {
             let mut row = item(
                 word,
@@ -4141,21 +4141,21 @@ mod tests {
             row.sentence_words = words.iter().map(|word| (*word).to_owned()).collect();
             row
         };
-        // 两句都是六个音节；输入分已含三份和两份词组插入代价，九键只扣相同的六份音节奖励。
+        // 同为六音节的两条切分直接按统一对数概率分排序，不受词数差异干扰。
         let phrases = sentence(
             "匿名天佑龙马",
             "ni'ming'tian'you'long'ma",
             &["匿名", "天佑", "龙马"],
-            40_000 - 3 * bonus,
+            -32_000,
         );
         let plain = sentence(
             "你明天有空吗",
             "ni'ming'tian'you'kong'ma",
             &["你", "明天", "有空", "吗"],
-            30_000 - 2 * bonus,
+            -22_000,
         );
-        assert_eq!(comparable_weight(&phrases), 40_000 - 9 * bonus);
-        assert_eq!(comparable_weight(&plain), 30_000 - 8 * bonus);
+        assert_eq!(comparable_weight(&phrases), -32_000);
+        assert_eq!(comparable_weight(&plain), -22_000);
         assert_eq!(
             ranked(vec![phrases, plain], false),
             ["你明天有空吗", "匿名天佑龙马"]

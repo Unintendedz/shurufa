@@ -163,7 +163,7 @@ pub fn fold_reading(text: &str) -> String {
     folded
 }
 
-fn folded_reading_equal(left: &str, right: &str) -> bool {
+pub(super) fn folded_reading_equal(left: &str, right: &str) -> bool {
     left.chars()
         .filter(|&character| character != '\'')
         .map(|character| character.to_ascii_lowercase())
@@ -192,15 +192,33 @@ pub fn mark_autocorrect_candidates(
         .filter(|item| item.corrected_from.is_empty())
     {
         // A cut can fold back to exactly the typed letters; matching that set would label a row the user spelled correctly, so only the sets that differ count.
+        // 补全续写词的 `canonical_pinyin` 音节数大于切分音节数（如 `xainzai -> xian'zai` 续出 `xian'zai'yi'jing`「现在已经」），
+        // 不属于等跨度纠错候选，严禁标上 `corrected_from` 以免在 `reading_answers_key` 中被误判为 `answers_key = true` 劫持首选。
         if cuts().any(|cut| {
             !cut.is_empty()
                 && !folded_reading_equal(cut, raw)
                 && folded_reading_equal(cut, &item.pinyin)
+                && !is_longer_continuation_for_cut(item, cut)
         }) {
             let folded = raw_letters.get_or_insert_with(|| fold_reading(raw));
             item.corrected_from = folded.as_str().into();
         }
     }
+}
+
+/// 判断词典候选是否为超出 `cut` 音节跨度的长词续写补全行。
+fn is_longer_continuation_for_cut(item: &WordItem, cut: &str) -> bool {
+    if !item.source.is_dictionary() || item.canonical_pinyin.is_empty() {
+        return false;
+    }
+    let cut_syllables = cut.bytes().filter(|&b| b == b'\'').count() + 1;
+    let canonical_syllables = item
+        .canonical_pinyin
+        .bytes()
+        .filter(|&b| b == b'\'')
+        .count()
+        + 1;
+    canonical_syllables > cut_syllables
 }
 
 /// The promotion and union rule of `alternative_segmentation_page` (QD:888-945): `primary_full` and `alternatives` are the full-key rows of the primary and alternative segmentations; `result` is the series answer so far.
@@ -493,6 +511,32 @@ mod tests {
         let mut typed_nve = vec![row("nve", "虐", 100)];
         mark_autocorrect_candidates(&mut typed_nve, "nve", "nve", &[]);
         assert!(typed_nve[0].corrected_from.is_empty());
+    }
+
+    #[test]
+    fn marking_never_labels_longer_continuation_phrases() {
+        let mut items = vec![
+            WordItem::new(
+                "xian'zai",
+                "现在",
+                500_000,
+                CandidateSource::Database,
+                "xian'zai",
+            ),
+            WordItem::new(
+                "xian'zai",
+                "现在已经",
+                120_000,
+                CandidateSource::Database,
+                "xian'zai'yi'jing",
+            ),
+        ];
+        mark_autocorrect_candidates(&mut items, "xainzai", "xian'zai", &[]);
+        assert_eq!(items[0].corrected_from, "xainzai");
+        assert!(
+            items[1].corrected_from.is_empty(),
+            "超长续写词绝不能被标为等跨度纠错候选"
+        );
     }
 
     #[test]

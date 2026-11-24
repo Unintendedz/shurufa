@@ -11,7 +11,8 @@ export CFLAGS=-mmacosx-version-min=13.0
 export CXXFLAGS=-mmacosx-version-min=13.0
 export CMAKE_OSX_DEPLOYMENT_TARGET=13.0
 export CMAKE_PREFIX_PATH="$(brew --prefix)"
-cargo build -p msime-host-api --locked
+# 正式切换 Release 构建，确保 Rust 宿主静态/动态库与 Swift/ObjC++ 原生层均启用完整优化。
+cargo build --release -p msime-host-api --locked
 resources="$(cargo run --quiet -p msime-client-core --example install_resources --locked -- target/resources)"
 # Tab 笔画筛选要 msime-stroke.db：按 resources/language-dictionaries.lock.json 下载并校验，已有且一致时不动。
 "$(brew --prefix python@3.14)/bin/python3.14" scripts/fetch_language_dictionaries.py
@@ -25,9 +26,10 @@ if [[ -n "$(git status --porcelain)" ]]; then
   revision=""
 fi
 cmake -G Ninja -S platforms/macos -B target/macos-isolated \
+  -DCMAKE_BUILD_TYPE=Release \
   -DMSIME_EDITION=shurufa -DMSIME_ENABLE_SPARKLE=OFF \
   -DMSIME_INPUT_SOURCE_REVISION="$revision" \
-  -DMSIME_HOST_LIBRARY="$CARGO_TARGET_DIR/debug/libmsime_host_api.a" \
+  -DMSIME_HOST_LIBRARY="$CARGO_TARGET_DIR/release/libmsime_host_api.a" \
   -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
   -DCMAKE_OSX_SYSROOT="$SDKROOT" -DCMAKE_PREFIX_PATH="$CMAKE_PREFIX_PATH" \
   -DPython3_EXECUTABLE="$(brew --prefix python@3.14)/bin/python3.14"
@@ -45,6 +47,13 @@ fi
 if [[ -z "$identity" ]]; then
   echo "没能在钥匙串里建「$signing_name」，按 ad-hoc 签名" >&2
   identity=-
+fi
+# 先显式签名端侧神经解码动态库与独立后台子进程，再按统一身份密封整包并严格验签。
+if [[ -f "$bundle/Contents/Frameworks/libshurufa_neural.dylib" ]]; then
+  codesign --force --sign "$identity" "$bundle/Contents/Frameworks/libshurufa_neural.dylib"
+fi
+if [[ -f "$bundle/Contents/Helpers/ShurufaNeuralService" ]]; then
+  codesign --force --sign "$identity" "$bundle/Contents/Helpers/ShurufaNeuralService"
 fi
 codesign --force --deep --sign "$identity" --entitlements platforms/macos/resources/VoiceInput.entitlements "$bundle"
 codesign --verify --deep --strict "$bundle"

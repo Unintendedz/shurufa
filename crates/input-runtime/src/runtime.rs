@@ -199,6 +199,14 @@ pub struct Runtime<E: InputEngine = Session> {
     pub(crate) settled_rerank_enabled: bool,
     /// 停顿精排是否锁定第 1 槽并在高亮离开首位后冻结页序（Shurufa 策略）。
     pub(crate) settled_lock_leader: bool,
+    /// Shurufa v2 Tier 1 两阶段异步神经解码开关（开启时接管重排并废除旧停顿锁首瘫痪）。
+    pub(crate) neural_v2_enabled: bool,
+    /// 光标前完整上文（至多 512 字，完整保留中文标点、空格、ASCII 与 Emoji，供 Tier 1 KV-Cache 预热与打分）。
+    pub(crate) neural_context: String,
+    /// 当前代次已派发的 Tier 1 请求快照，供回包融合时对齐候选元数据。
+    pub(crate) neural_pending_request: Option<msime_engine::neural_v2::NeuralDecodeRequest>,
+    /// Tier 1 全局 3 参数融合权重。
+    pub(crate) neural_fusion_weights: msime_engine::neural_v2::NeuralFusionWeights,
     // 开关和模型分别拥有不复用的身份，防止在途评分跨配置发布或恢复旧模型。
     settled_settings_epoch: Arc<()>,
     settled_model_epoch: Arc<()>,
@@ -350,6 +358,21 @@ pub struct SettledRerankScore {
     model_epoch: Arc<()>,
     order: Option<Vec<usize>>,
     reranker: Reranker,
+}
+
+/// [`Runtime::apply_neural_response`] 的应用结果。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NeuralApplyOutcome {
+    /// 响应代次匹配且成功执行融合（含重排后无变化的合法回包）。
+    pub applied: bool,
+    /// 最终候选顺序或集合发生变化（调用方须重绘候选窗）。
+    pub moved: bool,
+    /// 响应处理完成后的当前候选代次。
+    pub generation: u64,
+    /// 本次融合是否锁定了槽 0（>80 ms 迟到、已移动高亮或首槽受保护）。
+    pub slot0_locked: bool,
+    /// 本次融合是否通过 Tier 1 受限束搜索独有救回了前排候选。
+    pub tier1_rescued: bool,
 }
 
 /// [`Runtime::apply_settled_rerank`] 对评分的发布结果。
@@ -1113,6 +1136,11 @@ impl<E: InputEngine> Runtime<E> {
             settled_reranker: None,
             settled_rerank_enabled: true,
             settled_lock_leader: false,
+            neural_v2_enabled: false,
+            neural_context: String::new(),
+            neural_pending_request: None,
+            neural_fusion_weights:
+                msime_engine::neural_v2::NeuralFusionWeights::from_env_or_default(),
             settled_settings_epoch: Arc::new(()),
             settled_model_epoch: Arc::new(()),
             focused: false,
@@ -1236,6 +1264,417 @@ impl<E: InputEngine> Runtime<E> {
 
     pub fn settled_lock_leader(&self) -> bool {
         self.settled_lock_leader
+    }
+
+    /// 启用或关闭 Shurufa v2 Tier 1 两阶段异步神经解码。
+    /// 开启后自动解除旧 `settled_lock_leader` 停顿锁首策略，由 22 ms 延迟绘制与 80 ms 槽 0 锁负责无闪烁防跳。
+    pub fn set_neural_v2_enabled(&mut self, enabled: bool) {
+        self.neural_v2_enabled = enabled;
+        if enabled {
+            self.settled_lock_leader = false;
+        } else {
+            self.neural_pending_request = None;
+        }
+    }
+
+    pub fn neural_v2_enabled(&self) -> bool {
+        self.neural_v2_enabled
+    }
+
+    /// 设置 Tier 1 全局 3 参数融合权重（供单测与离线开发集标定使用）。
+    pub fn set_neural_fusion_weights(
+        &mut self,
+        weights: msime_engine::neural_v2::NeuralFusionWeights,
+    ) {
+        self.neural_fusion_weights = weights;
+    }
+
+    /// 返回当前光标前完整保留标点/空格的 512 字上文，供宿主空闲 50 ms 预热端侧 KV-Cache。
+    pub fn neural_prefill_context(&self) -> &str {
+        if self.focused {
+            &self.neural_context
+        } else {
+            ""
+        }
+    }
+
+    /// 取出当前代次的 Tier 1 神经解码请求（纯数据，不含任何 I/O）。
+    pub fn take_neural_request(&mut self) -> Option<msime_engine::neural_v2::NeuralDecodeRequest> {
+        use msime_engine::neural_v2::{
+            build_syllable_paths, is_neural_v2_source, NeuralCandidateInput, NeuralDecodeRequest,
+            DEFAULT_BEAM_WIDTH, DEFAULT_MAX_BEAM_RESULTS, DEFAULT_MAX_NEURAL_CANDIDATES,
+            DEFAULT_MAX_SYLLABLE_PATHS, DEFAULT_TYPO_CHANNEL_PENALTY,
+            DEFAULT_USER_DICTIONARY_LOG_PRIOR,
+        };
+
+        if !self.neural_v2_enabled
+            || !self.focused
+            || self.is_idle()
+            || self.cached.prediction
+            || self.cached.local_mode != "none"
+            || self.cached.dedicated_english
+            || !self.cached.conversion.is_empty()
+            || self.cached.caret_edit_suffix
+            || self.cached.candidates.is_empty()
+            || self.has_inserted_rows()
+        {
+            return None;
+        }
+        let scheme = scheme_type(self.cached.scheme)?;
+        let pinyin_scheme = scheme.is_pinyin()
+            || (scheme == SchemeType::Wubi && self.cached.answered_by_pinyin_fallback);
+        if !pinyin_scheme {
+            return None;
+        }
+
+        let engine_meta = self.engine.neural_v2_metadata();
+        let (raw_input, segmentation, syllable_paths) = if let Some(meta) = &engine_meta {
+            (
+                meta.raw_input.clone(),
+                meta.segmentation.clone(),
+                meta.syllable_paths.clone(),
+            )
+        } else {
+            let raw = self.cached.editing_text.clone();
+            let seg = if !self.cached.preedit.is_empty() {
+                self.cached.preedit.clone()
+            } else {
+                raw.clone()
+            };
+            let paths = build_syllable_paths(&raw, &seg, DEFAULT_MAX_SYLLABLE_PATHS);
+            (raw, seg, paths)
+        };
+
+        let primary_syllables = segmentation
+            .split('\'')
+            .filter(|piece| !piece.is_empty())
+            .count();
+
+        // 注意：下标使用剥离投影 Emoji 后的干净基础坐标 `base_idx`，确保 `apply_neural_response`
+        // 在剥离投影 Emoji 后能 1:1 严格对齐；仅发去重 `exact_span` 候选（上限 16 条，完整承接 1-Span 位置多样扰动）。
+        let max_neural_candidates = DEFAULT_MAX_NEURAL_CANDIDATES;
+        let mut candidates =
+            Vec::with_capacity(self.cached.candidates.len().min(max_neural_candidates));
+        let mut seen_texts: std::collections::HashSet<String> =
+            std::collections::HashSet::with_capacity(max_neural_candidates);
+        let mut base_idx = 0usize;
+        for seat in 0..self.cached.candidates.len() {
+            if self.is_projected_emoji(seat) {
+                continue;
+            }
+            let current_base_idx = base_idx;
+            base_idx += 1;
+            if candidates.len() >= max_neural_candidates || current_base_idx >= 64 {
+                break;
+            }
+            let source = self
+                .cached
+                .candidate_sources
+                .get(seat)
+                .copied()
+                .unwrap_or_default();
+            if !is_neural_v2_source(source) {
+                continue;
+            }
+            let text = self.cached.candidates[seat].clone();
+            let pinyin = self
+                .cached
+                .candidate_codes
+                .get(seat)
+                .cloned()
+                .unwrap_or_default();
+            let char_count = text.chars().count();
+            let eng_idx = self.engine_index(seat);
+            let meta = engine_meta.as_ref().and_then(|m| m.candidates.get(eng_idx));
+
+            let (stat_log_prob, channel_log_prob, user_log_prob, exact_span, pinned) =
+                if let Some(m) = meta {
+                    (
+                        m.stat_log_prob,
+                        m.channel_log_prob,
+                        m.user_log_prob,
+                        m.exact_span,
+                        m.pinned,
+                    )
+                } else {
+                    let stat = self
+                        .cached
+                        .candidate_static_evidence
+                        .get(seat)
+                        .and_then(|ev| ev.map(|e| e.log_prob_milli_nats as f64 / 1000.0));
+                    let corrected = self
+                        .cached
+                        .candidate_corrected
+                        .get(seat)
+                        .copied()
+                        .unwrap_or(false);
+                    let channel = if corrected {
+                        DEFAULT_TYPO_CHANNEL_PENALTY
+                    } else {
+                        0.0
+                    };
+                    let user = if source == msime_engine::CandidateSource::UserDatabase as u8 {
+                        DEFAULT_USER_DICTIONARY_LOG_PRIOR
+                    } else {
+                        0.0
+                    };
+                    let answers = self
+                        .cached
+                        .candidate_answers_key
+                        .get(seat)
+                        .copied()
+                        .unwrap_or(false);
+                    let exact = answers
+                        && char_count > 0
+                        && (primary_syllables == 0 || char_count <= primary_syllables + 1);
+                    let fixed = self
+                        .cached
+                        .candidate_positions
+                        .get(seat)
+                        .copied()
+                        .unwrap_or(0)
+                        > 0;
+                    (stat, channel, user, exact, fixed)
+                };
+
+            // 非等跨度前缀/续写词不参与等跨度融合，无需发往 Metal 前缀树浪费算力。
+            if !exact_span || pinned {
+                continue;
+            }
+            if !seen_texts.insert(text.clone()) {
+                continue;
+            }
+
+            candidates.push(NeuralCandidateInput {
+                index: current_base_idx,
+                text,
+                pinyin,
+                source,
+                char_count,
+                exact_span,
+                stat_log_prob,
+                channel_log_prob,
+                user_log_prob,
+                pinned,
+            });
+        }
+
+        if candidates.is_empty() && syllable_paths.is_empty() {
+            return None;
+        }
+
+        let request = NeuralDecodeRequest {
+            session: self.session,
+            generation: self.generation,
+            context: self.neural_context.clone(),
+            raw_input,
+            segmentation,
+            syllable_paths,
+            candidates,
+            beam_width: DEFAULT_BEAM_WIDTH,
+            max_beam_results: DEFAULT_MAX_BEAM_RESULTS,
+            enable_constrained_decode: true,
+        };
+        self.neural_pending_request = Some(request.clone());
+        Some(request)
+    }
+
+    /// 应用 Tier 1 神经解码回包：在纯 Rust 引擎执行统一概率融合、去重并集与等跨度排座。
+    pub fn apply_neural_response(
+        &mut self,
+        response: &msime_engine::neural_v2::NeuralDecodeResponse,
+        lock_slot_0: bool,
+    ) -> NeuralApplyOutcome {
+        use msime_engine::neural_v2::{fuse_neural_response, FusedSeat, SOURCE_NEURAL_CONSTRAINED};
+
+        let rejected = |generation: u64, locked: bool| NeuralApplyOutcome {
+            applied: false,
+            moved: false,
+            generation,
+            slot0_locked: locked,
+            tier1_rescued: false,
+        };
+
+        if !response.ok
+            || !self.neural_v2_enabled
+            || !self.focused
+            || self.is_idle()
+            || self.generation.checked_add(1).is_none()
+            || response.generation != self.generation
+            || (response.session != 0 && response.session != self.session)
+            || self.has_inserted_rows()
+        {
+            return rejected(self.generation, lock_slot_0);
+        }
+
+        let request = match &self.neural_pending_request {
+            Some(pending) if pending.generation == self.generation => pending.clone(),
+            _ => match self.take_neural_request() {
+                Some(fresh) => fresh,
+                None => return rejected(self.generation, lock_slot_0),
+            },
+        };
+
+        // 用户已主动移动高亮或翻页时同样锁定槽 0，防止视线下方候选跳动。
+        let marked = self.settled_highlight();
+        let effective_lock_slot_0 = lock_slot_0 || self.highlighted > 0;
+
+        self.snapshot_settled_seats();
+        let had_projected = self.strip_projected_emojis();
+        let base_len = self.cached.candidates.len();
+        let outcome = fuse_neural_response(
+            base_len,
+            &request,
+            response,
+            self.neural_fusion_weights,
+            effective_lock_slot_0,
+        );
+
+        if outcome.moved {
+            ensure_engine_order(&mut self.engine_order, base_len);
+            let old_candidates = std::mem::take(&mut self.cached.candidates);
+            let old_codes = std::mem::take(&mut self.cached.candidate_codes);
+            let old_annotations = std::mem::take(&mut self.cached.candidate_annotations);
+            let old_sources = std::mem::take(&mut self.cached.candidate_sources);
+            let old_positions = std::mem::take(&mut self.cached.candidate_positions);
+            let old_corrected = std::mem::take(&mut self.cached.candidate_corrected);
+            let old_answers_key = std::mem::take(&mut self.cached.candidate_answers_key);
+            let old_static_evidence = std::mem::take(&mut self.cached.candidate_static_evidence);
+            let old_keyboard_runner_up =
+                std::mem::take(&mut self.cached.candidate_keyboard_runner_up);
+            let old_engine_order = std::mem::take(&mut self.engine_order);
+
+            let has_codes = old_codes.len() == base_len;
+            let has_annotations = old_annotations.len() == base_len;
+            let has_positions = old_positions.len() == base_len;
+            let has_corrected = old_corrected.len() == base_len;
+            let has_static = old_static_evidence.len() == base_len;
+            let has_runner_up = old_keyboard_runner_up.len() == base_len;
+
+            let new_len = outcome.seats.len();
+            self.cached.candidates.reserve(new_len);
+            if has_codes {
+                self.cached.candidate_codes.reserve(new_len);
+            }
+            if has_annotations {
+                self.cached.candidate_annotations.reserve(new_len);
+            }
+            self.cached.candidate_sources.reserve(new_len);
+            if has_positions {
+                self.cached.candidate_positions.reserve(new_len);
+            }
+            if has_corrected {
+                self.cached.candidate_corrected.reserve(new_len);
+            }
+            self.cached.candidate_answers_key.reserve(new_len);
+            if has_static {
+                self.cached.candidate_static_evidence.reserve(new_len);
+            }
+            if has_runner_up {
+                self.cached.candidate_keyboard_runner_up.reserve(new_len);
+            }
+            self.engine_order.reserve(new_len);
+
+            for seat in &outcome.seats {
+                match seat {
+                    FusedSeat::Existing { index, .. } => {
+                        let id = *index;
+                        self.cached.candidates.push(old_candidates[id].clone());
+                        if has_codes {
+                            self.cached.candidate_codes.push(old_codes[id].clone());
+                        }
+                        if has_annotations {
+                            self.cached
+                                .candidate_annotations
+                                .push(old_annotations[id].clone());
+                        }
+                        self.cached.candidate_sources.push(old_sources[id]);
+                        if has_positions {
+                            self.cached.candidate_positions.push(old_positions[id]);
+                        }
+                        if has_corrected {
+                            self.cached.candidate_corrected.push(old_corrected[id]);
+                        }
+                        self.cached.candidate_answers_key.push(old_answers_key[id]);
+                        if has_static {
+                            self.cached
+                                .candidate_static_evidence
+                                .push(old_static_evidence[id]);
+                        }
+                        if has_runner_up {
+                            self.cached
+                                .candidate_keyboard_runner_up
+                                .push(old_keyboard_runner_up[id]);
+                        }
+                        self.engine_order.push(old_engine_order[id]);
+                    }
+                    FusedSeat::InjectedBeam { text, pinyin, .. } => {
+                        self.cached.candidates.push(text.clone());
+                        if has_codes {
+                            self.cached.candidate_codes.push(pinyin.clone());
+                        }
+                        if has_annotations {
+                            self.cached.candidate_annotations.push(String::new());
+                        }
+                        self.cached
+                            .candidate_sources
+                            .push(SOURCE_NEURAL_CONSTRAINED);
+                        if has_positions {
+                            self.cached.candidate_positions.push(0);
+                        }
+                        if has_corrected {
+                            self.cached.candidate_corrected.push(false);
+                        }
+                        self.cached.candidate_answers_key.push(true);
+                        if has_static {
+                            self.cached.candidate_static_evidence.push(None);
+                        }
+                        if has_runner_up {
+                            self.cached.candidate_keyboard_runner_up.push(false);
+                        }
+                        // `usize::MAX` 标记该行由 Tier 1 受限束搜索独有注入，选中时由 `commit_neural_injected` 直接上屏。
+                        self.engine_order.push(usize::MAX);
+                    }
+                }
+            }
+
+            self.normalize_online_slots();
+            if self.has_candidate_ops() {
+                self.transform_candidates();
+            }
+            self.apply_slot_allocator();
+            self.snapshot_valid = true;
+            if let Some((previous_highlight, text, code)) = &marked {
+                self.keep_highlight_on_same_candidate(*previous_highlight, text, code.as_deref());
+            } else {
+                self.highlighted = 0;
+            }
+            let _ = self.advance();
+            self.bump_candidates_epoch();
+            self.neural_pending_request = None;
+            return NeuralApplyOutcome {
+                applied: true,
+                moved: true,
+                generation: self.generation,
+                slot0_locked: outcome.slot0_locked,
+                tier1_rescued: outcome.tier1_rescued,
+            };
+        }
+
+        if had_projected {
+            self.apply_slot_allocator();
+            if let Some((previous_highlight, text, code)) = &marked {
+                self.keep_highlight_on_same_candidate(*previous_highlight, text, code.as_deref());
+            }
+        }
+        self.neural_pending_request = None;
+        NeuralApplyOutcome {
+            applied: true,
+            moved: false,
+            generation: self.generation,
+            slot0_locked: outcome.slot0_locked,
+            tier1_rescued: outcome.tier1_rescued,
+        }
     }
 
     /// Re-rank the current candidates with the settled model, reporting whether the order moved. Nothing happens without an attached model or while the settled rerank is switched off.
@@ -1370,9 +1809,11 @@ impl<E: InputEngine> Runtime<E> {
     }
 
     fn settled_rerank_blocked(&self) -> bool {
+        // Tier 1 两阶段神经解码开启时，停用旧 25 MB CPU 停顿重排，防止互相覆盖。
         // 重排必须推进候选代次，避免旧身份选到新座位；代次耗尽时不得重排。
         // 开启首选锁定时，一旦用户开始移动高亮或翻页即冻结页序，不再在眼皮底下改排候选。
-        !self.settled_rerank_enabled
+        self.neural_v2_enabled
+            || !self.settled_rerank_enabled
             || self.settled_reranker.is_none()
             || self.is_idle()
             || self.generation.checked_add(1).is_none()
@@ -1488,6 +1929,7 @@ impl<E: InputEngine> Runtime<E> {
     /// [`Runtime::seed_context`] appends, exactly as a commit does, and cancelling a composition keeps what was committed before it. A harness that seeds a different context per case therefore has to clear it first, or every case is ranked against the tail of all the cases before it. The Engine's rescoring context is cleared with it, so both rankers start from the same empty sentence. The Engine's committed-word context is left alone: seeding never adds to it, so there is nothing of the seed's there to forget, unlike [`Runtime::focus`], which also ends real commits.
     pub fn clear_context(&mut self) {
         self.ai_context.clear();
+        self.neural_context.clear();
         self.engine.set_rescoring_context("");
     }
 
@@ -1501,8 +1943,16 @@ impl<E: InputEngine> Runtime<E> {
     pub fn set_surrounding_context(&mut self, text: &str) {
         if !self.focused {
             self.ai_context.clear();
+            self.neural_context.clear();
             self.engine.set_rescoring_context("");
             return;
+        }
+        let neural_cleaned = sanitize_neural_context(text);
+        if (neural_cleaned.is_empty() || !self.neural_context.ends_with(neural_cleaned.as_ref()))
+            && self.neural_context != neural_cleaned.as_ref()
+        {
+            self.neural_context.clear();
+            self.neural_context.push_str(neural_cleaned.as_ref());
         }
         let cleaned = sanitize_surrounding_context(text);
         if !cleaned.is_empty() && self.ai_context.ends_with(cleaned.as_ref()) {
@@ -2359,6 +2809,7 @@ impl<E: InputEngine> Runtime<E> {
     pub(crate) fn remember_commit(&mut self, text: &str) {
         if !self.focused {
             self.ai_context.clear();
+            self.neural_context.clear();
         } else {
             self.ai_context.push_str(text);
             if self.ai_context.len() > 1024 {
@@ -2367,6 +2818,12 @@ impl<E: InputEngine> Runtime<E> {
                     cut += 1;
                 }
                 self.ai_context.drain(..cut);
+            }
+            self.neural_context.push_str(text);
+            let keep = msime_engine::neural_v2::neural_context_window(&self.neural_context).len();
+            if keep < self.neural_context.len() {
+                let cut = self.neural_context.len() - keep;
+                self.neural_context.drain(..cut);
             }
         }
         self.engine.set_rescoring_context(&self.ai_context);
@@ -2588,10 +3045,36 @@ impl<E: InputEngine> Runtime<E> {
         Ok(result)
     }
 
-    /// 选中 `seat` 上的候选：投影 Emoji 与插件插入行由 runtime 直接上屏，其余交给引擎。
+    /// 判断 `seat` 是否为 Tier 1 受限束搜索独有注入的新候选（不在原引擎词条索引内）。
+    pub(crate) fn is_neural_injected(&self, seat: usize) -> bool {
+        self.engine_order.get(seat) == Some(&usize::MAX)
+            && self.cached.candidate_sources.get(seat)
+                == Some(&msime_engine::neural_v2::SOURCE_NEURAL_CONSTRAINED)
+    }
+
+    /// 上屏 Tier 1 受限束搜索独有召回的完整整句：清掉当前组字并按正常文本提交，
+    /// 随后经 `transition()` 写入 `ai_context` 与 `neural_context` 供下句续接。
+    fn commit_neural_injected(&mut self, seat: usize) -> Result<EngineResult, RuntimeError> {
+        let text = self
+            .cached
+            .candidates
+            .get(seat)
+            .cloned()
+            .unwrap_or_default();
+        let mut result = self.discard_composition()?;
+        result.handled = true;
+        result.has_commit = !text.is_empty();
+        result.commit = text;
+        Ok(result)
+    }
+
+    /// 选中 `seat` 上的候选：投影 Emoji、插件插入行与 Tier 1 独有注入行由 runtime 直接上屏，其余交给引擎。
     fn select_seat(&mut self, seat: usize) -> Result<EngineResult, RuntimeError> {
         if let Some((anchor_word, emoji)) = self.projected_emoji_at(seat) {
             return self.commit_projected_emoji(&anchor_word, emoji);
+        }
+        if self.is_neural_injected(seat) {
+            return self.commit_neural_injected(seat);
         }
         if self.is_inserted(seat) {
             return self.commit_inserted(seat);
@@ -2599,10 +3082,13 @@ impl<E: InputEngine> Runtime<E> {
         self.engine.select(self.engine_index(seat))
     }
 
-    /// 从 `seat` 上的候选结束组字：投影 Emoji 与插件插入行由 runtime 直接上屏，其余交给引擎。
+    /// 从 `seat` 上的候选结束组字：投影 Emoji、插件插入行与 Tier 1 独有注入行由 runtime 直接上屏，其余交给引擎。
     fn finish_seat(&mut self, seat: usize) -> Result<EngineResult, RuntimeError> {
         if let Some((anchor_word, emoji)) = self.projected_emoji_at(seat) {
             return self.commit_projected_emoji(&anchor_word, emoji);
+        }
+        if self.is_neural_injected(seat) {
+            return self.commit_neural_injected(seat);
         }
         if self.is_inserted(seat) {
             return self.commit_inserted(seat);
@@ -3349,6 +3835,7 @@ impl<E: InputEngine> Runtime<E> {
         self.translations.clear();
         self.highlight_translations.clear();
         self.engine_order.clear();
+        self.neural_pending_request = None;
         // 即将换入引擎原生新快照，上一键的投影 Emoji 席位必须同步作废，
         // 否则 `order_presentation` -> `strip_projected_emojis` 会把新快照同下标的真实候选整条删掉。
         self.projected_emojis.clear();
@@ -4035,6 +4522,7 @@ impl<E: InputEngine> Runtime<E> {
             Action::Command(Command::ConversionLeft) if self.cached.conversion.is_empty() => {
                 let seat = if self.is_inserted(self.highlighted)
                     || self.is_projected_emoji(self.highlighted)
+                    || self.is_neural_injected(self.highlighted)
                 {
                     self.first_engine_seat()
                 } else {
@@ -4088,7 +4576,9 @@ impl<E: InputEngine> Runtime<E> {
             | Action::RemoveCandidate(id)
             | Action::FixCandidatePosition(id, _)
             | Action::ClearCandidatePosition(id)
-                if self.is_inserted(id.index) || self.is_projected_emoji(id.index) =>
+                if self.is_inserted(id.index)
+                    || self.is_projected_emoji(id.index)
+                    || self.is_neural_injected(id.index) =>
             {
                 Ok(empty_result(true))
             }
@@ -4357,6 +4847,22 @@ pub(crate) fn wubi_four_code_is_complete(snapshot: &EngineSnapshot) -> bool {
         && msime_client_core::is_ascii_alphabetic(&snapshot.editing_text)
         && snapshot.caret_position == WUBI_COMPLETE_CODE_LENGTH
         && !snapshot.candidates.is_empty()
+}
+
+/// 为 Tier 1 神经上文过滤 `U+FFFC` 与非法控制字符，完整保留中文标点、空格、ASCII 与 Emoji，按字符边界保留末尾至多 512 字。
+fn sanitize_neural_context(text: &str) -> std::borrow::Cow<'_, str> {
+    let allowed_char =
+        |c: char| c != '\u{fffc}' && (!c.is_control() || matches!(c, '\n' | '\r' | '\t'));
+    if text.chars().all(allowed_char) {
+        return std::borrow::Cow::Borrowed(msime_engine::neural_v2::neural_context_window(text));
+    }
+    let cleaned: String = text.chars().filter(|&c| allowed_char(c)).collect();
+    let tail = msime_engine::neural_v2::neural_context_window(&cleaned);
+    if tail.len() == cleaned.len() {
+        std::borrow::Cow::Owned(cleaned)
+    } else {
+        std::borrow::Cow::Owned(tail.to_owned())
+    }
 }
 
 /// 过滤富文本附件占位符（`U+FFFC`）及 `query_candidates` 拒收的控制字符，并按字符边界保留末尾至多 1024 字节。
