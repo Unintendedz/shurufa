@@ -126,6 +126,60 @@ bool is_cjk_hanzi(char32_t cp) {
            cp == 0x3007u;
 }
 
+/// 严格校验 UTF-8 完整性并提取首码点；仅当完整合法且首字符为 CJK 汉字时返回 true。
+bool decode_first_utf8_hanzi(const char *data, size_t len, char32_t &first_cp) {
+    if (!data || len == 0) return false;
+    size_t i = 0;
+    bool got_first = false;
+    while (i < len) {
+        const unsigned char b0 = static_cast<unsigned char>(data[i]);
+        char32_t cp = 0;
+        size_t need = 0;
+        if (b0 < 0x80u) {
+            need = 1;
+            cp = b0;
+        } else if ((b0 & 0xE0u) == 0xC0u) {
+            need = 2;
+            cp = b0 & 0x1Fu;
+        } else if ((b0 & 0xF0u) == 0xE0u) {
+            need = 3;
+            cp = b0 & 0x0Fu;
+        } else if ((b0 & 0xF8u) == 0xF0u) {
+            need = 4;
+            cp = b0 & 0x07u;
+        } else {
+            return false;
+        }
+        if (i + need > len) return false;
+        for (size_t k = 1; k < need; ++k) {
+            const unsigned char bk = static_cast<unsigned char>(data[i + k]);
+            if ((bk & 0xC0u) != 0x80u) return false;
+            cp = (cp << 6) | (bk & 0x3Fu);
+        }
+        if ((need == 2 && cp < 0x80u) ||
+            (need == 3 && cp < 0x800u) ||
+            (need == 4 && (cp < 0x10000u || cp > 0x10FFFFu)) ||
+            (cp >= 0xD800u && cp <= 0xDFFFu)) {
+            return false;
+        }
+        if (!got_first) {
+            if (!is_cjk_hanzi(cp)) return false;
+            first_cp = cp;
+            got_first = true;
+        }
+        i += need;
+    }
+    return got_first;
+}
+
+double log_sum_exp_pair(double a, double b) {
+    if (a <= -1e8) return b;
+    if (b <= -1e8) return a;
+    const double hi = std::max(a, b);
+    const double lo = std::min(a, b);
+    return hi + std::log1p(std::exp(lo - hi));
+}
+
 int32_t count_utf8_codepoints(const char *data, size_t len) {
     int32_t count = 0;
     for (size_t i = 0; i < len; ++i) {
@@ -425,12 +479,29 @@ struct NeuralEngine::Impl {
     // 中文 IM 聊天常省略句间逗号，缓存单个中文逗号 token 供前缀树单遍贝叶斯边际化复用。
     llama_token comma_token = -1;
 
-    // `seq_id = 0` 持久化上文状态与末尾 token 的精确 log-softmax 缓存。
+    // `seq_id = 0` 持久化上文状态与末尾 / 次末尾 token 的精确 log-softmax 缓存。
+    // 次末尾缓存（`cached_ctx_prev_log_probs`）用于零额外推理实现跨上文 BPE 边界 Token Healing，
+    // 消除「也 + 没 → 也没」「不 + 能 → 不能」等被 BPE 合并导致的 -10 nat 条件概率坍塌。
     std::vector<llama_token> cached_ctx_tokens;
     std::vector<float> cached_ctx_log_probs;
+    std::vector<float> cached_ctx_prev_log_probs;
     bool cached_ctx_valid = false;
+    bool cached_ctx_prev_valid = false;
     bool cached_ctx_was_empty = true;
     bool cached_ctx_ends_with_han = false;
+    llama_token cached_ctx_last_token = -1;
+    std::string cached_ctx_last_piece;
+    char32_t cached_ctx_last_first_cp = 0;
+    bool cached_ctx_last_has_han_first = false;
+    int32_t cached_ctx_last_piece_chars = 0;
+    double cached_ctx_last_lp = 0.0;
+    double cached_ctx_last_prefix_log_z = 0.0;
+    double cached_ctx_unmerged_log_weight = 0.0;
+
+    // BPE 词表首字前缀索引（启动一次性构建 < 2 ms）：
+    // 支持单字精确前缀边际化（汇聚「没 / 没有 / 没问题 / 没事…」全部 BPE 概率质量）与 Token Healing 归一常数。
+    std::vector<std::string> token_utf8_pieces;
+    std::unordered_map<char32_t, std::vector<llama_token>> hanzi_prefix_tokens;
 
     // 能力 C：受限束搜索倒排索引（`音节串 -> 合法纯汉字 token 列表`）及每个 token 的纯汉字 UTF-8 文本。
     bool constrained_vocab_ready = false;
@@ -745,9 +816,109 @@ struct NeuralEngine::Impl {
         return constrained_vocab_ready;
     }
 
+    /// 构建全词表 UTF-8 片段与首汉字倒排前缀索引（无词库依赖，启动一次性执行 < 2 ms）。
+    void build_bpe_prefix_index() {
+        token_utf8_pieces.assign(static_cast<size_t>(n_vocab), std::string{});
+        if (static_cast<int32_t>(token_char_lens.size()) != n_vocab) {
+            token_char_lens.assign(static_cast<size_t>(n_vocab), 0);
+        }
+        hanzi_prefix_tokens.clear();
+        hanzi_prefix_tokens.reserve(8192);
+
+        char piece_buf[128];
+        for (llama_token tid = 0; tid < n_vocab; ++tid) {
+            if (llama_vocab_is_control(vocab, tid)) continue;
+            const int32_t plen = llama_token_to_piece(
+                vocab, tid, piece_buf, static_cast<int32_t>(sizeof(piece_buf)), 0, false);
+            if (plen <= 0 || plen >= static_cast<int32_t>(sizeof(piece_buf))) continue;
+            const size_t ulen = static_cast<size_t>(plen);
+            token_utf8_pieces[static_cast<size_t>(tid)].assign(piece_buf, ulen);
+            if (token_char_lens[static_cast<size_t>(tid)] <= 0) {
+                token_char_lens[static_cast<size_t>(tid)] =
+                    std::max<int32_t>(1, count_utf8_codepoints(piece_buf, ulen));
+            }
+            char32_t first_cp = 0;
+            if (decode_first_utf8_hanzi(piece_buf, ulen, first_cp)) {
+                hanzi_prefix_tokens[first_cp].push_back(tid);
+            }
+        }
+    }
+
+    /// 对给定 `log_probs` 数组计算所有以 `prefix_utf8`（首汉字为 `first_cp`）开头的 BPE token 概率之和的对数。
+    double sum_prefix_log_probs_vec(
+        const std::vector<float> &log_probs,
+        char32_t first_cp,
+        const std::string &prefix_utf8) const {
+        auto it = hanzi_prefix_tokens.find(first_cp);
+        if (it == hanzi_prefix_tokens.end() || it->second.empty()) return -1e9;
+        const bool match_any_with_cp = (prefix_utf8.size() <= 4 && count_utf8_codepoints(prefix_utf8) == 1);
+        double max_lp = -1e9;
+        bool found = false;
+        for (llama_token tid : it->second) {
+            if (tid < 0 || static_cast<size_t>(tid) >= log_probs.size()) continue;
+            if (!match_any_with_cp) {
+                const std::string &p = token_utf8_pieces[static_cast<size_t>(tid)];
+                if (p.size() < prefix_utf8.size() || p.compare(0, prefix_utf8.size(), prefix_utf8) != 0) {
+                    continue;
+                }
+            }
+            const double lp = static_cast<double>(log_probs[static_cast<size_t>(tid)]);
+            if (!found || lp > max_lp) {
+                max_lp = lp;
+                found = true;
+            }
+        }
+        if (!found) return -1e9;
+        double sum_exp = 0.0;
+        for (llama_token tid : it->second) {
+            if (tid < 0 || static_cast<size_t>(tid) >= log_probs.size()) continue;
+            if (!match_any_with_cp) {
+                const std::string &p = token_utf8_pieces[static_cast<size_t>(tid)];
+                if (p.size() < prefix_utf8.size() || p.compare(0, prefix_utf8.size(), prefix_utf8) != 0) {
+                    continue;
+                }
+            }
+            const double diff = static_cast<double>(log_probs[static_cast<size_t>(tid)]) - max_lp;
+            if (diff > -25.0) {
+                sum_exp += std::exp(diff);
+            }
+        }
+        return max_lp + std::log(std::max(sum_exp, 1e-30));
+    }
+
+    /// 对原始 logits 指针与 `log_z` 计算所有以单汉字 `first_cp` 开头的 BPE token 概率之和的对数。
+    double sum_hanzi_prefix_log_probs_logits(
+        const float *logits,
+        double log_z,
+        char32_t first_cp) const {
+        if (!logits) return -1e9;
+        auto it = hanzi_prefix_tokens.find(first_cp);
+        if (it == hanzi_prefix_tokens.end() || it->second.empty()) return -1e9;
+        double max_v = -1e9;
+        bool found = false;
+        for (llama_token tid : it->second) {
+            if (tid < 0 || tid >= n_vocab) continue;
+            const double v = static_cast<double>(logits[tid]);
+            if (!found || v > max_v) {
+                max_v = v;
+                found = true;
+            }
+        }
+        if (!found) return -1e9;
+        double sum_exp = 0.0;
+        for (llama_token tid : it->second) {
+            if (tid < 0 || tid >= n_vocab) continue;
+            const double diff = static_cast<double>(logits[tid]) - max_v;
+            if (diff > -25.0) {
+                sum_exp += std::exp(diff);
+            }
+        }
+        return (max_v - log_z) + std::log(std::max(sum_exp, 1e-30));
+    }
+
     /// 内部无锁版上文预热（调用方须已持有 `mutex`）。
     /// 非空上文前置 `prompt_prefix_tokens`（`<|im_start|>user\n`）；空上文前置 `empty_prompt_tokens`（追加中性 `，`）。
-    /// 两者共享 `prompt_prefix_tokens` 头部并被 LCP 100% 零开销复用。
+    /// 两者共享 `prompt_prefix_tokens` 头部并被 LCP 100% 零开销复用，并同步维护次末尾 logits 缓存供 BPE Token Healing 复用。
     bool prefill_context_locked(const std::string &context_utf8, PrefillStats &stats, std::string &error_out) {
         const auto start = Clock::now();
         stats = PrefillStats{};
@@ -775,7 +946,8 @@ struct NeuralEngine::Impl {
             target.insert(target.end(), ctx_toks.begin(), ctx_toks.end());
         }
 
-        stats.total_tokens = static_cast<int32_t>(target.size());
+        const size_t total = target.size();
+        stats.total_tokens = static_cast<int32_t>(total);
 
         // 判断 UTF-8 上文是否直接以汉字结尾（无句间标点或空格），用于决定是否启用隐式分句逗号边际化。
         auto ends_with_han_utf8 = [](const std::string &s) -> bool {
@@ -817,15 +989,27 @@ struct NeuralEngine::Impl {
 
         llama_memory_t mem = llama_get_memory(ctx);
 
+        const bool need_prev = (!is_empty_context && total >= prefix_len + 1 && total >= 2);
         size_t lcp = 0;
+        bool prev_ready = false;
         if (cached_ctx_valid) {
-            const size_t limit = std::min(cached_ctx_tokens.size(), target.size());
+            const size_t limit = std::min(cached_ctx_tokens.size(), total);
             while (lcp < limit && cached_ctx_tokens[lcp] == target[lcp]) {
                 ++lcp;
             }
-            // 若新上文是旧上文的真前缀，需重算新上文最后一个 token 以刷新末尾 logits 缓存。
-            if (lcp == target.size() && lcp > 0) {
+            // 若新上文恰好在旧上文末尾追加了 1 个 token，旧末尾 logits 正是新上文 `total - 2` 处精确缓存，零开销复用。
+            if (need_prev && lcp == total - 1 && cached_ctx_tokens.size() == total - 1 && !cached_ctx_log_probs.empty()) {
+                cached_ctx_prev_log_probs = cached_ctx_log_probs;
+                prev_ready = true;
+            } else if (need_prev && lcp == total - 1 && cached_ctx_tokens.size() == total && cached_ctx_prev_valid) {
+                prev_ready = true;
+            }
+            // 若新上文是旧上文的真前缀，需重算末尾 token；若还需刷新次末尾 logits，则退回至 `total - 2`。
+            if (lcp == total && lcp > 0) {
                 --lcp;
+            }
+            if (need_prev && !prev_ready && lcp > total - 2) {
+                lcp = total - 2;
             }
         }
 
@@ -835,35 +1019,93 @@ struct NeuralEngine::Impl {
             llama_memory_seq_rm(mem, 0, static_cast<llama_pos>(lcp), -1);
         }
 
-        // 增量解码 `target[lcp .. target.size())`，仅在最后一个 token 打开 logits 开关。
-        const size_t total = target.size();
+        // 增量解码 `target[lcp .. total)`；同步在 `total - 2`（若需要）与 `total - 1` 打开 logits 开关。
+        bool got_last_logits = false;
         size_t cursor = lcp;
         while (cursor < total) {
             const size_t chunk = std::min<size_t>(static_cast<size_t>(n_batch), total - cursor);
             batch_clear(batch);
+            int32_t prev_batch_idx = -1;
+            int32_t last_batch_idx = -1;
             for (size_t i = 0; i < chunk; ++i) {
                 const size_t pos = cursor + i;
+                const bool is_prev = (need_prev && !prev_ready && pos + 2 == total);
                 const bool is_last = (pos + 1 == total);
-                batch_add_single_seq(batch, target[pos], static_cast<llama_pos>(pos), 0, is_last);
+                const int32_t b_idx = batch.n_tokens;
+                batch_add_single_seq(batch, target[pos], static_cast<llama_pos>(pos), 0, is_last || is_prev);
+                if (is_prev) prev_batch_idx = b_idx;
+                if (is_last) last_batch_idx = b_idx;
             }
             const int32_t rc = llama_decode(ctx, batch);
             if (rc != 0) {
                 cached_ctx_valid = false;
+                cached_ctx_prev_valid = false;
                 cached_ctx_tokens.clear();
                 llama_memory_seq_rm(mem, 0, -1, -1);
                 error_out = "llama_decode 上文预热失败，返回码=" + std::to_string(rc);
                 return false;
             }
+            if (prev_batch_idx >= 0) {
+                const float *prev_logits = llama_get_logits_ith(ctx, prev_batch_idx);
+                if (prev_logits) {
+                    compute_full_log_softmax(prev_logits, n_vocab, cached_ctx_prev_log_probs);
+                    prev_ready = true;
+                }
+            }
+            if (last_batch_idx >= 0) {
+                const float *last_logits = llama_get_logits_ith(ctx, last_batch_idx);
+                if (!last_logits) {
+                    cached_ctx_valid = false;
+                    cached_ctx_prev_valid = false;
+                    error_out = "获取上文末尾 logits 失败";
+                    return false;
+                }
+                compute_full_log_softmax(last_logits, n_vocab, cached_ctx_log_probs);
+                got_last_logits = true;
+            }
             cursor += chunk;
         }
 
-        const float *last_logits = llama_get_logits_ith(ctx, batch.n_tokens - 1);
-        if (!last_logits) {
+        if (!got_last_logits) {
             cached_ctx_valid = false;
-            error_out = "获取上文末尾 logits 失败";
+            cached_ctx_prev_valid = false;
+            error_out = "未产出上文末尾 logits";
             return false;
         }
-        compute_full_log_softmax(last_logits, n_vocab, cached_ctx_log_probs);
+
+        // 更新末 token 的 Token Healing 归一状态：`Z_last = log sum_{w starts with s_last} P(w | C_base)`。
+        cached_ctx_prev_valid = false;
+        cached_ctx_last_token = -1;
+        cached_ctx_last_piece.clear();
+        cached_ctx_last_first_cp = 0;
+        cached_ctx_last_has_han_first = false;
+        cached_ctx_last_piece_chars = 0;
+        cached_ctx_last_lp = 0.0;
+        cached_ctx_last_prefix_log_z = 0.0;
+        cached_ctx_unmerged_log_weight = 0.0;
+
+        if (need_prev && prev_ready && static_cast<int32_t>(cached_ctx_prev_log_probs.size()) == n_vocab) {
+            const llama_token last_tok = target[total - 1];
+            if (last_tok >= 0 && last_tok < n_vocab && !token_utf8_pieces[static_cast<size_t>(last_tok)].empty()) {
+                cached_ctx_last_token = last_tok;
+                cached_ctx_last_piece = token_utf8_pieces[static_cast<size_t>(last_tok)];
+                cached_ctx_last_piece_chars = std::max<int32_t>(1, count_utf8_codepoints(cached_ctx_last_piece));
+                cached_ctx_last_lp = static_cast<double>(cached_ctx_prev_log_probs[static_cast<size_t>(last_tok)]);
+                char32_t first_cp = 0;
+                if (decode_first_utf8_hanzi(
+                        cached_ctx_last_piece.data(), cached_ctx_last_piece.size(), first_cp)) {
+                    cached_ctx_last_first_cp = first_cp;
+                    cached_ctx_last_has_han_first = true;
+                    const double prefix_z = sum_prefix_log_probs_vec(
+                        cached_ctx_prev_log_probs, first_cp, cached_ctx_last_piece);
+                    cached_ctx_last_prefix_log_z = std::max(cached_ctx_last_lp, prefix_z);
+                } else {
+                    cached_ctx_last_prefix_log_z = cached_ctx_last_lp;
+                }
+                cached_ctx_unmerged_log_weight = std::min(0.0, cached_ctx_last_lp - cached_ctx_last_prefix_log_z);
+                cached_ctx_prev_valid = true;
+            }
+        }
 
         cached_ctx_tokens = std::move(target);
         cached_ctx_valid = true;
@@ -885,14 +1127,18 @@ struct NeuralEngine::Impl {
         double cum_log_prob = 0.0;
         bool scored = false;
         bool is_internal = false;
+        bool is_healed = false;
         int32_t branch_begin = 0;
         int32_t branch_end = 0;
     };
 
     /// 内部无锁版前缀树共享 KV 批量打分，可选输出每条候选的细粒度惊奇度诊断（零额外 GPU 推理）。
-    /// 当 `marginalize_latent_comma == true` 且非空上文直接以汉字结尾时，在同一棵前缀树内并入单节点
-    /// 隐式分句逗号分支，按全概率公式对「直接续写 / IM 省略逗号起新分句」做精确贝叶斯边际化：
-    /// `P(Y | C) = P_LM(Y | C) + alpha_omit * P_LM("，" | C) * P_LM(Y | C + "，")`。
+    /// 当 `im_boundary_calibration == true`（生产推理路径）时，在单次前缀树前向内同步完成三项精确 BPE/IM 概率校准：
+    /// 1. 左边界 BPE Token Healing：当上文末 token 与候选前缀发生 BPE 合并/重切（如 `也 + 没 → 也没`、`也 + 没问题 → 也没|问题`、
+    ///    `不 + 能 → 不能`、`字 + 典范 → 字典|范`）时，基于次末尾缓存 `C_base` 与 `Z_last` 还原真实条件对数概率；
+    /// 2. 右边界单字 BPE 前缀边际化：对单字候选汇总全词表所有以该汉字开头的 token 概率质量（如 `没 + 没有 + 没问题 + …`），
+    ///    消除高频虚词单字被多字 BPE 词吞噬造成的概率偏低（如 `没` 输给 `每`、`在` 输给 `再`）；
+    /// 3. IM 隐式分句逗号边际化：非空上文直接以汉字结尾且 `P_LM("，" | C) >= e^-4.5` 时，在单批序列预算内共享并入 `"，"` 子树。
     bool score_candidates_with_diag_locked(
         const std::string *context_utf8,
         const std::vector<std::string> &candidates,
@@ -900,7 +1146,7 @@ struct NeuralEngine::Impl {
         std::vector<CandidateScoreDiag> *out_diags,
         ScoreStats &stats,
         std::string &error_out,
-        bool marginalize_latent_comma = false) {
+        bool im_boundary_calibration = false) {
         const auto start = Clock::now();
         stats = ScoreStats{};
         stats.candidate_count = static_cast<int32_t>(candidates.size());
@@ -924,10 +1170,18 @@ struct NeuralEngine::Impl {
 
         const int32_t ctx_len = static_cast<int32_t>(cached_ctx_tokens.size());
         const int32_t max_cand_len = std::max<int32_t>(1, n_ctx - ctx_len - 3);
+        const bool can_heal = im_boundary_calibration
+            && cached_ctx_prev_valid
+            && !cached_ctx_was_empty
+            && !cached_ctx_last_piece.empty()
+            && ctx_len >= 2
+            && static_cast<int32_t>(cached_ctx_prev_log_probs.size()) == n_vocab;
+        const double unmerged_shift = can_heal ? cached_ctx_unmerged_log_weight : 0.0;
+
         // 仅当模型自身对上文末尾出现分句逗号赋予不可忽略概率（`P_LM("，" | C) >= e^-4.5 ≈ 1.11%`）时
         // 才在同一前缀树内展开隐式逗号子树；句中连续语境处 `P_LM("，" | C)` 极低，零开销直接跳过。
         constexpr double kLatentCommaTriggerMinLogProb = -4.5;
-        const bool use_latent_comma = marginalize_latent_comma
+        const bool use_latent_comma = im_boundary_calibration
             && !cached_ctx_was_empty
             && cached_ctx_ends_with_han
             && comma_token >= 0
@@ -936,14 +1190,29 @@ struct NeuralEngine::Impl {
             && static_cast<double>(cached_ctx_log_probs[static_cast<size_t>(comma_token)]) >= kLatentCommaTriggerMinLogProb
             && max_cand_len >= 2;
 
-        // 1. 构造 Token 前缀字典树（根节点 0 代表已预热上文末尾）。
+        // 1. 构造 Token 前缀字典树：
+        //    - 虚根 `0` 代表已预热上文末尾 `pos = ctx_len`；
+        //    - 可选虚根 `healed_root_id`（`is_healed = true`）代表上文次末尾 `C_base`（`pos = ctx_len - 1`）。
         std::vector<TrieNode> trie;
-        trie.reserve(candidates.size() * (use_latent_comma ? 6 : 4) + 2);
+        trie.reserve(candidates.size() * (use_latent_comma ? 6 : 4) + 4);
         trie.push_back(TrieNode{});
+        trie[0].parent = -1;
         trie[0].depth = -1;
         trie[0].scored = true;
+        trie[0].is_healed = false;
 
-        auto insert_child = [&](int32_t parent_id, llama_token tok, int32_t depth) -> int32_t {
+        int32_t healed_root_id = -1;
+        if (can_heal) {
+            healed_root_id = static_cast<int32_t>(trie.size());
+            TrieNode hroot{};
+            hroot.parent = -1;
+            hroot.depth = -1;
+            hroot.scored = true;
+            hroot.is_healed = true;
+            trie.push_back(std::move(hroot));
+        }
+
+        auto insert_child = [&](int32_t parent_id, llama_token tok, int32_t depth, bool is_healed) -> int32_t {
             for (const auto &ch : trie[static_cast<size_t>(parent_id)].children) {
                 if (ch.first == tok) {
                     return ch.second;
@@ -954,14 +1223,21 @@ struct NeuralEngine::Impl {
             node.token = tok;
             node.parent = parent_id;
             node.depth = depth;
+            node.is_healed = is_healed;
             trie.push_back(std::move(node));
             trie[static_cast<size_t>(parent_id)].children.emplace_back(tok, next_id);
             return next_id;
         };
 
         std::vector<int32_t> cand_end_node(candidates.size(), -1);
+        std::vector<int32_t> cand_healed_end_node(candidates.size(), -1);
         std::vector<int32_t> cand_comma_end_node(candidates.size(), -1);
         std::vector<std::vector<llama_token>> cand_tokens(candidates.size());
+        std::vector<char32_t> cand_single_cp(candidates.size(), 0);
+        std::vector<size_t> single_hanzi_indices;
+        std::vector<double> cand_comma_prefix_lp(candidates.size(), -1e9);
+        std::vector<char32_t> tmp_cps;
+        std::vector<llama_token> healed_toks;
         int32_t total_cand_tokens = 0;
 
         for (size_t i = 0; i < candidates.size(); ++i) {
@@ -973,21 +1249,62 @@ struct NeuralEngine::Impl {
             }
             total_cand_tokens += static_cast<int32_t>(toks.size());
 
-            int32_t cur = 0;
-            for (size_t d = 0; d < toks.size(); ++d) {
-                cur = insert_child(cur, toks[d], static_cast<int32_t>(d));
+            // 检测是否为单汉字候选（供右边界精确 BPE 前缀边际化使用）。
+            bool is_single_hanzi = false;
+            if (im_boundary_calibration &&
+                decode_strict_utf8_hanzi(candidates[i].data(), candidates[i].size(), 1, tmp_cps) &&
+                tmp_cps.size() == 1) {
+                is_single_hanzi = true;
+                cand_single_cp[i] = tmp_cps[0];
+                single_hanzi_indices.push_back(i);
             }
-            cand_end_node[i] = cur;
+
+            // 检测是否发生跨上文末 token 的 BPE 合并/重切（Left-Boundary Token Healing）。
+            bool merged_with_prev = false;
+            if (can_heal) {
+                std::string combined;
+                combined.reserve(cached_ctx_last_piece.size() + candidates[i].size());
+                combined.append(cached_ctx_last_piece);
+                combined.append(candidates[i]);
+                if (tokenize_raw(combined, healed_toks) &&
+                    !healed_toks.empty() &&
+                    healed_toks[0] != cached_ctx_last_token) {
+                    const int32_t max_healed_len = max_cand_len + 1;
+                    if (static_cast<int32_t>(healed_toks.size()) > max_healed_len) {
+                        healed_toks.resize(static_cast<size_t>(max_healed_len));
+                    }
+                    merged_with_prev = true;
+                    // 单字候选若只合为 1 个 token，直接由 `sum_prefix_log_probs_vec` 零开销涵盖；
+                    // 多字候选或跨 token 重切（如 `也是 + 个 → 也|是个`）插入 `healed_root_id` 子树。
+                    if (!is_single_hanzi || healed_toks.size() >= 2) {
+                        int32_t h_cur = healed_root_id;
+                        for (size_t d = 0; d < healed_toks.size(); ++d) {
+                            h_cur = insert_child(h_cur, healed_toks[d], static_cast<int32_t>(d), true);
+                        }
+                        cand_healed_end_node[i] = h_cur;
+                    }
+                }
+            }
+
+            // 对未发生左边界合并的候选（以及单字候选兜底）插入直连根 `0`；
+            // 已发生左边界合并的多字候选由规范的 healed 分支取代非法拆拼路径，避免浪费分支与 GPU 计算。
+            if (!merged_with_prev || is_single_hanzi) {
+                int32_t cur = 0;
+                for (size_t d = 0; d < toks.size(); ++d) {
+                    cur = insert_child(cur, toks[d], static_cast<int32_t>(d), false);
+                }
+                cand_end_node[i] = cur;
+            }
         }
 
         // 在不撑破单批序列上限（`n_seq_max - 1`）的前提下挂载共享隐式逗号子树：
-        // - 单 token 候选（绝大多数中文常用双字词）在逗号节点下直接成为叶子，零额外序列与零额外解码 token，全量纳入；
+        // - 单 token 候选（绝大多数中文常用双字词与单字）在逗号节点下直接成为叶子，零额外序列与零额外解码 token，全量纳入；
         // - 多 token 候选按 Tier 0 优先级在剩余单批序列预算内纳入，杜绝触发二次 Metal 分块前向。
         int32_t comma_node_id = -1;
         if (use_latent_comma) {
-            int32_t direct_internal_leaves = 0;
+            int32_t base_internal_leaves = 0;
             for (size_t id = 1; id < trie.size(); ++id) {
-                if (trie[id].children.empty()) continue;
+                if (trie[id].parent < 0 || trie[id].children.empty()) continue;
                 bool has_internal_child = false;
                 for (const auto &ch : trie[id].children) {
                     if (!trie[static_cast<size_t>(ch.second)].children.empty()) {
@@ -996,14 +1313,13 @@ struct NeuralEngine::Impl {
                     }
                 }
                 if (!has_internal_child) {
-                    ++direct_internal_leaves;
+                    ++base_internal_leaves;
                 }
             }
             const int32_t max_chunk_seqs = std::max<int32_t>(1, n_seq_max - 1);
-            const int32_t comma_branch_budget = std::max<int32_t>(0, max_chunk_seqs - direct_internal_leaves);
+            const int32_t comma_branch_budget = std::max<int32_t>(0, max_chunk_seqs - base_internal_leaves);
             if (comma_branch_budget >= 1) {
-                comma_node_id = insert_child(0, comma_token, 0);
-                // 仅当存在至少一条候选时逗号节点本身占 1 个初始内部叶子；每新增一条独立多 token 前缀再消耗 1 预算。
+                comma_node_id = insert_child(0, comma_token, 0, false);
                 int32_t multi_tok_added = 0;
                 const int32_t max_multi_tok_comma = std::max<int32_t>(0, comma_branch_budget);
                 for (size_t i = 0; i < candidates.size(); ++i) {
@@ -1017,17 +1333,20 @@ struct NeuralEngine::Impl {
                     }
                     int32_t c_cur = comma_node_id;
                     for (size_t d = 0; d < c_len; ++d) {
-                        c_cur = insert_child(c_cur, toks[d], static_cast<int32_t>(d + 1));
+                        c_cur = insert_child(c_cur, toks[d], static_cast<int32_t>(d + 1), false);
                     }
                     cand_comma_end_node[i] = c_cur;
                 }
             }
         }
 
-        stats.unique_trie_nodes = static_cast<int32_t>(trie.size()) - 1;
+        const int32_t virtual_roots = (healed_root_id >= 0) ? 2 : 1;
+        stats.unique_trie_nodes = std::max<int32_t>(0, static_cast<int32_t>(trie.size()) - virtual_roots);
         stats.total_candidate_tokens = total_cand_tokens;
 
-        // 2. 所有 depth == 0 首 token 直接查 `cached_ctx_log_probs`，零 GPU 开销。
+        // 2. 所有 depth == 0 首 token 直接查缓存对数概率，零 GPU 开销：
+        //    - 直连根 `0` 查 `cached_ctx_log_probs`；
+        //    - 愈合根 `healed_root_id` 查 `cached_ctx_prev_log_probs - Z_last`。
         for (const auto &ch : trie[0].children) {
             TrieNode &node = trie[static_cast<size_t>(ch.second)];
             if (node.token >= 0 && node.token < n_vocab) {
@@ -1037,10 +1356,24 @@ struct NeuralEngine::Impl {
             }
             node.scored = true;
         }
+        if (healed_root_id >= 0) {
+            for (const auto &ch : trie[static_cast<size_t>(healed_root_id)].children) {
+                TrieNode &node = trie[static_cast<size_t>(ch.second)];
+                if (node.token >= 0 && node.token < n_vocab) {
+                    node.edge_log_prob =
+                        static_cast<double>(cached_ctx_prev_log_probs[static_cast<size_t>(node.token)])
+                        - cached_ctx_last_prefix_log_z;
+                } else {
+                    node.edge_log_prob = -30.0;
+                }
+                node.scored = true;
+            }
+        }
 
-        // 3. 标记需要解码的内部节点（仅有子节点的非根节点需要解码，叶子节点完全免解码）。
+        // 3. 标记需要解码的内部节点（仅有子节点的非虚根节点需要解码，叶子节点完全免解码）。
         int32_t internal_count = 0;
         for (size_t id = 1; id < trie.size(); ++id) {
+            if (trie[id].parent < 0) continue;
             if (!trie[id].children.empty()) {
                 trie[id].is_internal = true;
                 ++internal_count;
@@ -1050,24 +1383,33 @@ struct NeuralEngine::Impl {
 
         if (internal_count > 0) {
             int32_t next_branch = 0;
-            auto assign_branches = [&](auto &&self, int32_t node_id) -> void {
+            std::vector<uint8_t> branch_is_healed;
+            auto assign_branches = [&](auto &&self, int32_t node_id, uint8_t is_healed_flag) -> void {
                 TrieNode &node = trie[static_cast<size_t>(node_id)];
                 node.branch_begin = next_branch;
                 bool has_internal_child = false;
                 for (const auto &ch : node.children) {
                     if (trie[static_cast<size_t>(ch.second)].is_internal) {
                         has_internal_child = true;
-                        self(self, ch.second);
+                        self(self, ch.second, is_healed_flag);
                     }
                 }
                 if (!has_internal_child) {
+                    branch_is_healed.push_back(is_healed_flag);
                     ++next_branch;
                 }
                 node.branch_end = next_branch;
             };
             for (const auto &ch : trie[0].children) {
                 if (trie[static_cast<size_t>(ch.second)].is_internal) {
-                    assign_branches(assign_branches, ch.second);
+                    assign_branches(assign_branches, ch.second, 0);
+                }
+            }
+            if (healed_root_id >= 0) {
+                for (const auto &ch : trie[static_cast<size_t>(healed_root_id)].children) {
+                    if (trie[static_cast<size_t>(ch.second)].is_internal) {
+                        assign_branches(assign_branches, ch.second, 1);
+                    }
                 }
             }
 
@@ -1084,7 +1426,13 @@ struct NeuralEngine::Impl {
                 const int32_t chunk_seqs = b_end - b_start;
 
                 for (int32_t s = 1; s <= chunk_seqs; ++s) {
-                    llama_memory_seq_cp(mem, 0, s, -1, -1);
+                    const int32_t b = b_start + (s - 1);
+                    if (branch_is_healed[static_cast<size_t>(b)]) {
+                        // 愈合分支仅拷贝 `C_base`（`0 .. ctx_len - 2`），从 `pos = ctx_len - 1` 接续合并后的 token。
+                        llama_memory_seq_cp(mem, 0, s, 0, static_cast<llama_pos>(ctx_len - 1));
+                    } else {
+                        llama_memory_seq_cp(mem, 0, s, -1, -1);
+                    }
                 }
 
                 std::vector<int32_t> active_nodes;
@@ -1121,10 +1469,11 @@ struct NeuralEngine::Impl {
                         }
                         const bool need_logits = (node_children_scored[static_cast<size_t>(node_id)] == 0);
                         const int32_t batch_idx = batch.n_tokens;
+                        const int32_t base_pos = node.is_healed ? (ctx_len - 1) : ctx_len;
                         batch_add(
                             batch,
                             node.token,
-                            static_cast<llama_pos>(ctx_len + node.depth),
+                            static_cast<llama_pos>(base_pos + node.depth),
                             seq_ids_buf,
                             need_logits);
                         if (need_logits) {
@@ -1169,6 +1518,13 @@ struct NeuralEngine::Impl {
                             }
                             child.scored = true;
                         }
+                        // 对隐式逗号节点顺带计算全部单字候选的精确前缀边际对数概率（零额外推理）。
+                        if (node_id == comma_node_id && !single_hanzi_indices.empty()) {
+                            for (size_t idx : single_hanzi_indices) {
+                                cand_comma_prefix_lp[idx] =
+                                    sum_hanzi_prefix_log_probs_logits(logits, log_z, cand_single_cp[idx]);
+                            }
+                        }
                         node_children_scored[static_cast<size_t>(node_id)] = 1;
                     }
                     offset += take;
@@ -1184,7 +1540,11 @@ struct NeuralEngine::Impl {
         // 4. 自顶向下累加联合条件对数概率 `log P_LM(Y | C)`。
         for (size_t id = 1; id < trie.size(); ++id) {
             TrieNode &node = trie[id];
-            const double parent_cum = (node.parent > 0) ? trie[static_cast<size_t>(node.parent)].cum_log_prob : 0.0;
+            if (node.parent < 0) continue;
+            const double parent_cum =
+                (trie[static_cast<size_t>(node.parent)].parent >= 0)
+                    ? trie[static_cast<size_t>(node.parent)].cum_log_prob
+                    : 0.0;
             node.cum_log_prob = parent_cum + node.edge_log_prob;
         }
 
@@ -1196,18 +1556,62 @@ struct NeuralEngine::Impl {
         std::vector<int32_t> path_nodes;
         for (size_t i = 0; i < candidates.size(); ++i) {
             const int32_t end_id = cand_end_node[i];
-            if (end_id <= 0 || !trie[static_cast<size_t>(end_id)].scored) continue;
-            const double lp_direct = trie[static_cast<size_t>(end_id)].cum_log_prob;
-            double total_lp = lp_direct;
-            bool comma_won = false;
+            const int32_t h_end = cand_healed_end_node[i];
             const int32_t c_end = use_latent_comma ? cand_comma_end_node[i] : -1;
-            if (c_end > 0 && trie[static_cast<size_t>(c_end)].scored) {
-                const double lp_via_comma = kLatentCommaOmitLogPrior + trie[static_cast<size_t>(c_end)].cum_log_prob;
-                const double hi = std::max(lp_direct, lp_via_comma);
-                const double lo = std::min(lp_direct, lp_via_comma);
-                total_lp = hi + std::log1p(std::exp(lo - hi));
-                comma_won = (lp_via_comma > lp_direct);
+
+            double lp_primary = -1e9;
+            bool used_healed = false;
+
+            if (cand_single_cp[i] != 0) {
+                // 单字精确 BPE 前缀边际化：直连全部以 `c` 开头的词 + 跨上文合并全部以 `s_last + c` 开头的词。
+                double lp_dir = sum_prefix_log_probs_vec(cached_ctx_log_probs, cand_single_cp[i], candidates[i]);
+                if (lp_dir <= -1e8 && end_id > 0 && trie[static_cast<size_t>(end_id)].scored) {
+                    lp_dir = trie[static_cast<size_t>(end_id)].cum_log_prob;
+                }
+                if (lp_dir > -1e8) {
+                    lp_dir += unmerged_shift;
+                }
+                double lp_heal = -1e9;
+                if (can_heal && cached_ctx_last_has_han_first) {
+                    std::string merged_prefix;
+                    merged_prefix.reserve(cached_ctx_last_piece.size() + candidates[i].size());
+                    merged_prefix.append(cached_ctx_last_piece);
+                    merged_prefix.append(candidates[i]);
+                    const double raw_heal = sum_prefix_log_probs_vec(
+                        cached_ctx_prev_log_probs, cached_ctx_last_first_cp, merged_prefix);
+                    if (raw_heal > -1e8) {
+                        lp_heal = raw_heal - cached_ctx_last_prefix_log_z;
+                    }
+                }
+                if (h_end > 0 && trie[static_cast<size_t>(h_end)].scored) {
+                    lp_heal = log_sum_exp_pair(lp_heal, trie[static_cast<size_t>(h_end)].cum_log_prob);
+                }
+                lp_primary = log_sum_exp_pair(lp_dir, lp_heal);
+                used_healed = (lp_heal > lp_dir && h_end > 0);
+            } else if (h_end > 0 && trie[static_cast<size_t>(h_end)].scored) {
+                // 发生左边界 BPE 合并/重切的多字候选：使用规范愈合路径。
+                lp_primary = trie[static_cast<size_t>(h_end)].cum_log_prob;
+                used_healed = true;
+            } else if (end_id > 0 && trie[static_cast<size_t>(end_id)].scored) {
+                lp_primary = unmerged_shift + trie[static_cast<size_t>(end_id)].cum_log_prob;
+            } else {
+                continue;
             }
+
+            double lp_via_comma = -1e9;
+            if (use_latent_comma && comma_node_id > 0 && trie[static_cast<size_t>(comma_node_id)].scored) {
+                if (cand_single_cp[i] != 0 && cand_comma_prefix_lp[i] > -1e8) {
+                    lp_via_comma = unmerged_shift + kLatentCommaOmitLogPrior
+                        + trie[static_cast<size_t>(comma_node_id)].edge_log_prob
+                        + cand_comma_prefix_lp[i];
+                } else if (c_end > 0 && trie[static_cast<size_t>(c_end)].scored) {
+                    lp_via_comma = unmerged_shift + kLatentCommaOmitLogPrior
+                        + trie[static_cast<size_t>(c_end)].cum_log_prob;
+                }
+            }
+
+            const double total_lp = std::min(0.0, log_sum_exp_pair(lp_primary, lp_via_comma));
+            const bool comma_won = (lp_via_comma > lp_primary && c_end > 0);
             out_log_probs[i] = total_lp;
 
             if (out_diags) {
@@ -1216,9 +1620,20 @@ struct NeuralEngine::Impl {
                 diag.char_count = std::max<int32_t>(1, count_utf8_codepoints(candidates[i]));
                 diag.avg_char_lp = total_lp / static_cast<double>(diag.char_count);
 
+                if (cand_single_cp[i] != 0) {
+                    // 单字候选已由精确前缀边际化（含左边界 Token Healing 与隐式逗号）得到整体对数概率，
+                    // 直接复用 `total_lp` 作为单步诊断，避免回溯到未愈合单 token 的偏低惊奇度。
+                    diag.token_count = 1;
+                    diag.min_edge_lp = (cached_ctx_was_empty || comma_won) ? (total_lp + 1.5) : total_lp;
+                    diag.worst_char_start = 0;
+                    diag.worst_char_end = 1;
+                    (*out_diags)[i] = diag;
+                    continue;
+                }
+
                 path_nodes.clear();
-                const int32_t stop_parent = comma_won ? comma_node_id : 0;
-                int32_t cur = comma_won ? c_end : end_id;
+                const int32_t stop_parent = comma_won ? comma_node_id : (used_healed ? healed_root_id : 0);
+                int32_t cur = comma_won ? c_end : (used_healed ? h_end : end_id);
                 while (cur > 0 && cur != stop_parent) {
                     path_nodes.push_back(cur);
                     cur = trie[static_cast<size_t>(cur)].parent;
@@ -1234,7 +1649,10 @@ struct NeuralEngine::Impl {
                 int32_t char_cursor = 0;
                 for (size_t t = 0; t < path_nodes.size(); ++t) {
                     const TrieNode &nd = trie[static_cast<size_t>(path_nodes[t])];
-                    const int32_t tok_chars = token_utf8_chars(nd.token);
+                    int32_t tok_chars = token_utf8_chars(nd.token);
+                    if (used_healed && !comma_won && t == 0) {
+                        tok_chars = std::max<int32_t>(1, tok_chars - cached_ctx_last_piece_chars);
+                    }
                     double metric = nd.edge_log_prob / std::sqrt(static_cast<double>(std::max<int32_t>(1, tok_chars)));
                     if ((cached_ctx_was_empty || comma_won) && t == 0) {
                         metric += 1.5;
@@ -2066,6 +2484,7 @@ std::unique_ptr<NeuralEngine> NeuralEngine::create(const EngineConfig &config, s
     if (!config.pinyin_db_path.empty() || !config.pinyin_tsv_path.empty()) {
         impl->build_constrained_vocab_index(config.pinyin_db_path, config.pinyin_tsv_path);
     }
+    impl->build_bpe_prefix_index();
 
     // 预热固定起始前缀（并缓存空上文精确 log_probs），确保 Metal 着色器首次编译完成且杜绝 pos=0 退化。
     PrefillStats warmup_stats{};
