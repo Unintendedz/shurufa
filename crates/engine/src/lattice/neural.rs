@@ -262,13 +262,14 @@ impl NeuralReranker {
         self.score_order_with_means_into(paths, context, order, None)
     }
 
-    /// 按 `context` 最后 64 字的模型评分在多字同音词切片中挑选唯一更贴合语境的首选下标。
+    /// 按 `context` 最后 64 字的模型评分在同音词典切片（含单字与多字词）中挑选唯一更贴合语境的首选下标。
     ///
-    /// 单字没有词内搭配约束，不同读音简拼的静态权重也不可直接互比；因此调用方只传入字数 `>= 2`
-    /// 且完整读音一致的同音词引用。神经条件对数概率 `ln P_LM(w | context)` 本身已包含语料先验，
-    /// 旧词库分档权重又存在人工倍数断崖（如「登录 502k / 登陆 5k」「把他 319k / 把它 4.6k」），
-    /// 因此仅以 `0.25 * ln(weight)` 作为低频防噪稳定项，可叠加 Stage 4 贝叶斯等效先验权重与 `.gram`
-    /// 搭配加成；当最佳同音词相对原首选净领先不少于 `0.35` nats 时返回其下标。
+    /// 不同读音简拼的静态权重不可直接互比，因此调用方只传入完整读音和字数一致的同音词典引用。
+    /// - 多字词（`chars >= 2`）：以 `0.25 * ln(weight)` 作低频防噪稳定项，叠加神经条件对数概率与 `.gram`
+    ///   跨界搭配加成，净领先 `>= 0.35 nats` 时提首；
+    /// - 单字（`chars == 1`）：缺少词内搭配约束，采用更高静态先验系数 `0.40 * ln(weight)` 与更严格净领先
+    ///   门槛 `1.00 nats`，确保「邮箱 + 里」「我同事老 + 李」「这句话说 + 得」「今天是几 + 号」「明天 + 再」等
+    ///   明确语境精准翻盘，而中性或模糊前文绝不误翻「的/是/有/在/好/里/他」等高频核心单字。
     pub fn pick_dictionary_homophone(
         &mut self,
         items: &[&crate::types::WordItem],
@@ -276,8 +277,10 @@ impl NeuralReranker {
         effective_weights: Option<&[f64]>,
         collocation_bonuses: Option<&[f64]>,
     ) -> Option<usize> {
-        const HOMOPHONE_STATIC_PRIOR_WEIGHT: f64 = 0.25;
-        const HOMOPHONE_PROMOTE_SUM_MARGIN_NATS: f64 = 0.35;
+        const MULTI_CHAR_STATIC_PRIOR_WEIGHT: f64 = 0.25;
+        const MULTI_CHAR_PROMOTE_SUM_MARGIN_NATS: f64 = 0.35;
+        const SINGLE_CHAR_STATIC_PRIOR_WEIGHT: f64 = 0.40;
+        const SINGLE_CHAR_PROMOTE_MARGIN_NATS: f64 = 1.00;
         let trimmed = last_characters(trailing_han_clause(context), CONTEXT_CHARACTERS);
         let scored = items.len().min(MAX_RERANK_PATHS);
         if scored < 2 || trimmed.is_empty() {
@@ -293,7 +296,19 @@ impl NeuralReranker {
         if means.len() != scored {
             return None;
         }
-        let chars = texts[0].chars().count() as f64;
+        let char_count = texts[0].chars().count();
+        let chars = char_count as f64;
+        let (prior_weight, margin) = if char_count == 1 {
+            (
+                SINGLE_CHAR_STATIC_PRIOR_WEIGHT,
+                SINGLE_CHAR_PROMOTE_MARGIN_NATS,
+            )
+        } else {
+            (
+                MULTI_CHAR_STATIC_PRIOR_WEIGHT,
+                MULTI_CHAR_PROMOTE_SUM_MARGIN_NATS,
+            )
+        };
         let score_of = |index: usize| {
             let weight = effective_weights
                 .and_then(|weights| weights.get(index).copied())
@@ -302,9 +317,7 @@ impl NeuralReranker {
             let collocation = collocation_bonuses
                 .and_then(|bonuses| bonuses.get(index).copied())
                 .unwrap_or(0.0);
-            HOMOPHONE_STATIC_PRIOR_WEIGHT * weight.ln()
-                + f64::from(means[index]) * chars
-                + collocation
+            prior_weight * weight.ln() + f64::from(means[index]) * chars + collocation
         };
         let leader_score = score_of(0);
         let mut best = 0;
@@ -316,15 +329,14 @@ impl NeuralReranker {
                 best_score = candidate_score;
             }
         }
-        (best != 0 && best_score - leader_score >= HOMOPHONE_PROMOTE_SUM_MARGIN_NATS)
-            .then_some(best)
+        (best != 0 && best_score - leader_score >= margin).then_some(best)
     }
 }
 
-/// 计算 `.gram` 语法模型对多字同音词组的跨界搭配加成（仅用于 `pick_dictionary_homophone`）。
+/// 计算 `.gram` 语法模型对同音词典候选的跨界搭配加成（仅用于 `pick_dictionary_homophone`）。
 ///
-/// 相比词网格逐边打分（`collocation_min_length = 2`），同音词竞争要求跨界搭配长度至少为 3 字，
-/// 避免仅凭「上文末字 + 候选首字」两字偶然共现就压倒神经模型的全句语境判断。
+/// 跨界搭配最小长度取 `word_chars + 1`（单字为 `2`，多字词为 `3`）：确保至少覆盖 1 个上文汉字加完整单字或
+/// 至少 3 字跨界片段，既支持「说得 / 邮箱里 / 慢慢地」，又避免多字词仅靠「上文末字 + 候选首字」偶然共现误翻。
 pub(crate) fn homophone_collocation_bonuses(
     db: Option<&crate::lattice::octagram::GramDb>,
     context: &str,
@@ -334,15 +346,20 @@ pub(crate) fn homophone_collocation_bonuses(
     out: &mut [f64; MAX_RERANK_PATHS],
 ) -> Option<usize> {
     let db = db?;
-    if collocation_weight <= 0.0 {
+    if collocation_weight <= 0.0 || items.is_empty() {
         return None;
     }
     let clause = trailing_han_clause(context);
     if clause.is_empty() {
         return None;
     }
+    let min_len = if items[0].word.chars().count() <= 1 {
+        2
+    } else {
+        3
+    };
     let mut config = *grammar;
-    config.collocation_min_length = config.collocation_min_length.max(3);
+    config.collocation_min_length = config.collocation_min_length.max(min_len);
     let count = items.len().min(MAX_RERANK_PATHS);
     let mut any_hit = false;
     for (slot, item) in out[..count].iter_mut().zip(&items[..count]) {

@@ -303,7 +303,7 @@ impl InputSession {
             return None;
         }
         let characters = first.word.chars().count();
-        if characters < 2 {
+        if characters == 0 {
             return None;
         }
         let scheme = first.scheme;

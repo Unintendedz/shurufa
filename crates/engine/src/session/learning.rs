@@ -24,7 +24,8 @@ use crate::types::{
 };
 use crate::user_dictionary::journal::is_user_deleted;
 use crate::user_dictionary::overlay::{
-    delete_personal_selection_event, record_personal_selection, unix_now_seconds,
+    delete_personal_selection_event, record_contested_leader_confirmation,
+    record_personal_selection, unix_now_seconds,
 };
 use crate::user_dictionary::picks::{clear_pick_transition, record_pick_transition};
 use crate::user_dictionary::ranking::{
@@ -216,10 +217,43 @@ impl InputSession {
             })
             .count();
         let default_behind_leaders = leading > 0 && index == leading;
-        if self.frequency.mode == FrequencyAdjustmentMode::Disabled
-            || index == 0
-            || default_behind_leaders
-        {
+        if self.frequency.mode == FrequencyAdjustmentMode::Disabled {
+            return None;
+        }
+        if index == 0 || default_behind_leaders {
+            // 独立个人叠加层（Stage 4）：若该多音节键存在竞争词记录，空格接受当前首选时
+            // 顺手记一条确认事件（有上限、无竞争时零写入），消除只记改选造成的选择偏差。
+            if self.decoupled_personal_learning
+                && selected_source.is_dictionary()
+                && self
+                    .engine
+                    .current_scheme_type()
+                    .learns_into_main_dictionary()
+                && self.local_mode != LocalInputMode::SuperJianpin
+            {
+                let ordered = self.ranking_list();
+                if let Some(selected) = ordered.get(index) {
+                    if !Self::is_wubi_native_candidate(selected) && selected.scheme.is_pinyin() {
+                        let request = self.engine.request();
+                        let fallback_key = if request.normalized_segmentation.is_empty() {
+                            request.segmentation.as_str()
+                        } else {
+                            request.normalized_segmentation.as_str()
+                        };
+                        let entry_key = if selected.canonical_pinyin.is_empty() {
+                            fallback_key
+                        } else {
+                            selected.canonical_pinyin.as_str()
+                        };
+                        let _ = record_contested_leader_confirmation(
+                            self.journal_path(),
+                            entry_key,
+                            &selected.word,
+                            unix_now_seconds(),
+                        );
+                    }
+                }
+            }
             return None;
         }
         if !selected_source.is_dictionary()

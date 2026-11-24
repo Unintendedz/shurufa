@@ -130,9 +130,10 @@ NSString *MSIMETextClientPrecedingContext(id<MSIMETextClient> client, NSUInteger
     const NSUInteger length = selected.location - start;
     NSAttributedString *substring = [client attributedSubstringFromRange:NSMakeRange(start, length)];
     NSString *text = substring.string;
-    if (!text) return nil;
+    // 光标不在文档起点（length >= 1）却返回空串说明客户端未真正暴露前文（如部分 Chromium/Electron 输入框），
+    // 必须返回 nil 让上层回退到 AX 读取，而不能当作已知空文档覆盖运行时已有前文。
+    if (!text || !text.length) return nil;
     if (provedReadable) *provedReadable = YES;
-    if (!text.length) return @"";
     NSUInteger trimStart = 0;
     if (CFStringIsSurrogateLowCharacter([text characterAtIndex:0])) trimStart = 1;
     NSUInteger trimEnd = text.length;

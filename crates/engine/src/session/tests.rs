@@ -14386,5 +14386,85 @@ fn decoupled_personal_learning_works_across_interleaved_completions_and_survives
     );
 }
 
+#[test]
+fn single_char_personal_learning_keeps_leader_and_uses_han_context_while_contested_words_confirm_on_space(
+) {
+    let fixture = Fixture::new(
+        "CREATE TABLE tbl_1_l(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_1_l VALUES('li','l','里',7329328);\
+         INSERT INTO tbl_1_l VALUES('li','l','力',3298612);\
+         INSERT INTO tbl_1_l VALUES('li','l','理',1903915);\
+         INSERT INTO tbl_1_l VALUES('li','l','李',1462547);\
+         CREATE TABLE tbl_2_c(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_2_c VALUES('chu''fa','cf','出发',593690);\
+         INSERT INTO tbl_2_c VALUES('chu''fa','cf','处罚',587462);\
+         INSERT INTO tbl_2_c VALUES('chu''fa','cf','触发',550097);\
+         INSERT INTO tbl_2_c VALUES('chu''fa','cf','除法',10000);",
+    );
+    // 合成神经模型在汉字前文下强烈偏好「李」，用于验证单字语境同音竞争已接通且不依赖静默劫持首位。
+    write_synthetic_keyboard_model(
+        &fixture.path().join(assets::NEURAL_MODEL_KEYBOARD),
+        &['老', '里', '力', '理', '李'],
+        &['李'],
+    );
+    let mut session = fixture.session_with(|options| {
+        options.learning = true;
+        options.decoupled_personal_learning = true;
+        options.sentence_association.neural_keyboard = true;
+        options.frequency.mode = FrequencyAdjustmentMode::Promote;
+        options.frequency.trigger_count = 1;
+    });
+
+    // 1. 分 3 次独立输入选择单字「李」后，无前文时「里」仍稳守第 1 位，「李」被召回到第 2 位。
+    for _ in 0..3 {
+        session.reset_context();
+        session.set_rescoring_context("");
+        type_text(&mut session, "li");
+        assert_eq!(
+            select_word(&mut session, "李").commit.as_deref(),
+            Some("李")
+        );
+    }
+    session.reset_context();
+    session.set_rescoring_context("");
+    type_text(&mut session, "li");
+    assert_eq!(&words(&session)[..2], ["里", "李"]);
+    session.command(Command::Cancel);
+
+    // 2. 带汉字前文时，单字语境同音竞争可将强语境单字「李」提至第 1 位。
+    session.reset_context();
+    session.set_rescoring_context("老");
+    type_text(&mut session, "li");
+    assert_eq!(&words(&session)[..2], ["李", "里"]);
+    session.command(Command::Cancel);
+
+    // 3. 多音节词「出发 / 除法」：偶发选 2 次「除法」后再以空格接受 2 次「出发」，
+    //    随后第 3 次选「除法」也不会反超「出发」，彻底消除空格不记数的选择偏差。
+    session.set_rescoring_context("");
+    for _ in 0..2 {
+        session.reset_context();
+        type_text(&mut session, "chufa");
+        assert_eq!(
+            select_word(&mut session, "除法").commit.as_deref(),
+            Some("除法")
+        );
+    }
+    for _ in 0..2 {
+        session.reset_context();
+        type_text(&mut session, "chufa");
+        assert_eq!(words(&session)[0], "出发");
+        assert_eq!(session.select(0).commit.as_deref(), Some("出发"));
+    }
+    session.reset_context();
+    type_text(&mut session, "chufa");
+    assert_eq!(
+        select_word(&mut session, "除法").commit.as_deref(),
+        Some("除法")
+    );
+    session.reset_context();
+    type_text(&mut session, "chufa");
+    assert_eq!(words(&session)[0], "出发");
+}
+
 mod caret_suffix;
 mod stroke_filter;

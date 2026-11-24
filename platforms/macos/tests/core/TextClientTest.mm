@@ -832,7 +832,11 @@ int main() {
         // 已知可读的文档被删空（`knownReadable=YES`）时返回 `@""`；从未返回过文本的空客户端（如终端）返回 `nil`。
         client.document = @"";
         assert([MSIMETextClientPrecedingContext(client, 96, YES, &proved) isEqual:@""] && !proved);
+        // 光标不在文档起点（location > 0）却返回空串时，视为客户端未真正暴露前文，返回 `nil` 以便回退 AX。
+        client.documentSelection = NSMakeRange(2, 0);
+        assert(MSIMETextClientPrecedingContext(client, 96, YES, &proved) == nil && !proved);
         client.document = nil;
+        client.documentSelection = NSMakeRange(0, 0);
         assert(MSIMETextClientPrecedingContext(client, 96, NO, &proved) == nil && !proved);
     }
     return 0;

@@ -71,6 +71,41 @@ pub fn record_personal_selection(
     Ok(event_id)
 }
 
+/// 当某个多音节词键在 `personal_selection_events` 中已有竞争词记录时，记录一次用户以空格接受
+/// 当前首选的确认事件，消除「只记改选、不记空格接受默认首位」的选择偏差。
+///
+/// - 单字键（不含 `'`）不写确认事件（单字未置顶本身永不抢占第 1 槽）；
+/// - 无日志或该键下没有任何竞争词记录时直接零写入返回（99%+ 常规键零磁盘开销）；
+/// - 当当前首选的衰减计数已领先最高竞争词至少 `2.0` 次时不再追加，避免高频常用词无限刷写日志。
+pub fn record_contested_leader_confirmation(
+    user_db: &Path,
+    entry_key: &str,
+    leader_word: &str,
+    now_unix: i64,
+) -> Result<bool> {
+    if entry_key.is_empty() || leader_word.is_empty() || !entry_key.contains('\'') {
+        return Ok(false);
+    }
+    let counts = decayed_counts_for_key(user_db, entry_key, now_unix);
+    if counts.is_empty() {
+        return Ok(false);
+    }
+    let max_rival = counts
+        .iter()
+        .filter(|(word, _)| word.as_str() != leader_word)
+        .map(|(_, &count)| count)
+        .fold(0.0f64, f64::max);
+    if max_rival <= 0.0 {
+        return Ok(false);
+    }
+    let leader_count = counts.get(leader_word).copied().unwrap_or(0.0);
+    if leader_count >= max_rival + 2.0 {
+        return Ok(false);
+    }
+    record_personal_selection(user_db, entry_key, leader_word, now_unix)?;
+    Ok(true)
+}
+
 /// 按事件 ID 确定性回滚一次刚写入的个人选词学习事件（如紧接退格删光整段刚上屏词）。
 pub fn delete_personal_selection_event(user_db: &Path, event_id: i64) -> Result<bool> {
     let Some(journal) = existing_journal(user_db) else {
@@ -136,8 +171,8 @@ fn is_exact_homophone(item: &WordItem, entry_key: &str) -> bool {
 
 /// 为语境同音竞争计算融合了 Stage 4 衰减个人选词事件的等效静态先验权重。
 ///
-/// 推导：`alpha * P_static(w) + n_user(w) = (alpha / Z) * (w_static + (Z / alpha) * n_user(w))`；
-/// 当所有同音词均无个人选词记录（`n_user == 0`）时返回 `None`，使下游 `ln(weight)` 与冷启动完全等价；
+/// 推导：`alpha * (w_static / w_max) + n_user(w) = (alpha / w_max) * (w_static + (w_max / alpha) * n_user(w))`；
+/// 当所有同音词均无个人选词记录（`n_user == 0`）或属于单字键时返回 `None`，使下游 `ln(weight)` 与冷启动完全等价；
 /// 有明确选词记录时既不改写主词库静态权重，又能防止中性前文把刚学会的常用词打回静态次席。
 pub fn effective_bayesian_weights(
     user_db: &Path,
@@ -145,7 +180,7 @@ pub fn effective_bayesian_weights(
     items: &[&WordItem],
     now_unix: i64,
 ) -> Option<Vec<f64>> {
-    if entry_key.is_empty() || items.len() < 2 {
+    if entry_key.is_empty() || !entry_key.contains('\'') || items.len() < 2 {
         return None;
     }
     let counts = decayed_counts_for_key(user_db, entry_key, now_unix);
@@ -158,12 +193,11 @@ pub fn effective_bayesian_weights(
     if !any_matched {
         return None;
     }
-    let total_static_mass: f64 = items
+    let leader_weight = items
         .iter()
         .map(|item| item.weight.max(1) as f64)
-        .sum::<f64>()
-        .max(1.0);
-    let user_unit_weight = total_static_mass / BAYESIAN_PRIOR_ALPHA;
+        .fold(1.0f64, f64::max);
+    let user_unit_weight = leader_weight / BAYESIAN_PRIOR_ALPHA;
     Some(
         items
             .iter()
@@ -181,6 +215,13 @@ pub fn effective_bayesian_weights(
 /// 要求第 0 位本身是 `entry_key` 的精确拼音词典命中；随后跨越中间可能夹入的词网格整句与长词补全，
 /// 收集全部精确同音词典行一起参与贝叶斯平滑与手动置顶，避免「登录/登陆」「出发/除法」这类因补全词
 /// 夹层而断开的同音词脱离个人学习与置顶控制。
+///
+/// 关键约束：
+/// 1. 静态先验以榜首静态权重 `w_max` 为锚（`alpha * (w / w_max)`），而非跨全组求和归一化，
+///    避免同音词/字数量多（如 600 个同音字或 5 个同音词）把榜首护城河稀释击穿；
+/// 2. 单字键（`entry_key` 不含 `'`）下未手动置顶的个人选词记录只负责首屏第 2–5 位召回，
+///    **绝不抢占第 1 槽**（防止偶发输入「李」「得」「号」「事」「再」劫持「里」「的」「好」「是」「在」），
+///    单字第 1 槽只由显式置顶或语境同音重排改变。
 pub fn apply_personal_overlay(
     user_db: &Path,
     entry_key: &str,
@@ -226,24 +267,25 @@ pub fn apply_personal_overlay(
             leader_protected: true,
         };
     }
-    let total_static_mass: f64 = exact_indices
+    let is_single_char_key =
+        !entry_key.contains('\'') && candidates[exact_indices[0]].word.chars().count() == 1;
+    let leader_weight = exact_indices
         .iter()
         .map(|&raw_idx| candidates[raw_idx].weight.max(1) as f64)
-        .sum::<f64>()
-        .max(1.0);
+        .fold(1.0f64, f64::max);
     let mut posteriors = Vec::with_capacity(group_len);
     let mut user_counts = Vec::with_capacity(group_len);
     for &raw_idx in &exact_indices {
         let item = &candidates[raw_idx];
-        let p_static = item.weight.max(1) as f64 / total_static_mass;
+        let p_rel = item.weight.max(1) as f64 / leader_weight;
         let n_user = counts.get(item.word.as_str()).copied().unwrap_or(0.0);
-        posteriors.push(BAYESIAN_PRIOR_ALPHA * p_static + n_user);
+        posteriors.push(BAYESIAN_PRIOR_ALPHA * p_rel + n_user);
         user_counts.push(n_user);
     }
 
     let mut leader_pos = pinned_pos.unwrap_or(0);
     let mut overlay_promoted_leader = false;
-    if pinned_pos.is_none() {
+    if pinned_pos.is_none() && !is_single_char_key {
         let mut best_score = posteriors[0];
         for pos in 1..group_len {
             if user_counts[pos] >= SLOT_ZERO_MIN_DECAYED_PICKS && posteriors[pos] > best_score {
@@ -505,5 +547,93 @@ mod tests {
             weights[0] > weights[1],
             "3 次选择后的「登陆」有效权重应高于「登录」: {weights:?}"
         );
+    }
+
+    #[test]
+    fn single_char_overlay_recalls_without_hijacking_slot_zero_and_respects_pin() {
+        let dir = Dir::new();
+        let journal = dir.journal();
+        let now = 1_800_000_000;
+
+        let make = || {
+            vec![
+                item("li", "里", 7_329_328),
+                item("li", "力", 3_298_612),
+                item("li", "理", 1_903_915),
+                item("li", "李", 1_462_547),
+                item("li", "离", 1_378_185),
+                item("li", "立", 1_293_824),
+            ]
+        };
+
+        // 即使多次明确选择单字「李」（如输入人名），也只能召回到首屏第 2 位，绝不能劫持静态首位「里」。
+        for i in 0..5 {
+            record_personal_selection(&journal, "li", "李", now + i).unwrap();
+        }
+        let mut after = make();
+        let out = apply_personal_overlay(&journal, "li", None, &mut after, now + 10);
+        assert!(out.moved && !out.leader_protected);
+        assert_eq!(words(&after), ["里", "李", "力", "理", "离", "立"]);
+
+        // 单字键的 `effective_bayesian_weights` 恒返回 None，避免个人单字选择扭曲语境同音判断。
+        let refs: Vec<&WordItem> = after.iter().collect();
+        assert!(effective_bayesian_weights(&journal, "li", &refs, now + 10).is_none());
+
+        // 显式手动置顶「李」仍作为 L4 硬约束允许占第 1 槽。
+        let mut pinned = make();
+        let out_pin = apply_personal_overlay(&journal, "li", Some("李"), &mut pinned, now + 10);
+        assert!(out_pin.moved && out_pin.leader_protected);
+        assert_eq!(words(&pinned)[0], "李");
+    }
+
+    #[test]
+    fn multi_char_prior_anchors_to_leader_and_contested_confirmation_bounds_writes() {
+        let dir = Dir::new();
+        let journal = dir.journal();
+        let now = 1_800_000_000;
+
+        let make = || {
+            vec![
+                item("chu'fa", "出发", 593_690),
+                item("chu'fa", "处罚", 587_462),
+                item("chu'fa", "触发", 550_097),
+                item("chu'fa", "楚法", 20_000),
+                item("chu'fa", "除法", 10_000),
+            ]
+        };
+
+        // 无竞争记录时，空格确认首选必须零写入返回 false。
+        assert!(!record_contested_leader_confirmation(&journal, "chu'fa", "出发", now).unwrap());
+        assert!(!journal.exists());
+
+        // 多个高频同音词并列时，静态先验以榜首 `w_max` 为锚（先验=3.0），不被其余同音词稀释：
+        // 偶发 2 次选弱词「除法」只能越过更弱的「楚法」进入首屏第 4 位，绝不能劫持「出发」。
+        record_personal_selection(&journal, "chu'fa", "除法", now).unwrap();
+        record_personal_selection(&journal, "chu'fa", "除法", now + 1).unwrap();
+        let mut after2 = make();
+        let out2 = apply_personal_overlay(&journal, "chu'fa", None, &mut after2, now + 2);
+        assert!(out2.moved && !out2.leader_protected);
+        assert_eq!(words(&after2), ["出发", "处罚", "触发", "除法", "楚法"]);
+
+        // 有竞争记录后，空格接受「出发」记入确认计数，并在领先竞争词 +2.0 次后自动停止追加。
+        let mut written = 0;
+        for step in 0..8 {
+            if record_contested_leader_confirmation(&journal, "chu'fa", "出发", now + 10 + step)
+                .unwrap()
+            {
+                written += 1;
+            }
+        }
+        assert_eq!(
+            written, 4,
+            "竞争词计数 2.0 时最多追加 4 条确认即触及 +2.0 上限"
+        );
+
+        // 此时再偶发选一次「除法」（累计 3 次），「出发」因已获 4 次确认（后验 7.0 > 3.05）稳守首位。
+        record_personal_selection(&journal, "chu'fa", "除法", now + 20).unwrap();
+        let mut defended = make();
+        let out_def = apply_personal_overlay(&journal, "chu'fa", None, &mut defended, now + 21);
+        assert!(!out_def.leader_protected);
+        assert_eq!(defended[0].word, "出发");
     }
 }
