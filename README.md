@@ -35,19 +35,21 @@ Shurufa 是我自己用的 macOS 中文输入法，结合了[水杉输入法](ht
 
 ### 二、中文打字引擎：更准、更稳、不乱跳
 
-- **五层候选决策链重构**：
-  - 落地纯函数 `SlotAllocator` 统一接管展示席位分配，候选排序与席位规则解耦。
-  - 修复万象语法搭配分数的 `LOG10_E` 错误衰减，打通词格跨边界上下文。
-  - 单趟复用逐键键盘神经分数，配合随包内置的 **25 MB 停顿后精排模型** 并在停顿精排时锁定已稳定的榜首，避免正要按空格选词时候选突然翻位；为短串引入静态先验赤字护栏与首选防抖阈值。
-- **三路语言信号协同**：
-  - **光标前现成上文感知**：组字开始前通过 `IMKTextInput` 与已授权的辅助功能读取光标前已写好的文本（密码框与终端自动跳过，清洗非汉字前缀消除神经模型 `<unk>` 污染），按上文重排多字同音词。
-  - **万象 LTS 语法搭配模型**：默认接入 `wanxiang-lts-zh-hans.gram`，设置页可随时开关。
-  - **长句与特殊结构优化**：补齐动宾离合词（如「许个愿」「请个假」）拆插解码、指物代词对称短语、长句前缀多样性解码，收紧整句纠错门槛并去掉候选窗里重复的纠错回显。
-- **更克制的个人词频学习**：
-  - 独立个人学习叠加层，采用 **30 天半衰期贝叶斯排序**。
-  - 高频核心词建立渐进护城河，防止一次误选直接击穿常用词，同时不阻断强语境下的同音纠偏。
-  - **紧接退格即时回滚**：选错词立刻按 Backspace 删掉时自动回滚刚刚记下的词频偏好。
-  - 手动置顶统一归口在引擎层，不会被自动调频挤到第二位。
+- **Shurufa v2 统一概率词格与混淆网络（Tier 0）**：
+  - 废除旧词格 `+47.63 nat` 人工断崖，**清空 356 条静态动宾离合词硬编码表**，将单字、多字词与万象 LTS `.gram`（修复 `LOG10_E` 错误衰减并重构为零分配查表）统一映射到同一自然对数概率空间。
+  - 按句长自适应调度束宽（`56/40/32`）与出边上限，叠加 1-Span 混淆网络位置扰动消除候选后缀塌缩；3+ 字整句首屏采用 `4+2` 读法布局，由纯函数 `SlotAllocator` 统一接管展示席位分配。
+- **任意句长切分、简全混拼与物理键盘错拼信道**：
+  - 任意句长 A* 零声母隔音切分 + 长句边界词法剪枝，解决长句漏切与耗时膨胀。
+  - 简全混拼与 4+ 音节纯简拼走统一词网格解码；高频简拼与整串纠错按统一物理信道概率公平竞争，不再被数百条单字纠错淹没。
+  - 统一建模 QWERTY 物理邻键、跨音节换位、缺后鼻音 `g` 与两字母非法尾恢复，去掉候选窗里重复的纠错回显。
+- **进程外 Metal 两阶段端侧神经解码（Tier 1）**：
+  - 将 `llama.cpp`（Metal）封装在包内独立助手进程 `ShurufaNeuralService` 与 `libshurufa_neural.dylib`，通过私有 UDS 与主输入法隔离显存和故障域；服务异常时零掉键无缝降级回 Tier 0 并指数退避自愈，空闲 10 分钟或系统内存压力时自动卸载释放内存。
+  - 自动发现本地纯预训练基座模型 **`Qwen3-0.6B-Base-Q4_K_M.gguf`（378 MB）**；读取光标前至多 **512 字完整上文**（通过 `IMKTextInput` 与辅助功能采集，完整保留中文标点、空格、ASCII 与 Emoji，密码框严格禁用）做 KV-Cache 增量预热。
+  - 两阶段推理：先对去重等跨度候选（Top-16）执行前缀树共享 KV 批量打分，再仅对高惊奇度难句按需触发局部窗口受限束搜索救回词典 OOV 整句；全部 3 参数线性融合与排座留在纯 Rust 引擎内，主线程 `<3 ms` 非阻塞，配 22 ms 延迟绘制窗与双兜底 **80 ms 槽 0 锁**（防止盲打按空格前首位翻位）。本地未放 GGUF 模型时自动回退至升级后的 Tier 0 + 随包 25 MB 停顿精排。
+- **更克制的防劫持个人词频学习**：
+  - 独立追加式个人学习叠加层（永不改写主词库静态权重），采用以榜首权重为锚的 **30 天半衰期贝叶斯排序** 与竞争多音节键空格确认，跨补全词夹层生效。
+  - 单字键未置顶永不劫持第 1 槽，交由语境同音（含单字与多字语境消歧及万象 `.gram` 跨界搭配）与引擎层统一手动置顶接管。
+  - **5 秒内紧接退格删光即时回滚**：选错词立刻按 Backspace 删光时确定性撤销该条选择并写入 **24 小时半衰期负反馈**，同时将个人增益严格钳位在 `[-1.5, +1.5]` nats 注入统一神经融合。
 - **顺手的日常打字增强**：
   - **精选内联 Emoji 投影**：重排后按 4400+ 条精选映射与 MRU 自动给出对应 Emoji，不打乱正文候选序。
   - **中文组字夹带离线英文**：3～4 字母不可拆前缀、5 字母以上前缀、`Shift+字母` 大写起手自动补全离线英文词，回车原样上屏，日常夹几个英文词不用来回切 ABC。
@@ -91,20 +93,21 @@ Shurufa 是我自己用的 macOS 中文输入法，结合了[水杉输入法](ht
 
 ## 自己构建
 
-只在我的环境里验证过：Apple Silicon、Command Line Tools 的 MacOSX26.5 SDK、Rust、Homebrew（CMake、Ninja、python@3.14、uv；如需本机托管大模型润色，另备 `llama.cpp` 的 `llama-server` 与本地 GGUF 模型）。
+只在我的环境里验证过：Apple Silicon、Command Line Tools 的 MacOSX26.5 SDK、Rust、Homebrew（CMake、Ninja、python@3.14、uv、`llama.cpp`——同时提供端侧神经解码所需的 `libllama` 与可选的本机托管润色 `llama-server`）。
 
 ```sh
-bash platforms/macos/build-shurufa.sh            # 构建 target/macos-isolated/Shurufa.app
+bash platforms/macos/build-shurufa.sh            # 构建 target/macos-isolated/Shurufa.app（含 ShurufaNeuralService）
 bash platforms/macos/scripts/install-shurufa.sh  # 安装到 ~/Library/Input Methods/Shurufa.app
 ```
 
-构建时会拉取笔画词库和 25 MB 停顿精排模型，首次安装本地缺万象语法模型时会自动下载 `wanxiang-lts-zh-hans.gram`（约 373 MB）；本地流式语音的运行环境与模型在设置窗口里按需用 `uv` 安装。构建按登录钥匙串里的本机自签名证书「Shurufa Local Signing」签名，没有时脚本会自己建一张。换到你的机器上大概率要改点什么，这正是上面说的：fork 下来，按你自己的来。
+构建时会拉取笔画词库和 25 MB 停顿精排模型，首次安装本地缺万象语法模型时会自动下载 `wanxiang-lts-zh-hans.gram`（约 373 MB）；将端侧神经语言模型 `Qwen3-0.6B-Base-Q4_K_M.gguf`（约 378 MB）放入 `~/Library/Application Support/Shurufa/resource-packs/neural-lm/` 后自动启用两阶段 Metal 神经解码（缺模型时自动无损降级回 Tier 0 与随包 25 MB 停顿精排）；本地流式语音的运行环境与模型在设置窗口里按需用 `uv` 安装。构建按登录钥匙串里的本机自签名证书「Shurufa Local Signing」签名，没有时脚本会自己建一张。换到你的机器上大概率要改点什么，这正是上面说的：fork 下来，按你自己的来。
 
 ## 致谢
 
 - [水杉输入法（MSIME）](https://github.com/metasequoiaime/msime)：输入引擎、各平台宿主框架和词库都来自它。谢谢水杉的作者和贡献者，没有这么扎实的底子，就没有这个 fork。
 - [OpenLess](https://github.com/Open-Less/openless)：语音输入照着它的体验来做，本地流式识别 worker 的适配器结构、Metal 内存与 CPU 预算、VAD 门控改编自 OpenLess 的 TextStream 适配器。谢谢 OpenLess 的作者和贡献者。
 - [万象拼音（rime-wanxiang）](https://github.com/amzxyz/rime-wanxiang)：默认接入了万象 LTS 语法搭配模型（模型读取与编码逻辑移植自 `lotem/librime-octagram`）。谢谢万象与 Rime 社区的作者和贡献者。
+- [llama.cpp](https://github.com/ggml-org/llama.cpp) 与 [Qwen3](https://github.com/QwenLM/Qwen3)：Shurufa v2 端侧 Metal 两阶段神经解码基于 `llama.cpp` 推理内核与 `Qwen3-0.6B-Base` 基座模型构建。
 - 其他第三方组件见 [docs/third-party.md](docs/third-party.md) 和 [THIRD_PARTY_NOTICES.txt](platforms/macos/resources/Licenses/THIRD_PARTY_NOTICES.txt)。
 
 ## 许可证
