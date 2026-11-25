@@ -503,10 +503,12 @@ struct NeuralEngine::Impl {
     std::vector<std::string> token_utf8_pieces;
     std::unordered_map<char32_t, std::vector<llama_token>> hanzi_prefix_tokens;
 
-    // 能力 C：受限束搜索倒排索引（`音节串 -> 合法纯汉字 token 列表`）及每个 token 的纯汉字 UTF-8 文本。
+    // 能力 C：受限束搜索倒排索引（全拼 `syllable_to_tokens` + 简拼/混拼首字母 `initial_to_tokens`）及每个 token 的纯汉字文本与读音列表。
     bool constrained_vocab_ready = false;
     VocabIndexStats vocab_stats{};
     std::unordered_map<std::string, std::vector<llama_token>> syllable_to_tokens;
+    std::unordered_map<std::string, std::vector<llama_token>> initial_to_tokens;
+    std::vector<std::vector<std::string>> token_syllable_combos;
     std::vector<std::string> token_hanzi_text;
     std::vector<int32_t> token_char_lens;
 
@@ -749,9 +751,12 @@ struct NeuralEngine::Impl {
         }
 
         token_hanzi_text.assign(static_cast<size_t>(n_vocab), std::string{});
+        token_syllable_combos.assign(static_cast<size_t>(n_vocab), {});
         token_char_lens.assign(static_cast<size_t>(n_vocab), 0);
         syllable_to_tokens.clear();
         syllable_to_tokens.reserve(65536);
+        initial_to_tokens.clear();
+        initial_to_tokens.reserve(32768);
 
         char piece_buf[128];
         std::vector<char32_t> cps;
@@ -805,7 +810,28 @@ struct NeuralEngine::Impl {
                 if (vec.empty() || vec.back() != tid) {
                     vec.push_back(tid);
                 }
+                // 同步构建 1..=4 字首字母倒排索引（如 `jiu'dian -> j'd`、`san'shi -> s's`、`fen -> f`），
+                // 使 Stage B 受限束搜索同样支持带语境的纯简拼与简全混拼救回（如 `现在是北京时间上午 + j'd's's'f -> 九点三十分`）。
+                std::string init_key;
+                init_key.reserve(8);
+                bool take_next = true;
+                for (char ch : key) {
+                    if (ch == '\'') {
+                        take_next = true;
+                    } else if (take_next) {
+                        if (!init_key.empty()) init_key.push_back('\'');
+                        init_key.push_back(ch);
+                        take_next = false;
+                    }
+                }
+                if (!init_key.empty()) {
+                    auto &ivec = initial_to_tokens[init_key];
+                    if (ivec.empty() || ivec.back() != tid) {
+                        ivec.push_back(tid);
+                    }
+                }
             }
+            token_syllable_combos[static_cast<size_t>(tid)] = std::move(combos);
         }
 
         vocab_stats.hanzi_entries = static_cast<int32_t>(hanzi_to_pinyins.size());
@@ -1782,23 +1808,93 @@ struct NeuralEngine::Impl {
         std::unordered_map<std::string, BeamCandidate> best_by_text;
 
         const size_t path_limit = std::min<size_t>(paths.size(), std::max<size_t>(1, max_paths));
+        auto is_bare_initial_piece = [&](const std::string &piece) -> bool {
+            if (piece.empty()) return true;
+            if (piece.size() == 1) return true;
+            if (piece == "zh" || piece == "ch" || piece == "sh") return true;
+            return syllable_to_tokens.find(piece) == syllable_to_tokens.end();
+        };
+        auto token_matches_mixed_span = [&](
+            llama_token tid,
+            const std::vector<std::string> &syls,
+            const std::vector<uint8_t> &is_bare,
+            size_t start,
+            size_t span) -> bool {
+            if (tid < 0 || static_cast<size_t>(tid) >= token_syllable_combos.size()) return false;
+            const auto &combos = token_syllable_combos[static_cast<size_t>(tid)];
+            for (const std::string &combo : combos) {
+                size_t cur = 0;
+                bool matched = true;
+                for (size_t k = 0; k < span; ++k) {
+                    const size_t sep = combo.find('\'', cur);
+                    const size_t end = (sep == std::string::npos) ? combo.size() : sep;
+                    const size_t piece_len = end - cur;
+                    const std::string &req = syls[start + k];
+                    if (is_bare[start + k]) {
+                        if (piece_len < req.size() || combo.compare(cur, req.size(), req) != 0) {
+                            matched = false;
+                            break;
+                        }
+                    } else {
+                        if (piece_len != req.size() || combo.compare(cur, piece_len, req) != 0) {
+                            matched = false;
+                            break;
+                        }
+                    }
+                    if (sep == std::string::npos) {
+                        if (k + 1 != span) matched = false;
+                        break;
+                    }
+                    cur = sep + 1;
+                }
+                if (matched) return true;
+            }
+            return false;
+        };
+
         for (size_t path_idx = 0; path_idx < path_limit; ++path_idx) {
             const auto &path = paths[path_idx];
-            if (!path.is_complete || path.syllables.empty() || path.syllables.size() > 24) {
+            const bool allow_path = path.is_complete
+                ? (!path.syllables.empty() && path.syllables.size() <= 24)
+                : (path.syllables.size() >= 4 && path.syllables.size() <= 10);
+            if (!allow_path) {
                 continue;
             }
             ++stats.path_count;
             const size_t n = path.syllables.size();
 
+            std::vector<uint8_t> syl_is_bare(n, 0);
+            if (!path.is_complete) {
+                for (size_t p = 0; p < n; ++p) {
+                    syl_is_bare[p] = is_bare_initial_piece(path.syllables[p]) ? 1 : 0;
+                }
+            }
+
             std::vector<std::vector<std::string>> span_keys(n);
+            std::vector<std::vector<std::string>> span_init_keys(n);
+            std::vector<std::vector<uint8_t>> span_mode(n);  // 0 = 全拼精确查表, 1 = 纯单字母首字母直查, 2 = 混拼/翘舌前缀过滤
             for (size_t p = 0; p < n; ++p) {
                 const size_t max_span = std::min<size_t>(4, n - p);
                 span_keys[p].resize(max_span);
+                span_init_keys[p].resize(max_span);
+                span_mode[p].resize(max_span, 0);
                 std::string acc;
+                std::string init_acc;
+                bool any_bare = false;
+                bool all_single_letter = true;
                 for (size_t s = 0; s < max_span; ++s) {
-                    if (s > 0) acc.push_back('\'');
-                    acc += path.syllables[p + s];
+                    const std::string &piece = path.syllables[p + s];
+                    if (s > 0) {
+                        acc.push_back('\'');
+                        init_acc.push_back('\'');
+                    }
+                    acc += piece;
+                    init_acc.push_back(piece.empty() ? '?' : piece[0]);
+                    if (syl_is_bare[p + s]) any_bare = true;
+                    if (piece.size() != 1) all_single_letter = false;
                     span_keys[p][s] = acc;
+                    span_init_keys[p][s] = init_acc;
+                    span_mode[p][s] = !any_bare ? 0 : (all_single_letter ? 1 : 2);
                 }
             }
 
@@ -1845,17 +1941,33 @@ struct NeuralEngine::Impl {
                 const size_t per_span_keep = std::max<size_t>(static_cast<size_t>(beam_width) * 3, 10);
                 std::vector<std::pair<double, llama_token>> top_toks;
                 for (size_t s = 0; s < max_span; ++s) {
-                    auto it = syllable_to_tokens.find(span_keys[p][s]);
-                    if (it == syllable_to_tokens.end() || it->second.empty()) continue;
-                    const auto &cands = it->second;
+                    const uint8_t mode = span_mode[p][s];
+                    const std::vector<llama_token> *cands_ptr = nullptr;
+                    if (mode == 0) {
+                        auto it = syllable_to_tokens.find(span_keys[p][s]);
+                        if (it != syllable_to_tokens.end() && !it->second.empty()) {
+                            cands_ptr = &it->second;
+                        }
+                    } else {
+                        auto it = initial_to_tokens.find(span_init_keys[p][s]);
+                        if (it != initial_to_tokens.end() && !it->second.empty()) {
+                            cands_ptr = &it->second;
+                        }
+                    }
+                    if (!cands_ptr) continue;
+                    const auto &cands = *cands_ptr;
                     top_toks.clear();
                     top_toks.reserve(cands.size());
                     for (llama_token tid : cands) {
+                        if (mode == 2 && !token_matches_mixed_span(tid, path.syllables, syl_is_bare, p, s + 1)) {
+                            continue;
+                        }
                         const double lp = already_log_probs
                                               ? static_cast<double>(logits_or_log_probs[static_cast<size_t>(tid)])
                                               : (static_cast<double>(logits_or_log_probs[static_cast<size_t>(tid)]) - log_z);
                         top_toks.emplace_back(lp, tid);
                     }
+                    if (top_toks.empty()) continue;
                     if (top_toks.size() > per_span_keep) {
                         std::partial_sort(
                             top_toks.begin(),
@@ -2290,19 +2402,32 @@ struct NeuralEngine::Impl {
         std::vector<BeamCandidate> beam_results;
         BeamStats beam_stats{};
 
+        const bool allow_jianpin_beam = !parsed_paths.empty()
+            && !parsed_paths[0].is_complete
+            && !cached_ctx_was_empty
+            && primary_n >= 4
+            && primary_n <= 8;
+        const double jianpin_avg_thresh = env_double_or("SHURUFA_BEAM_JIANPIN_AVG_LP_THRESH", -4.8);
+
         const bool trigger_beam = force_beam ||
             (best_idx < 0) ||
             (best_avg_char_lp < avg_thresh && best_min_edge_lp < min_edge_thresh) ||
             (best_min_edge_lp < extreme_edge_thresh) ||
-            (primary_n >= 4 && best_avg_char_lp < extreme_avg_thresh);
+            (primary_n >= 4 && best_avg_char_lp < extreme_avg_thresh) ||
+            (allow_jianpin_beam && best_avg_char_lp < jianpin_avg_thresh);
 
-        if (enable_beam && constrained_vocab_ready && trigger_beam &&
-            !parsed_paths.empty() && parsed_paths[0].is_complete && primary_n >= 2) {
-            const int32_t beam_width = std::clamp(req.get_i32("beam_width", 4), 2, 4);
+        const bool allow_beam_for_path = !parsed_paths.empty() && (
+            (parsed_paths[0].is_complete && primary_n >= 2) ||
+            allow_jianpin_beam);
+
+        if (enable_beam && constrained_vocab_ready && trigger_beam && allow_beam_for_path) {
+            const int32_t req_beam_width = std::clamp(req.get_i32("beam_width", 4), 2, 4);
+            const int32_t beam_width =
+                (allow_jianpin_beam && primary_n >= 6) ? std::min<int32_t>(req_beam_width, 3) : req_beam_width;
             const int32_t max_results = std::clamp(
                 req.get_i32("max_beam_results", req.get_i32("max_results", 3)), 1, 4);
 
-            if (primary_n <= 5) {
+            if (primary_n <= 5 || !parsed_paths[0].is_complete) {
                 beam_ran = true;
                 if (!decode_constrained_locked(
                         nullptr, parsed_paths, beam_width, max_results, 1, beam_results, beam_stats, err)) {

@@ -1170,11 +1170,24 @@ impl InputSession {
             let pinned =
                 item.fixed_position > 0 || pinned_word.as_deref() == Some(item.word.as_str());
 
+            let exact_literal_dict = !folded_raw.is_empty()
+                && item.source.is_dictionary()
+                && item.corrected_from.is_empty()
+                && !item.fuzzy
+                && !item.canonical_pinyin.is_empty()
+                && item
+                    .canonical_pinyin
+                    .chars()
+                    .filter(|&c| c != '\'')
+                    .map(|c| c.to_ascii_lowercase())
+                    .eq(folded_raw.chars());
+
             candidates.push(crate::neural_v2::EngineNeuralCandidateMeta {
                 stat_log_prob,
                 channel_log_prob,
                 user_log_prob,
                 exact_span,
+                exact_literal_dict,
                 pinned,
             });
         }
@@ -1190,10 +1203,9 @@ impl InputSession {
 
 /// 按物理键盘编辑形态与是否存在精确字面词典整词估算错拼候选的自然对数信道代价（nats）。
 /// - 无精确字面词典整词时（如 `xainzai`/`meiwentj`/`diannai`/`qinkuang`），保持高敏感度（`-2.4 ~ -2.8 nats`）积极救回；
-/// - 存在精确字面词典整词时：前后鼻音 `g`（`-3.4`）、相邻换位（`-3.6`）、连击重复键（`-3.8`）、漏键（`-4.4`）
-///   与邻键替换（`-4.6`）维持平衡灵敏度；而**删去用户显式敲入的非 `g`、非重复字母**（如 `xiongtai -> xingtai` 删 `o`、
-///   `jinchang -> jichang` 删 `n`）的真实物理发生概率极低，收紧至 `-7.0 nats`，要求强语境证据（如「这个产品的 + xiongtai -> 形态*」）
-///   才允许覆写字面整词。
+/// - 存在精确字面词典整词时：前后鼻音 `g`（`-3.4`）、相邻换位（`-3.6`）、连击重复键（`-3.8`）、漏键（`-4.4`）与邻键替换（`-4.6`）维持平衡灵敏度；
+///   而**删去用户显式敲入的非 `g`、非重复字母**（如 `xiongtai -> xingtai` 删 `o`、`jinchang -> jichang` 删 `n`）
+///   极少在用户已准确拼出合法词典词时发生，收紧至 `-7.0 nats`，要求强语境证据才允许覆写字面整词。
 fn typo_channel_log_penalty(
     folded_raw: &str,
     canonical_pinyin: &str,

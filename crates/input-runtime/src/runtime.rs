@@ -1387,55 +1387,62 @@ impl<E: InputEngine> Runtime<E> {
             let eng_idx = self.engine_index(seat);
             let meta = engine_meta.as_ref().and_then(|m| m.candidates.get(eng_idx));
 
-            let (stat_log_prob, channel_log_prob, user_log_prob, exact_span, pinned) =
-                if let Some(m) = meta {
-                    (
-                        m.stat_log_prob,
-                        m.channel_log_prob,
-                        m.user_log_prob,
-                        m.exact_span,
-                        m.pinned,
-                    )
+            let (
+                stat_log_prob,
+                channel_log_prob,
+                user_log_prob,
+                exact_span,
+                exact_literal_dict,
+                pinned,
+            ) = if let Some(m) = meta {
+                (
+                    m.stat_log_prob,
+                    m.channel_log_prob,
+                    m.user_log_prob,
+                    m.exact_span,
+                    m.exact_literal_dict,
+                    m.pinned,
+                )
+            } else {
+                let stat = self
+                    .cached
+                    .candidate_static_evidence
+                    .get(seat)
+                    .and_then(|ev| ev.map(|e| e.log_prob_milli_nats as f64 / 1000.0));
+                let corrected = self
+                    .cached
+                    .candidate_corrected
+                    .get(seat)
+                    .copied()
+                    .unwrap_or(false);
+                let channel = if corrected {
+                    DEFAULT_TYPO_CHANNEL_PENALTY
                 } else {
-                    let stat = self
-                        .cached
-                        .candidate_static_evidence
-                        .get(seat)
-                        .and_then(|ev| ev.map(|e| e.log_prob_milli_nats as f64 / 1000.0));
-                    let corrected = self
-                        .cached
-                        .candidate_corrected
-                        .get(seat)
-                        .copied()
-                        .unwrap_or(false);
-                    let channel = if corrected {
-                        DEFAULT_TYPO_CHANNEL_PENALTY
-                    } else {
-                        0.0
-                    };
-                    let user = if source == msime_engine::CandidateSource::UserDatabase as u8 {
-                        DEFAULT_USER_DICTIONARY_LOG_PRIOR
-                    } else {
-                        0.0
-                    };
-                    let answers = self
-                        .cached
-                        .candidate_answers_key
-                        .get(seat)
-                        .copied()
-                        .unwrap_or(false);
-                    let exact = answers
-                        && char_count > 0
-                        && (primary_syllables == 0 || char_count <= primary_syllables + 1);
-                    let fixed = self
-                        .cached
-                        .candidate_positions
-                        .get(seat)
-                        .copied()
-                        .unwrap_or(0)
-                        > 0;
-                    (stat, channel, user, exact, fixed)
+                    0.0
                 };
+                let user = if source == msime_engine::CandidateSource::UserDatabase as u8 {
+                    DEFAULT_USER_DICTIONARY_LOG_PRIOR
+                } else {
+                    0.0
+                };
+                let answers = self
+                    .cached
+                    .candidate_answers_key
+                    .get(seat)
+                    .copied()
+                    .unwrap_or(false);
+                let exact = answers
+                    && char_count > 0
+                    && (primary_syllables == 0 || char_count <= primary_syllables + 1);
+                let fixed = self
+                    .cached
+                    .candidate_positions
+                    .get(seat)
+                    .copied()
+                    .unwrap_or(0)
+                    > 0;
+                (stat, channel, user, exact, false, fixed)
+            };
 
             // 非等跨度前缀/续写词不参与等跨度融合，无需发往 Metal 前缀树浪费算力。
             if !exact_span || pinned {
@@ -1452,6 +1459,7 @@ impl<E: InputEngine> Runtime<E> {
                 source,
                 char_count,
                 exact_span,
+                exact_literal_dict,
                 stat_log_prob,
                 channel_log_prob,
                 user_log_prob,

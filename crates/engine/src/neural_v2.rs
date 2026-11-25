@@ -123,6 +123,9 @@ pub struct NeuralCandidateInput {
     /// 是否严格覆盖当前整段输入且非超长续写词（等跨度竞争核心判据）。
     #[serde(default)]
     pub exact_span: bool,
+    /// 是否为严格匹配原始输入字母的未纠错词典整词（排除前缀补全，如 `meiganxi -> 没敢想` 为 `false`）。
+    #[serde(default)]
+    pub exact_literal_dict: bool,
     /// Tier 0 统一自然对数静态先验（nats）；非词格或缺失时为 `None`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stat_log_prob: Option<f64>,
@@ -144,6 +147,7 @@ pub struct EngineNeuralCandidateMeta {
     pub channel_log_prob: f64,
     pub user_log_prob: f64,
     pub exact_span: bool,
+    pub exact_literal_dict: bool,
     pub pinned: bool,
 }
 
@@ -456,7 +460,9 @@ pub fn fuse_neural_response(
         let Some(path) = path else {
             continue;
         };
-        if !path.is_complete || beam.text.chars().count() != path.syllables.len() {
+        let path_allows_beam = path.is_complete
+            || (!request.context.is_empty() && (4..=8).contains(&path.syllables.len()));
+        if !path_allows_beam || beam.text.chars().count() != path.syllables.len() {
             continue;
         }
         if tier0_texts.contains(beam.text.as_str()) {
@@ -548,9 +554,14 @@ pub fn fuse_neural_response(
     //     （如 `shj -> 时间/手机`、`shh -> 上海`、`zhw -> 中文/这位`）时，单字纠错候选（`char_count == 1`，如 `是`/`这`/`书`）
     //     会凭少 1 字白赚约 `+4.5..+5.0 nats` 联合概率反压多字简拼整词，须补足 `-4.8 nats` 信息量差；
     //     多字纠错候选（`char_count >= 2`，如跨音节换位 `jintina -> 今天*`、`meiwentj -> 没问题*`）不施加此惩罚。
+    // (c) 空上文精确字面词信道保守边际：当上文为空、输入为完整全拼且同池存在严格匹配原始字母的未纠错词典整词
+    //     （`exact_literal_dict == true`，如 `"" + naizi -> 奶子`，排除 `meiganxi -> 没敢想` 这类前缀补全词）时，
+    //     缺乏语境证据佐证错拼，对错拼候选额外施加 `-2.5 nats` 信道边际：常规字面词不被无条件高频邻键词劫持首位，
+    //     而有上文语义佐证（如 `他是个好 + naizi -> 孩子*`）或空上文生僻碰撞大额先验差仍可正常救回。
     const BASE_NON_LEXICAL_SPLIT_PENALTY: f64 = -1.8;
     const BARE_INITIAL_SPLIT_EXTRA_PER_SYLLABLE: f64 = -1.2;
     const SINGLE_CHAR_TYPO_ENTROPY_COMP: f64 = -4.8;
+    const EMPTY_CONTEXT_EXACT_LITERAL_TYPO_PENALTY: f64 = -2.5;
     let bare_initial_count = request
         .segmentation
         .split('\'')
@@ -558,6 +569,7 @@ pub fn fuse_neural_response(
         .count();
     let mut exact_dict_len_mask: u8 = 0;
     let mut has_multi_char_exact_dict = false;
+    let mut has_verified_exact_literal_dict = false;
     for &(_, c, _) in &competing_tier0 {
         if is_dict_bucket(c.source) && c.channel_log_prob == 0.0 {
             if (2..=4).contains(&c.char_count) {
@@ -566,8 +578,18 @@ pub fn fuse_neural_response(
             if c.char_count >= 2 {
                 has_multi_char_exact_dict = true;
             }
+            if c.exact_literal_dict {
+                has_verified_exact_literal_dict = true;
+            }
         }
     }
+    let empty_ctx_literal_typo_penalty =
+        if request.context.is_empty() && bare_initial_count == 0 && has_verified_exact_literal_dict
+        {
+            EMPTY_CONTEXT_EXACT_LITERAL_TYPO_PENALTY
+        } else {
+            0.0
+        };
 
     let mut competitors: Vec<ScoredCompetitor> =
         Vec::with_capacity(competing_tier0.len() + unique_beams.len());
@@ -604,9 +626,15 @@ pub fn fuse_neural_response(
             } else {
                 0.0
             };
+        let empty_ctx_typo_adj = if cand.channel_log_prob <= -2.0 {
+            empty_ctx_literal_typo_penalty
+        } else {
+            0.0
+        };
         let total = cand.channel_log_prob
             + non_lexical_split_penalty
             + shorter_typo_len_comp
+            + empty_ctx_typo_adj
             + weights.lambda_neural * (*neural_lp)
             + weights.lambda_stat * rel_stat
             + weights.lambda_user * cand.user_log_prob;
@@ -625,8 +653,19 @@ pub fn fuse_neural_response(
         .unwrap_or(BEAM_OOV_STAT_REL_CEILING)
         .clamp(BEAM_OOV_STAT_REL_FLOOR, BEAM_OOV_STAT_REL_CEILING);
     for (text, pinyin, neural_lp, channel_lp) in unique_beams {
-        let total =
-            channel_lp + weights.lambda_neural * neural_lp + weights.lambda_stat * beam_stat_rel;
+        let char_count = text.chars().count();
+        let has_same_len_exact_dict =
+            (2..=4).contains(&char_count) && (exact_dict_len_mask & (1u8 << char_count)) != 0;
+        let non_lexical_split_penalty = if has_same_len_exact_dict && channel_lp == 0.0 {
+            BASE_NON_LEXICAL_SPLIT_PENALTY
+                + BARE_INITIAL_SPLIT_EXTRA_PER_SYLLABLE * (bare_initial_count.min(3) as f64)
+        } else {
+            0.0
+        };
+        let total = channel_lp
+            + non_lexical_split_penalty
+            + weights.lambda_neural * neural_lp
+            + weights.lambda_stat * beam_stat_rel;
         competitors.push(ScoredCompetitor {
             kind: CompetitorKind::Beam {
                 text: text.clone(),
@@ -895,6 +934,7 @@ mod tests {
             source: CandidateSource::Generated as u8,
             char_count: text.chars().count(),
             exact_span,
+            exact_literal_dict: false,
             stat_log_prob,
             channel_log_prob: 0.0,
             user_log_prob: 0.0,
@@ -1407,5 +1447,128 @@ mod tests {
         };
         let out2 = fuse_neural_response(2, &req2, &resp2, NeuralFusionWeights::default(), false);
         assert_eq!(out2.top1_text.as_deref(), Some("时间"));
+
+        // 3. 空上文完整全拼存在严格精确词典整词（`exact_literal_dict == true`，如 `"" + naizi -> 奶子`）时，
+        //    邻键高频错拼（`孩子*`）在 `-4.6 - 2.5 = -7.1 nats` 信道边际下不得劫持首位；
+        //    而仅存在前缀补全词典词（`exact_literal_dict == false`，如 `"" + meiganxi` 下的 `没敢想`）时，
+        //    真实错拼（`没关系*`）照常胜出。
+        let mut lit_word = sample_candidate(0, "奶子", true, Some(-10.52));
+        lit_word.source = CandidateSource::Database as u8;
+        lit_word.exact_literal_dict = true;
+        let mut high_freq_typo = sample_candidate(1, "孩子", true, Some(-12.53));
+        high_freq_typo.source = CandidateSource::Generated as u8;
+        high_freq_typo.channel_log_prob = -4.6;
+        let mut req3 = base_request(vec![lit_word, high_freq_typo]);
+        req3.context.clear();
+        req3.raw_input = "naizi".into();
+        req3.segmentation = "nai'zi".into();
+        let resp3 = NeuralDecodeResponse {
+            ok: true,
+            session: 1,
+            generation: 10,
+            candidate_scores: vec![
+                NeuralScoredCandidate {
+                    text: "奶子".into(),
+                    neural_log_prob: -15.09,
+                },
+                NeuralScoredCandidate {
+                    text: "孩子".into(),
+                    neural_log_prob: -8.73,
+                },
+            ],
+            beam_candidates: vec![],
+        };
+        let out3 = fuse_neural_response(2, &req3, &resp3, NeuralFusionWeights::default(), false);
+        assert_eq!(out3.top1_text.as_deref(), Some("奶子"));
+
+        let mut prefix_dict = sample_candidate(0, "没敢想", true, Some(-12.0));
+        prefix_dict.source = CandidateSource::Database as u8;
+        prefix_dict.exact_literal_dict = false;
+        let mut real_typo = sample_candidate(1, "没关系", true, Some(-10.0));
+        real_typo.source = CandidateSource::Generated as u8;
+        real_typo.channel_log_prob = -2.8;
+        let mut req3b = base_request(vec![prefix_dict, real_typo]);
+        req3b.context.clear();
+        req3b.raw_input = "meiganxi".into();
+        req3b.segmentation = "mei'gan'xi".into();
+        let resp3b = NeuralDecodeResponse {
+            ok: true,
+            session: 1,
+            generation: 10,
+            candidate_scores: vec![
+                NeuralScoredCandidate {
+                    text: "没敢想".into(),
+                    neural_log_prob: -15.0,
+                },
+                NeuralScoredCandidate {
+                    text: "没关系".into(),
+                    neural_log_prob: -7.5,
+                },
+            ],
+            beam_candidates: vec![],
+        };
+        let out3b = fuse_neural_response(2, &req3b, &resp3b, NeuralFusionWeights::default(), false);
+        assert_eq!(out3b.top1_text.as_deref(), Some("没关系"));
+
+        // 4. 有语境 3–8 音节简拼（如 `现在是北京时间上午 + j'd's's'f`）允许采纳 Stage B 受限束搜索救回候选。
+        let mut t0 = sample_candidate(0, "决定是十分", true, Some(5.12));
+        t0.source = CandidateSource::Collocation as u8;
+        let mut req4 = base_request(vec![t0]);
+        req4.context = "现在是北京时间上午".into();
+        req4.raw_input = "jdssf".into();
+        req4.segmentation = "j'd's's'f".into();
+        req4.syllable_paths = vec![NeuralSyllablePath {
+            syllables: vec!["j".into(), "d".into(), "s".into(), "s".into(), "f".into()],
+            channel_log_prob: 0.0,
+            is_complete: false,
+        }];
+        let resp4 = NeuralDecodeResponse {
+            ok: true,
+            session: 1,
+            generation: 10,
+            candidate_scores: vec![NeuralScoredCandidate {
+                text: "决定是十分".into(),
+                neural_log_prob: -30.7,
+            }],
+            beam_candidates: vec![NeuralBeamCandidate {
+                text: "九点三十分".into(),
+                neural_log_prob: -6.56,
+                path_index: 0,
+                token_count: 3,
+            }],
+        };
+        let out4 = fuse_neural_response(1, &req4, &resp4, NeuralFusionWeights::default(), false);
+        assert_eq!(out4.top1_text.as_deref(), Some("九点三十分"));
+
+        // 5. 同池已存在 2–4 字精确词典整词时，Stage B 生成的同字数非词典拼接
+        //    必须承担与 Tier 0 非词典拼接一致的结构先验惩罚，不得绕过惩罚反超精确词典整词。
+        let mut dict_four = sample_candidate(0, "不可或缺", true, Some(-12.2));
+        dict_four.source = CandidateSource::Database as u8;
+        let mut req5 = base_request(vec![dict_four]);
+        req5.context = "这件事对他来说".into();
+        req5.raw_input = "bkhuoq".into();
+        req5.segmentation = "b'k'huo'q".into();
+        req5.syllable_paths = vec![NeuralSyllablePath {
+            syllables: vec!["b".into(), "k".into(), "huo".into(), "q".into()],
+            channel_log_prob: 0.0,
+            is_complete: false,
+        }];
+        let resp5 = NeuralDecodeResponse {
+            ok: true,
+            session: 1,
+            generation: 10,
+            candidate_scores: vec![NeuralScoredCandidate {
+                text: "不可或缺".into(),
+                neural_log_prob: -14.2,
+            }],
+            beam_candidates: vec![NeuralBeamCandidate {
+                text: "不可或取".into(),
+                neural_log_prob: -11.5,
+                path_index: 0,
+                token_count: 2,
+            }],
+        };
+        let out5 = fuse_neural_response(1, &req5, &resp5, NeuralFusionWeights::default(), false);
+        assert_eq!(out5.top1_text.as_deref(), Some("不可或缺"));
     }
 }
