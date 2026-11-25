@@ -3,11 +3,13 @@
 //!
 //! 设计不变量（由本模块单测锁死）：
 //! 1. **中文首位神圣不可侵犯**：扩展候选永不占据下标 0（空格永远提交主首选）。
-//! 2. **固定低侵入槽位与首页限额**：主推 Emoji 默认落在下标 2（第 3 位，不足 2 项时紧跟首位后），首页至多 1 格；
-//!    同词其余备选 Emoji 放第 2 页开头（下标 `page_size`），方便偶尔点选后由本地 MRU 升至主推席。
-//! 3. **不撕裂英文补全区块**：当英文自动补全处于首页连续席位时，Emoji 绝不楔入英文词与其补全之间；
+//! 2. **L4 固定席位硬约束不可破坏**：用户显式固定在 `fixed_position = k`（`k >= 1`）的候选必须稳坐最终下标 `k - 1`，
+//!    投影 Emoji 主动绕开固定席位，未固定候选沿空余席位顺流，绝不把固定候选向后挤格或挤到下一页。
+//! 3. **固定低侵入槽位与首页限额**：主推 Emoji 默认落在下标 2（第 3 位，若该席被固定则顺延至首页最近空余席），首页至多 1 格；
+//!    同词其余备选 Emoji 放第 2 页开头（下标 `page_size` 起的首个空余席），方便偶尔点选后由本地 MRU 升至主推席。
+//! 4. **不撕裂英文补全区块**：当英文自动补全处于首页连续席位时，Emoji 绝不楔入英文词与其补全之间；
 //!    英文/字面原文居首时直接静默。
-//! 4. **主序零扰动**：剔除所有投影行后，剩余主候选与输入 `base` 逐条一致。
+//! 5. **未固定主序零扰动**：剔除投影行与固定席位后，所有未固定主候选保持输入 `base` 的相对次序，零丢失、零重复。
 
 use crate::local::inline_emoji::lookup_inline_emojis;
 use crate::types::CandidateSource;
@@ -54,6 +56,8 @@ pub struct SlotCandidate<'a> {
     pub text: &'a str,
     pub kind: SlotCandidateKind,
     pub answers_key: bool,
+    /// L4 硬约束：用户显式固定的 1-based 候选席位（`0` 表示未固定；`k > 0` 锁定最终展示下标 `k - 1`）。
+    pub fixed_position: u8,
 }
 
 /// `SlotAllocator` 产出的展示席位。
@@ -154,7 +158,42 @@ where
     }
 
     let page_size = budget.page_size.max(2);
-    // 计算主推 Emoji 的安全下标：永不为 0，默认落在第 3 位（下标 2），且不楔入首页连续英文补全块中间。
+    let extra_count = emojis
+        .len()
+        .saturating_sub(1)
+        .min(budget.max_secondary_emojis);
+    let total_len = base.len() + 1 + extra_count;
+
+    // 1. 先登记全部 L4 固定席位（`fixed_position = k > 0` 锁定最终展示下标 `k - 1`），
+    //    确保后续插入的投影 Emoji 永不把用户固定候选向后挤格或挤到下一页。
+    let mut reserved_pinned: Vec<Option<usize>> = vec![None; total_len];
+    let mut pinned_candidates: Vec<(usize, usize)> = Vec::new();
+    let mut unpinned_ids: Vec<usize> = Vec::with_capacity(base.len());
+    for candidate in base {
+        if candidate.fixed_position > 0 {
+            let target = usize::from(candidate.fixed_position - 1).min(total_len - 1);
+            pinned_candidates.push((target, candidate.id));
+        } else {
+            unpinned_ids.push(candidate.id);
+        }
+    }
+    pinned_candidates.sort_by_key(|&(target, _)| target);
+    for (target, id) in pinned_candidates {
+        let mut slot = target;
+        while slot < total_len && reserved_pinned[slot].is_some() {
+            slot += 1;
+        }
+        if slot >= total_len {
+            if let Some(free) = reserved_pinned.iter().position(|entry| entry.is_none()) {
+                slot = free;
+            } else {
+                continue;
+            }
+        }
+        reserved_pinned[slot] = Some(id);
+    }
+
+    // 2. 计算主推 Emoji 的安全下标：永不为 0，默认落在第 3 位（下标 2），不楔入连续英文补全块，且绝不覆盖固定席位。
     let mut primary_slot = budget.primary_emoji_slot.max(1).min(base.len());
     if primary_slot < base.len()
         && base[primary_slot].kind == SlotCandidateKind::English
@@ -169,33 +208,66 @@ where
             .min(page_size.saturating_sub(1))
             .min(base.len());
     }
-
-    let mut result: Vec<AllocatedSlot> = Vec::with_capacity(base.len() + emojis.len());
-    result.extend(base.iter().map(|item| AllocatedSlot::Base(item.id)));
-    result.insert(
-        primary_slot,
-        AllocatedSlot::ProjectedEmoji {
-            anchor_word: anchor_word.to_owned(),
-            emoji: emojis[0],
-        },
-    );
-
-    // 同一词的其余备选 Emoji 放在第 2 页开头（不抢占首页任何一格），方便用户偶尔翻页点选后由 MRU 记住。
-    let extra_count = emojis
-        .len()
-        .saturating_sub(1)
-        .min(budget.max_secondary_emojis);
-    if extra_count > 0 {
-        let secondary_start = page_size.min(result.len());
-        for (offset, &emoji) in emojis[1..=extra_count].iter().enumerate() {
-            result.insert(
-                secondary_start + offset,
-                AllocatedSlot::ProjectedEmoji {
-                    anchor_word: anchor_word.to_owned(),
-                    emoji,
-                },
-            );
+    if reserved_pinned[primary_slot].is_some() {
+        let page_end = page_size.min(total_len);
+        let fallback = (primary_slot + 1..page_end)
+            .find(|&s| reserved_pinned[s].is_none())
+            .or_else(|| {
+                (1..primary_slot)
+                    .rev()
+                    .find(|&s| reserved_pinned[s].is_none())
+            })
+            .or_else(|| (page_end..total_len).find(|&s| reserved_pinned[s].is_none()));
+        if let Some(free) = fallback {
+            primary_slot = free;
         }
+    }
+
+    let mut reserved_emojis: Vec<Option<&'static str>> = vec![None; total_len];
+    if reserved_pinned[primary_slot].is_none() {
+        reserved_emojis[primary_slot] = Some(emojis[0]);
+    }
+
+    // 3. 同词其余备选 Emoji 放在第 2 页开头起的空余席位（不抢占首页任何一格，也不覆盖固定席位）。
+    if extra_count > 0 {
+        let mut cursor = page_size.min(total_len.saturating_sub(1));
+        for &emoji in &emojis[1..=extra_count] {
+            while cursor < total_len
+                && (reserved_pinned[cursor].is_some() || reserved_emojis[cursor].is_some())
+            {
+                cursor += 1;
+            }
+            if cursor >= total_len {
+                if let Some(free) = (1..total_len)
+                    .find(|&s| reserved_pinned[s].is_none() && reserved_emojis[s].is_none())
+                {
+                    cursor = free;
+                } else {
+                    break;
+                }
+            }
+            reserved_emojis[cursor] = Some(emoji);
+            cursor += 1;
+        }
+    }
+
+    // 4. 合并产出最终展示席位：固定席位原地锁死、Emoji 落入专属空位、其余未固定主候选按原相对顺序顺流填入。
+    let mut unpinned_iter = unpinned_ids.into_iter();
+    let mut result: Vec<AllocatedSlot> = Vec::with_capacity(total_len);
+    for seat in 0..total_len {
+        if let Some(id) = reserved_pinned[seat] {
+            result.push(AllocatedSlot::Base(id));
+        } else if let Some(emoji) = reserved_emojis[seat] {
+            result.push(AllocatedSlot::ProjectedEmoji {
+                anchor_word: anchor_word.to_owned(),
+                emoji,
+            });
+        } else if let Some(id) = unpinned_iter.next() {
+            result.push(AllocatedSlot::Base(id));
+        }
+    }
+    for id in unpinned_iter {
+        result.push(AllocatedSlot::Base(id));
     }
 
     result
@@ -211,6 +283,7 @@ mod tests {
             text,
             kind: SlotCandidateKind::PrimaryChinese,
             answers_key,
+            fixed_position: 0,
         }
     }
 
@@ -220,6 +293,7 @@ mod tests {
             text,
             kind: SlotCandidateKind::English,
             answers_key: false,
+            fixed_position: 0,
         }
     }
 
@@ -387,5 +461,57 @@ mod tests {
         assert!(!alloc_after
             .iter()
             .any(|slot| matches!(slot, AllocatedSlot::ProjectedEmoji { emoji: "😄", .. })));
+    }
+
+    #[test]
+    fn fixed_positions_hold_exact_seats_while_emojis_route_around_them() {
+        // 场景 1：`嘛` 固定在第 4 位（下标 3），`马` 在第 2 位投影 🐴/🐎：
+        // `🐴` 落下标 2、`嘛` 纹丝不动坐下标 3、`🐎` 落第 2 页开头下标 6，绝不把固定项挤到第 5 位或第 2 页。
+        let mut ma_pinned_4 = zh(3, "嘛", true);
+        ma_pinned_4.fixed_position = 4;
+        let base = [
+            zh(0, "吗", true),
+            zh(1, "马", true),
+            zh(2, "码", true),
+            ma_pinned_4,
+            zh(4, "麻", true),
+            zh(5, "妈", true),
+            zh(6, "骂", true),
+        ];
+        let allocated = allocate_slots(&base, SlotBudget::default(), true, |_| None);
+        assert_eq!(allocated[0], AllocatedSlot::Base(0));
+        assert_eq!(allocated[1], AllocatedSlot::Base(1));
+        assert!(matches!(
+            allocated[2],
+            AllocatedSlot::ProjectedEmoji { ref anchor_word, .. } if anchor_word == "马"
+        ));
+        assert_eq!(allocated[3], AllocatedSlot::Base(3));
+        assert_eq!(allocated[4], AllocatedSlot::Base(2));
+        assert_eq!(allocated[5], AllocatedSlot::Base(4));
+        assert!(matches!(
+            allocated[6],
+            AllocatedSlot::ProjectedEmoji { ref anchor_word, .. } if anchor_word == "马"
+        ));
+
+        // 场景 2：`嘛` 固定在第 3 位（下标 2，正好与主推 Emoji 默认席位冲突）：
+        // `嘛` 硬锁下标 2，主推 Emoji 礼让顺延到首页下标 3。
+        let mut ma_pinned_3 = zh(2, "嘛", true);
+        ma_pinned_3.fixed_position = 3;
+        let base_collide = [
+            zh(0, "吗", true),
+            zh(1, "马", true),
+            ma_pinned_3,
+            zh(3, "码", true),
+            zh(4, "麻", true),
+            zh(5, "妈", true),
+        ];
+        let alloc_collide = allocate_slots(&base_collide, SlotBudget::default(), true, |_| None);
+        assert_eq!(alloc_collide[0], AllocatedSlot::Base(0));
+        assert_eq!(alloc_collide[1], AllocatedSlot::Base(1));
+        assert_eq!(alloc_collide[2], AllocatedSlot::Base(2));
+        assert!(matches!(
+            alloc_collide[3],
+            AllocatedSlot::ProjectedEmoji { ref anchor_word, .. } if anchor_word == "马"
+        ));
     }
 }

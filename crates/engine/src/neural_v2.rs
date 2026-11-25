@@ -172,6 +172,10 @@ pub struct NeuralDecodeRequest {
     #[serde(default)]
     pub syllable_paths: Vec<NeuralSyllablePath>,
     pub candidates: Vec<NeuralCandidateInput>,
+    /// L4 固定/置顶席位清单：每项为 `(base_index, target_seat)`，
+    /// 融合排座时强制把基础下标 `base_index` 锁在最终席位 `target_seat`，防止被等跨度重排或续写顺延挤离。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pinned_seats: Vec<(usize, usize)>,
     #[serde(default = "default_beam_width")]
     pub beam_width: u32,
     #[serde(default = "default_max_beam_results")]
@@ -749,22 +753,67 @@ pub fn fuse_neural_response(
         }
     }
 
-    // 7. 将排序后的等跨度竞争结果无损回填至原等跨度槽位，非等跨度行（前缀/续写/英文/置顶）保持原相对位置。
-    let mut exact_slots: Vec<usize> = competing_tier0.iter().map(|(_, c, _)| c.index).collect();
+    // 7. 统一 L4 固定/置顶席位约束与等跨度无损回填：
+    //    先对全部未固定行执行等跨度前 4 连续排座与束搜索溢出回填，再把每个 L4 固定/置顶行精确合入其目标席位，
+    //    保证用户固定在位置 `k` 的候选（如 `ma -> 嘛` 固定在第 4 位）绝不被神经重排、非等跨度顺延或束注入挤离原位。
+    let mut pinned_index_set: HashSet<usize> = HashSet::new();
+    let mut raw_pinned: Vec<(usize, usize)> = Vec::new();
+    for &(orig_idx, target_seat) in &request.pinned_seats {
+        if orig_idx < total_base_len && pinned_index_set.insert(orig_idx) {
+            raw_pinned.push((target_seat, orig_idx));
+        }
+    }
+    for cand in &request.candidates {
+        if cand.pinned && cand.index < total_base_len && pinned_index_set.insert(cand.index) {
+            raw_pinned.push((cand.index, cand.index));
+        }
+    }
+
+    let mut exact_slots: Vec<usize> = competing_tier0
+        .iter()
+        .map(|(_, c, _)| c.index)
+        .filter(|idx| !pinned_index_set.contains(idx))
+        .collect();
     exact_slots.sort_unstable();
     exact_slots.dedup();
 
-    let mut seats: Vec<FusedSeat> = Vec::with_capacity(total_base_len + competitors.len());
+    let extra_beams = competitors.len().saturating_sub(exact_slots.len());
+    let final_len = total_base_len + extra_beams;
+
+    // 为所有 L4 固定/置顶行分配最终目标席位（冲突时向后顺延至最近空位）。
+    raw_pinned.sort_by_key(|&(target, orig)| (target, orig));
+    let mut pinned_by_seat: Vec<Option<usize>> = vec![None; final_len];
+    for (target, orig_idx) in raw_pinned {
+        let mut seat = target.min(final_len.saturating_sub(1));
+        while seat < final_len && pinned_by_seat[seat].is_some() {
+            seat += 1;
+        }
+        if seat >= final_len {
+            if let Some(free) = pinned_by_seat.iter().position(|entry| entry.is_none()) {
+                seat = free;
+            } else {
+                continue;
+            }
+        }
+        pinned_by_seat[seat] = Some(orig_idx);
+    }
+
+    let unpinned_base_indices: Vec<usize> = (0..total_base_len)
+        .filter(|idx| !pinned_index_set.contains(idx))
+        .collect();
+    let mut unpinned_seats: Vec<FusedSeat> = Vec::with_capacity(final_len);
 
     if exact_slots.is_empty() {
         // 极端情况：Tier 0 没有任何等跨度候选（例如仅剩前缀单字），而 Tier 1 受限束搜索召回了完整整句。
-        let insert_at = if effective_lock_slot_0 {
-            1.min(total_base_len)
+        let lock_first_unpinned =
+            effective_lock_slot_0 && pinned_by_seat.first().is_none_or(|p| p.is_none());
+        let insert_at = if lock_first_unpinned {
+            1.min(unpinned_base_indices.len())
         } else {
             0
         };
-        for idx in 0..insert_at {
-            seats.push(FusedSeat::Existing {
+        for &idx in &unpinned_base_indices[..insert_at] {
+            unpinned_seats.push(FusedSeat::Existing {
                 index: idx,
                 promoted_by_neural: false,
             });
@@ -777,7 +826,7 @@ pub fn fuse_neural_response(
                 channel_log_prob,
             } = &comp.kind
             {
-                seats.push(FusedSeat::InjectedBeam {
+                unpinned_seats.push(FusedSeat::InjectedBeam {
                     text: text.clone(),
                     pinyin: pinyin.clone(),
                     neural_log_prob: *neural_log_prob,
@@ -785,8 +834,8 @@ pub fn fuse_neural_response(
                 });
             }
         }
-        for idx in insert_at..total_base_len {
-            seats.push(FusedSeat::Existing {
+        for &idx in &unpinned_base_indices[insert_at..] {
+            unpinned_seats.push(FusedSeat::Existing {
                 index: idx,
                 promoted_by_neural: false,
             });
@@ -794,14 +843,24 @@ pub fn fuse_neural_response(
     } else {
         let exact_slot_set: HashSet<usize> = exact_slots.iter().copied().collect();
         let mut comp_iter = competitors.into_iter();
-        let first_exact = exact_slots[0];
-        let last_exact_slot = *exact_slots.last().unwrap_or(&0);
-        // 保证首页前 4 席等跨度主候选从 `first_exact` 起连续呈现，
+        let first_exact_pos = unpinned_base_indices
+            .iter()
+            .position(|idx| exact_slot_set.contains(idx))
+            .unwrap_or(0);
+        let last_exact_pos = unpinned_base_indices
+            .iter()
+            .rposition(|idx| exact_slot_set.contains(idx))
+            .unwrap_or(0);
+        // 保证首页前 4 席未固定等跨度主候选连续呈现，
         // 防止长词续写（如 `淡饭粗茶`/`淡饭黄齑`/`单反相机`）楔入首页中间把真实等跨度词（如 `但凡`）挤到第 2 页；
-        // 3+ 字整句 `ordering.rs` 原本已占 `0..4`，`displaced_non_exact` 为空，完整保持 `4+2` 布局。
+        // L4 固定席位已提前剔除并独立锁位，绝不会被误判为续写词顺延。
         let front_exact_count = exact_slots.len().min(4);
-        let contiguous_front_end = (first_exact + front_exact_count).min(total_base_len);
-        let displaced_non_exact: Vec<usize> = (first_exact..contiguous_front_end)
+        let contiguous_front_end =
+            (first_exact_pos + front_exact_count).min(unpinned_base_indices.len());
+        let displaced_non_exact: Vec<usize> = unpinned_base_indices
+            [first_exact_pos..contiguous_front_end]
+            .iter()
+            .copied()
             .filter(|idx| !exact_slot_set.contains(idx))
             .collect();
         let mut overflow_inserted = false;
@@ -825,50 +884,54 @@ pub fn fuse_neural_response(
                 },
             };
 
-        // 1. 首个等跨度槽位之前的非等跨度行（如置顶项）原位保留。
-        for base_idx in 0..first_exact {
-            seats.push(FusedSeat::Existing {
+        // 1. 首个等跨度未固定槽位之前的非等跨度行原位保留。
+        for &base_idx in &unpinned_base_indices[..first_exact_pos] {
+            unpinned_seats.push(FusedSeat::Existing {
                 index: base_idx,
                 promoted_by_neural: false,
             });
         }
 
-        // 2. 从 `first_exact` 起连续回填前 `front_exact_count` 名等跨度胜出者。
-        for slot in first_exact..contiguous_front_end {
+        // 2. 从 `first_exact_pos` 起连续回填前 `front_exact_count` 名等跨度胜出者。
+        for &target_slot in &unpinned_base_indices[first_exact_pos..contiguous_front_end] {
             if let Some(comp) = comp_iter.next() {
-                seats.push(make_seat(comp, slot, true));
+                unpinned_seats.push(make_seat(comp, target_slot, true));
             }
         }
         // 若所有原始等跨度槽位均已落在前段内，立即接上束搜索溢出项，避免丢失。
-        if last_exact_slot < contiguous_front_end && !overflow_inserted {
+        if last_exact_pos < contiguous_front_end && !overflow_inserted {
             overflow_inserted = true;
             for extra in comp_iter.by_ref() {
-                seats.push(make_seat(extra, contiguous_front_end, false));
+                unpinned_seats.push(make_seat(extra, contiguous_front_end, false));
             }
         }
 
-        // 3. 将原本夹在 `first_exact..contiguous_front_end` 内的非等跨度续写词顺延至前 4 等跨度之后。
+        // 3. 将原本夹在未固定前 4 段内的非等跨度续写词顺延至前 4 等跨度之后。
         for idx in displaced_non_exact {
-            seats.push(FusedSeat::Existing {
+            unpinned_seats.push(FusedSeat::Existing {
                 index: idx,
                 promoted_by_neural: false,
             });
         }
 
-        // 4. 其余区间按原槽位无损回填剩余等跨度与非等跨度候选。
-        for base_idx in contiguous_front_end..total_base_len {
+        // 4. 其余未固定区间按原槽位无损回填剩余等跨度与非等跨度候选。
+        for (pos, &base_idx) in unpinned_base_indices
+            .iter()
+            .enumerate()
+            .skip(contiguous_front_end)
+        {
             if exact_slot_set.contains(&base_idx) {
                 if let Some(comp) = comp_iter.next() {
-                    seats.push(make_seat(comp, base_idx, true));
+                    unpinned_seats.push(make_seat(comp, base_idx, true));
                 }
-                if base_idx == last_exact_slot && !overflow_inserted {
+                if pos == last_exact_pos && !overflow_inserted {
                     overflow_inserted = true;
                     for extra in comp_iter.by_ref() {
-                        seats.push(make_seat(extra, base_idx, false));
+                        unpinned_seats.push(make_seat(extra, base_idx, false));
                     }
                 }
             } else {
-                seats.push(FusedSeat::Existing {
+                unpinned_seats.push(FusedSeat::Existing {
                     index: base_idx,
                     promoted_by_neural: false,
                 });
@@ -876,17 +939,36 @@ pub fn fuse_neural_response(
         }
     }
 
-    // 二次兜底校验：若 `effective_lock_slot_0` 为真，硬性保证槽 0 必为原索引 0。
-    if effective_lock_slot_0 {
-        if let Some(pos) = seats
+    // 二次兜底校验：若 `effective_lock_slot_0` 为真且槽 0 未被其他固定行占据，硬性保证未固定流首位必为原索引 0，
+    // 在合并固定席位之前旋转，绝不连带平移任何 L4 固定席位。
+    if effective_lock_slot_0
+        && !pinned_index_set.contains(&0)
+        && pinned_by_seat.first().is_none_or(|p| p.is_none())
+    {
+        if let Some(pos) = unpinned_seats
             .iter()
             .position(|s| matches!(s, FusedSeat::Existing { index: 0, .. }))
         {
             if pos > 0 {
-                seats[..=pos].rotate_right(1);
+                unpinned_seats[..=pos].rotate_right(1);
             }
         }
     }
+
+    // 合并 L4 固定席位与未固定流，得到最终零丢失、零重复且严格遵守全部固定位置的席位表。
+    let mut seats: Vec<FusedSeat> = Vec::with_capacity(final_len);
+    let mut unpinned_iter = unpinned_seats.into_iter();
+    for pinned_slot in &pinned_by_seat {
+        if let Some(orig_idx) = *pinned_slot {
+            seats.push(FusedSeat::Existing {
+                index: orig_idx,
+                promoted_by_neural: false,
+            });
+        } else if let Some(seat) = unpinned_iter.next() {
+            seats.push(seat);
+        }
+    }
+    seats.extend(unpinned_iter);
 
     let moved = seats.len() != total_base_len
         || seats
@@ -955,6 +1037,7 @@ mod tests {
                 is_complete: true,
             }],
             candidates,
+            pinned_seats: Vec::new(),
             beam_width: 5,
             max_beam_results: 4,
             enable_constrained_decode: true,
@@ -1570,5 +1653,77 @@ mod tests {
         };
         let out5 = fuse_neural_response(1, &req5, &resp5, NeuralFusionWeights::default(), false);
         assert_eq!(out5.top1_text.as_deref(), Some("不可或缺"));
+    }
+
+    #[test]
+    fn pinned_fixed_position_never_displaced_by_neural_fusion() {
+        // 模拟 `差价 + ma` 中「嘛」被用户固定在第 4 位（下标 3），
+        // 即便「嘛」因 `pinned = true` 不发往神经打分，也不得被前 4 连续等跨度逻辑误判为续写词挤到第 5 位。
+        let mut c0 = sample_candidate(0, "吗", true, Some(-4.0));
+        c0.source = CandidateSource::Database as u8;
+        let mut c1 = sample_candidate(1, "马", true, Some(-4.5));
+        c1.source = CandidateSource::Database as u8;
+        let mut c2 = sample_candidate(2, "妈", true, Some(-5.0));
+        c2.source = CandidateSource::Database as u8;
+        // 下标 3 为用户固定的「嘛」（不在 candidates 中，通过 pinned_seats = [(3, 3)] 锁位）
+        let mut c4 = sample_candidate(4, "麻", true, Some(-5.5));
+        c4.source = CandidateSource::Database as u8;
+        let mut c5 = sample_candidate(5, "码", true, Some(-6.0));
+        c5.source = CandidateSource::Database as u8;
+        let mut req = base_request(vec![c0, c1, c2, c4, c5]);
+        req.context = "差价".into();
+        req.raw_input = "ma".into();
+        req.segmentation = "ma".into();
+        req.pinned_seats = vec![(3, 3)];
+        let resp = NeuralDecodeResponse {
+            ok: true,
+            session: 1,
+            generation: 10,
+            candidate_scores: vec![
+                NeuralScoredCandidate {
+                    text: "吗".into(),
+                    neural_log_prob: -2.0,
+                },
+                NeuralScoredCandidate {
+                    text: "码".into(),
+                    neural_log_prob: -2.2,
+                },
+                NeuralScoredCandidate {
+                    text: "马".into(),
+                    neural_log_prob: -3.0,
+                },
+                NeuralScoredCandidate {
+                    text: "麻".into(),
+                    neural_log_prob: -3.5,
+                },
+                NeuralScoredCandidate {
+                    text: "妈".into(),
+                    neural_log_prob: -4.0,
+                },
+            ],
+            beam_candidates: vec![],
+        };
+        let out = fuse_neural_response(6, &req, &resp, NeuralFusionWeights::default(), false);
+        let order: Vec<usize> = out
+            .seats
+            .iter()
+            .map(|s| match *s {
+                FusedSeat::Existing { index, .. } => index,
+                FusedSeat::InjectedBeam { .. } => usize::MAX,
+            })
+            .collect();
+        // 下标 3（嘛）稳坐第 4 位（位置 3），其余未固定候选按神经融合分顺流排在 0,1,2,4,5。
+        assert_eq!(order, vec![0, 5, 1, 3, 4, 2]);
+
+        // 即使迟到锁槽 0（lock_slot_0 = true），下标 3 也绝不能被连带平移。
+        let out_locked = fuse_neural_response(6, &req, &resp, NeuralFusionWeights::default(), true);
+        assert!(matches!(
+            out_locked.seats[0],
+            FusedSeat::Existing { index: 0, .. }
+        ));
+        assert!(matches!(
+            out_locked.seats[3],
+            FusedSeat::Existing { index: 3, .. }
+        ));
     }
 }

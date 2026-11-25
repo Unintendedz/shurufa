@@ -1355,6 +1355,7 @@ impl<E: InputEngine> Runtime<E> {
         let max_neural_candidates = DEFAULT_MAX_NEURAL_CANDIDATES;
         let mut candidates =
             Vec::with_capacity(self.cached.candidates.len().min(max_neural_candidates));
+        let mut pinned_seats: Vec<(usize, usize)> = Vec::new();
         let mut seen_texts: std::collections::HashSet<String> =
             std::collections::HashSet::with_capacity(max_neural_candidates);
         let mut base_idx = 0usize;
@@ -1364,8 +1365,23 @@ impl<E: InputEngine> Runtime<E> {
             }
             let current_base_idx = base_idx;
             base_idx += 1;
-            if candidates.len() >= max_neural_candidates || current_base_idx >= 64 {
+            if current_base_idx >= 64 {
                 break;
+            }
+            // L4 固定席位（`fixed_position = k > 0`）无论来源如何一律登记目标席位 `k - 1`，
+            // 确保神经融合与 Emoji 剥离重投后仍牢牢锁在用户指定席位。
+            let fixed_pos = self
+                .cached
+                .candidate_positions
+                .get(seat)
+                .copied()
+                .unwrap_or(0);
+            if fixed_pos > 0 {
+                pinned_seats.push((current_base_idx, usize::from(fixed_pos - 1)));
+                continue;
+            }
+            if candidates.len() >= max_neural_candidates {
+                continue;
             }
             let source = self
                 .cached
@@ -1434,18 +1450,16 @@ impl<E: InputEngine> Runtime<E> {
                 let exact = answers
                     && char_count > 0
                     && (primary_syllables == 0 || char_count <= primary_syllables + 1);
-                let fixed = self
-                    .cached
-                    .candidate_positions
-                    .get(seat)
-                    .copied()
-                    .unwrap_or(0)
-                    > 0;
-                (stat, channel, user, exact, false, fixed)
+                (stat, channel, user, exact, false, false)
             };
 
+            if pinned {
+                // 手动置顶（`pinned_candidates`，无显式位置号）硬锁定首位 0。
+                pinned_seats.push((current_base_idx, 0));
+                continue;
+            }
             // 非等跨度前缀/续写词不参与等跨度融合，无需发往 Metal 前缀树浪费算力。
-            if !exact_span || pinned {
+            if !exact_span {
                 continue;
             }
             if !seen_texts.insert(text.clone()) {
@@ -1479,6 +1493,7 @@ impl<E: InputEngine> Runtime<E> {
             segmentation,
             syllable_paths,
             candidates,
+            pinned_seats,
             beam_width: DEFAULT_BEAM_WIDTH,
             max_beam_results: DEFAULT_MAX_BEAM_RESULTS,
             enable_constrained_decode: true,
@@ -3518,6 +3533,12 @@ impl<E: InputEngine> Runtime<E> {
                 text: self.cached.candidates[index].as_str(),
                 kind: SlotCandidateKind::from_source(self.cached.candidate_sources[index]),
                 answers_key: self.cached.candidate_answers_key[index],
+                fixed_position: self
+                    .cached
+                    .candidate_positions
+                    .get(index)
+                    .copied()
+                    .unwrap_or(0),
             })
             .collect();
         let budget = SlotBudget {
@@ -3713,15 +3734,23 @@ impl<E: InputEngine> Runtime<E> {
             || self.cached.candidate_positions.len() != count
             || self.cached.candidate_corrected.len() != count
             || self.cached.candidate_answers_key.len() != count
-            || order.iter().enumerate().all(|(seat, index)| seat == *index)
         {
             return false;
         }
-        self.apply_candidate_order(order);
+        let mut adjusted = order.to_vec();
+        preserve_fixed_seats_in_order(&self.cached.candidate_positions, &mut adjusted);
+        if adjusted
+            .iter()
+            .enumerate()
+            .all(|(seat, index)| seat == *index)
+        {
+            return false;
+        }
+        self.apply_candidate_order(&adjusted);
         true
     }
 
-    /// 把 `promote` 旋到首位，并同步候选元数据和引擎座位映射。下标为 0 或越界时不动。
+    /// 把 `promote` 旋到首位，并同步候选元数据和引擎座位映射。下标为 0、越界或触及固定席位时保持 L4 固定位不动。
     fn promote_row(&mut self, promote: usize) -> bool {
         let count = self.cached.candidates.len();
         if promote == 0 || promote >= count {
@@ -3736,6 +3765,23 @@ impl<E: InputEngine> Runtime<E> {
             || snapshot.candidate_answers_key.len() != count
         {
             return false;
+        }
+        // 首位已被用户固定或待晋升行本身已被固定在特定位置时，不破坏 L4 硬约束。
+        if snapshot.candidate_positions[0] > 0 || snapshot.candidate_positions[promote] > 0 {
+            return false;
+        }
+        if snapshot.candidate_positions[..=promote]
+            .iter()
+            .any(|&pos| pos > 0)
+        {
+            let mut order: Vec<usize> = (0..count).collect();
+            order[..=promote].rotate_right(1);
+            preserve_fixed_seats_in_order(&snapshot.candidate_positions, &mut order);
+            if order.iter().enumerate().all(|(seat, index)| seat == *index) {
+                return false;
+            }
+            self.apply_candidate_order(&order);
+            return true;
         }
         ensure_engine_order(&mut self.engine_order, count);
         let snapshot = &mut self.cached;
@@ -3775,9 +3821,13 @@ impl<E: InputEngine> Runtime<E> {
         {
             return false;
         }
-        let Some(order) = runner_up_order(snapshot.scheme, &order_rows(snapshot)) else {
+        let Some(mut order) = runner_up_order(snapshot.scheme, &order_rows(snapshot)) else {
             return false;
         };
+        preserve_fixed_seats_in_order(&snapshot.candidate_positions, &mut order);
+        if order.iter().enumerate().all(|(seat, index)| seat == *index) {
+            return false;
+        }
         self.apply_candidate_order(&order);
         true
     }
@@ -4897,4 +4947,49 @@ fn sanitize_surrounding_context(text: &str) -> std::borrow::Cow<'_, str> {
         cleaned.drain(..cut);
     }
     std::borrow::Cow::Owned(cleaned)
+}
+
+/// 保持排列 `order`（新座位 -> 旧座位）中所有 L4 固定席位（`positions[old_idx] > 0`）稳坐其目标席位 `pos - 1`，
+/// 其余未固定行按 `order` 原先的相对顺序顺流填入空余席位，杜绝逐键重排、次选降位或停顿精排把固定词挤离指定位置。
+fn preserve_fixed_seats_in_order(positions: &[u8], order: &mut [usize]) {
+    let count = order.len();
+    if count < 2 || positions.len() != count || positions.iter().all(|&p| p == 0) {
+        return;
+    }
+    let mut fixed_entries: Vec<(usize, usize)> = Vec::new();
+    for (old_idx, &pos) in positions.iter().enumerate() {
+        if pos > 0 {
+            let target = usize::from(pos - 1).min(count - 1);
+            fixed_entries.push((target, old_idx));
+        }
+    }
+    fixed_entries.sort_by_key(|&(target, old_idx)| (target, old_idx));
+    let mut reserved: Vec<Option<usize>> = vec![None; count];
+    for (target, old_idx) in fixed_entries {
+        let mut seat = target;
+        while seat < count && reserved[seat].is_some() {
+            seat += 1;
+        }
+        if seat >= count {
+            if let Some(free) = reserved.iter().position(|entry| entry.is_none()) {
+                seat = free;
+            } else {
+                continue;
+            }
+        }
+        reserved[seat] = Some(old_idx);
+    }
+    let unpinned: Vec<usize> = order
+        .iter()
+        .copied()
+        .filter(|&old_idx| positions.get(old_idx).copied().unwrap_or(0) == 0)
+        .collect();
+    let mut unpinned_iter = unpinned.into_iter();
+    for (seat, slot) in order.iter_mut().enumerate() {
+        if let Some(old_idx) = reserved[seat] {
+            *slot = old_idx;
+        } else if let Some(old_idx) = unpinned_iter.next() {
+            *slot = old_idx;
+        }
+    }
 }
