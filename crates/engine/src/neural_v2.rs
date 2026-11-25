@@ -22,6 +22,8 @@ pub const SOURCE_NEURAL_CONSTRAINED: u8 = 20;
 
 /// Tier 1 上文窗口上限（按 Unicode 标量字符数计，完整保留中文标点、空格、ASCII 与 Emoji）。
 pub const NEURAL_CONTEXT_MAX_CHARS: usize = 512;
+/// Tier 1 光标右侧同行后文窗口上限（按 Unicode 标量字符数计，遇换行截断，供句中补字双向消歧）。
+pub const NEURAL_RIGHT_CONTEXT_MAX_CHARS: usize = 16;
 /// 单次发往 Tier 1 神经打分的去重等跨度 Tier 0 候选上限（稳定压在 <= 18 ms 零闪烁窗内）。
 pub const DEFAULT_MAX_NEURAL_CANDIDATES: usize = 16;
 /// 受限束搜索默认束宽。
@@ -167,6 +169,9 @@ pub struct NeuralDecodeRequest {
     pub generation: u64,
     /// 光标前完整上文（至多 512 字，保留中文标点、空格、ASCII 与 Emoji）。
     pub context: String,
+    /// 光标后同行现成后文（句中插入补字时非空，遇换行截断，至多 16 字；常规句尾输入为空串）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub right_context: String,
     pub raw_input: String,
     pub segmentation: String,
     #[serde(default)]
@@ -278,6 +283,33 @@ pub fn neural_context_window_limit(text: &str, max_chars: usize) -> &str {
         }
     }
     text
+}
+
+/// 截取光标右侧同行现成后文（至多 `NEURAL_RIGHT_CONTEXT_MAX_CHARS` 个 Unicode 标量字符）：
+/// - 遇到换行符（`\n` / `\r`）立即截断，保证句尾换行前输入不会把下一行当作同行后文；
+/// - 若同行右侧仅剩空白字符则返回空串，与常规句尾输入一致。
+pub fn neural_right_context_window(text: &str) -> &str {
+    neural_right_context_window_limit(text, NEURAL_RIGHT_CONTEXT_MAX_CHARS)
+}
+
+/// 按字符数上限从头部截取同行右侧后文窗口，始终落在合法 UTF-8 字符边界。
+pub fn neural_right_context_window_limit(text: &str, max_chars: usize) -> &str {
+    if text.is_empty() || max_chars == 0 {
+        return "";
+    }
+    let mut end_byte = text.len();
+    for (count, (byte_idx, ch)) in text.char_indices().enumerate() {
+        if matches!(ch, '\n' | '\r' | '\0' | '\u{fffc}') || count >= max_chars {
+            end_byte = byte_idx;
+            break;
+        }
+    }
+    let slice = text[..end_byte].trim_end_matches([' ', '\t']);
+    if slice.chars().all(char::is_whitespace) {
+        ""
+    } else {
+        slice
+    }
 }
 
 /// 将词典权重映射到与 Tier 0 词网格一致的统一自然对数先验刻度（nats）。
@@ -464,8 +496,10 @@ pub fn fuse_neural_response(
         let Some(path) = path else {
             continue;
         };
+        let has_any_context_for_beam =
+            !request.context.trim().is_empty() || !request.right_context.trim().is_empty();
         let path_allows_beam = path.is_complete
-            || (!request.context.is_empty() && (4..=8).contains(&path.syllables.len()));
+            || (has_any_context_for_beam && (4..=8).contains(&path.syllables.len()));
         if !path_allows_beam || beam.text.chars().count() != path.syllables.len() {
             continue;
         }
@@ -571,11 +605,28 @@ pub fn fuse_neural_response(
         .split('\'')
         .filter(|piece| !piece.is_empty() && !is_intact(piece))
         .count();
+    let primary_syllable_count = request
+        .syllable_paths
+        .first()
+        .map(|p| p.syllables.len())
+        .unwrap_or_else(|| {
+            request
+                .segmentation
+                .split('\'')
+                .filter(|piece| !piece.is_empty())
+                .count()
+        });
+    let has_any_context =
+        !request.context.trim().is_empty() || !request.right_context.trim().is_empty();
     let mut exact_dict_len_mask: u8 = 0;
     let mut has_multi_char_exact_dict = false;
     let mut has_verified_exact_literal_dict = false;
+    let mut has_single_char_exact_dict = false;
     for &(_, c, _) in &competing_tier0 {
         if is_dict_bucket(c.source) && c.channel_log_prob == 0.0 {
+            if c.char_count == 1 {
+                has_single_char_exact_dict = true;
+            }
             if (2..=4).contains(&c.char_count) {
                 exact_dict_len_mask |= 1u8 << c.char_count;
             }
@@ -587,9 +638,13 @@ pub fn fuse_neural_response(
             }
         }
     }
+    // 无任何上下文（光标左、右均为空）且为单音节输入、已命中未纠错词典单字时，
+    // 上下文互信息严格为 0，直接保持 Tier 0 经验词频序，避免句首提示偏置翻转单字基线（如 `xian -> 先`、`zai -> 在`、`le -> 了`）。
+    if !has_any_context && primary_syllable_count == 1 && has_single_char_exact_dict {
+        return identity(effective_lock_slot_0);
+    }
     let empty_ctx_literal_typo_penalty =
-        if request.context.is_empty() && bare_initial_count == 0 && has_verified_exact_literal_dict
-        {
+        if !has_any_context && bare_initial_count == 0 && has_verified_exact_literal_dict {
             EMPTY_CONTEXT_EXACT_LITERAL_TYPO_PENALTY
         } else {
             0.0
@@ -1029,6 +1084,7 @@ mod tests {
             session: 1,
             generation: 10,
             context: "这个兄弟 应该多少还是".to_owned(),
+            right_context: String::new(),
             raw_input: "zhenglexieqian".to_owned(),
             segmentation: "zheng'le'xie'qian".to_owned(),
             syllable_paths: vec![NeuralSyllablePath {
@@ -1725,5 +1781,85 @@ mod tests {
             out_locked.seats[3],
             FusedSeat::Existing { index: 3, .. }
         ));
+    }
+
+    #[test]
+    fn zero_context_single_char_preserves_unigram_while_right_context_disambiguates() {
+        let mut xian_first = sample_candidate(0, "先", true, Some(-4.10));
+        xian_first.source = CandidateSource::Database as u8;
+        xian_first.exact_literal_dict = true;
+        let mut xian_now = sample_candidate(1, "现", true, Some(-4.46));
+        xian_now.source = CandidateSource::Database as u8;
+        xian_now.exact_literal_dict = true;
+
+        // 1. 左、右上下文均为空时，单音节词典单字严格保持 Tier 0 经验词频序（`#1 先`），不被句首偏置翻转。
+        let mut zero_ctx_req = base_request(vec![xian_first.clone(), xian_now.clone()]);
+        zero_ctx_req.context.clear();
+        zero_ctx_req.right_context.clear();
+        zero_ctx_req.raw_input = "xian".into();
+        zero_ctx_req.segmentation = "xian".into();
+        zero_ctx_req.syllable_paths = vec![NeuralSyllablePath {
+            syllables: vec!["xian".into()],
+            channel_log_prob: 0.0,
+            is_complete: true,
+        }];
+        let biased_resp = NeuralDecodeResponse {
+            ok: true,
+            session: 1,
+            generation: 10,
+            candidate_scores: vec![
+                NeuralScoredCandidate {
+                    text: "先".into(),
+                    neural_log_prob: -7.1,
+                },
+                NeuralScoredCandidate {
+                    text: "现".into(),
+                    neural_log_prob: -6.1,
+                },
+            ],
+            beam_candidates: vec![],
+        };
+        let zero_out = fuse_neural_response(
+            2,
+            &zero_ctx_req,
+            &biased_resp,
+            NeuralFusionWeights::default(),
+            false,
+        );
+        assert!(!zero_out.moved);
+        assert_eq!(zero_out.top1_text.as_deref(), Some("先"));
+
+        // 2. 句中补字存在右侧后文（如 `|[xian]在看会不会...`）时，允许双向内填分正常将 `现` 推上首位。
+        let mut infill_req = zero_ctx_req.clone();
+        infill_req.right_context =
+            neural_right_context_window("在看会不会有被拒绝的\n下一行").into();
+        assert_eq!(infill_req.right_context, "在看会不会有被拒绝的");
+        let infill_resp = NeuralDecodeResponse {
+            ok: true,
+            session: 1,
+            generation: 10,
+            candidate_scores: vec![
+                NeuralScoredCandidate {
+                    text: "先".into(),
+                    neural_log_prob: -32.2,
+                },
+                NeuralScoredCandidate {
+                    text: "现".into(),
+                    neural_log_prob: -27.1,
+                },
+            ],
+            beam_candidates: vec![],
+        };
+        let infill_out = fuse_neural_response(
+            2,
+            &infill_req,
+            &infill_resp,
+            NeuralFusionWeights::default(),
+            false,
+        );
+        assert!(infill_out.moved);
+        assert_eq!(infill_out.top1_text.as_deref(), Some("现"));
+        assert_eq!(neural_right_context_window("\n下一行"), "");
+        assert_eq!(neural_right_context_window("   \t\r\n下一行"), "");
     }
 }

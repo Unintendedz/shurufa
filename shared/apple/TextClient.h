@@ -7,6 +7,7 @@
 // NSTextInputClient-compatible context queries. Hosts that cannot expose
 // document context may omit these; callers must treat the result as unknown.
 - (NSRange)selectedRange;
+- (NSInteger)length;
 - (NSAttributedString *)attributedSubstringFromRange:(NSRange)range;
 @end
 
@@ -59,6 +60,9 @@ uint32_t MSIMETextClientPrecedingUnicodeScalar(id<MSIMETextClient> client);
 /// `knownReadable` 表示该客户端此前已成功返回过文档片段，此时光标位于 0 返回空串 `@""`；`provedReadable` 输出本次是否确认可读。
 NSString *MSIMETextClientPrecedingContext(id<MSIMETextClient> client, NSUInteger maxUTF16Units,
                                           BOOL knownReadable, BOOL *provedReadable);
+
+/// 读取选区或折叠光标后至多 `maxUTF16Units` 个 UTF-16 码元的现成后文（供句中补字双向消歧）；不可读或越界时安全返回 `nil`。
+NSString *MSIMETextClientFollowingContext(id<MSIMETextClient> client, NSUInteger maxUTF16Units);
 
 /// 校验刚上屏文本仍紧邻折叠光标，返回其文档范围与左侧标量；未知、过长或过期时返回 NSNotFound。
 NSRange MSIMETextClientCommittedRange(id<MSIMETextClient> client, NSString *text,

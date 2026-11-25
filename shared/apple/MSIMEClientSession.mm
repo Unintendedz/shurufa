@@ -734,6 +734,20 @@ static void MSIMEInvokeAnnounce(void *context) {
         _handle, static_cast<const uint8_t *>(utf8.bytes), utf8.length), error);
     return [value isEqual:@YES];
 }
+- (BOOL)setFollowingContext:(NSString *)context error:(NSError **)error {
+    if (![self checkThreadAndHandle:error]) return NO;
+    NSString *input = context ?: @"";
+    if (input.length > 64) {
+        NSUInteger keepUnits = 64;
+        if (CFStringIsSurrogateHighCharacter([input characterAtIndex:keepUnits - 1])) --keepUnits;
+        input = [input substringToIndex:keepUnits];
+    }
+    NSData *utf8 = [input dataUsingEncoding:NSUTF8StringEncoding];
+    if (!utf8 || utf8.length > 4096) return NO;
+    id value = decodeValue(msime_client_set_following_context(
+        _handle, static_cast<const uint8_t *>(utf8.bytes), utf8.length), error);
+    return [value isEqual:@YES];
+}
 - (nullable NSDictionary *)setCharacterWidthFull:(BOOL)fullwidth error:(NSError **)error {
     if (![self checkThreadAndHandle:error]) return nil;
     NSDictionary *view = decode(msime_client_set_character_width(_handle, fullwidth), error);

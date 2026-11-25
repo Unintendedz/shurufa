@@ -52,5 +52,5 @@ Status: implemented
   - 原有全集零回退：`shurufa-spoken-v1` 维持 `top1 = 0.808`、`mrr = 0.876`；`quanpin-words-v1` (n=2,791) 维持 `top1 = 0.755`、`top5 = 0.967`。
   - `TextClientTest.mm`、Rust 全量单测（`msime-engine`、`msime-input-runtime` 411/411、`msime-engine-wasm` 61/61、`msime-host-api shurufa_tests` 6/6）全绿。
 - **代价与后续重访条件**：
-  - 若未来新增**光标右侧上下文**（如句中补字 `邮箱[li|]的邮件` 的后文 `的邮件`）跨 FFI 传入，单字和词组消歧（尤其是「慢慢地/的」「写得/的」）还可进一步提升；当前仍仅利用光标左侧上下文。
+  - 光标右侧同行后文跨 FFI 双向消歧已由 [Shurufa v2 统一概率词格与端侧 Metal 两阶段神经解码架构](../architecture/2026-11-24-shurufa-v2-probabilistic-neural-ime.md) 通过 `msime_client_set_following_context` 与 `NeuralDecodeRequest::right_context` 落地覆盖（如 `你发送看看，[xian]看会不会有被拒绝的 → #1 先`、`邮箱[li]的邮件 → #1 里`、`他跑[de]很快 → #1 得`）；非神经 v2 离线回退路径仍仅使用光标左侧上下文。
   - 若用户确实希望某个单字在无上下文时永久取代静态第 1 槽（例如长期偏好「她」或「把」），需使用手动置顶，不再靠隐式累计自动抢占。

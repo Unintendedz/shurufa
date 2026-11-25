@@ -5,6 +5,47 @@
 use crate::*;
 
 const MAX_NEURAL_RESPONSE_BYTES: usize = 256 * 1024;
+const FOLLOWING_CONTEXT_LIMIT: usize = 4_096;
+
+/// 组字开始前同步光标右侧同行现成后文（供句中补字双向消歧，最多 4096 字节 UTF-8）；
+/// 隐私会话、安全输入字段清空上下文并返回 `false`；正在组字时返回 `false` 不改状态。
+///
+/// # Safety
+/// `length` 不为 0 时，`context` 必须指向至少 `length` 个可读字节。
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_set_following_context(
+    handle: u64,
+    context: *const u8,
+    length: usize,
+) -> *mut c_char {
+    if length > FOLLOWING_CONTEXT_LIMIT || (length != 0 && context.is_null()) {
+        return response(|| Err("invalid following context".into()));
+    }
+    let bytes = if length == 0 {
+        &[][..]
+    } else {
+        unsafe { std::slice::from_raw_parts(context, length) }
+    };
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return response(|| Err("invalid following context".into()));
+    };
+    response(|| {
+        with_session(handle, |session| {
+            let private_traits = session.lifecycle.as_deref().is_some_and(|state| {
+                state.context().traits & (lifecycle::TRAIT_SECURE | lifecycle::TRAIT_PRIVATE) != 0
+            });
+            if session.statistics_private || private_traits {
+                session.runtime.clear_context();
+                return Ok(Value::Bool(false));
+            }
+            if session.runtime.has_composition() {
+                return Ok(Value::Bool(false));
+            }
+            session.runtime.set_following_context(text);
+            Ok(Value::Bool(true))
+        })
+    })
+}
 
 /// 启用或关闭会话的 Tier 1 两阶段异步神经解码模式。
 /// 开启时自动解除旧版 `settled_lock_leader` 停顿锁首策略，改由 22 ms 延迟绘制与 80 ms 槽 0 锁控制防闪烁。

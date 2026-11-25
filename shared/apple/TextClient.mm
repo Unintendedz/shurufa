@@ -144,6 +144,61 @@ NSString *MSIMETextClientPrecedingContext(id<MSIMETextClient> client, NSUInteger
     return [text substringWithRange:NSMakeRange(trimStart, trimEnd - trimStart)];
 }
 
+NSString *MSIMETextClientFollowingContext(id<MSIMETextClient> client, NSUInteger maxUTF16Units) {
+    if (!client || !maxUTF16Units || ![client respondsToSelector:@selector(selectedRange)] ||
+        ![client respondsToSelector:@selector(attributedSubstringFromRange:)])
+        return nil;
+    @try {
+        const NSRange selected = [client selectedRange];
+        if (selected.location == NSNotFound) return nil;
+        const NSUInteger afterStart = selected.location + selected.length;
+        NSUInteger reqLen = maxUTF16Units;
+        if ([client respondsToSelector:@selector(length)]) {
+            const NSInteger totalLen = [client length];
+            if (totalLen >= 0) {
+                const NSUInteger docLen = static_cast<NSUInteger>(totalLen);
+                if (afterStart >= docLen) return @"";
+                reqLen = MIN(reqLen, docLen - afterStart);
+            }
+        }
+        NSAttributedString *substring = [client attributedSubstringFromRange:NSMakeRange(afterStart, reqLen)];
+        if (!substring && reqLen > 1) {
+            // 兼容不自动裁剪 proposedRange 的客户端：先探 1 码元确认是否真有后文，再二分定位可读尾部长度。
+            NSAttributedString *probe1 = [client attributedSubstringFromRange:NSMakeRange(afterStart, 1)];
+            if (probe1.string.length > 0) {
+                NSUInteger lo = 1;
+                NSUInteger hi = reqLen - 1;
+                NSAttributedString *best = probe1;
+                while (lo <= hi) {
+                    const NSUInteger mid = lo + (hi - lo) / 2;
+                    NSAttributedString *cand = [client attributedSubstringFromRange:NSMakeRange(afterStart, mid)];
+                    if (cand.string.length > 0) {
+                        best = cand;
+                        lo = mid + 1;
+                    } else {
+                        if (mid == 0) break;
+                        hi = mid - 1;
+                    }
+                }
+                substring = best;
+            }
+        }
+        NSString *text = substring.string;
+        if (!text) return nil;
+        if (!text.length) return @"";
+        NSUInteger trimStart = 0;
+        if (CFStringIsSurrogateLowCharacter([text characterAtIndex:0])) trimStart = 1;
+        NSUInteger trimEnd = text.length;
+        if (trimEnd > trimStart && CFStringIsSurrogateHighCharacter([text characterAtIndex:trimEnd - 1]))
+            --trimEnd;
+        if (trimStart >= trimEnd) return @"";
+        if (trimStart == 0 && trimEnd == text.length) return text;
+        return [text substringWithRange:NSMakeRange(trimStart, trimEnd - trimStart)];
+    } @catch (NSException *) {
+        return nil;
+    }
+}
+
 void MSIMEApplyTransitionWithWriteGuard(NSDictionary *transition, id<MSIMETextClient> client,
                                        MSIMEInlinePreeditStyle style, NSString *closing,
                                        BOOL *clientHasMarkedText, BOOL (^isCurrent)(void)) {

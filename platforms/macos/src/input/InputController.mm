@@ -2133,13 +2133,30 @@ static NSImage *MSIMECandidateLogoImage() {
         ? [(id)client bundleIdentifier] : nil;
     if (msime::mac::IsTerminalBundleIdentifier(bundle)) return;
     const NSUInteger maxContextUnits = _neuralV2Enabled ? 512 : 96;
+    const BOOL wantFollowing = _neuralV2Enabled && [_session respondsToSelector:@selector(setFollowingContext:error:)];
+    const NSUInteger maxFollowingUnits = wantFollowing ? 32 : 0;
     BOOL provedReadable = NO;
+    NSString *following = nil;
     NSString *preceding = MSIMETextClientPrecedingContext(
         client, maxContextUnits, _readableDocumentClient == client, &provedReadable);
     if (provedReadable) _readableDocumentClient = client;
-    if (!preceding) preceding = [self readAXPrecedingContextForBundle:bundle maxUTF16Units:maxContextUnits];
+    if (preceding) {
+        if (wantFollowing) {
+            following = MSIMETextClientFollowingContext(client, maxFollowingUnits);
+        }
+    } else if (wantFollowing) {
+        preceding = msime::mac::ReadAXSurroundingContext(bundle, maxContextUnits, maxFollowingUnits, &following);
+        if (!preceding) {
+            preceding = [self readAXPrecedingContextForBundle:bundle maxUTF16Units:maxContextUnits];
+        }
+    } else {
+        preceding = [self readAXPrecedingContextForBundle:bundle maxUTF16Units:maxContextUnits];
+    }
     if (preceding) {
         [_session setSurroundingContext:preceding error:nil];
+        if (wantFollowing && following.length > 0) {
+            [_session setFollowingContext:following error:nil];
+        }
         if ([self neuralV2Active] && (!_lastNeuralPrefilledContext || ![preceding isEqualToString:_lastNeuralPrefilledContext])) {
             _lastNeuralPrefilledContext = [preceding copy];
             [[ShurufaNeuralClient sharedClient] prefillContext:preceding];

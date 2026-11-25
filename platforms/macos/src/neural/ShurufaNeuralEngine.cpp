@@ -214,6 +214,46 @@ std::string utf8_char_slice(const std::string &s, int32_t start_cp, int32_t end_
     return s.substr(start_byte, end_byte - start_byte);
 }
 
+/// 提取光标右侧同行内填前瞻后缀（遇换行或控制符截断，最多 `max_chars` 个 Unicode 标量字符；纯空白视为空）。
+std::string extract_inline_right_suffix(const std::string &right_ctx, int32_t max_chars) {
+    if (right_ctx.empty() || max_chars <= 0) return {};
+    size_t i = 0;
+    int32_t taken = 0;
+    while (i < right_ctx.size()) {
+        const unsigned char b0 = static_cast<unsigned char>(right_ctx[i]);
+        if (b0 == '\n' || b0 == '\r' || b0 == '\0') {
+            break;
+        }
+        // 遇到 U+FFFC（0xEF 0xBF 0xBC）富文本附件占位符立即截断。
+        if (b0 == 0xEFu && i + 2 < right_ctx.size() &&
+            static_cast<unsigned char>(right_ctx[i + 1]) == 0xBFu &&
+            static_cast<unsigned char>(right_ctx[i + 2]) == 0xBCu) {
+            break;
+        }
+        if (taken >= max_chars) {
+            break;
+        }
+        size_t step = 1;
+        if ((b0 & 0xE0u) == 0xC0u) step = 2;
+        else if ((b0 & 0xF0u) == 0xE0u) step = 3;
+        else if ((b0 & 0xF8u) == 0xF0u) step = 4;
+        if (i + step > right_ctx.size()) break;
+        i += step;
+        ++taken;
+    }
+    while (i > 0 && (right_ctx[i - 1] == ' ' || right_ctx[i - 1] == '\t')) {
+        --i;
+    }
+    bool has_non_ws = false;
+    for (size_t k = 0; k < i; ++k) {
+        if (right_ctx[k] != ' ' && right_ctx[k] != '\t') {
+            has_non_ws = true;
+            break;
+        }
+    }
+    return has_non_ws ? right_ctx.substr(0, i) : std::string{};
+}
+
 /// 严格解码 UTF-8，要求字节流完整合法且全部为 1..max_chars 个纯汉字（自动过滤残缺 UTF-8 字节碎片）。
 bool decode_strict_utf8_hanzi(const char *data, size_t len, size_t max_chars, std::vector<char32_t> &out) {
     out.clear();
@@ -640,11 +680,29 @@ struct NeuralEngine::Impl {
     bool build_constrained_vocab_index(const std::string &pinyin_db_path, const std::string &pinyin_tsv_path) {
         const auto start = Clock::now();
         std::unordered_map<char32_t, std::vector<std::pair<int64_t, std::string>>> raw_map;
+        sqlite3 *db = nullptr;
+        sqlite3_stmt *multi_stmts[5][26]{};
+        auto close_db = [&]() {
+            for (int len = 2; len <= 4; ++len) {
+                for (int ch = 0; ch < 26; ++ch) {
+                    if (multi_stmts[len][ch]) {
+                        sqlite3_finalize(multi_stmts[len][ch]);
+                        multi_stmts[len][ch] = nullptr;
+                    }
+                }
+            }
+            if (db) {
+                sqlite3_exec(db, "END;", nullptr, nullptr, nullptr);
+                sqlite3_close(db);
+                db = nullptr;
+            }
+        };
 
-        // 1. 只读读取主词库 `tbl_1_*` 单字表（与 `crates/engine/src/format.rs` 契约一致）。
+        // 1. 只读读取主词库 `tbl_1_*` 单字表（与 `crates/engine/src/format.rs` 契约一致），
+        //    开启只读事务与 mmap 共享读锁，使后续数千次多音字 BPE 词索引点查免去逐次 POSIX 文件锁系统调用。
         if (!pinyin_db_path.empty() && std::filesystem::exists(pinyin_db_path)) {
-            sqlite3 *db = nullptr;
             if (sqlite3_open_v2(pinyin_db_path.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) == SQLITE_OK && db) {
+                sqlite3_exec(db, "PRAGMA mmap_size = 268435456; BEGIN DEFERRED;", nullptr, nullptr, nullptr);
                 const char *initials = "abcdefghjklmnopqrstwxyz";
                 std::vector<char32_t> cps;
                 for (const char *p = initials; *p != '\0'; ++p) {
@@ -669,9 +727,9 @@ struct NeuralEngine::Impl {
                     }
                     sqlite3_finalize(stmt);
                 }
-                sqlite3_close(db);
             } else if (db) {
                 sqlite3_close(db);
+                db = nullptr;
             }
         }
 
@@ -701,6 +759,7 @@ struct NeuralEngine::Impl {
         }
 
         if (raw_map.empty()) {
+            close_db();
             constrained_vocab_ready = false;
             return false;
         }
@@ -805,6 +864,42 @@ struct NeuralEngine::Impl {
                 }
                 combos = std::move(next_combos);
             }
+            // 对含多音字的 2..=4 字 BPE 整词（如 `重要 zhong'yao` vs `重新 chong'xin`、`长期 chang'qi` vs `长大 zhang'da`、
+            // `行业 hang'ye` vs `行为 xing'wei`、`了解 liao'jie`、`还是 hai'shi` vs `还原 huan'yuan`），
+            // 用主词库索引核对真实成词读音；若词库已收录该词，则仅保留词库实证读音，杜绝伪造异读污染束搜索与单字前缀边际化。
+            if (db && cps.size() >= 2 && cps.size() <= 4 && combos.size() >= 2) {
+                const int len_bucket = static_cast<int>(cps.size());
+                const std::string &word_utf8 = token_hanzi_text[static_cast<size_t>(tid)];
+                std::vector<std::string> attested;
+                for (const std::string &cand_key : combos) {
+                    if (cand_key.empty() || cand_key[0] < 'a' || cand_key[0] > 'z') continue;
+                    const int ch_idx = cand_key[0] - 'a';
+                    sqlite3_stmt *&st = multi_stmts[len_bucket][ch_idx];
+                    if (!st) {
+                        char sql[128];
+                        std::snprintf(
+                            sql,
+                            sizeof(sql),
+                            "SELECT 1 FROM tbl_%d_%c WHERE key = ?1 AND value = ?2 LIMIT 1",
+                            len_bucket,
+                            cand_key[0]);
+                        if (sqlite3_prepare_v2(db, sql, -1, &st, nullptr) != SQLITE_OK) {
+                            st = nullptr;
+                            continue;
+                        }
+                    }
+                    sqlite3_reset(st);
+                    sqlite3_clear_bindings(st);
+                    sqlite3_bind_text(st, 1, cand_key.data(), static_cast<int>(cand_key.size()), SQLITE_STATIC);
+                    sqlite3_bind_text(st, 2, word_utf8.data(), static_cast<int>(word_utf8.size()), SQLITE_STATIC);
+                    if (sqlite3_step(st) == SQLITE_ROW) {
+                        attested.push_back(cand_key);
+                    }
+                }
+                if (!attested.empty()) {
+                    combos = std::move(attested);
+                }
+            }
             for (const std::string &key : combos) {
                 auto &vec = syllable_to_tokens[key];
                 if (vec.empty() || vec.back() != tid) {
@@ -834,6 +929,7 @@ struct NeuralEngine::Impl {
             token_syllable_combos[static_cast<size_t>(tid)] = std::move(combos);
         }
 
+        close_db();
         vocab_stats.hanzi_entries = static_cast<int32_t>(hanzi_to_pinyins.size());
         vocab_stats.indexed_tokens = indexed_tokens;
         vocab_stats.syllable_keys = static_cast<int32_t>(syllable_to_tokens.size());
@@ -870,14 +966,64 @@ struct NeuralEngine::Impl {
         }
     }
 
-    /// 对给定 `log_probs` 数组计算所有以 `prefix_utf8`（首汉字为 `first_cp`）开头的 BPE token 概率之和的对数。
+    /// 校验多字 BPE token 在第 `syl_index` 个汉字位置上的真实读音是否匹配当前用户敲入的单音节 `req_syl`。
+    bool token_syllable_at_matches(
+        llama_token tid,
+        size_t syl_index,
+        const std::string &req_syl,
+        bool req_is_bare) const {
+        if (req_syl.empty() || tid < 0 || static_cast<size_t>(tid) >= token_syllable_combos.size()) {
+            return true;
+        }
+        const auto &combos = token_syllable_combos[static_cast<size_t>(tid)];
+        if (combos.empty()) {
+            return true;
+        }
+        for (const std::string &combo : combos) {
+            size_t cur = 0;
+            size_t idx = 0;
+            bool ok = false;
+            while (cur <= combo.size()) {
+                const size_t sep = combo.find('\'', cur);
+                const size_t end = (sep == std::string::npos) ? combo.size() : sep;
+                if (idx == syl_index) {
+                    const size_t plen = end - cur;
+                    if (req_is_bare) {
+                        ok = (plen >= req_syl.size() && combo.compare(cur, req_syl.size(), req_syl) == 0);
+                    } else {
+                        ok = (plen == req_syl.size() && combo.compare(cur, plen, req_syl) == 0);
+                    }
+                    break;
+                }
+                if (sep == std::string::npos) break;
+                cur = sep + 1;
+                ++idx;
+            }
+            if (ok) return true;
+        }
+        return false;
+    }
+
+    // 单音节输入信道停止先验代价（nats/额外右延汉字）：
+    // 当用户仅敲入 1 个音节（如 `xian`、`hui`）停下选单字时，精确落在该单字边界的 token（`extra_right_chars == 0`，
+    // 含独立单字 `先`/`没` 与左边界愈合词 `也没`/`好的`）信道权重为 1.0（0.0 nats）；
+    // 而向右吞并多音节成词的 BPE 整词 token（如 `现在`、`回复`、`没有`）对应用户本可通过多音节连打输入的整词，
+    // 按单字停顿信道概率折算 `-1.65 nats/字`，既保留高频虚词单字的必要边际化支撑，又杜绝黏着语素（如 `现` 借 `现在`）压倒独立单字（`先`）。
+    static constexpr double kSingleCharRightExtStopPenalty = 1.65;
+
+    /// 对给定 `log_probs` 数组计算所有以 `prefix_utf8`（首汉字为 `first_cp`）开头的 BPE token 加权概率之和的对数。
     double sum_prefix_log_probs_vec(
         const std::vector<float> &log_probs,
         char32_t first_cp,
-        const std::string &prefix_utf8) const {
+        const std::string &prefix_utf8,
+        const std::string &req_single_syl = "",
+        bool req_is_bare = false,
+        bool apply_stop_prior = false) const {
         auto it = hanzi_prefix_tokens.find(first_cp);
         if (it == hanzi_prefix_tokens.end() || it->second.empty()) return -1e9;
-        const bool match_any_with_cp = (prefix_utf8.size() <= 4 && count_utf8_codepoints(prefix_utf8) == 1);
+        const int32_t prefix_chars = std::max<int32_t>(1, count_utf8_codepoints(prefix_utf8));
+        const size_t cand_syl_idx = static_cast<size_t>(prefix_chars - 1);
+        const bool match_any_with_cp = (prefix_utf8.size() <= 4 && prefix_chars == 1);
         double max_lp = -1e9;
         bool found = false;
         for (llama_token tid : it->second) {
@@ -888,7 +1034,16 @@ struct NeuralEngine::Impl {
                     continue;
                 }
             }
-            const double lp = static_cast<double>(log_probs[static_cast<size_t>(tid)]);
+            const int32_t tok_chars = std::max<int32_t>(prefix_chars, token_char_lens[static_cast<size_t>(tid)]);
+            const int32_t extra_right = tok_chars - prefix_chars;
+            if (apply_stop_prior && !req_single_syl.empty() && (extra_right > 0 || cand_syl_idx > 0) &&
+                !token_syllable_at_matches(tid, cand_syl_idx, req_single_syl, req_is_bare)) {
+                continue;
+            }
+            const double stop_adj = (apply_stop_prior && extra_right > 0)
+                ? (-kSingleCharRightExtStopPenalty * static_cast<double>(std::min<int32_t>(extra_right, 3)))
+                : 0.0;
+            const double lp = static_cast<double>(log_probs[static_cast<size_t>(tid)]) + stop_adj;
             if (!found || lp > max_lp) {
                 max_lp = lp;
                 found = true;
@@ -904,7 +1059,16 @@ struct NeuralEngine::Impl {
                     continue;
                 }
             }
-            const double diff = static_cast<double>(log_probs[static_cast<size_t>(tid)]) - max_lp;
+            const int32_t tok_chars = std::max<int32_t>(prefix_chars, token_char_lens[static_cast<size_t>(tid)]);
+            const int32_t extra_right = tok_chars - prefix_chars;
+            if (apply_stop_prior && !req_single_syl.empty() && (extra_right > 0 || cand_syl_idx > 0) &&
+                !token_syllable_at_matches(tid, cand_syl_idx, req_single_syl, req_is_bare)) {
+                continue;
+            }
+            const double stop_adj = (apply_stop_prior && extra_right > 0)
+                ? (-kSingleCharRightExtStopPenalty * static_cast<double>(std::min<int32_t>(extra_right, 3)))
+                : 0.0;
+            const double diff = (static_cast<double>(log_probs[static_cast<size_t>(tid)]) + stop_adj) - max_lp;
             if (diff > -25.0) {
                 sum_exp += std::exp(diff);
             }
@@ -912,11 +1076,13 @@ struct NeuralEngine::Impl {
         return max_lp + std::log(std::max(sum_exp, 1e-30));
     }
 
-    /// 对原始 logits 指针与 `log_z` 计算所有以单汉字 `first_cp` 开头的 BPE token 概率之和的对数。
+    /// 对原始 logits 指针与 `log_z` 计算所有以单汉字 `first_cp` 开头的 BPE token 加权概率之和的对数。
     double sum_hanzi_prefix_log_probs_logits(
         const float *logits,
         double log_z,
-        char32_t first_cp) const {
+        char32_t first_cp,
+        const std::string &req_single_syl = "",
+        bool req_is_bare = false) const {
         if (!logits) return -1e9;
         auto it = hanzi_prefix_tokens.find(first_cp);
         if (it == hanzi_prefix_tokens.end() || it->second.empty()) return -1e9;
@@ -924,7 +1090,16 @@ struct NeuralEngine::Impl {
         bool found = false;
         for (llama_token tid : it->second) {
             if (tid < 0 || tid >= n_vocab) continue;
-            const double v = static_cast<double>(logits[tid]);
+            const int32_t tok_chars = std::max<int32_t>(1, token_char_lens[static_cast<size_t>(tid)]);
+            const int32_t extra_right = tok_chars - 1;
+            if (extra_right > 0 && !req_single_syl.empty() &&
+                !token_syllable_at_matches(tid, 0, req_single_syl, req_is_bare)) {
+                continue;
+            }
+            const double stop_adj = (extra_right > 0)
+                ? (-kSingleCharRightExtStopPenalty * static_cast<double>(std::min<int32_t>(extra_right, 3)))
+                : 0.0;
+            const double v = static_cast<double>(logits[tid]) + stop_adj;
             if (!found || v > max_v) {
                 max_v = v;
                 found = true;
@@ -934,7 +1109,16 @@ struct NeuralEngine::Impl {
         double sum_exp = 0.0;
         for (llama_token tid : it->second) {
             if (tid < 0 || tid >= n_vocab) continue;
-            const double diff = static_cast<double>(logits[tid]) - max_v;
+            const int32_t tok_chars = std::max<int32_t>(1, token_char_lens[static_cast<size_t>(tid)]);
+            const int32_t extra_right = tok_chars - 1;
+            if (extra_right > 0 && !req_single_syl.empty() &&
+                !token_syllable_at_matches(tid, 0, req_single_syl, req_is_bare)) {
+                continue;
+            }
+            const double stop_adj = (extra_right > 0)
+                ? (-kSingleCharRightExtStopPenalty * static_cast<double>(std::min<int32_t>(extra_right, 3)))
+                : 0.0;
+            const double diff = (static_cast<double>(logits[tid]) + stop_adj) - max_v;
             if (diff > -25.0) {
                 sum_exp += std::exp(diff);
             }
@@ -1172,7 +1356,10 @@ struct NeuralEngine::Impl {
         std::vector<CandidateScoreDiag> *out_diags,
         ScoreStats &stats,
         std::string &error_out,
-        bool im_boundary_calibration = false) {
+        bool im_boundary_calibration = false,
+        const std::string &right_suffix = "",
+        const std::string &req_single_syl = "",
+        bool req_single_is_bare = false) {
         const auto start = Clock::now();
         stats = ScoreStats{};
         stats.candidate_count = static_cast<int32_t>(candidates.size());
@@ -1266,18 +1453,22 @@ struct NeuralEngine::Impl {
         std::vector<llama_token> healed_toks;
         int32_t total_cand_tokens = 0;
 
+        const bool has_right_suffix = !right_suffix.empty();
         for (size_t i = 0; i < candidates.size(); ++i) {
             if (candidates[i].empty()) continue;
+            const std::string eval_text = has_right_suffix ? (candidates[i] + right_suffix) : candidates[i];
             auto &toks = cand_tokens[i];
-            if (!tokenize_raw(candidates[i], toks) || toks.empty()) continue;
+            if (!tokenize_raw(eval_text, toks) || toks.empty()) continue;
             if (static_cast<int32_t>(toks.size()) > max_cand_len) {
                 toks.resize(static_cast<size_t>(max_cand_len));
             }
             total_cand_tokens += static_cast<int32_t>(toks.size());
 
-            // 检测是否为单汉字候选（供右边界精确 BPE 前缀边际化使用）。
+            // 仅在无右侧现成后文时启用单字右边界 BPE 前缀边际化；
+            // 有右侧后文（句中内填）时 `eval_text` 已直接携带真实后文并精确完成左右两侧 BPE 合并。
             bool is_single_hanzi = false;
-            if (im_boundary_calibration &&
+            if (!has_right_suffix &&
+                im_boundary_calibration &&
                 decode_strict_utf8_hanzi(candidates[i].data(), candidates[i].size(), 1, tmp_cps) &&
                 tmp_cps.size() == 1) {
                 is_single_hanzi = true;
@@ -1289,9 +1480,9 @@ struct NeuralEngine::Impl {
             bool merged_with_prev = false;
             if (can_heal) {
                 std::string combined;
-                combined.reserve(cached_ctx_last_piece.size() + candidates[i].size());
+                combined.reserve(cached_ctx_last_piece.size() + eval_text.size());
                 combined.append(cached_ctx_last_piece);
-                combined.append(candidates[i]);
+                combined.append(eval_text);
                 if (tokenize_raw(combined, healed_toks) &&
                     !healed_toks.empty() &&
                     healed_toks[0] != cached_ctx_last_token) {
@@ -1544,11 +1735,11 @@ struct NeuralEngine::Impl {
                             }
                             child.scored = true;
                         }
-                        // 对隐式逗号节点顺带计算全部单字候选的精确前缀边际对数概率（零额外推理）。
+                        // 对隐式逗号节点顺带计算全部单字候选的加权前缀边际对数概率（零额外推理）。
                         if (node_id == comma_node_id && !single_hanzi_indices.empty()) {
                             for (size_t idx : single_hanzi_indices) {
-                                cand_comma_prefix_lp[idx] =
-                                    sum_hanzi_prefix_log_probs_logits(logits, log_z, cand_single_cp[idx]);
+                                cand_comma_prefix_lp[idx] = sum_hanzi_prefix_log_probs_logits(
+                                    logits, log_z, cand_single_cp[idx], req_single_syl, req_single_is_bare);
                             }
                         }
                         node_children_scored[static_cast<size_t>(node_id)] = 1;
@@ -1589,8 +1780,10 @@ struct NeuralEngine::Impl {
             bool used_healed = false;
 
             if (cand_single_cp[i] != 0) {
-                // 单字精确 BPE 前缀边际化：直连全部以 `c` 开头的词 + 跨上文合并全部以 `s_last + c` 开头的词。
-                double lp_dir = sum_prefix_log_probs_vec(cached_ctx_log_probs, cand_single_cp[i], candidates[i]);
+                // 单字 BPE 前缀边际化（带单音节停顿信道先验与多音字读音一致性过滤）：
+                // 精确落在单字边界的 token（含左边界合并如 `也没`、`好的`）保持 1.0 权重，右延多字整词按 `-1.65 nats/字` 折算。
+                double lp_dir = sum_prefix_log_probs_vec(
+                    cached_ctx_log_probs, cand_single_cp[i], candidates[i], req_single_syl, req_single_is_bare, true);
                 if (lp_dir <= -1e8 && end_id > 0 && trie[static_cast<size_t>(end_id)].scored) {
                     lp_dir = trie[static_cast<size_t>(end_id)].cum_log_prob;
                 }
@@ -1604,7 +1797,12 @@ struct NeuralEngine::Impl {
                     merged_prefix.append(cached_ctx_last_piece);
                     merged_prefix.append(candidates[i]);
                     const double raw_heal = sum_prefix_log_probs_vec(
-                        cached_ctx_prev_log_probs, cached_ctx_last_first_cp, merged_prefix);
+                        cached_ctx_prev_log_probs,
+                        cached_ctx_last_first_cp,
+                        merged_prefix,
+                        req_single_syl,
+                        req_single_is_bare,
+                        true);
                     if (raw_heal > -1e8) {
                         lp_heal = raw_heal - cached_ctx_last_prefix_log_z;
                     }
@@ -1644,7 +1842,9 @@ struct NeuralEngine::Impl {
                 CandidateScoreDiag diag{};
                 diag.total_lp = total_lp;
                 diag.char_count = std::max<int32_t>(1, count_utf8_codepoints(candidates[i]));
-                diag.avg_char_lp = total_lp / static_cast<double>(diag.char_count);
+                const int32_t right_chars = has_right_suffix ? count_utf8_codepoints(right_suffix) : 0;
+                const int32_t eval_chars = std::max<int32_t>(1, diag.char_count + right_chars);
+                diag.avg_char_lp = total_lp / static_cast<double>(eval_chars);
 
                 if (cand_single_cp[i] != 0) {
                     // 单字候选已由精确前缀边际化（含左边界 Token Healing 与隐式逗号）得到整体对数概率，
@@ -2339,6 +2539,13 @@ struct NeuralEngine::Impl {
             }
         }
         const size_t primary_n = parsed_paths.empty() ? 0 : parsed_paths[0].syllables.size();
+        const std::string right_suffix = extract_inline_right_suffix(req.get_string("right_context"), 5);
+        std::string req_single_syl;
+        bool req_single_is_bare = false;
+        if (primary_n == 1 && !parsed_paths[0].syllables.empty()) {
+            req_single_syl = parsed_paths[0].syllables[0];
+            req_single_is_bare = !parsed_paths[0].is_complete;
+        }
         // 按句长自适应控制前缀树上限：短中句满额收容 16 条（承接全部 1-Span 混淆网络扰动），
         // 14+ 音节超长句保留 14 条以兼顾长句混淆网络召回与低延迟窗口。
         const size_t cand_cap = (primary_n >= 14) ? 14 : 16;
@@ -2368,7 +2575,17 @@ struct NeuralEngine::Impl {
         std::vector<CandidateScoreDiag> diags;
         ScoreStats score_stats{};
         if (!unique_cands.empty()) {
-            if (!score_candidates_with_diag_locked(nullptr, unique_cands, scores, &diags, score_stats, err, true)) {
+            if (!score_candidates_with_diag_locked(
+                    nullptr,
+                    unique_cands,
+                    scores,
+                    &diags,
+                    score_stats,
+                    err,
+                    true,
+                    right_suffix,
+                    req_single_syl,
+                    req_single_is_bare)) {
                 return make_err(err);
             }
         }
@@ -2453,6 +2670,33 @@ struct NeuralEngine::Impl {
                 if (!decode_constrained_locked(
                         nullptr, parsed_paths, beam_width, max_results, 1, beam_results, beam_stats, err)) {
                     return make_err(err);
+                }
+            }
+
+            if (beam_ran && !beam_results.empty() && !right_suffix.empty()) {
+                // 句中内填触发受限束搜索时，将束候选统一拼接右侧后文重打分，保证与 Stage A 对数概率尺度严格一致。
+                std::vector<std::string> beam_texts;
+                beam_texts.reserve(beam_results.size());
+                for (const auto &bc : beam_results) {
+                    beam_texts.push_back(bc.text);
+                }
+                std::vector<double> beam_infill_scores;
+                ScoreStats rescore_stats{};
+                if (score_candidates_with_diag_locked(
+                        nullptr,
+                        beam_texts,
+                        beam_infill_scores,
+                        nullptr,
+                        rescore_stats,
+                        err,
+                        true,
+                        right_suffix)) {
+                    for (size_t i = 0; i < beam_results.size(); ++i) {
+                        beam_results[i].log_prob = beam_infill_scores[i];
+                    }
+                    std::sort(beam_results.begin(), beam_results.end(), [](const BeamCandidate &a, const BeamCandidate &b) {
+                        return a.log_prob > b.log_prob;
+                    });
                 }
             }
         }

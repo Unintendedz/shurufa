@@ -203,6 +203,8 @@ pub struct Runtime<E: InputEngine = Session> {
     pub(crate) neural_v2_enabled: bool,
     /// 光标前完整上文（至多 512 字，完整保留中文标点、空格、ASCII 与 Emoji，供 Tier 1 KV-Cache 预热与打分）。
     pub(crate) neural_context: String,
+    /// 光标后同行现成后文（至多 16 字，遇换行截断，供句中补字双向消歧）。
+    pub(crate) neural_right_context: String,
     /// 当前代次已派发的 Tier 1 请求快照，供回包融合时对齐候选元数据。
     pub(crate) neural_pending_request: Option<msime_engine::neural_v2::NeuralDecodeRequest>,
     /// Tier 1 全局 3 参数融合权重。
@@ -1138,6 +1140,7 @@ impl<E: InputEngine> Runtime<E> {
             settled_lock_leader: false,
             neural_v2_enabled: false,
             neural_context: String::new(),
+            neural_right_context: String::new(),
             neural_pending_request: None,
             neural_fusion_weights:
                 msime_engine::neural_v2::NeuralFusionWeights::from_env_or_default(),
@@ -1485,10 +1488,24 @@ impl<E: InputEngine> Runtime<E> {
             return None;
         }
 
+        // 无左、右上下文且为单音节未纠错词典单字查询时，无需派发端侧推理，直接保持 Tier 0 词频基线且零闪烁。
+        let has_any_context =
+            !self.neural_context.trim().is_empty() || !self.neural_right_context.trim().is_empty();
+        let has_single_char_exact_dict = candidates.iter().any(|c| {
+            c.char_count == 1
+                && (c.source == msime_engine::CandidateSource::Database as u8
+                    || c.source == msime_engine::CandidateSource::UserDatabase as u8)
+                && c.channel_log_prob == 0.0
+        });
+        if !has_any_context && primary_syllables == 1 && has_single_char_exact_dict {
+            return None;
+        }
+
         let request = NeuralDecodeRequest {
             session: self.session,
             generation: self.generation,
             context: self.neural_context.clone(),
+            right_context: self.neural_right_context.clone(),
             raw_input,
             segmentation,
             syllable_paths,
@@ -1953,6 +1970,7 @@ impl<E: InputEngine> Runtime<E> {
     pub fn clear_context(&mut self) {
         self.ai_context.clear();
         self.neural_context.clear();
+        self.neural_right_context.clear();
         self.engine.set_rescoring_context("");
     }
 
@@ -1964,6 +1982,8 @@ impl<E: InputEngine> Runtime<E> {
     /// - 若非空且当前 `ai_context` 已以这段前文结尾，说明光标仍停在本会话刚上屏的位置，保留完整 `ai_context` 与引擎词序链；
     /// - 否则说明前文是现成文本，或用户移动了光标、粘贴、删除了文字，切断引擎旧词序链并替换为当前光标前文本。
     pub fn set_surrounding_context(&mut self, text: &str) {
+        // 每次同步光标前文时默认清空旧后文；若光标位于句中，宿主紧随其后调用 `set_following_context` 写入实时后文。
+        self.neural_right_context.clear();
         if !self.focused {
             self.ai_context.clear();
             self.neural_context.clear();
@@ -1986,6 +2006,18 @@ impl<E: InputEngine> Runtime<E> {
             self.ai_context.clear();
             self.ai_context.push_str(cleaned.as_ref());
             self.engine.set_rescoring_context(&self.ai_context);
+        }
+    }
+
+    /// 组字开始前同步光标右侧同行现成后文（供句中补字双向消歧，遇换行自动截断，至多 16 字）。
+    pub fn set_following_context(&mut self, text: &str) {
+        self.neural_right_context.clear();
+        if !self.focused {
+            return;
+        }
+        let cleaned = sanitize_neural_right_context(text);
+        if !cleaned.is_empty() {
+            self.neural_right_context.push_str(cleaned.as_ref());
         }
     }
 
@@ -2833,6 +2865,7 @@ impl<E: InputEngine> Runtime<E> {
         if !self.focused {
             self.ai_context.clear();
             self.neural_context.clear();
+            self.neural_right_context.clear();
         } else {
             self.ai_context.push_str(text);
             if self.ai_context.len() > 1024 {
@@ -4073,6 +4106,8 @@ impl<E: InputEngine> Runtime<E> {
         // from one application into another. The Engine's committed-word context follows the same rule: the next word
         // no longer follows the last one, and no later pick may take back what a commit in the other client taught.
         self.ai_context.clear();
+        self.neural_context.clear();
+        self.neural_right_context.clear();
         self.engine.set_rescoring_context("");
         self.engine.reset_context();
         let mut transition = self.transition(result);
@@ -4921,6 +4956,21 @@ fn sanitize_neural_context(text: &str) -> std::borrow::Cow<'_, str> {
     } else {
         std::borrow::Cow::Owned(tail.to_owned())
     }
+}
+
+/// 为 Tier 1 神经后文过滤非法控制字符，遇换行截断并保留头部至多 16 字。
+fn sanitize_neural_right_context(text: &str) -> std::borrow::Cow<'_, str> {
+    let head = msime_engine::neural_v2::neural_right_context_window(text);
+    if head.is_empty() {
+        return std::borrow::Cow::Borrowed("");
+    }
+    let allowed_char = |c: char| c != '\u{fffc}' && (!c.is_control() || c == '\t');
+    if head.chars().all(allowed_char) {
+        return std::borrow::Cow::Borrowed(head);
+    }
+    let cleaned: String = head.chars().filter(|&c| allowed_char(c)).collect();
+    let trimmed = msime_engine::neural_v2::neural_right_context_window(&cleaned);
+    std::borrow::Cow::Owned(trimmed.to_owned())
 }
 
 /// 过滤富文本附件占位符（`U+FFFC`）及 `query_candidates` 拒收的控制字符，并按字符边界保留末尾至多 1024 字节。

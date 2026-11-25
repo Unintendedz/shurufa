@@ -227,3 +227,36 @@ fn runtime_neural_v2_rejects_stale_generation_and_honors_slot0_lock() {
     assert_eq!(view.candidates[0].text, "整了血铅");
     assert_eq!(view.candidates[1].text, "挣了些钱");
 }
+
+#[test]
+fn runtime_neural_v2_skips_zero_context_single_char_and_propagates_following_context() {
+    let mut engine = StubNeuralEngine::composing(
+        "xian",
+        "xian",
+        &[("先", true, Some(-4_100)), ("现", true, Some(-4_460))],
+    );
+    engine.snapshot.candidate_sources = vec![
+        CandidateSource::Database as u8,
+        CandidateSource::Database as u8,
+    ];
+    let mut runtime = Runtime::new(engine, 6).unwrap();
+    runtime.focused = true;
+    runtime.set_neural_v2_enabled(true);
+
+    // 无前文且无后文时，单音节词典单字不派发冗余推理请求。
+    assert!(runtime.take_neural_request().is_none());
+
+    // 句中补字同步前文与后文后，请求完整携带 `context` 与换行截断后的 `right_context`。
+    runtime.set_surrounding_context("你发送看看，");
+    runtime.set_following_context("看会不会有被拒绝的\n第二行");
+    let req = runtime
+        .take_neural_request()
+        .expect("有双向上下文时应派发请求");
+    assert_eq!(req.context, "你发送看看，");
+    assert_eq!(req.right_context, "看会不会有被拒绝的");
+
+    // 下一次仅同步前文（光标移到句尾）时自动清空旧后文，杜绝跨位置残留。
+    runtime.set_surrounding_context("你发送看看，先看会不会有被拒绝的");
+    let req_end = runtime.take_neural_request().expect("有前文时应派发请求");
+    assert!(req_end.right_context.is_empty());
+}

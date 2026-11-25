@@ -838,6 +838,16 @@ int main() {
         client.document = nil;
         client.documentSelection = NSMakeRange(0, 0);
         assert(MSIMETextClientPrecedingContext(client, 96, NO, &proved) == nil && !proved);
+
+        // 光标后现成文本读取：支持不裁剪越界范围的客户端，并安全剥离尾端截断的孤立高代理。
+        client.document = @"你发送看看，看会不会😀后文";
+        client.documentSelection = NSMakeRange(6, 0);
+        assert([MSIMETextClientFollowingContext(client, 32) isEqual:@"看会不会😀后文"]);
+        // 截断恰落在 😀（偏移 4..6）的高代理位时，自动剥离尾端孤立高代理。
+        assert([MSIMETextClientFollowingContext(client, 5) isEqual:@"看会不会"]);
+        // 光标在文档末尾时无后文。
+        client.documentSelection = NSMakeRange(client.document.length, 0);
+        assert(MSIMETextClientFollowingContext(client, 32) == nil);
     }
     return 0;
 }

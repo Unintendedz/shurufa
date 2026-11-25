@@ -161,10 +161,15 @@ inline NSString *ReadAXFullFieldTextFromElement(AXUIElementRef focus, NSUInteger
     return TrimSurrogateEdges([fullText substringToIndex:maxUTF16Units]);
 }
 
-/// 当客户端未通过 `IMKTextInput` 返回文档文本（典型如 Electron / Chromium 输入框）时，
-/// 在已获辅助功能授权的前提下以 20 毫秒超时读取焦点控件光标前的文本；不弹窗请求权限，安全密码框一律拒绝。
-inline NSString *ReadAXPrecedingContext(NSString *clientBundle, NSUInteger maxUTF16Units) {
-    if (!clientBundle.length || !maxUTF16Units || IsTerminalBundleIdentifier(clientBundle) || !AXIsProcessTrusted())
+/// 在单次焦点元素查询中同时读取光标前与光标后现成文本（20 ms 超时，安全密码框一律拒绝）；
+/// `maxFollowingUTF16Units == 0` 或 `outFollowing == nullptr` 时仅读取光标前文本。
+inline NSString *ReadAXSurroundingContext(
+    NSString *clientBundle,
+    NSUInteger maxPrecedingUTF16Units,
+    NSUInteger maxFollowingUTF16Units,
+    NSString **outFollowing) {
+    if (outFollowing) *outFollowing = nil;
+    if (!clientBundle.length || !maxPrecedingUTF16Units || IsTerminalBundleIdentifier(clientBundle) || !AXIsProcessTrusted())
         return nil;
     NSRunningApplication *front = NSWorkspace.sharedWorkspace.frontmostApplication;
     if (front.processIdentifier <= 0 || ![front.bundleIdentifier isEqualToString:clientBundle])
@@ -188,7 +193,17 @@ inline NSString *ReadAXPrecedingContext(NSString *clientBundle, NSUInteger maxUT
         AXUIElementSetMessagingTimeout(focus, 0.02f) != kAXErrorSuccess)
         return nil;
 
-    return ReadAXPrecedingContextFromElement(focus, maxUTF16Units);
+    NSString *preceding = ReadAXPrecedingContextFromElement(focus, maxPrecedingUTF16Units);
+    if (preceding && outFollowing && maxFollowingUTF16Units > 0) {
+        *outFollowing = ReadAXFollowingContextFromElement(focus, maxFollowingUTF16Units);
+    }
+    return preceding;
+}
+
+/// 当客户端未通过 `IMKTextInput` 返回文档文本（典型如 Electron / Chromium 输入框）时，
+/// 在已获辅助功能授权的前提下以 20 毫秒超时读取焦点控件光标前的文本；不弹窗请求权限，安全密码框一律拒绝。
+inline NSString *ReadAXPrecedingContext(NSString *clientBundle, NSUInteger maxUTF16Units) {
+    return ReadAXSurroundingContext(clientBundle, maxUTF16Units, 0, nullptr);
 }
 
 }
