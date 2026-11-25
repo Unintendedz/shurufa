@@ -44,15 +44,16 @@ use msime_engine::host::{
     ShuangpinCustomTable, ShuangpinCustomTablePart,
 };
 use msime_engine::{SchemeSet, SchemeType, ShuangpinProfileKind};
-#[cfg(unix)]
-use msime_input_runtime::TranslationQuery;
-#[cfg(unix)]
-use msime_input_runtime::UnixSocketProvider;
+use msime_input_runtime::EmojiPanelQuery;
 use msime_input_runtime::{
     Action, AiAssistantProviderConfig, CandidateId, CharacterWidth, OnlineCandidate, OnlineQuery,
     Runtime, Transition, TranslationService,
 };
-use msime_input_runtime::EmojiPanelQuery;
+#[cfg(unix)]
+use msime_input_runtime::{
+    NeuralServiceClient, TranslationQuery, UnixSocketProvider, NEURAL_PREFILL_DEBOUNCE,
+    NEURAL_PROVISIONAL_WINDOW,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::cell::RefCell;
@@ -60,6 +61,7 @@ use std::collections::HashMap;
 use std::ffi::{c_char, CString};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
 // Only the Unix socket streaming entry point takes raw callback context.
 #[cfg(unix)]
 use std::ffi::c_void;
@@ -245,6 +247,10 @@ struct HostSession {
     resources_pending: bool,
     /// 生命周期核心的状态，只由 `msime_client_set_lifecycle` 设上。为 `None` 时不推导任何事件，transition JSON 逐字节不变。
     lifecycle: Option<Box<lifecycle::LifecycleState>>,
+    #[cfg(unix)]
+    neural_client: Option<Arc<NeuralServiceClient>>,
+    #[cfg(unix)]
+    last_neural_prefilled_context: Option<String>,
     // Declared after runtime so the Engine is dropped before releasing access.
     _dictionary_access: DictionaryAccess,
 }
@@ -410,6 +416,64 @@ fn engine_chinese_punctuation(enabled: bool, lock: u8) -> bool {
 }
 
 impl HostSession {
+    fn is_private_or_secure(&self) -> bool {
+        self.statistics_private
+            || self.lifecycle.as_deref().is_some_and(|state| {
+                state.context().traits & (lifecycle::TRAIT_SECURE | lifecycle::TRAIT_PRIVATE) != 0
+            })
+    }
+
+    #[cfg(unix)]
+    fn neural_v2_active(&self) -> bool {
+        self.edition.id == "shurufa"
+            && self.runtime.neural_v2_enabled()
+            && self.runtime.is_focused()
+            && !self.english_mode
+            && !self.is_private_or_secure()
+            && self
+                .neural_client
+                .as_ref()
+                .is_some_and(|c| c.is_available())
+    }
+
+    #[cfg(not(unix))]
+    fn neural_v2_active(&self) -> bool {
+        false
+    }
+
+    #[cfg(unix)]
+    fn schedule_neural_prefill_if_idle(&mut self) {
+        if !self.neural_v2_active() || !self.runtime.is_idle() {
+            return;
+        }
+        let ctx = self.runtime.neural_prefill_context().to_owned();
+        if self.last_neural_prefilled_context.as_deref() == Some(ctx.as_str()) {
+            return;
+        }
+        if let Some(client) = self.neural_client.as_ref() {
+            self.last_neural_prefilled_context = Some(ctx.clone());
+            client.schedule_prefill(ctx, NEURAL_PREFILL_DEBOUNCE);
+        }
+    }
+
+    #[cfg(unix)]
+    fn prefill_neural_now_if_changed(&mut self) {
+        if !self.neural_v2_active() {
+            return;
+        }
+        let ctx = self.runtime.neural_prefill_context().to_owned();
+        if self.last_neural_prefilled_context.as_deref() == Some(ctx.as_str()) {
+            return;
+        }
+        if let Some(client) = self.neural_client.as_ref() {
+            self.last_neural_prefilled_context = Some(ctx.clone());
+            client.prefill_context(&ctx);
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn prefill_neural_now_if_changed(&mut self) {}
+
     /// 判断一个标点键去向所用的上下文。`msime_client_punctuation_with_context` 和大写锁定改道（[`Self::caps_lock_punctuation`]）用的是同一份。
     fn punctuation_context(&self, character: u8, preceding: Option<char>) -> PunctuationContext {
         let lock = match self.punctuation_lock_override {
@@ -2333,6 +2397,31 @@ fn dispatch_value(
         // 大写锁定改道先于其余处理，后面看到的都是改道后的动作。
         let action = session.caps_lock_punctuation(action);
         let action = session.runtime.candidate_shortcut(action);
+        #[cfg(unix)]
+        if matches!(
+            action,
+            Action::SelectHighlighted | Action::Command(Command::CommitCandidate) | Action::Finish
+        ) && session.neural_v2_active()
+        {
+            if let Some((target_gen, remaining)) =
+                session.runtime.provisional_remaining(Instant::now())
+            {
+                if !remaining.is_zero() {
+                    let response = session.neural_client.as_ref().and_then(|client| {
+                        client.wait_for_decode_generation(
+                            session.runtime.session_id(),
+                            target_gen,
+                            remaining,
+                        )
+                    });
+                    if let Some(resp) = response {
+                        let _ = session.runtime.apply_neural_response(&resp, false);
+                    }
+                }
+                session.runtime.mark_presented(target_gen);
+            }
+        }
+        let prev_comp_epoch = session.runtime.composition_epoch();
         let currency_punctuation = matches!(
             action,
             Action::Character { value: b'$', .. } | Action::Punctuation(b'$')
@@ -2374,6 +2463,48 @@ fn dispatch_value(
         let mut result = session.complete_transition(result);
         // 脚本插件可能在这里改写上屏的 body（`before_commit`），宿主拿到的是改写之后的文本；引擎学习和 AI 上文已经按原文记下。
         let feedback = session.lifecycle_after(pending, facts, &mut result);
+        #[cfg(unix)]
+        if session.neural_v2_active() {
+            let session_id = session.runtime.session_id();
+            let post_comp_epoch = session.runtime.composition_epoch();
+            let had_commit = result
+                .commit
+                .as_deref()
+                .is_some_and(|commit| !commit.is_empty());
+            if !had_commit
+                && post_comp_epoch != prev_comp_epoch
+                && !result.view.editing_text.is_empty()
+                && result.view.page == 0
+                && !result.view.prediction
+                && !result.view.dedicated_english
+                && result.view.local_mode == "none"
+                && result.view.conversion.is_empty()
+                && !result.view.caret_edit_suffix
+                && result
+                    .view
+                    .candidates
+                    .first()
+                    .is_some_and(|candidate| candidate.highlighted)
+            {
+                if let Some(req) = session.runtime.take_neural_request() {
+                    let enqueued = session.neural_client.as_ref().is_some_and(|client| {
+                        client.enqueue_decode(session_id, &req, NEURAL_PROVISIONAL_WINDOW)
+                    });
+                    if enqueued {
+                        session
+                            .runtime
+                            .begin_provisional(req.generation, NEURAL_PROVISIONAL_WINDOW);
+                        result.view.provisional = session.runtime.is_provisional();
+                    }
+                }
+            } else if had_commit && result.view.editing_text.is_empty() {
+                session.schedule_neural_prefill_if_idle();
+            } else if result.view.editing_text.is_empty() {
+                if let Some(client) = session.neural_client.as_ref() {
+                    client.cancel_pending_decode_for_session(session_id);
+                }
+            }
+        }
         let mut value = serde_json::to_value(result).map_err(|e| e.to_string())?;
         if let (Some(effect), Value::Object(fields)) = (feedback, &mut value) {
             fields.insert("feedback".into(), json!({ "typing_effect": effect }));

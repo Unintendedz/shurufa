@@ -2493,10 +2493,7 @@ fn creating_a_session_records_the_resources_it_loaded_for_dictionary_updates() {
 // 宿主为全拼九键打开的覆盖不能带进注音：从全拼切到注音时按注音自己的布局判断，没选「注音 9 键」就是大千键位。
 #[test]
 fn the_repeat_gesture_arms_except_in_schemes_that_write_no_chinese_marks() {
-    for (scheme, arms) in [
-        (InputScheme::Quanpin, true),
-        (InputScheme::Shuangpin, true),
-    ] {
+    for (scheme, arms) in [(InputScheme::Quanpin, true), (InputScheme::Shuangpin, true)] {
         let dir = tempfile::tempdir().unwrap();
         let handle = test_host_preferences(
             dir.path(),
@@ -9459,13 +9456,7 @@ fn effective_scheme_falls_back_to_the_last_chinese_scheme_then_quanpin() {
         (Vietnamese, None, &all[..], Vietnamese, OFFERED),
         (Tibetan, None, &all[..], Tibetan, OFFERED),
         (Cantonese, None, &all[..], Cantonese, OFFERED),
-        (
-            Zhuyin,
-            Some(ChineseScheme::Wubi),
-            &all[..],
-            Zhuyin,
-            OFFERED,
-        ),
+        (Zhuyin, Some(ChineseScheme::Wubi), &all[..], Zhuyin, OFFERED),
         // An unsupported scheme returns to the last Chinese scheme, else 全拼.
         (
             Vietnamese,
@@ -9565,8 +9556,7 @@ fn the_fallback_scheme_is_the_edition_default() {
             last_chinese_scheme: last,
             ..Preferences::default()
         };
-        let (effective, diagnostic) =
-            effective_scheme(&preferences, &offered, wubi.default_scheme);
+        let (effective, diagnostic) = effective_scheme(&preferences, &offered, wubi.default_scheme);
         assert_eq!(effective, InputScheme::Wubi, "{scheme:?} after {last:?}");
         assert!(diagnostic.unwrap().contains("does not offer"));
         let (full, _) = effective_scheme(

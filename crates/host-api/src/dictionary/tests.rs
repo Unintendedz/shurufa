@@ -487,11 +487,7 @@ fn a_lookup_names_where_each_candidate_came_from_and_leaves_the_user_data_alone(
     assert_eq!(candidates[0].origin, CandidateOrigin::UserWord);
     assert_eq!(candidates[0].weight, Some(900));
 
-    for (scheme, code) in [
-        (None, ""),
-        (None, "Ceshi"),
-        (None, "ce;shi"),
-    ] {
+    for (scheme, code) in [(None, ""), (None, "Ceshi"), (None, "ce;shi")] {
         assert!(
             lookup_candidates(&options, scheme, code, 5).is_err(),
             "{code}"

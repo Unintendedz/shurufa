@@ -919,6 +919,23 @@ enum MsimeCommand {
 char *msime_client_command(uint64_t session, uint32_t command);
 /* Shurufa v2 Tier 1 两阶段异步神经解码开关。 */
 char *msime_client_set_neural_v2_enabled(uint64_t session, bool enabled);
+/* 神经服务唤醒回调（可能从后台工作线程触发，宿主应尽快转回会话所在主线程再调用 `msime_client_poll_neural`）。 */
+typedef void (*MsimeNeuralWakeupFn)(void *opaque, uint64_t session, uint64_t generation);
+/* 配置并启用或关闭 Shurufa 端侧神经服务（纯 Rust 管理独立后台子进程、UDS 二进制帧、50 ms Prefill 防抖、
+ * ~28 ms Provisional 防闪窗及热态 Space 条件变量有界等待）。config_json 可传 NULL（使用会话 options 默认目录）。
+ * 返回 {"available": bool, "enabled": bool, "pid": number}。 */
+char *msime_client_configure_neural_service(uint64_t session,
+                                            const uint8_t *config_json,
+                                            size_t length,
+                                            MsimeNeuralWakeupFn wakeup,
+                                            void *opaque);
+/* 主线程收到唤醒回调后轮询：若当前代次解码已完成则按两阶段状态机融合（Provisional 期不锁槽 0，
+ * Presented 期硬锁槽 0 仅升级槽 1..），或当 ~28 ms Provisional 窗到期时推进至 Presented；
+ * 返回 {"ready": bool, "moved": bool, "provisional": bool, "view"?: View}。 */
+char *msime_client_poll_neural(uint64_t session);
+/* 用户在 ~28 ms Provisional 期内按下非字母 UI 控制键或展开候选面板时，立即结束等待窗口并转为 Presented，
+ * 返回 {"flushed": bool, "provisional": false, "view"?: View}。 */
+char *msime_client_flush_provisional_neural(uint64_t session);
 /* 组字开始前同步光标右侧同行现成后文（最多 4096 字节 UTF-8，遇换行截断保留头部至多 16 字），供句中补字双向消歧；隐私/安全字段清空上下文并返回 false，组字中返回 false 不改状态。 */
 char *msime_client_set_following_context(uint64_t session, const uint8_t *context, size_t length);
 /* 取出当前代次的 Tier 1 神经解码请求（含完整保留标点/空格的 512 字上文、可选同行后文、音节 DAG 路径与候选）；不可用时返回 value=null。 */

@@ -254,6 +254,7 @@ pub unsafe extern "C" fn msime_client_set_surrounding_context(
                 return Ok(Value::Bool(false));
             }
             session.runtime.set_surrounding_context(text);
+            session.prefill_neural_now_if_changed();
             Ok(Value::Bool(true))
         })
     })

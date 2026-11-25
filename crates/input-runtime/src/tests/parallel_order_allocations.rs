@@ -44,7 +44,10 @@ fn parallel_candidate_order_uses_one_cycle_buffer() {
                 .collect();
             assert_eq!(actual_order, order);
             for (seat, &row) in order.iter().enumerate() {
-                assert_eq!(runtime.cached.candidates[seat].text, format!("合成候选{row}"));
+                assert_eq!(
+                    runtime.cached.candidates[seat].text,
+                    format!("合成候选{row}")
+                );
                 assert_eq!(runtime.cached.candidates[seat].code, format!("k{row}"));
                 assert_eq!(
                     runtime.cached.candidates[seat].annotation,

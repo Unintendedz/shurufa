@@ -380,6 +380,7 @@ int main(int argc, const char *argv[]) {
         if ([shared respondsToSelector:@selector(stopClipboardCapture)]) [shared performSelector:@selector(stopClipboardCapture)];
         [sourceMonitor stop];
         if (!MSIMEEditionIsShurufa()) MSIMEUsageReportingStop();
+        msime_client_release_process_cache();
         (void)server;
     }
     return 0;

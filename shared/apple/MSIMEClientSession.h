@@ -72,6 +72,16 @@ FOUNDATION_EXPORT NSNotificationName const MSIMEClientSessionDidReplaceSnapshotN
 - (nullable NSDictionary *)pinGeneration:(uint64_t)generation index:(NSUInteger)index error:(NSError **)error;
 - (nullable NSDictionary *)removeGeneration:(uint64_t)generation index:(NSUInteger)index error:(NSError **)error;
 - (nullable NSDictionary<NSString *, id> *)viewWithError:(NSError **)error;
+/// 配置并启用或关闭 Shurufa 端侧神经服务（由纯 Rust 运行时管理独立子进程、UDS 二进制帧、
+/// 50 ms Prefill 防抖、~28 ms Provisional 防闪窗与热态 Space 条件变量有界等待）。
+@property (nonatomic, readonly) BOOL neuralV2Enabled;
+- (nullable NSDictionary *)configureNeuralServiceWithOptions:(nullable NSDictionary<NSString *, id> *)options
+                                               updateHandler:(nullable void (^)(uint64_t generation))updateHandler
+                                                       error:(NSError **)error;
+/// 主线程收到神经服务唤醒通知后轮询两阶段状态机；若 `ready` 为真，调用方应以返回的 `view` 重绘候选窗。
+- (nullable NSDictionary *)pollNeuralWithError:(NSError **)error;
+/// 在 ~28 ms Provisional 期内按下非字母控制键时立即冲刷至 `Presented` 态并返回最新视图。
+- (nullable NSDictionary *)flushProvisionalNeuralWithError:(NSError **)error;
 /// 启用或关闭 Shurufa v2 Tier 1 两阶段异步神经解码。
 - (BOOL)setNeuralV2Enabled:(BOOL)enabled error:(NSError **)error;
 /// 取出当前代次的 Tier 1 神经解码请求 JSON 字典；无请求时返回 nil（且 error 为 nil）。

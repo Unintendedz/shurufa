@@ -95,7 +95,10 @@ fn check_page(sources: Vec<u8>, page_size: u8) {
         assert_eq!(entry.source, sources[index]);
         assert!(!entry.corrected);
         assert!(entry.answers_key);
-        assert_eq!(entry.origin, msime_engine::CandidateOrigin::EngineRow(index));
+        assert_eq!(
+            entry.origin,
+            msime_engine::CandidateOrigin::EngineRow(index)
+        );
     }
     assert_eq!(runtime.cached.candidates.len(), expected.len());
     let actual_order: Vec<usize> = runtime

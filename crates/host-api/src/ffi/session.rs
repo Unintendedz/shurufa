@@ -174,6 +174,8 @@ pub(crate) fn create_session(bytes: &[u8], usage: SessionUse) -> Result<Value, S
                 state_root,
                 resources_pending: false,
                 lifecycle: None,
+                neural_client: None,
+                last_neural_prefilled_context: None,
                 _dictionary_access: dictionary_access,
             },
         )
@@ -193,9 +195,14 @@ pub(crate) fn focus_session(handle: u64, focused: bool) -> Result<Value, String>
         let pending = session.lifecycle_begin(lifecycle::Call::Focus(focused));
         // Focus-out is where a host's field ends, so selections counted in it are written here rather than waiting for a batch to fill. The same goes for the engine's delayed context learning: the iOS keyboard extension and the Android IME process can be killed without ever destroying their sessions, and the engine no longer writes that queue at process exit.
         if !focused {
+            session.last_neural_prefilled_context = None;
+            if let Some(client) = session.neural_client.as_ref() {
+                client.cancel_pending_decode_for_session(session.runtime.session_id());
+            }
             session.flush_selections();
             msime_engine::flush_personal_learning();
         } else {
+            session.last_neural_prefilled_context = None;
             session.refresh_plugin_tables();
             // 聚焦时刷新按需下载的语法模型包；Engine 重建在随后的 `complete_transition` 里空闲时进行。
             session.refresh_resource_packs();
@@ -209,6 +216,9 @@ pub(crate) fn focus_session(handle: u64, focused: bool) -> Result<Value, String>
         let mut result = session.complete_transition(result);
         // 失焦上屏不可改写、也不出声；focus_in/focus_out 排在组字结束之后，所以 focus_in 也在上面的重读之后。focus 的回复不带 `feedback`。
         session.lifecycle_after(pending, facts, &mut result);
+        if focused {
+            session.schedule_neural_prefill_if_idle();
+        }
         serde_json::to_value(result).map_err(|e| e.to_string())
     })
 }
@@ -221,7 +231,9 @@ pub extern "C" fn msime_client_reset_cache(handle: u64) -> *mut c_char {
 /// Releases process-level model caches without requiring a live session handle. This is for host
 /// memory-pressure callbacks after an input session has already been destroyed.
 #[no_mangle]
-pub extern "C" fn msime_client_release_process_cache() {}
+pub extern "C" fn msime_client_release_process_cache() {
+    ffi::neural::shutdown_shared_neural_client();
+}
 
 #[no_mangle]
 pub extern "C" fn msime_client_voice_start(handle: u64) -> *mut c_char {

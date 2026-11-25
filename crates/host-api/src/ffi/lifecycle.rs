@@ -48,6 +48,10 @@ pub(crate) fn destroy_session(handle: u64) -> Result<Value, String> {
             .ok_or("unknown session or wrong thread")?;
         // 还在组字时先发 composition_end{Destroyed}；是音乐所有者时关掉音乐。
         session.lifecycle_destroy();
+        ffi::neural::unregister_wakeup(session.runtime.session_id());
+        if let Some(client) = session.neural_client.as_ref() {
+            client.cancel_pending_decode_for_session(session.runtime.session_id());
+        }
         // A host may tear a session down without a focus-out first; what it counted is still written.
         session.flush_selections();
         // Dropping the engine session writes its own journal's delayed context learning; this also covers every other journal the process learned into, while this session still holds its dictionary access.
@@ -77,13 +81,15 @@ fn with_host_session<T: Copy>(
 /// 让会话选择加入生命周期核心，或换一组位。不落盘。返回实际启用的位；未知会话返回 0。
 #[no_mangle]
 pub extern "C" fn msime_client_set_lifecycle(handle: u64, flags: u32) -> u32 {
-    with_host_session(handle, 0, |session| match session.lifecycle.as_deref_mut() {
-        Some(state) => state.set_flags(&session.sound, flags),
-        None => {
-            let state = lifecycle::LifecycleState::new(handle, flags);
-            let accepted = state.flags();
-            session.lifecycle = Some(Box::new(state));
-            accepted
+    with_host_session(handle, 0, |session| {
+        match session.lifecycle.as_deref_mut() {
+            Some(state) => state.set_flags(&session.sound, flags),
+            None => {
+                let state = lifecycle::LifecycleState::new(handle, flags);
+                let accepted = state.flags();
+                session.lifecycle = Some(Box::new(state));
+                accepted
+            }
         }
     })
 }

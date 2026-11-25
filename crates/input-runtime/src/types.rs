@@ -109,6 +109,9 @@ pub struct View {
     pub caret_edit_suffix: bool,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub caret_edit_prefix: String,
+    /// 首页候选处于端侧神经解码的无感防闪等待窗（`~28 ms`）；宿主可延后绘制候选框以避免首槽跳动。
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub provisional: bool,
     pub page: usize,
     pub page_size: usize,
     pub page_count: usize,

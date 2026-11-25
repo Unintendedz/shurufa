@@ -1680,30 +1680,15 @@ if(SHURUFA_LLAMA_INCLUDE_DIR AND SHURUFA_LLAMA_LIBRARY)
     COMMENT "同步端侧神经解码库与独立后台服务到 Shurufa.app 包内")
   add_dependencies(MSIMEClientInputMethod shurufa_stage_neural_bundle)
 
-  # UDS IPC 客户端与独立后台服务集成单测（使用 `--test-mock`，无 378 MB 模型依赖亦可完整验证崩溃自愈与帧协议）。
-  add_executable(neural-service-ipc-test tests/neural/NeuralServiceIPCTest.mm src/neural/ShurufaNeuralClient.mm)
+  # UDS IPC 客户端（纯 Rust `msime_client`）与独立后台服务集成单测（使用 `--test-mock`，无 378 MB 模型依赖亦可完整验证崩溃自愈与帧协议）。
+  add_executable(neural-service-ipc-test tests/neural/NeuralServiceIPCTest.mm)
   target_compile_features(neural-service-ipc-test PRIVATE cxx_std_17)
   target_compile_options(neural-service-ipc-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
-  target_link_libraries(neural-service-ipc-test PRIVATE "-framework AppKit" "-framework Foundation")
+  target_link_libraries(neural-service-ipc-test PRIVATE apple-client "-framework AppKit" "-framework Foundation")
   add_dependencies(neural-service-ipc-test ShurufaNeuralService)
   add_test(NAME neural-service-ipc COMMAND neural-service-ipc-test "$<TARGET_FILE:ShurufaNeuralService>")
   set_tests_properties(neural-service-ipc PROPERTIES TIMEOUT 30)
 endif()
-
-# InputController.mm 通过 ShurufaNeuralClient.mm 与独立后台神经服务异步通信（纯 Foundation/UDS，零 libllama 依赖）；
-# 自动附加给所有直接编译或 `#include` 了 InputController.mm 的目标（含输入法本体与全部控制器单元测试）。
-set_source_files_properties(src/neural/ShurufaNeuralClient.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
-get_property(MSIME_NEURAL_CLIENT_TARGETS DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
-foreach(msime_target IN LISTS MSIME_NEURAL_CLIENT_TARGETS)
-  get_target_property(msime_target_sources ${msime_target} SOURCES)
-  if(msime_target_sources
-     AND ("src/input/InputController.mm" IN_LIST msime_target_sources
-          OR "src/core/FloatingToolbarPanel.mm" IN_LIST msime_target_sources))
-    if(NOT "src/neural/ShurufaNeuralClient.mm" IN_LIST msime_target_sources)
-      target_sources(${msime_target} PRIVATE src/neural/ShurufaNeuralClient.mm)
-    endif()
-  endif()
-endforeach()
 
 # 构建产物不能成为系统按 bundle id 查找的输入法副本。
 if(MSIME_EDITION STREQUAL "shurufa")

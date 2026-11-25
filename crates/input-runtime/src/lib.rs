@@ -46,10 +46,9 @@ use msime_engine::host::{
 };
 pub use msime_engine::ordering::DICTIONARY_SOURCES;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(unix)]
 use serde_json::{json, Value};
+use std::collections::HashMap;
 #[cfg(unix)]
 use std::io::{Read, Write};
 #[cfg(unix)]
@@ -58,6 +57,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -80,11 +80,15 @@ fn needs_dangling_segment_delimiter_backspace(raw: &str, caret: usize) -> bool {
 
 mod emoji_mru;
 mod engine;
+#[cfg(unix)]
+mod neural_client;
 mod providers;
 mod runtime;
 mod types;
 
 pub use engine::*;
+#[cfg(unix)]
+pub use neural_client::*;
 pub use providers::*;
 pub use runtime::*;
 pub use types::*;

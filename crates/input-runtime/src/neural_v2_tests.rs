@@ -23,15 +23,12 @@ impl StubNeuralEngine {
             ..EngineSnapshot::default()
         };
         for (index, &(text, exact, stat_milli)) in candidates.iter().enumerate() {
-            let mut entry =
-                CandidateEntry::new(text, preedit, CandidateSource::Generated as u8);
+            let mut entry = CandidateEntry::new(text, preedit, CandidateSource::Generated as u8);
             entry.answers_key = exact;
-            entry.static_evidence = stat_milli.map(|m| {
-                msime_engine::ordering::StaticEvidence {
-                    log_prob_milli_nats: m,
-                    characters: text.chars().count(),
-                    keyboard_neural: None,
-                }
+            entry.static_evidence = stat_milli.map(|m| msime_engine::ordering::StaticEvidence {
+                log_prob_milli_nats: m,
+                characters: text.chars().count(),
+                keyboard_neural: None,
             });
             entry.origin = msime_engine::CandidateOrigin::EngineRow(index);
             snap.candidates.push(entry);
@@ -303,4 +300,66 @@ fn locked_prefix_feeds_effective_left_context_and_preserves_pinned_first_across_
     assert_eq!(view.candidates[1].text, "跑步");
     assert_eq!(view.candidates[1].fixed_position, None);
     assert_eq!(view.candidates[2].text, "刨步");
+}
+
+#[test]
+fn runtime_presentation_phase_controls_provisional_view_flush_and_slot0_lock() {
+    let engine = StubNeuralEngine::composing(
+        "zhenglexieqian",
+        "zheng'le'xie'qian",
+        &[
+            ("整了血铅", true, Some(-11_400)),
+            ("挣了些钱", true, Some(-12_200)),
+        ],
+    );
+    let mut runtime = Runtime::new(engine, 6).unwrap();
+    runtime.focused = true;
+    runtime.set_neural_v2_enabled(true);
+    runtime.set_surrounding_context("这个兄弟，应该多少还是");
+
+    assert_eq!(runtime.presentation_phase(), PresentationPhase::Idle);
+    assert!(!runtime.view().provisional);
+
+    let req = runtime.take_neural_request().expect("应产生神经请求");
+    runtime.begin_provisional(req.generation, std::time::Duration::from_millis(28));
+    assert!(runtime.is_provisional());
+    assert!(runtime.view().provisional);
+
+    // 到期进入 Presented（或非字母键冲刷），随后迟到响应锁死槽 0。
+    assert!(runtime.flush_provisional());
+    assert!(!runtime.is_provisional());
+    assert!(!runtime.view().provisional);
+    assert_eq!(
+        runtime.presentation_phase(),
+        PresentationPhase::Presented {
+            generation: req.generation
+        }
+    );
+
+    let resp = NeuralDecodeResponse {
+        ok: true,
+        session: req.session,
+        generation: req.generation,
+        candidate_scores: vec![
+            NeuralScoredCandidate {
+                text: "整了血铅".into(),
+                neural_log_prob: -24.0,
+            },
+            NeuralScoredCandidate {
+                text: "挣了些钱".into(),
+                neural_log_prob: -1.0,
+            },
+        ],
+        beam_candidates: vec![],
+    };
+    // Presented 状态下按 lock_slot_0 = true 应用，槽 0 被硬锁定不变。
+    let lock_slot_0 = !matches!(
+        runtime.presentation_phase(),
+        PresentationPhase::Provisional { generation, .. } if generation == runtime.generation()
+    );
+    assert!(lock_slot_0);
+    let out = runtime.apply_neural_response(&resp, lock_slot_0);
+    assert!(out.applied);
+    assert!(out.slot0_locked);
+    assert_eq!(runtime.view().candidates[0].text, "整了血铅");
 }

@@ -86,7 +86,10 @@ fn online_seating_materializes_early_and_late_mismatches() {
                 .collect();
             assert_eq!(actual_order, expected);
             for (seat, &row) in expected.iter().enumerate() {
-                assert_eq!(runtime.cached.candidates[seat].text, format!("合成候选{row}"));
+                assert_eq!(
+                    runtime.cached.candidates[seat].text,
+                    format!("合成候选{row}")
+                );
                 assert_eq!(runtime.cached.candidates[seat].code, format!("k{row}"));
                 assert_eq!(
                     runtime.cached.candidates[seat].annotation,

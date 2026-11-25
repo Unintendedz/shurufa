@@ -8,13 +8,11 @@ use msime_engine::{
     UnifiedScorer,
 };
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 pub enum Action {
     ResetCache,
-    Character {
-        value: u8,
-        shift: bool,
-    },
+    Character { value: u8, shift: bool },
     Punctuation(u8),
     PunctuationAscii(u8),
     Command(Command),
@@ -73,6 +71,7 @@ pub struct Runtime<E: InputEngine = Session> {
     pub(crate) neural_right_context: String,
     pub(crate) neural_pending_request: Option<msime_engine::neural_v2::NeuralDecodeRequest>,
     pub(crate) neural_fusion_weights: msime_engine::neural_v2::NeuralFusionWeights,
+    pub(crate) presentation_phase: PresentationPhase,
     pub(crate) facts: DispatchFacts,
     pub(crate) selected_text: String,
     pub(crate) composition_epoch: u64,
@@ -130,7 +129,8 @@ fn retain_candidate_translations(
     } else if translations.len() <= 8 || candidates.len() <= 8 {
         translations.retain(|text, _| candidates.iter().any(|entry| entry.text == *text));
     } else {
-        let candidates: HashSet<&str> = candidates.iter().map(|entry| entry.text.as_str()).collect();
+        let candidates: HashSet<&str> =
+            candidates.iter().map(|entry| entry.text.as_str()).collect();
         translations.retain(|text, _| candidates.contains(text.as_str()));
     }
 }
@@ -152,6 +152,16 @@ pub struct NeuralApplyOutcome {
     pub slot0_locked: bool,
     /// 本次融合是否通过 Tier 1 受限束搜索独有救回了前排候选。
     pub tier1_rescued: bool,
+}
+
+/// 两阶段防闪与槽 0 锁定状态机。
+/// - `Provisional`：首帧等待 `~28 ms` 无感窗口，宿主暂缓画候选面板且不锁槽 0；
+/// - `Presented`：候选窗已实际呈现，后续迟到神经回包强制硬锁槽 0 仅升级槽 1..。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PresentationPhase {
+    Idle,
+    Provisional { generation: u64, deadline: Instant },
+    Presented { generation: u64 },
 }
 
 impl Runtime<Session> {
@@ -742,6 +752,7 @@ impl<E: InputEngine> Runtime<E> {
             neural_pending_request: None,
             neural_fusion_weights:
                 msime_engine::neural_v2::NeuralFusionWeights::from_env_or_default(),
+            presentation_phase: PresentationPhase::Idle,
             focused: false,
             page_size: page_size.into(),
             highlighted: 0,
@@ -805,11 +816,77 @@ impl<E: InputEngine> Runtime<E> {
         self.neural_v2_enabled = enabled;
         if !enabled {
             self.neural_pending_request = None;
+            self.presentation_phase = PresentationPhase::Idle;
         }
     }
 
     pub fn neural_v2_enabled(&self) -> bool {
         self.neural_v2_enabled
+    }
+
+    pub fn session_id(&self) -> u64 {
+        self.session
+    }
+
+    pub fn is_focused(&self) -> bool {
+        self.focused
+    }
+
+    pub fn presentation_phase(&self) -> PresentationPhase {
+        self.presentation_phase
+    }
+
+    pub fn is_provisional(&self) -> bool {
+        matches!(
+            self.presentation_phase,
+            PresentationPhase::Provisional { generation, .. }
+                if generation == self.generation && !self.is_idle()
+        )
+    }
+
+    pub fn provisional_remaining(&self, now: Instant) -> Option<(u64, Duration)> {
+        match self.presentation_phase {
+            PresentationPhase::Provisional {
+                generation,
+                deadline,
+            } if generation == self.generation && !self.is_idle() => {
+                Some((generation, deadline.saturating_duration_since(now)))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn begin_provisional(&mut self, generation: u64, window: Duration) {
+        if !self.is_idle() && self.generation == generation {
+            self.presentation_phase = PresentationPhase::Provisional {
+                generation,
+                deadline: Instant::now() + window,
+            };
+        }
+    }
+
+    pub fn mark_presented(&mut self, generation: u64) -> bool {
+        match self.presentation_phase {
+            PresentationPhase::Provisional { generation: g, .. } if g == generation => {
+                self.presentation_phase = PresentationPhase::Presented { generation };
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn flush_provisional(&mut self) -> bool {
+        if matches!(
+            self.presentation_phase,
+            PresentationPhase::Provisional { .. }
+        ) {
+            self.presentation_phase = PresentationPhase::Presented {
+                generation: self.generation,
+            };
+            true
+        } else {
+            false
+        }
     }
 
     pub fn set_neural_fusion_weights(
@@ -1110,6 +1187,9 @@ impl<E: InputEngine> Runtime<E> {
             }
             let _ = self.advance();
             self.bump_candidates_epoch();
+            self.presentation_phase = PresentationPhase::Presented {
+                generation: self.generation,
+            };
             self.neural_pending_request = None;
             return NeuralApplyOutcome {
                 applied: true,
@@ -1125,6 +1205,14 @@ impl<E: InputEngine> Runtime<E> {
             if let Some((previous_highlight, text, code)) = &marked {
                 self.keep_highlight_on_same_candidate(*previous_highlight, text, code.as_deref());
             }
+        }
+        if matches!(
+            self.presentation_phase,
+            PresentationPhase::Provisional { generation, .. } if generation == self.generation
+        ) {
+            self.presentation_phase = PresentationPhase::Presented {
+                generation: self.generation,
+            };
         }
         self.neural_pending_request = None;
         NeuralApplyOutcome {
@@ -1270,6 +1358,7 @@ impl<E: InputEngine> Runtime<E> {
             conversion_focus_end: self.cached.conversion_focus_end,
             caret_edit_suffix: self.cached.caret_edit_suffix,
             caret_edit_prefix: self.cached.caret_edit_prefix.clone(),
+            provisional: self.is_provisional(),
             page,
             page_size: self.page_size,
             page_count: visible.div_ceil(self.page_size),
@@ -1370,9 +1459,7 @@ impl<E: InputEngine> Runtime<E> {
             .candidates
             .iter()
             .filter_map(|entry| match entry.origin {
-                CandidateOrigin::EngineRow(idx) => {
-                    Some((idx, (entry.text.clone(), entry.source)))
-                }
+                CandidateOrigin::EngineRow(idx) => Some((idx, (entry.text.clone(), entry.source))),
                 CandidateOrigin::InjectedBeam | CandidateOrigin::ProjectedEmoji { .. } => None,
             })
             .collect();
@@ -1654,6 +1741,7 @@ impl<E: InputEngine> Runtime<E> {
         self.engine.set_rescoring_context(&self.ai_context);
         self.load_snapshot(cached);
         self.snapshot_valid = true;
+        self.presentation_phase = PresentationPhase::Idle;
         self.page_size = page_size.into();
         self.highlighted = 0;
         self.touch_keyboard_layout = touch_keyboard_layout;
@@ -1849,7 +1937,10 @@ impl<E: InputEngine> Runtime<E> {
                 if !self.backspace_reverts_selection
                     || reading.chars().count() > 1
                     || caret != reading.len()
-                    || self.locked_prefix.last().is_none_or(|seg| seg.reading.is_empty())
+                    || self
+                        .locked_prefix
+                        .last()
+                        .is_none_or(|seg| seg.reading.is_empty())
                 {
                     return Ok(None);
                 }
@@ -1863,7 +1954,10 @@ impl<E: InputEngine> Runtime<E> {
             }
             _ => return Ok(None),
         };
-        let selection = self.locked_prefix.pop().expect("the stack was checked above");
+        let selection = self
+            .locked_prefix
+            .pop()
+            .expect("the stack was checked above");
         self.bump_composition_epoch();
         self.facts.retracted = Some(if restore {
             SelectionRetraction::Restore
@@ -2340,6 +2434,7 @@ impl<E: InputEngine> Runtime<E> {
 
     pub(crate) fn refresh(&mut self) -> Result<(), RuntimeError> {
         self.snapshot_valid = false;
+        self.presentation_phase = PresentationPhase::Idle;
         let had_translations =
             !self.translations.is_empty() || !self.highlight_translations.is_empty();
         self.translations.clear();
@@ -2445,6 +2540,7 @@ impl<E: InputEngine> Runtime<E> {
         }
         self.hold_phrase_progress(false, false, false, false, "", &mut result);
         self.focused = focused;
+        self.presentation_phase = PresentationPhase::Idle;
         self.ai_context.clear();
         self.neural_context.clear();
         self.neural_right_context.clear();
@@ -2667,6 +2763,7 @@ impl<E: InputEngine> Runtime<E> {
                 self.bump_candidates_epoch();
             }
             self.highlighted = index;
+            self.flush_provisional();
             return Ok(self.transition(empty_result(true)));
         }
         if let Some(transition) = self.retreat_phrase_selection(&action)? {
@@ -2826,8 +2923,8 @@ impl<E: InputEngine> Runtime<E> {
                 self.facts.raw = result.has_commit;
             }
         }
-        let needs_commit_context = result.as_ref().is_ok_and(|result| result.has_commit)
-            || !self.locked_prefix.is_empty();
+        let needs_commit_context =
+            result.as_ref().is_ok_and(|result| result.has_commit) || !self.locked_prefix.is_empty();
         let commit_context = needs_commit_context.then(|| self.output_context());
         let refresh = self.refresh();
         let mut result = result?;
@@ -2853,7 +2950,8 @@ impl<E: InputEngine> Runtime<E> {
             &mut result,
         );
         if let Some(selection) = self.facts.selection.as_mut() {
-            if selection.outcome == SelectionOutcome::Committed && !self.cached.editing_text.is_empty()
+            if selection.outcome == SelectionOutcome::Committed
+                && !self.cached.editing_text.is_empty()
             {
                 selection.outcome = SelectionOutcome::Partial;
             }

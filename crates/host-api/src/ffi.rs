@@ -89,6 +89,7 @@ pub use host::*;
 pub use input::*;
 pub use lifecycle::*;
 pub use mcp::*;
+pub use neural::*;
 pub use pack_downloads::*;
 pub use plugins::*;
 pub use providers::*;

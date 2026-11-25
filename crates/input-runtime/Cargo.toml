@@ -11,7 +11,7 @@ rust-version.workspace = true
 msime-engine = { path = "../engine" }
 msime-client-core = { path = "../client-core" }
 msime-path-trust = { path = "../path-trust" }
-rustix = { workspace = true, features = ["process"] }
+rustix = { workspace = true, features = ["process", "net"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

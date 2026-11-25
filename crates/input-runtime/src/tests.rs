@@ -5079,9 +5079,7 @@ fn clearing_online_candidates_does_not_change_engine_after_generation_exhaustion
         .unwrap());
     runtime.generation = u64::MAX;
     let before = runtime.engine.snapshot().unwrap().candidates;
-    assert!(before
-        .iter()
-        .any(|candidate| candidate.text == "合成候选"));
+    assert!(before.iter().any(|candidate| candidate.text == "合成候选"));
 
     assert!(matches!(
         runtime.clear_online_candidates(1),
@@ -6205,7 +6203,10 @@ fn real_engine_pin_to_first_block_and_locked_prefix_backspace_rollback() {
         .find(|c| c.text == "处罚")
         .unwrap()
         .id;
-    let pinned_view = runtime.dispatch(Action::PinCandidate(punish_id)).unwrap().view;
+    let pinned_view = runtime
+        .dispatch(Action::PinCandidate(punish_id))
+        .unwrap()
+        .view;
     assert_eq!(pinned_view.candidates[0].text, "处罚");
     assert_eq!(pinned_view.candidates[0].fixed_position, Some(1));
 
@@ -6216,7 +6217,10 @@ fn real_engine_pin_to_first_block_and_locked_prefix_backspace_rollback() {
         .find(|c| c.text == "触犯")
         .unwrap()
         .id;
-    let after_block = runtime.dispatch(Action::RemoveCandidate(chufan_id)).unwrap().view;
+    let after_block = runtime
+        .dispatch(Action::RemoveCandidate(chufan_id))
+        .unwrap()
+        .view;
     assert!(!after_block.candidates.iter().any(|c| c.text == "触犯"));
     assert_eq!(after_block.candidates[0].text, "处罚");
     assert_eq!(after_block.candidates[0].fixed_position, Some(1));
@@ -6239,12 +6243,17 @@ fn real_engine_pin_to_first_block_and_locked_prefix_backspace_rollback() {
 
     // 删空剩余拼音并再按一次退格，拆回已选前缀 `处罚` 恢复 `chufa`。
     for _ in 0..3 {
-        runtime.dispatch(Action::Command(Command::Backspace)).unwrap();
+        runtime
+            .dispatch(Action::Command(Command::Backspace))
+            .unwrap();
     }
     let rolled_back = runtime.view();
     assert!(rolled_back.phrase_prefix.is_empty());
     assert_eq!(rolled_back.editing_text, "chufa");
-    assert!(runtime.cursor_snapshot().effective_left_context().is_empty());
+    assert!(runtime
+        .cursor_snapshot()
+        .effective_left_context()
+        .is_empty());
 
     // 改选第 2 项「出发」并补输 `lou` 完成整句上屏（触发整句学习）。
     let depart_id = rolled_back
@@ -6274,9 +6283,5 @@ fn real_engine_pin_to_first_block_and_locked_prefix_backspace_rollback() {
 
     // 新建输入框再打 `chufalou`，刚才整句连选学会的「出发楼」应已入库。
     type_characters(&mut runtime, "chufalou");
-    assert!(runtime
-        .view()
-        .candidates
-        .iter()
-        .any(|c| c.text == "出发楼"));
+    assert!(runtime.view().candidates.iter().any(|c| c.text == "出发楼"));
 }

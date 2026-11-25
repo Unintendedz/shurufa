@@ -34,6 +34,18 @@ struct VoiceStreamContext { MSIMEVoiceProviderUpdate update; MSIMEVoiceProviderP
 static void VoiceUpdate(const uint8_t *text, size_t length, bool final, void *opaque) { auto *c=(VoiceStreamContext *)opaque; if(!c||!c->update||!text||length>4096)return; NSString *value=[[NSString alloc] initWithBytes:text length:length encoding:NSUTF8StringEncoding]; if(value)c->update(value,final); }
 static void VoicePhase(uint8_t phase, void *opaque) { auto *c=(VoiceStreamContext *)opaque; if(c&&c->phase)c->phase(phase); }
 
+static NSMapTable<NSNumber *, MSIMEClientSession *> *gNeuralSessions = nil;
+@interface MSIMEClientSession ()
+- (void)handleNeuralWakeupForGeneration:(uint64_t)generation;
+@end
+static void MSIMENeuralWakeupCallback(void *opaque, uint64_t session, uint64_t generation) {
+    (void)opaque;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        MSIMEClientSession *target = [gNeuralSessions objectForKey:@(session)];
+        [target handleNeuralWakeupForGeneration:generation];
+    });
+}
+
 struct SnapshotReaderContext { MSIMESnapshotNextRecord block; };
 static intptr_t SnapshotNext(void *opaque, uint8_t *buffer, size_t capacity) {
     @autoreleasepool {
@@ -78,6 +90,9 @@ static NSDictionary *decode(char *response, NSError **error) {
     NSNumber *_punctuationLockOverride;
     NSNumber *_characterWidthOverride;
     BOOL _capsLock;
+    NSDictionary *_neuralOptions;
+    void (^_neuralUpdateHandler)(uint64_t generation);
+    BOOL _neuralV2Enabled;
     // 生命周期核心的选择加入和最后报告的字段属性。它们只活在会话里、不落盘，快照替换会话后在 restoreLiveModes: 里恢复。
     uint32_t _lifecycleFlags;
     uint32_t _fieldTraits;
@@ -137,13 +152,59 @@ static NSDictionary *decode(char *response, NSError **error) {
         _lifecycleFlags = msime_client_set_lifecycle(_handle, _lifecycleFlags);
         if (_fieldTraits) _fieldTraits = msime_client_set_field_traits(_handle, _fieldTraits);
     }
+    if (restored && (_neuralOptions || _neuralUpdateHandler)) {
+        restored = [self configureNeuralServiceWithOptions:_neuralOptions updateHandler:_neuralUpdateHandler error:error] != nil;
+    }
     if (restored) return YES;
     // Do not expose a replacement session silently running in the wrong mode.
+    [gNeuralSessions removeObjectForKey:@(_handle)];
     msime_client_string_free(msime_client_destroy(_handle));
     _handle = 0;
+    _neuralV2Enabled = NO;
     return NO;
 }
 - (NSDictionary *)hostOptions { return _hostOptions; }
+- (BOOL)neuralV2Enabled { return _neuralV2Enabled; }
+- (void)handleNeuralWakeupForGeneration:(uint64_t)generation {
+    if (_handle && _neuralUpdateHandler) _neuralUpdateHandler(generation);
+}
+- (nullable NSDictionary *)configureNeuralServiceWithOptions:(nullable NSDictionary<NSString *, id> *)options
+                                               updateHandler:(nullable void (^)(uint64_t generation))updateHandler
+                                                       error:(NSError **)error {
+    if (![self checkThreadAndHandle:error]) return nil;
+    if (!gNeuralSessions) gNeuralSessions = [NSMapTable strongToWeakObjectsMapTable];
+    _neuralOptions = [options isKindOfClass:NSDictionary.class] ? [options copy] : nil;
+    _neuralUpdateHandler = [updateHandler copy];
+    if (_neuralUpdateHandler) [gNeuralSessions setObject:self forKey:@(_handle)];
+    else [gNeuralSessions removeObjectForKey:@(_handle)];
+    NSData *data = nil;
+    if (_neuralOptions) {
+        if (![NSJSONSerialization isValidJSONObject:_neuralOptions]) {
+            setError(error, @"神经服务配置必须是 JSON 对象");
+            return nil;
+        }
+        data = [NSJSONSerialization dataWithJSONObject:_neuralOptions options:0 error:error];
+        if (!data) return nil;
+    }
+    NSDictionary *result = decode(
+        msime_client_configure_neural_service(
+            _handle,
+            data ? static_cast<const uint8_t *>(data.bytes) : nullptr,
+            data ? data.length : 0,
+            _neuralUpdateHandler ? MSIMENeuralWakeupCallback : nullptr,
+            nullptr),
+        error);
+    _neuralV2Enabled = result && [result[@"enabled"] isEqual:@YES];
+    return result;
+}
+- (nullable NSDictionary *)pollNeuralWithError:(NSError **)error {
+    if (![self checkThreadAndHandle:error]) return nil;
+    return decode(msime_client_poll_neural(_handle), error);
+}
+- (nullable NSDictionary *)flushProvisionalNeuralWithError:(NSError **)error {
+    if (![self checkThreadAndHandle:error]) return nil;
+    return decode(msime_client_flush_provisional_neural(_handle), error);
+}
 - (BOOL)setNeuralV2Enabled:(BOOL)enabled error:(NSError **)error {
     return decodeValue(msime_client_set_neural_v2_enabled(_handle, enabled), error) != nil;
 }
@@ -506,8 +567,10 @@ static void MSIMEInvokeAnnounce(void *context) {
     NSDictionary *ready = [self snapshotActivationReady];
     if (![ready[@"ready"] isEqual:@YES]) { setError(error, @"请先完成正在输入的内容，再应用本地词库"); return NO; }
     NSDictionary *optionsCopy = [session->_hostOptions copy];
+    [gNeuralSessions removeObjectForKey:@(old)];
     msime_client_string_free(msime_client_destroy(old));
     session->_handle = 0;
+    session->_neuralV2Enabled = NO;
     NSData *data = [version dataUsingEncoding:NSUTF8StringEncoding];
     NSDictionary *result = decode(msime_client_snapshot_activate(handle, static_cast<const uint8_t *>(data.bytes), data.length), error);
     if (!result) {
@@ -889,9 +952,13 @@ static void MSIMEInvokeAnnounce(void *context) {
 }
 - (BOOL)closeWithError:(NSError **)error {
     if (![self checkThreadAndHandle:error]) return NO;
+    const uint64_t closing = _handle;
+    [gNeuralSessions removeObjectForKey:@(closing)];
     NSDictionary *result = decode(msime_client_destroy(_handle), error);
     if (!result) return NO;
     _handle = 0;
+    _neuralV2Enabled = NO;
+    _neuralUpdateHandler = nil;
     if (gActiveSession == self) gActiveSession = nil;
     return YES;
 }
