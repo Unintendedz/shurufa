@@ -1189,9 +1189,11 @@ impl InputSession {
 }
 
 /// 按物理键盘编辑形态与是否存在精确字面词典整词估算错拼候选的自然对数信道代价（nats）。
-/// - 缺失/多敲后鼻音 `g`（`-2.4`）与相邻键位换位（`-2.6`）保持高敏感度；
-/// - 增删字母与 QWERTY 邻键误触在无精确字面词时维持 `-2.8`，存在精确字面词典整词时提高至 `-4.4 / -4.6 nats`，
-///   避免真实高频双字词（如 `danfan -> 但凡/单反`）被 `dan->dian` 或 `f->d` 错拼误劫持。
+/// - 无精确字面词典整词时（如 `xainzai`/`meiwentj`/`diannai`/`qinkuang`），保持高敏感度（`-2.4 ~ -2.8 nats`）积极救回；
+/// - 存在精确字面词典整词时：前后鼻音 `g`（`-3.4`）、相邻换位（`-3.6`）、连击重复键（`-3.8`）、漏键（`-4.4`）
+///   与邻键替换（`-4.6`）维持平衡灵敏度；而**删去用户显式敲入的非 `g`、非重复字母**（如 `xiongtai -> xingtai` 删 `o`、
+///   `jinchang -> jichang` 删 `n`）的真实物理发生概率极低，收紧至 `-7.0 nats`，要求强语境证据（如「这个产品的 + xiongtai -> 形态*」）
+///   才允许覆写字面整词。
 fn typo_channel_log_penalty(
     folded_raw: &str,
     canonical_pinyin: &str,
@@ -1245,11 +1247,22 @@ fn typo_channel_log_penalty(
         }
         return if has_exact_literal_dict { -4.6 } else { -2.8 };
     }
-    if has_exact_literal_dict {
-        -4.4
-    } else {
-        -2.8
+    if !has_exact_literal_dict {
+        return -2.8;
     }
+    // 存在精确字面整词且删去了用户已显式敲入的字母（`raw > corr`）：
+    // 若为紧邻重复键连击误触（如 `xingtaii -> xingtai`）保持 `-3.8`，否则为低概率删字编辑（`-7.0`）。
+    if raw_bytes.len() > corr_bytes.len() {
+        let is_repeated_slip = raw_bytes.len() == corr_bytes.len() + 1
+            && (0..=corr_bytes.len()).any(|pos| {
+                raw_bytes[..pos] == corr_bytes[..pos]
+                    && raw_bytes[pos + 1..] == corr_bytes[pos..]
+                    && ((pos > 0 && raw_bytes[pos] == corr_bytes[pos - 1])
+                        || (pos < corr_bytes.len() && raw_bytes[pos] == corr_bytes[pos]))
+            });
+        return if is_repeated_slip { -3.8 } else { -7.0 };
+    }
+    -4.4
 }
 
 fn split_wubi_candidates(items: &mut Vec<WordItem>) -> Vec<WordItem> {

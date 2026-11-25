@@ -384,6 +384,7 @@ struct ScoredCompetitor {
     kind: CompetitorKind,
     text: String,
     total_score: f64,
+    is_typo: bool,
 }
 
 /// 纯函数统一概率融合与排座：
@@ -586,6 +587,7 @@ pub fn fuse_neural_response(
             },
             text: cand.text.clone(),
             total_score: total,
+            is_typo: cand.channel_log_prob <= -2.0,
         });
     }
 
@@ -604,6 +606,7 @@ pub fn fuse_neural_response(
             },
             text,
             total_score: total,
+            is_typo: channel_lp <= -2.0,
         });
     }
 
@@ -628,6 +631,42 @@ pub fn fuse_neural_response(
                 (CompetitorKind::Beam { .. }, CompetitorKind::Beam { .. }) => a.text.cmp(&b.text),
             })
     });
+
+    // 当同池已存在未纠错的精确词典整词（如 `xiongtai -> 兄台`）时，在 Tier 1 完成全池打分之后，
+    // 首页前 4 个等跨度席位至多保留 1 条得分最高的纠错候选（保留其原有胜出名次，包括 `#1` 语境救回），
+    // 将其余次优纠错候选（如 `性态*`/`邢台*`）顺延至第 5 席之后，做到零召回损失、零 Top-1 损失且不刷屏首页。
+    let has_exact_literal_dict_any = competing_tier0
+        .iter()
+        .any(|(_, c, _)| is_dict_bucket(c.source) && c.channel_log_prob == 0.0);
+    if has_exact_literal_dict_any && competitors.len() > 2 {
+        const PAGE1_EQUAL_SPAN_CAP: usize = 4;
+        const MAX_TYPOS_IN_PAGE1: usize = 1;
+        let mut head: Vec<ScoredCompetitor> = Vec::with_capacity(PAGE1_EQUAL_SPAN_CAP);
+        let mut deferred_typos: Vec<ScoredCompetitor> = Vec::new();
+        let mut rest: Vec<ScoredCompetitor> = Vec::new();
+        let mut typos_in_head = 0usize;
+        for comp in competitors {
+            if head.len() < PAGE1_EQUAL_SPAN_CAP {
+                if comp.is_typo {
+                    if typos_in_head < MAX_TYPOS_IN_PAGE1 {
+                        typos_in_head += 1;
+                        head.push(comp);
+                    } else {
+                        deferred_typos.push(comp);
+                    }
+                } else {
+                    head.push(comp);
+                }
+            } else {
+                rest.push(comp);
+            }
+        }
+        let mut reordered = Vec::with_capacity(head.len() + deferred_typos.len() + rest.len());
+        reordered.extend(head);
+        reordered.extend(deferred_typos);
+        reordered.extend(rest);
+        competitors = reordered;
+    }
 
     // 若要求锁槽 0 且原槽 0 在竞争集合中，将其牢牢固定在竞争列表首位，其余席位按融合分升序更新。
     if effective_lock_slot_0 && slot0_eligible {
@@ -1212,5 +1251,73 @@ mod tests {
             })
             .collect();
         assert_eq!(seat_indices, vec![0, 5, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn exact_literal_word_caps_secondary_typos_on_page_one_without_dropping_recall() {
+        // 输入 `xiongtai` 存在精确字面词典整词 `兄台` 与 3 条纠错候选 `形态*`/`性态*`/`邢台*` 时：
+        // Tier 1 融合后首页前 4 席仅留最强 1 条纠错（`形态*`），`性态*`/`邢台*` 顺延至第 5 席之后且零丢失；
+        // 若最强纠错本身赢下 `#1`，仍稳居 `#1` 不受影响。
+        let mut dict_exact = sample_candidate(0, "兄台", true, Some(-11.0));
+        dict_exact.source = CandidateSource::Database as u8;
+        let mut typo_1 = sample_candidate(1, "形态", true, Some(-8.0));
+        typo_1.source = CandidateSource::Generated as u8;
+        typo_1.channel_log_prob = -7.0;
+        let mut typo_2 = sample_candidate(2, "性态", true, Some(-9.5));
+        typo_2.source = CandidateSource::Generated as u8;
+        typo_2.channel_log_prob = -7.0;
+        let mut typo_3 = sample_candidate(3, "邢台", true, Some(-9.0));
+        typo_3.source = CandidateSource::Generated as u8;
+        typo_3.channel_log_prob = -7.0;
+        let mut lit_2 = sample_candidate(4, "熊太", true, Some(-13.0));
+        lit_2.source = CandidateSource::Generated as u8;
+        let mut lit_3 = sample_candidate(5, "凶太", true, Some(-13.5));
+        lit_3.source = CandidateSource::Generated as u8;
+
+        let req = base_request(vec![dict_exact, typo_1, typo_2, typo_3, lit_2, lit_3]);
+        let resp = NeuralDecodeResponse {
+            ok: true,
+            session: 1,
+            generation: 10,
+            candidate_scores: vec![
+                NeuralScoredCandidate {
+                    text: "兄台".into(),
+                    neural_log_prob: -17.6,
+                },
+                NeuralScoredCandidate {
+                    text: "形态".into(),
+                    neural_log_prob: -11.1,
+                },
+                NeuralScoredCandidate {
+                    text: "性态".into(),
+                    neural_log_prob: -12.0,
+                },
+                NeuralScoredCandidate {
+                    text: "邢台".into(),
+                    neural_log_prob: -12.5,
+                },
+                NeuralScoredCandidate {
+                    text: "熊太".into(),
+                    neural_log_prob: -20.5,
+                },
+                NeuralScoredCandidate {
+                    text: "凶太".into(),
+                    neural_log_prob: -21.0,
+                },
+            ],
+            beam_candidates: vec![],
+        };
+        let out = fuse_neural_response(6, &req, &resp, NeuralFusionWeights::default(), false);
+        assert_eq!(out.top1_text.as_deref(), Some("兄台"));
+        let seat_indices: Vec<usize> = out
+            .seats
+            .iter()
+            .map(|s| match s {
+                FusedSeat::Existing { index, .. } => *index,
+                FusedSeat::InjectedBeam { .. } => usize::MAX,
+            })
+            .collect();
+        // 前 4 席：0(兄台), 1(形态*), 4(熊太), 5(凶太)；次优纠错 2(性态*), 3(邢台*) 顺延至后且无损保留。
+        assert_eq!(seat_indices, vec![0, 1, 4, 5, 2, 3]);
     }
 }

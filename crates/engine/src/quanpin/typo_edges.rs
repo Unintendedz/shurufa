@@ -107,7 +107,8 @@ pub fn collect_probabilistic_typo_edges(
         return raw_edges;
     }
 
-    // 每个 `(start, end)` 跨度按 `ln(weight) - channel_penalty` 降序去重并截断为 Top-3，兼顾召回与词网格稀疏性。
+    // 每个 `(start, end)` 跨度按 `ln(weight) - channel_penalty` 降序去重并截断为 Top-3，
+    // 保留完整 Tier 0 召回供 Tier 1 神经模型结合上下文裁决（首页纠错防刷屏由 Tier 1 融合排座处理）。
     let mut by_span: HashMap<(usize, usize), Vec<TypoEdge>> = HashMap::new();
     for edge in raw_edges {
         by_span
@@ -231,6 +232,7 @@ fn plan_probabilistic_keys(
         }
         covered += width;
     }
+    let literal_intact = covered == n && !literal_best.words.is_empty();
     if covered != n {
         weak.clear();
     }
@@ -241,6 +243,10 @@ fn plan_probabilistic_keys(
     const PROBABILISTIC_TYPO_KEY_BUDGET: usize = 36;
     // 跨音节 2-to-1 相邻换位信道代价（标准换位 `-2.4` + 跨边界融合微调 `-0.4` = `-2.8 nats`）。
     const MERGE_TRANSPOSITION_PENALTY: f64 = CHANNEL_TRANSPOSITION_PENALTY + 0.40;
+    // 当字面主路径在当前跨度已完整命中真实多字词（无单字弱位）时，删去用户显式敲入的非鼻音 `g`、非连击重复字母
+    // （如 `xiong'tai -> xing'tai` 删 `o`、`jin'chang -> ji'chang` 删 `n`）附加字面保真代价，
+    // 避免 Tier 0 同步首帧提前用低概率删字纠错盖过字面整词，同时不削弱漏键、换位、前后鼻音与邻键纠错。
+    const INTACT_WORD_EXTRA_LETTER_SURCHARGE: f64 = 2.40;
 
     let mut planned: Vec<PlannedKey> = Vec::new();
     // 优先检测相邻合法音节对经单次邻位换位可合并为一个合法音节的情形（如 `jin'ti'na -> jin'tian`、`xi'hu'na -> xi'huan`、`li'na'xi -> lian'xi`），
@@ -277,6 +283,16 @@ fn plan_probabilistic_keys(
                     if start + length > n {
                         break;
                     }
+                    let span_is_intact =
+                        literal_intact && (start..(start + length)).all(|pos| !weak.get(pos));
+                    let is_non_nasal_extra_letter = typed.len() > typo.syllable.len()
+                        && !crate::pinyin::typos::is_extra_nasal_g(typed, &typo.syllable)
+                        && !crate::pinyin::typos::is_repeated_key_slip(typed, &typo.syllable);
+                    let adjusted_penalty = if span_is_intact && is_non_nasal_extra_letter {
+                        penalty + INTACT_WORD_EXTRA_LETTER_SURCHARGE
+                    } else {
+                        penalty
+                    };
                     let key = typo_span_key(
                         segments,
                         start,
@@ -285,8 +301,8 @@ fn plan_probabilistic_keys(
                         &typo.syllable,
                     );
                     if let Some(existing) = planned.iter_mut().find(|entry| entry.key == key) {
-                        if penalty < existing.penalty {
-                            existing.penalty = penalty;
+                        if adjusted_penalty < existing.penalty {
+                            existing.penalty = adjusted_penalty;
                         }
                         continue;
                     }
@@ -297,7 +313,7 @@ fn plan_probabilistic_keys(
                         start,
                         end: start + length,
                         key,
-                        penalty,
+                        penalty: adjusted_penalty,
                     });
                     if planned.len() >= PROBABILISTIC_TYPO_KEY_BUDGET {
                         break 'positions;
@@ -621,6 +637,49 @@ mod tests {
                 hit.penalty
             );
         }
+    }
+
+    #[test]
+    fn intact_literal_multi_char_word_applies_extra_letter_surcharge_while_preserving_pool() {
+        let fixture = Fixture::new();
+        fixture
+            .insert("xiong'tai", "兄台", 8_000)
+            .insert("xing'tai", "形态", 400_000)
+            .insert("xing'tai", "邢台", 80_000)
+            .insert("xing'tai", "性态", 20_000);
+        let database = PinyinDatabase::open(&fixture.database());
+        let profile = PersonalTypoProfile::shared(&fixture.journal());
+        let mut cache = FifoCache::new(64);
+        let all = autocorrect_type::TRANSPOSITION
+            | autocorrect_type::NEIGHBOR
+            | autocorrect_type::MISSING_OR_EXTRA;
+        let segs = vec!["xiong".to_owned(), "tai".to_owned()];
+        let literal_intact = SentencePath {
+            sentence: "兄台".to_owned(),
+            key: "xiong'tai".to_owned(),
+            log_prob: -10.0,
+            words: vec!["兄台".to_owned()],
+            typo_edges: 0,
+        };
+        let edges = collect_probabilistic_typo_edges(
+            &database,
+            &mut cache,
+            &profile,
+            &segs,
+            &literal_intact,
+            all,
+        );
+        assert_eq!(
+            edges.len(),
+            3,
+            "Tier 0 保留完整 Top-3 纠错池供 Tier 1 裁决，不在静态层盲剪: {edges:?}"
+        );
+        assert_eq!(edges[0].value, "形态");
+        assert!(
+            edges[0].penalty >= 5.5,
+            "完整字面整词上的非鼻音删字纠错应附加保真代价，避免 Tier 0 提前盖过字面词: {}",
+            edges[0].penalty
+        );
     }
 
     #[test]

@@ -35,7 +35,9 @@ Status: implemented
 - **唯一 3 参数线性融合目标（`neural_v2.rs`）**：全部融合数学留在纯 Rust `msime-engine` 内：
   $$\text{Score}(Y) = \log P_{\text{channel}}(X \mid Y) + \lambda_{\text{neural}} \log P_{\text{neural}}(Y \mid C) + \lambda_{\text{stat}} \cdot \text{rel\_stat}(Y) + \lambda_{\text{user}} \log P_{\text{user}}(Y \mid C)$$
   经开发集标定取 $\lambda_{\text{neural}} = 1.0$、$\lambda_{\text{stat}} = 0.35$、$\lambda_{\text{user}} = 1.0$。`rel_stat` 按词典桶/词网格桶各自减桶内最大值并截断至 `[-10.0, 0.0]` 消除跨来源加性常数错位；当同池存在未纠错的真实双字词典整词时，非词典 `[1,1]` 拆字拼接（如 `但反`/`但犯`）施加 `-1.8 nats` 非成词结构先验惩罚（避免分桶归一抹平双字成词优势，同时语境强必需拆字凭 `+4..+12 nats` 神经优势仍可胜出）；未进入 Tier 0 词网格主束的 `UniqueBeam` 独有候选按已观测 Tier 0 下界钳位至 `[-6.5, -3.5]`，杜绝束搜索次优路径凭虚高静态分反超在池真词，同时保证强神经语境优势（`+4..+15 nats`）的 OOV 词稳定翻盘。
-- **字面整词错拼信道分级门槛（`session/candidates.rs`）**：`typo_channel_log_penalty` 区分后鼻音 `g` 增删、相邻换位与邻键/增删编辑形态；当字面键已存在未纠错精确词典整词（如 `dan'fan -> 但凡/单反`）时，将邻键与增删错拼信道代价由 `-2.8` 收紧至 `-4.6 / -4.4 nats`（后鼻音 `g` 与换位收紧至 `-3.4 / -3.6 nats`），防止 `dan->dian` 或 `f->d` 错拼反超真实高频字面词，同时无字面词时维持原敏感度。
+- **字面整词错拼信道分级门槛与首页纠错多样性约束（`session/candidates.rs`、`quanpin/typo_edges.rs`、`neural_v2.rs`）**：
+  - `typo_channel_log_penalty` 按物理击键编辑形态细分代价：无精确字面词典整词时维持 `-2.4 ~ -2.8 nats` 积极救回；存在精确字面词典整词时，前后鼻音 `g`（`-3.4`）、换位（`-3.6`）、连击重复键（`-3.8`）、漏键（`-4.4`）与邻键替换（`-4.6`）维持平衡灵敏度，而**删去用户显式敲入的非 `g`、非重复字母**（如 `xiongtai -> xingtai` 删 `o`、`jinchang -> jichang` 删 `n`）收紧至 `-7.0 nats`（同步 Tier 0 完整字面整词跨度上亦对该类低概率删字边附加 `+2.40` 保真代价，同时保留完整 Top-3 纠错池供 Tier 1 裁决）。
+  - `neural_v2.rs::fuse_neural_response` 在 Tier 1 完成全池打分之后，若同池存在未纠错精确词典整词，将首页前 4 个等跨度席位中的纠错候选上限设为 1 条（保留其原有胜出名次，含 `#1` 语境救回），将次优纠错候选（如 `性态*`/`邢台*`）无损顺延至第 5 席之后——做到「`这个 + xiongtai → #1 兄台 / #2 形态*`（首页零纠错刷屏）」、「`这个产品的 + xiongtai → #1 形态*`」、「`我是河北 + xiongtai → #1 邢台*`」兼得，且三套盲测（含 `S12_typo_and_fuzzy`）零回归。
 - **严格等跨度判定、首页等跨度连续排座与双兜底 80 ms 槽 0 锁**：`session/candidates.rs::neural_v2_metadata` 要求备选切分同时满足 `folded_pinyin_full && pinyin_syllables == word_chars && canonical_syllables == word_chars`，杜绝超长续写词抢占首槽；`neural_v2.rs::fuse_neural_response` 保证从首个等跨度槽位起至多前 4 席等跨度胜出者连续落座，将楔入其中的长词续写（如 `淡饭粗茶`/`单反相机`）顺延至其后，避免真实等跨度词被挤出首页（3+ 字整句原本占 `0..4`，`4+2` 布局不变）；`runtime.rs` 与 `neural_v2.rs` 在响应超时 `> 80 ms`、用户已移动高亮/翻页或首槽已置顶/非中文时双兜底锁定槽 0 不变（`late_slot0_mutated = 0`）。
 - **512 字完整上文窗口**：`neural_context_window` 保留光标前至多 512 个 Unicode 标量字符（完整保留中文标点、空格、ASCII 与 Emoji），通过独立纯数据 C ABI（`msime_client.h` 追加 4 个导出函数，向后兼容所有平台宿主）透传给端侧推理服务。
 
@@ -78,7 +80,7 @@ Status: implemented
 关键结论：
 - 相比旧 `main` 生产基线，`v2_full` 在 `diagnostic_dev` 上 Top-1 提升 **`+30.43 pp`**、CER 降低 **`4.9×`**；在从未触碰的封存盲测 `blind_holdout` 上 Top-1 提升 **`+24.13 pp`**（`57.85% → 81.98%`）、In-Pool 提升 **`+11.34 pp`**（`90.99%`）、MRR 提升 **`+0.1980`**（`0.8455`）、CER 降至 **`3.76%`**（`2.3×` 下降）、S03 上下文同音对偶双命中从 `76.9%` 跃升至 **`84.6%`**（`+7.7 pp`）；在全新 `rolling_fresh_v2` 上保持 **`81.87%`**、CER `3.70%` 且 S03 双命中 **`100.0% (12/12)`**。
 - 端到端性能：`last_key P95 = 8.3–9.2 ms`（同步 Tier 0 极速出屏），`score P50 ≈ 19.5–20.8 ms` / `P95 ≈ 34.4–36.3 ms`，单字 Token Healing + 前缀边际化仅耗时 `0.1–0.4 ms`，`late_slot0_mutated = 0`。
-- 实机复现用例均在零词级规则下首位命中：「这个兄弟 应该多少还是」+ `zhenglexieqian` → `#1 挣了些钱`；IM 无标点长句「现在对输入法想要打个字」+ `danfan` → `#1 但凡`（「全画幅」+ `danfan` → `#1 单反`）；跨 BPE 边界「就是说我想读取别的客户的消息也」+ `mei` → `#1 没`（`0.4 ms`，领先「每」`+7.4 nats`）。
+- 实机复现用例均在零词级规则下首位命中：「这个兄弟 应该多少还是」+ `zhenglexieqian` → `#1 挣了些钱`；IM 无标点长句「现在对输入法想要打个字」+ `danfan` → `#1 但凡`（「全画幅」+ `danfan` → `#1 单反`）；跨 BPE 边界「就是说我想读取别的客户的消息也」+ `mei` → `#1 没`（`0.4 ms`，领先「每」`+7.4 nats`）；「好」+ `d` → `#1 的`；「这个」+ `xiongtai` → `#1 兄台 / #2 形态*`（同时「这个产品的」+ `xiongtai` → `#1 形态*`、「我是河北」+ `xiongtai` → `#1 邢台*`）。
 
 ## Historical audit
 
@@ -122,6 +124,11 @@ Status: implemented
 
 - **最强理由**：在 `kv_unified = true` 模式下将 `n_seq_max` 提到 `36` 并对所有 16 条候选无条件展开逗号子树，实现最直观且可容纳全部 32 条直连/逗号分支于单批内。
 - **放弃原因**：实测证实提高 `n_seq_max` 至 `36` 会放宽 `llama.cpp` Metal 统一 KV 的序列掩码与 batch 元数据开销，反而使空上文预热 `P95` 从 `16.1 ms` 升至 `24.8 ms`、`holdout` 打分 `P95` 升至 `40.6 ms` 并引入 `>80 ms` 尖峰；而维持 `n_seq_max = 20` 并以已缓存的 `cached_ctx_log_probs[comma_token] >= -4.5` 做 O(1) 剪枝，再按「单 token 叶子全量纳入 + 多 token 分支在单批序列余量内纳入」控树后，`blind_holdout` 完整保留 `81.40%` Top-1 与 `84.6%` S03 双命中，同时 `Score P50` 回落至 `19.3 ms`、`>80 ms` 锁槽率保持 `0.00%`。
+
+### 7. 完整字面词防纠错刷屏：在 Tier 0 `typo_edges.rs` 静态截断 Top-1 并全面抬高全部编辑惩罚 vs 仅收紧低概率删字 + Tier 1 融合后首页限流
+
+- **最强理由**：直接在 Tier 0 把完整字面整词跨度的纠错边裁为 Top-1 并统一将鼻音/换位/邻键/删字惩罚提到 `-4.8 ~ -7.6`，逻辑集中且能一步压掉 `形态*/性态*/邢台*`。
+- **放弃原因**：盲测对照实验（`v2p5` vs `v2p6`）证实，在 Tier 0 按静态词频盲剪为 Top-1 并连带收紧前后鼻音与换位惩罚，会使 `rolling_fresh_v2` 的 `S12_typo_and_fuzzy` `In-Pool` 从 `94.44%` 跌至 `88.89%`、`Top-1` 从 `83.33%` 跌至 `72.22%`，同时在「我是河北 + `xiongtai`」场景中盲剪掉真实地名「邢台*」。改为 Tier 0 保持 Top-3 召回、仅对非 `g` 非重复删字收紧至 `-7.0`、并在 Tier 1 神经打分后把首页前 4 席纠错上限设为 1 后，三套盲测全面恢复零回归（`holdout 81.98%`、`fresh_v2 81.87%`、`S12 Top-1 83.33% / In-Pool 94.44%`），且 17 组实机场景探针全部首位命中。
 
 ## Consequences
 
