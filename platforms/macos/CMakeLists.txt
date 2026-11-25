@@ -1729,12 +1729,16 @@ if(SHURUFA_LLAMA_INCLUDE_DIR AND SHURUFA_LLAMA_LIBRARY)
   set_target_properties(ShurufaNeuralService PROPERTIES
     BUILD_RPATH "@executable_path/../Frameworks;@executable_path;${SHURUFA_LLAMA_LIB_DIR}")
 
-  add_dependencies(MSIMEClientInputMethod shurufa_neural ShurufaNeuralService)
-  add_custom_command(TARGET MSIMEClientInputMethod POST_BUILD
+  # 不依赖 MSIMEClientInputMethod 的 POST_BUILD：仅改动 C++ 神经引擎时主可执行文件不重链，
+  # POST_BUILD 不会触发，会导致包内 dylib/helper 静默滞后；改由独立目标按依赖同步拷贝到包内。
+  add_custom_target(shurufa_stage_neural_bundle
     COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>/Contents/Frameworks"
     COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>/Contents/Helpers"
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:shurufa_neural>" "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>/Contents/Frameworks/libshurufa_neural.dylib"
-    COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:ShurufaNeuralService>" "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>/Contents/Helpers/ShurufaNeuralService")
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:ShurufaNeuralService>" "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>/Contents/Helpers/ShurufaNeuralService"
+    DEPENDS shurufa_neural ShurufaNeuralService
+    COMMENT "同步端侧神经解码库与独立后台服务到 Shurufa.app 包内")
+  add_dependencies(MSIMEClientInputMethod shurufa_stage_neural_bundle)
 
   # UDS IPC 客户端与独立后台服务集成单测（使用 `--test-mock`，无 378 MB 模型依赖亦可完整验证崩溃自愈与帧协议）。
   add_executable(neural-service-ipc-test tests/neural/NeuralServiceIPCTest.mm src/neural/ShurufaNeuralClient.mm)
