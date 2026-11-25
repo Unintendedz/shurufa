@@ -176,6 +176,7 @@ pub(crate) fn create_session(bytes: &[u8], usage: SessionUse) -> Result<Value, S
                 lifecycle: None,
                 neural_client: None,
                 last_neural_prefilled_context: None,
+                view_buffer: Default::default(),
                 _dictionary_access: dictionary_access,
             },
         )
@@ -191,36 +192,45 @@ pub extern "C" fn msime_client_focus(handle: u64, focused: bool) -> *mut c_char 
 /// `msime_client_focus` 的本体。
 pub(crate) fn focus_session(handle: u64, focused: bool) -> Result<Value, String> {
     with_session(handle, |session| {
-        // 在换插件表之前采样：换表会刷新打开着的 `/` 列表，这也算这次 focus 的变化。
-        let pending = session.lifecycle_begin(lifecycle::Call::Focus(focused));
-        // Focus-out is where a host's field ends, so selections counted in it are written here rather than waiting for a batch to fill. The same goes for the engine's delayed context learning: the iOS keyboard extension and the Android IME process can be killed without ever destroying their sessions, and the engine no longer writes that queue at process exit.
-        if !focused {
-            session.last_neural_prefilled_context = None;
-            if let Some(client) = session.neural_client.as_ref() {
-                client.cancel_pending_decode_for_session(session.runtime.session_id());
-            }
-            session.flush_selections();
-            msime_engine::flush_personal_learning();
-        } else {
-            session.last_neural_prefilled_context = None;
-            session.refresh_plugin_tables();
-            // 聚焦时刷新按需下载的语法模型包；Engine 重建在随后的 `complete_transition` 里空闲时进行。
-            session.refresh_resource_packs();
-            // The settings page may have imported the pack in use again, or removed it, since this session last looked.
-            session.sound.restamp();
-        }
-        let result = session.runtime.focus(focused).map_err(|e| e.to_string());
-        // 失焦先取消组字再刷新，刷新失败时组字已经没了：照样发 end、hidden 和 focus_out。
-        let result = session.lifecycle_on_error(pending, result)?;
-        let facts = session.runtime.facts();
-        let mut result = session.complete_transition(result);
-        // 失焦上屏不可改写、也不出声；focus_in/focus_out 排在组字结束之后，所以 focus_in 也在上面的重读之后。focus 的回复不带 `feedback`。
-        session.lifecycle_after(pending, facts, &mut result);
-        if focused {
-            session.schedule_neural_prefill_if_idle();
-        }
+        let result = focus_session_transition(session, focused)?;
         serde_json::to_value(result).map_err(|e| e.to_string())
     })
+}
+
+/// 零拷贝与 JSON 焦点接口共用的核心状态切换。
+pub(crate) fn focus_session_transition(
+    session: &mut HostSession,
+    focused: bool,
+) -> Result<Transition, String> {
+    // 在换插件表之前采样：换表会刷新打开着的 `/` 列表，这也算这次 focus 的变化。
+    let pending = session.lifecycle_begin(lifecycle::Call::Focus(focused));
+    // Focus-out is where a host's field ends, so selections counted in it are written here rather than waiting for a batch to fill. The same goes for the engine's delayed context learning: the iOS keyboard extension and the Android IME process can be killed without ever destroying their sessions, and the engine no longer writes that queue at process exit.
+    if !focused {
+        session.last_neural_prefilled_context = None;
+        if let Some(client) = session.neural_client.as_ref() {
+            client.cancel_pending_decode_for_session(session.runtime.session_id());
+        }
+        session.flush_selections();
+        msime_engine::flush_personal_learning();
+    } else {
+        session.last_neural_prefilled_context = None;
+        session.refresh_plugin_tables();
+        // 聚焦时刷新按需下载的语法模型包；Engine 重建在随后的 `complete_transition` 里空闲时进行。
+        session.refresh_resource_packs();
+        // The settings page may have imported the pack in use again, or removed it, since this session last looked.
+        session.sound.restamp();
+    }
+    let result = session.runtime.focus(focused).map_err(|e| e.to_string());
+    // 失焦先取消组字再刷新，刷新失败时组字已经没了：照样发 end、hidden 和 focus_out。
+    let result = session.lifecycle_on_error(pending, result)?;
+    let facts = session.runtime.facts();
+    let mut result = session.complete_transition(result);
+    // 失焦上屏不可改写、也不出声；focus_in/focus_out 排在组字结束之后，所以 focus_in 也在上面的重读之后。focus 的回复不带 `feedback`。
+    session.lifecycle_after(pending, facts, &mut result);
+    if focused {
+        session.schedule_neural_prefill_if_idle();
+    }
+    Ok(result)
 }
 
 #[no_mangle]

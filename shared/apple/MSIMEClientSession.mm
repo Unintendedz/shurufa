@@ -9,6 +9,11 @@ static __weak MSIMEClientSession *gActiveSession;
 static void setError(NSError **error, NSString *message) {
     if (error) *error = [NSError errorWithDomain:MSIMEClientErrorDomain code:1 userInfo:@{NSLocalizedDescriptionKey: message}];
 }
+static void setSnapshotError(char *rawError, NSError **error) {
+    NSString *message = rawError ? @(rawError) : @"输入运行时调用失败";
+    if (rawError) msime_client_string_free(rawError);
+    setError(error, message);
+}
 static BOOL parseUInt64(id value, NSString *field, uint64_t *result, NSError **error) {
     if (![value isKindOfClass:NSNumber.class] ||
         CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID() ||
@@ -688,6 +693,109 @@ static void MSIMEInvokeAnnounce(void *context) {
 - (nullable NSDictionary *)viewWithError:(NSError **)error {
     if (![self checkThreadAndHandle:error]) return nil;
     return decode(msime_client_view(_handle), error);
+}
+- (nullable const ShurufaViewSnapshot *)viewSnapshotWithError:(NSError **)error {
+    if (![self checkThreadAndHandle:error]) return nullptr;
+    char *rawError = nullptr;
+    const ShurufaViewSnapshot *snapshot = shurufa_session_view(_handle, &rawError);
+    if (!snapshot) setSnapshotError(rawError, error);
+    return snapshot;
+}
+- (nullable const ShurufaTransitionSnapshot *)typeASCIISnapshot:(uint8_t)character shift:(BOOL)shift error:(NSError **)error {
+    if (![self checkThreadAndHandle:error]) return nullptr;
+    char *rawError = nullptr;
+    const ShurufaTransitionSnapshot *snapshot = shurufa_session_character(_handle, character, shift, &rawError);
+    if (!snapshot) setSnapshotError(rawError, error);
+    return snapshot;
+}
+- (nullable const ShurufaTransitionSnapshot *)commandSnapshot:(uint32_t)command error:(NSError **)error {
+    if (![self checkThreadAndHandle:error]) return nullptr;
+    char *rawError = nullptr;
+    const ShurufaTransitionSnapshot *snapshot = shurufa_session_command(_handle, command, &rawError);
+    if (!snapshot) setSnapshotError(rawError, error);
+    return snapshot;
+}
+- (nullable const ShurufaTransitionSnapshot *)punctuationSnapshot:(uint8_t)character
+                                                        preceding:(uint32_t)preceding
+                                                     hasPreceding:(BOOL)hasPreceding
+                                                     literalASCII:(BOOL)literalASCII
+                                                            error:(NSError **)error {
+    if (![self checkThreadAndHandle:error]) return nullptr;
+    char *rawError = nullptr;
+    const ShurufaTransitionSnapshot *snapshot = shurufa_session_punctuation(
+        _handle, character, preceding, hasPreceding, literalASCII, &rawError);
+    if (!snapshot) setSnapshotError(rawError, error);
+    return snapshot;
+}
+- (nullable const ShurufaTransitionSnapshot *)selectSnapshotGeneration:(uint64_t)generation
+                                                                 index:(NSUInteger)index
+                                                                 error:(NSError **)error {
+    if (![self checkThreadAndHandle:error]) return nullptr;
+    char *rawError = nullptr;
+    const ShurufaTransitionSnapshot *snapshot = shurufa_session_select(_handle, generation, index, &rawError);
+    if (!snapshot) setSnapshotError(rawError, error);
+    return snapshot;
+}
+- (nullable const ShurufaTransitionSnapshot *)selectAnyCandidateSnapshotGeneration:(uint64_t)generation
+                                                                             index:(NSUInteger)index
+                                                                             error:(NSError **)error {
+    if (![self checkThreadAndHandle:error]) return nullptr;
+    char *rawError = nullptr;
+    const ShurufaTransitionSnapshot *snapshot = shurufa_session_select_any(_handle, generation, index, &rawError);
+    if (!snapshot) setSnapshotError(rawError, error);
+    return snapshot;
+}
+- (nullable const ShurufaTransitionSnapshot *)selectEdgeSnapshotGeneration:(uint64_t)generation
+                                                                     index:(NSUInteger)index
+                                                                      edge:(uint8_t)edge
+                                                                     error:(NSError **)error {
+    if (![self checkThreadAndHandle:error]) return nullptr;
+    char *rawError = nullptr;
+    const ShurufaTransitionSnapshot *snapshot = shurufa_session_select_edge(_handle, generation, index, edge, &rawError);
+    if (!snapshot) setSnapshotError(rawError, error);
+    return snapshot;
+}
+- (nullable const ShurufaTransitionSnapshot *)setFocusedSnapshot:(BOOL)focused error:(NSError **)error {
+    if (![self checkThreadAndHandle:error]) return nullptr;
+    char *rawError = nullptr;
+    const ShurufaTransitionSnapshot *snapshot = shurufa_session_focus(_handle, focused, &rawError);
+    if (!snapshot) {
+        setSnapshotError(rawError, error);
+        return nullptr;
+    }
+    if (focused) gActiveSession = self;
+    return snapshot;
+}
+- (nullable const ShurufaViewSnapshot *)pollNeuralSnapshotReady:(BOOL *)ready
+                                                          moved:(BOOL *)moved
+                                                          error:(NSError **)error {
+    if (![self checkThreadAndHandle:error]) return nullptr;
+    char *rawError = nullptr;
+    bool readyValue = false;
+    bool movedValue = false;
+    const ShurufaViewSnapshot *snapshot = shurufa_session_poll_neural(
+        _handle, ready ? &readyValue : nullptr, moved ? &movedValue : nullptr, &rawError);
+    if (!snapshot) {
+        setSnapshotError(rawError, error);
+        return nullptr;
+    }
+    if (ready) *ready = readyValue ? YES : NO;
+    if (moved) *moved = movedValue ? YES : NO;
+    return snapshot;
+}
+- (nullable const ShurufaViewSnapshot *)flushProvisionalNeuralSnapshotFlushed:(BOOL *)flushed
+                                                                       error:(NSError **)error {
+    if (![self checkThreadAndHandle:error]) return nullptr;
+    char *rawError = nullptr;
+    bool flushedValue = false;
+    const ShurufaViewSnapshot *snapshot = shurufa_session_flush_provisional_neural(
+        _handle, flushed ? &flushedValue : nullptr, &rawError);
+    if (!snapshot) {
+        setSnapshotError(rawError, error);
+        return nullptr;
+    }
+    if (flushed) *flushed = flushedValue ? YES : NO;
+    return snapshot;
 }
 - (nullable NSDictionary *)allCandidatesWithError:(NSError **)error {
     if (![self checkThreadAndHandle:error]) return nil;

@@ -5,7 +5,7 @@
 
 use crate::*;
 use msime_input_runtime::{
-    NeuralClientConfig, NeuralServiceClient, NeuralWakeupFn, PresentationPhase,
+    NeuralClientConfig, NeuralServiceClient, NeuralWakeupFn, PresentationPhase, View,
 };
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -250,121 +250,185 @@ pub unsafe extern "C" fn msime_client_configure_neural_service(
     })
 }
 
+pub(crate) struct NeuralPollResult {
+    pub ready: bool,
+    pub applied: Option<bool>,
+    pub moved: bool,
+    pub generation: Option<u64>,
+    pub slot0_locked: Option<bool>,
+    pub tier1_rescued: Option<bool>,
+    pub provisional: bool,
+    pub pid: u32,
+    pub view: Option<View>,
+}
+
+/// 与 `msime_client_poll_neural` 和 `shurufa_session_poll_neural` 共用的轮询状态机推进。
+pub(crate) fn poll_neural_session(session: &mut HostSession) -> NeuralPollResult {
+    let gen = session.runtime.generation();
+    let session_id = session.runtime.session_id();
+    let pid = session
+        .neural_client
+        .as_ref()
+        .map_or(0, |client| client.service_pid());
+    if !session.neural_v2_active() || session.runtime.is_idle() {
+        session.runtime.flush_provisional();
+        return NeuralPollResult {
+            ready: false,
+            applied: None,
+            moved: false,
+            generation: None,
+            slot0_locked: None,
+            tier1_rescued: None,
+            provisional: false,
+            pid,
+            view: None,
+        };
+    }
+
+    let completed = session
+        .neural_client
+        .as_ref()
+        .and_then(|client| client.take_completed_decode(session_id, gen));
+    let phase = session.runtime.presentation_phase();
+    let was_provisional = matches!(
+        phase,
+        PresentationPhase::Provisional { generation: g, .. } if g == gen
+    );
+
+    match completed {
+        Some(Some(parsed)) => {
+            let lock_slot_0 = !was_provisional;
+            let pending = session.lifecycle_begin(lifecycle::Call::SideChannel);
+            let outcome = session.runtime.apply_neural_response(&parsed, lock_slot_0);
+            let pid = session
+                .neural_client
+                .as_ref()
+                .map_or(0, |client| client.service_pid());
+            if outcome.moved || was_provisional {
+                let view = session.runtime.view();
+                session.lifecycle_view(pending, &view);
+                NeuralPollResult {
+                    ready: true,
+                    applied: Some(outcome.applied),
+                    moved: outcome.moved,
+                    generation: Some(outcome.generation),
+                    slot0_locked: Some(outcome.slot0_locked),
+                    tier1_rescued: Some(outcome.tier1_rescued),
+                    provisional: false,
+                    pid,
+                    view: Some(view),
+                }
+            } else {
+                NeuralPollResult {
+                    ready: false,
+                    applied: Some(outcome.applied),
+                    moved: false,
+                    generation: Some(outcome.generation),
+                    slot0_locked: Some(outcome.slot0_locked),
+                    tier1_rescued: Some(outcome.tier1_rescued),
+                    provisional: false,
+                    pid,
+                    view: None,
+                }
+            }
+        }
+        Some(None) => {
+            if was_provisional {
+                session.runtime.mark_presented(gen);
+                NeuralPollResult {
+                    ready: true,
+                    applied: Some(false),
+                    moved: false,
+                    generation: None,
+                    slot0_locked: None,
+                    tier1_rescued: None,
+                    provisional: false,
+                    pid,
+                    view: Some(session.runtime.view()),
+                }
+            } else {
+                NeuralPollResult {
+                    ready: false,
+                    applied: Some(false),
+                    moved: false,
+                    generation: None,
+                    slot0_locked: None,
+                    tier1_rescued: None,
+                    provisional: false,
+                    pid,
+                    view: None,
+                }
+            }
+        }
+        None => {
+            if let PresentationPhase::Provisional {
+                generation: g,
+                deadline,
+            } = phase
+            {
+                if g == gen && Instant::now() + Duration::from_millis(1) >= deadline {
+                    session.runtime.mark_presented(gen);
+                    return NeuralPollResult {
+                        ready: true,
+                        applied: Some(false),
+                        moved: false,
+                        generation: None,
+                        slot0_locked: None,
+                        tier1_rescued: None,
+                        provisional: false,
+                        pid,
+                        view: Some(session.runtime.view()),
+                    };
+                }
+            }
+            NeuralPollResult {
+                ready: false,
+                applied: Some(false),
+                moved: false,
+                generation: None,
+                slot0_locked: None,
+                tier1_rescued: None,
+                provisional: session.runtime.is_provisional(),
+                pid,
+                view: None,
+            }
+        }
+    }
+}
+
 /// 主线程收到唤醒回调后轮询：完成两阶段防闪与槽 0 锁状态推进，并视需要返回最新 `View`。
 #[no_mangle]
 pub extern "C" fn msime_client_poll_neural(handle: u64) -> *mut c_char {
     response(|| {
         with_session(handle, |session| {
-            let gen = session.runtime.generation();
-            let session_id = session.runtime.session_id();
-            let pid = session
-                .neural_client
-                .as_ref()
-                .map_or(0, |client| client.service_pid());
-            if !session.neural_v2_active() || session.runtime.is_idle() {
-                session.runtime.flush_provisional();
-                return Ok(json!({
-                    "ready": false,
-                    "moved": false,
-                    "provisional": false,
-                    "pid": pid,
-                }));
-            }
-
-            let completed = session
-                .neural_client
-                .as_ref()
-                .and_then(|client| client.take_completed_decode(session_id, gen));
-            let phase = session.runtime.presentation_phase();
-            let was_provisional = matches!(
-                phase,
-                PresentationPhase::Provisional { generation: g, .. } if g == gen
-            );
-
-            match completed {
-                Some(Some(parsed)) => {
-                    let lock_slot_0 = !was_provisional;
-                    let pending = session.lifecycle_begin(lifecycle::Call::SideChannel);
-                    let outcome = session.runtime.apply_neural_response(&parsed, lock_slot_0);
-                    let pid = session
-                        .neural_client
-                        .as_ref()
-                        .map_or(0, |client| client.service_pid());
-                    if outcome.moved || was_provisional {
-                        let view = session.runtime.view();
-                        session.lifecycle_view(pending, &view);
-                        Ok(json!({
-                            "ready": true,
-                            "applied": outcome.applied,
-                            "moved": outcome.moved,
-                            "generation": outcome.generation,
-                            "slot0_locked": outcome.slot0_locked,
-                            "tier1_rescued": outcome.tier1_rescued,
-                            "provisional": false,
-                            "pid": pid,
-                            "view": view,
-                        }))
-                    } else {
-                        Ok(json!({
-                            "ready": false,
-                            "applied": outcome.applied,
-                            "moved": false,
-                            "generation": outcome.generation,
-                            "slot0_locked": outcome.slot0_locked,
-                            "tier1_rescued": outcome.tier1_rescued,
-                            "provisional": false,
-                            "pid": pid,
-                        }))
-                    }
+            let result = poll_neural_session(session);
+            let mut body = json!({
+                "ready": result.ready,
+                "moved": result.moved,
+                "provisional": result.provisional,
+                "pid": result.pid,
+            });
+            if let Value::Object(ref mut map) = body {
+                if let Some(applied) = result.applied {
+                    map.insert("applied".into(), json!(applied));
                 }
-                Some(None) => {
-                    if was_provisional {
-                        session.runtime.mark_presented(gen);
-                        Ok(json!({
-                            "ready": true,
-                            "applied": false,
-                            "moved": false,
-                            "provisional": false,
-                            "pid": pid,
-                            "view": session.runtime.view(),
-                        }))
-                    } else {
-                        Ok(json!({
-                            "ready": false,
-                            "applied": false,
-                            "moved": false,
-                            "provisional": false,
-                            "pid": pid,
-                        }))
-                    }
+                if let Some(generation) = result.generation {
+                    map.insert("generation".into(), json!(generation));
                 }
-                None => {
-                    if let PresentationPhase::Provisional {
-                        generation: g,
-                        deadline,
-                    } = phase
-                    {
-                        if g == gen && Instant::now() + Duration::from_millis(1) >= deadline {
-                            session.runtime.mark_presented(gen);
-                            return Ok(json!({
-                                "ready": true,
-                                "applied": false,
-                                "moved": false,
-                                "provisional": false,
-                                "pid": pid,
-                                "view": session.runtime.view(),
-                            }));
-                        }
-                    }
-                    Ok(json!({
-                        "ready": false,
-                        "applied": false,
-                        "moved": false,
-                        "provisional": session.runtime.is_provisional(),
-                        "pid": pid,
-                    }))
+                if let Some(slot0_locked) = result.slot0_locked {
+                    map.insert("slot0_locked".into(), json!(slot0_locked));
+                }
+                if let Some(tier1_rescued) = result.tier1_rescued {
+                    map.insert("tier1_rescued".into(), json!(tier1_rescued));
+                }
+                if let Some(view) = result.view {
+                    map.insert(
+                        "view".into(),
+                        serde_json::to_value(view).map_err(|e| e.to_string())?,
+                    );
                 }
             }
+            Ok(body)
         })
     })
 }

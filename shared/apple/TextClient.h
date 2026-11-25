@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#include "msime_client.h"
 
 @protocol MSIMETextClient <NSObject>
 - (void)insertText:(id)text replacementRange:(NSRange)range;
@@ -46,6 +47,13 @@ void MSIMEApplyTransitionWithCommitObserver(NSDictionary *transition, id<MSIMETe
 void MSIMEApplyTransitionWithWriteGuard(NSDictionary *transition, id<MSIMETextClient> client,
                                        MSIMEInlinePreeditStyle style, NSString *closing,
                                        BOOL *clientHasMarkedText, BOOL (^isCurrent)(void));
+/// 直接按零拷贝 C 快照同步写入上屏与行内预编辑（热路径不再经过 `NSDictionary` 装箱）。
+void MSIMEApplyTransitionSnapshotWithCommitObserver(const ShurufaTransitionSnapshot *transition,
+                                                    NSString *overrideCommit,
+                                                    id<MSIMETextClient> client,
+                                                    MSIMEInlinePreeditStyle style, NSString *closing,
+                                                    BOOL *clientHasMarkedText, BOOL (^isCurrent)(void),
+                                                    void (^didCommit)(NSString *text));
 // UTF-16 display offset shared by marked text and the candidate preedit row.
 NSUInteger MSIMEPreeditCaretPosition(NSString *editing, NSString *preedit, id position);
 

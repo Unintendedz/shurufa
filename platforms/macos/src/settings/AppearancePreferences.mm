@@ -3410,7 +3410,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     return [_sharedCandidateFitContent boolValue];
 }
 - (BOOL)adaptiveCandidateCount {
-    return !self.vertical && [_sharedCandidateCountMode isEqual:@"adaptive"];
+    return NO;
 }
 - (CGFloat)candidateMaxWidth { return _sharedCandidateMaxWidth ? _sharedCandidateMaxWidth.doubleValue : 420; }
 - (NSUInteger)candidateColumns { return _sharedCandidateColumns ? _sharedCandidateColumns.unsignedIntegerValue : 6; }

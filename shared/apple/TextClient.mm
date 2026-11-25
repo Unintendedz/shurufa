@@ -22,9 +22,8 @@ static BOOL MSIMEStrictCaretPosition(id value, NSUInteger *result) {
 }
 
 // 把按 Unicode 标量计的位置换成 UTF-16 下标；不是非负整数或超出范围时取末尾。
-static NSUInteger MSIMEScalarOffset(NSString *text, id value) {
-    NSUInteger scalars = 0;
-    if (!MSIMEStrictCaretPosition(value, &scalars)) return text.length;
+static NSUInteger MSIMEScalarOffsetFromCount(NSString *text, NSUInteger scalars, BOOL valid) {
+    if (!valid) return text.length;
     NSUInteger offset = 0;
     while (offset < text.length && scalars > 0) {
         const unichar high = [text characterAtIndex:offset];
@@ -45,9 +44,9 @@ static NSString *MSIMEPreeditLetters(NSString *text) {
     return letters;
 }
 
-NSUInteger MSIMEPreeditCaretPosition(NSString *editing, NSString *preedit, id position) {
-    NSUInteger rawCaret = 0;
-    if (!MSIMEStrictCaretPosition(position, &rawCaret)) return preedit.length;
+static NSUInteger MSIMEPreeditCaretPositionFromValue(NSString *editing, NSString *preedit,
+                                                       NSUInteger rawCaret, BOOL validCaret) {
+    if (!validCaret) return preedit.length;
     rawCaret = MIN(rawCaret, editing.length);
     if ([preedit isEqual:editing]) return rawCaret;
     // Only map lossless separator formatting. Expanded shuangpin, converted words
@@ -68,6 +67,12 @@ NSUInteger MSIMEPreeditCaretPosition(NSString *editing, NSString *preedit, id po
     if (rawCaret && MSIMEPreeditSeparator([editing characterAtIndex:rawCaret - 1]))
         while (displayCaret < preedit.length && MSIMEPreeditSeparator([preedit characterAtIndex:displayCaret])) ++displayCaret;
     return displayCaret;
+}
+
+NSUInteger MSIMEPreeditCaretPosition(NSString *editing, NSString *preedit, id position) {
+    NSUInteger rawCaret = 0;
+    const BOOL validCaret = MSIMEStrictCaretPosition(position, &rawCaret);
+    return MSIMEPreeditCaretPositionFromValue(editing, preedit, rawCaret, validCaret);
 }
 
 NSString *MSIMETextClientFollowingCharacter(id<MSIMETextClient> client) {
@@ -222,65 +227,50 @@ void MSIMEApplyTransitionTrackingMarkedText(NSDictionary *transition, id<MSIMETe
     MSIMEApplyTransitionWithCommitObserver(transition, client, style, closing, clientHasMarkedText, nil, nil);
 }
 
-void MSIMEApplyTransitionWithCommitObserver(NSDictionary *transition, id<MSIMETextClient> client,
-                                            MSIMEInlinePreeditStyle style, NSString *closing,
-                                            BOOL *clientHasMarkedText, BOOL (^isCurrent)(void),
-                                            void (^didCommit)(NSString *text)) {
-    if (![transition isKindOfClass:NSDictionary.class] || (isCurrent && !isCurrent())) return;
+static NSString *MSIMESliceString(ShurufaStringSlice slice) {
+    if (!slice.ptr || slice.len == 0) return @"";
+    return [[NSString alloc] initWithBytes:slice.ptr length:slice.len encoding:NSUTF8StringEncoding] ?: @"";
+}
+
+static void MSIMEApplyTransitionFields(NSString *commit, NSString *editing, NSString *preedit,
+                                       NSUInteger rawCaret, BOOL validCaret, NSString *reading,
+                                       NSString *conversion, NSUInteger conversionFocusStart,
+                                       NSUInteger conversionFocusEnd, NSString *phrase,
+                                       BOOL hasView, id<MSIMETextClient> client,
+                                       MSIMEInlinePreeditStyle style, NSString *closing,
+                                       BOOL *clientHasMarkedText, BOOL (^isCurrent)(void),
+                                       void (^didCommit)(NSString *text)) {
+    if (isCurrent && !isCurrent()) return;
 
     if (!closing.length) closing = nil;
-    id commit = transition[@"commit"];
     // A commit ends the pair: the closing mark goes in with the text it was holding open, and the
     // caret lands after it, where the next character belongs.
-    if ([commit isKindOfClass:NSString.class] && closing)
-        commit = [(NSString *)commit stringByAppendingString:closing];
-    if ([commit isKindOfClass:NSString.class]) {
+    if (commit && closing) commit = [commit stringByAppendingString:closing];
+    const BOOL hasCommit = commit != nil;
+    if (hasCommit) {
         // 先消耗旧标记，再同步写入；回调中的新组字由新的派发持有。
         if (clientHasMarkedText) *clientHasMarkedText = NO;
         [client insertText:commit replacementRange:NSMakeRange(NSNotFound, NSNotFound)];
         if (isCurrent && !isCurrent()) return;
         if (didCommit) didCommit(commit);
         if (isCurrent && !isCurrent()) return;
-
     }
-    NSDictionary *view = transition[@"view"];
-    if (![view isKindOfClass:NSDictionary.class]) return;
-    NSString *editing = view[@"editing_text"];
-    if (![editing isKindOfClass:NSString.class]) editing = @"";
-    NSString *preedit = view[@"preedit"];
-    if (![preedit isKindOfClass:NSString.class]) preedit = editing;
-    id position = view[@"caret_position"];
-    // A Japanese composition is かな, not romaji, and a Korean one is Hangul, not the Dubeolsik key letters in `editing_text`.
-    //
-    // The Engine hands over both - `editing_text` is the letters that were typed and `reading` the
-    // kana they convert to - and every Japanese input method shows the kana: it is what the user
-    // means, what the candidates are for, and what Enter commits here. Showing the letters instead
-    // leaves the composition saying `nihon` while the commit says にほん.
-    //
-    // The exception is a caret the user has moved into the middle of the letters. The Engine's
-    // offset is into the romaji and there is no map from it into the kana - the same reason
-    // MSIMEPreeditCaretPosition refuses to guess for shuangpin - so rather than draw the caret in
-    // the wrong place, that case keeps showing what the caret belongs to. Typing never reaches it:
-    // the caret sits at the end until an arrow key moves it.
-    NSString *reading = view[@"reading"];
-    NSUInteger rawCaret = 0;
-    BOOL validCaret = MSIMEStrictCaretPosition(position, &rawCaret);
-    if ([reading isKindOfClass:NSString.class] && reading.length &&
-        (!validCaret || rawCaret >= editing.length)) {
+    if (!hasView) return;
+    if (!editing) editing = @"";
+    if (!preedit) preedit = editing;
+    if (reading.length && (!validCaret || rawCaret >= editing.length)) {
         editing = reading;
         preedit = reading;
-        position = @(reading.length);
         rawCaret = reading.length;
         validCaret = YES;
     }
     NSString *marked = preedit;
-    NSUInteger caret = MSIMEPreeditCaretPosition(editing, preedit, position);
+    NSUInteger caret = MSIMEPreeditCaretPositionFromValue(editing, preedit, rawCaret, validCaret);
     // 整句改字：行内画改好的整句，不管预编辑样式选的是什么，光标在焦点字前，焦点那一段单独成一个子句。
-    NSString *conversion = view[@"conversion"];
     NSRange focus = NSMakeRange(NSNotFound, 0);
-    if ([conversion isKindOfClass:NSString.class] && conversion.length) {
-        const NSUInteger start = MSIMEScalarOffset(conversion, view[@"conversion_focus_start"]);
-        const NSUInteger end = MAX(start, MSIMEScalarOffset(conversion, view[@"conversion_focus_end"]));
+    if (conversion.length) {
+        const NSUInteger start = MSIMEScalarOffsetFromCount(conversion, conversionFocusStart, YES);
+        const NSUInteger end = MAX(start, MSIMEScalarOffsetFromCount(conversion, conversionFocusEnd, YES));
         marked = conversion;
         caret = start;
         focus = NSMakeRange(start, end - start);
@@ -291,15 +281,8 @@ void MSIMEApplyTransitionWithCommitObserver(NSDictionary *transition, id<MSIMETe
         marked = @"";
         caret = 0;
     }
-    // A phrase being put together out of several selections keeps the part already chosen in the
-    // composition instead of sending it to the document. It leads the marked text and the caret
-    // moves past it, the way the reference prepends word_for_creating_word to the reading and
-    // offsets the display caret by its length. The runtime hands it over separately because
-    // caret_position is an offset into the editing text in this host's own string unit.
-    NSString *phrase = view[@"phrase_prefix"];
     NSUInteger phraseLength = 0;
-    if ([phrase isKindOfClass:NSString.class] && phrase.length &&
-        (style != MSIMEInlinePreeditStyleEmpty || focus.location != NSNotFound)) {
+    if (phrase.length && (style != MSIMEInlinePreeditStyleEmpty || focus.location != NSNotFound)) {
         marked = [phrase stringByAppendingString:marked];
         caret += phrase.length;
         phraseLength = phrase.length;
@@ -307,19 +290,9 @@ void MSIMEApplyTransitionWithCommitObserver(NSDictionary *transition, id<MSIMETe
     }
     // While the pair is open the closing mark is the tail of the marked text, so it stays visible and
     // stays after the caret. A commit above has already consumed it.
-    if (closing && ![commit isKindOfClass:NSString.class]) marked = [marked stringByAppendingString:closing];
+    if (closing && !hasCommit) marked = [marked stringByAppendingString:closing];
     id displayed = marked;
 #if TARGET_OS_OSX
-    // Two clauses, drawn differently, once a phrase is being assembled: the piece already chosen is
-    // settled and the reading after it is still being typed. The reference draws the same
-    // distinction with TSF display attributes - its input clause carries a dotted underline and its
-    // converted clause none - and the macOS convention for it is the other way round in weight: the
-    // settled clause keeps a thin underline and the clause still being worked on a thick one, which
-    // is what every Japanese input method here does. Without this the two run together as one
-    // stretch of underlined text and nothing says where what the user already chose ends.
-    //
-    // AppKit only; UIKit's document proxy takes a plain string, and no UIKit host holds a phrase.
-    // 整句改字时焦点那一段是正在改的子句（粗下划线），其余是已经转换好的（细下划线），与日文输入法改文节时一样。
     if (focus.location != NSNotFound && focus.length > 0 && NSMaxRange(focus) <= marked.length) {
         NSMutableAttributedString *clauses = [[NSMutableAttributedString alloc] initWithString:marked];
         NSInteger segment = 0;
@@ -346,7 +319,6 @@ void MSIMEApplyTransitionWithCommitObserver(NSDictionary *transition, id<MSIMETe
         displayed = clauses;
     } else if (marked.length > 0) {
         // 普通组字也明确标出子句与下划线，不依赖 IMK 与客户端的默认标记样式。
-        // 光标只由下方的零长度选区表达，不把竖线等标记混进应用文字。
         displayed = [[NSAttributedString alloc] initWithString:marked attributes:@{
             NSUnderlineStyleAttributeName: @(NSUnderlineStyleSingle),
             NSMarkedClauseSegmentAttributeName: @0
@@ -354,10 +326,64 @@ void MSIMEApplyTransitionWithCommitObserver(NSDictionary *transition, id<MSIMETe
     }
 #endif
     // Only the clear of a composition that is not there is skipped; after a commit the clear still goes out, as it always has.
-    if (clientHasMarkedText && !*clientHasMarkedText && !marked.length && ![commit isKindOfClass:NSString.class]) return;
+    if (clientHasMarkedText && !*clientHasMarkedText && !marked.length && !hasCommit) return;
     // Recorded before the write: IMK can service the next key inside it, and that nested write lands in the client after this one, so it must also be the one whose state is left recorded.
     if (clientHasMarkedText) *clientHasMarkedText = marked.length > 0;
     [client setMarkedText:displayed selectionRange:NSMakeRange(caret, 0) replacementRange:NSMakeRange(NSNotFound, NSNotFound)];
+}
+
+void MSIMEApplyTransitionWithCommitObserver(NSDictionary *transition, id<MSIMETextClient> client,
+                                            MSIMEInlinePreeditStyle style, NSString *closing,
+                                            BOOL *clientHasMarkedText, BOOL (^isCurrent)(void),
+                                            void (^didCommit)(NSString *text)) {
+    if (![transition isKindOfClass:NSDictionary.class]) return;
+    id rawCommit = transition[@"commit"];
+    NSString *commit = [rawCommit isKindOfClass:NSString.class] ? (NSString *)rawCommit : nil;
+    NSDictionary *view = transition[@"view"];
+    const BOOL hasView = [view isKindOfClass:NSDictionary.class];
+    if (!hasView) {
+        MSIMEApplyTransitionFields(commit, nil, nil, 0, NO, nil, nil, 0, 0, nil, NO, client,
+                                   style, closing, clientHasMarkedText, isCurrent, didCommit);
+        return;
+    }
+    NSString *editing = [view[@"editing_text"] isKindOfClass:NSString.class] ? view[@"editing_text"] : @"";
+    NSString *preedit = [view[@"preedit"] isKindOfClass:NSString.class] ? view[@"preedit"] : editing;
+    NSUInteger rawCaret = 0;
+    const BOOL validCaret = MSIMEStrictCaretPosition(view[@"caret_position"], &rawCaret);
+    NSString *reading = [view[@"reading"] isKindOfClass:NSString.class] ? view[@"reading"] : nil;
+    NSString *conversion = [view[@"conversion"] isKindOfClass:NSString.class] ? view[@"conversion"] : nil;
+    NSUInteger focusStart = 0;
+    NSUInteger focusEnd = 0;
+    if (conversion.length) {
+        NSUInteger s = 0, e = 0;
+        const BOOL vs = MSIMEStrictCaretPosition(view[@"conversion_focus_start"], &s);
+        const BOOL ve = MSIMEStrictCaretPosition(view[@"conversion_focus_end"], &e);
+        focusStart = vs ? s : conversion.length;
+        focusEnd = ve ? MAX(focusStart, e) : conversion.length;
+    }
+    NSString *phrase = [view[@"phrase_prefix"] isKindOfClass:NSString.class] ? view[@"phrase_prefix"] : nil;
+    MSIMEApplyTransitionFields(commit, editing, preedit, rawCaret, validCaret, reading, conversion,
+                               focusStart, focusEnd, phrase, YES, client, style, closing,
+                               clientHasMarkedText, isCurrent, didCommit);
+}
+
+void MSIMEApplyTransitionSnapshotWithCommitObserver(const ShurufaTransitionSnapshot *transition,
+                                                    NSString *overrideCommit,
+                                                    id<MSIMETextClient> client,
+                                                    MSIMEInlinePreeditStyle style, NSString *closing,
+                                                    BOOL *clientHasMarkedText, BOOL (^isCurrent)(void),
+                                                    void (^didCommit)(NSString *text)) {
+    if (!transition) return;
+    NSString *commit = overrideCommit ?: (transition->has_commit ? MSIMESliceString(transition->commit) : nil);
+    const ShurufaViewSnapshot *view = &transition->view;
+    NSString *editing = MSIMESliceString(view->editing_text);
+    NSString *preedit = (view->preedit.ptr || view->preedit.len > 0) ? MSIMESliceString(view->preedit) : editing;
+    NSString *reading = view->reading.len > 0 ? MSIMESliceString(view->reading) : nil;
+    NSString *conversion = view->conversion.len > 0 ? MSIMESliceString(view->conversion) : nil;
+    NSString *phrase = view->phrase_prefix.len > 0 ? MSIMESliceString(view->phrase_prefix) : nil;
+    MSIMEApplyTransitionFields(commit, editing, preedit, view->caret_position, YES, reading, conversion,
+                               view->conversion_focus_start, view->conversion_focus_end, phrase,
+                               YES, client, style, closing, clientHasMarkedText, isCurrent, didCommit);
 }
 
 void MSIMEApplyTransition(NSDictionary *transition, id<MSIMETextClient> client) {

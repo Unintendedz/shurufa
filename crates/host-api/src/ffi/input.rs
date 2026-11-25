@@ -285,8 +285,9 @@ pub extern "C" fn msime_client_character(handle: u64, ascii: u8, shift: bool) ->
     )
 }
 
-#[no_mangle]
-pub extern "C" fn msime_client_command(handle: u64, command: u32) -> *mut c_char {
+pub(crate) fn command_action(
+    command: u32,
+) -> Result<(Action, Option<lifecycle::InputClass>), String> {
     let action = match command {
         0 => Action::Command(Command::Backspace),
         1 => Action::SelectHighlighted,
@@ -306,19 +307,17 @@ pub extern "C" fn msime_client_command(handle: u64, command: u32) -> *mut c_char
         18 => Action::Command(Command::ConversionRight),
         // 宿主已经自己写入了文本：对会话同 Cancel，生命周期里结束原因记 HostCommit。
         lifecycle::COMMAND_CANCEL_AFTER_HOST_COMMIT => {
-            return dispatch_call(
-                handle,
+            return Ok((
                 Action::Command(Command::Cancel),
                 Some(lifecycle::InputClass::HostCommit),
-            )
+            ))
         }
-        // 焦点即将离开，宿主替用户结束组字：对会话同 Finish（高亮的是脚本插件行时改为原样上屏，见 `Action::FinishOnFocusLoss`），上屏来源记 FocusLoss，不出声不画。
+        // 焦点即将离开，宿主替用户结束组字：对会话同 Finish，上屏来源记 FocusLoss，不出声不画。
         lifecycle::COMMAND_FINISH_ON_FOCUS_LOSS => {
-            return dispatch_call(
-                handle,
+            return Ok((
                 Action::FinishOnFocusLoss,
                 Some(lifecycle::InputClass::FocusLoss),
-            )
+            ))
         }
         100 => Action::NextPage,
         101 => Action::PreviousPage,
@@ -327,15 +326,47 @@ pub extern "C" fn msime_client_command(handle: u64, command: u32) -> *mut c_char
         104 => Action::FirstCandidate,
         105 => Action::LastCandidate,
         106 => Action::FirstCandidateOrHome,
-        _ => return response(|| Err("unknown input command".into())),
+        _ => return Err("unknown input command".into()),
     };
-    dispatch(handle, action)
+    Ok((action, None))
+}
+
+#[no_mangle]
+pub extern "C" fn msime_client_command(handle: u64, command: u32) -> *mut c_char {
+    match command_action(command) {
+        Ok((action, Some(host))) => dispatch_call(handle, action, Some(host)),
+        Ok((action, None)) => dispatch(handle, action),
+        Err(error) => response(|| Err(error)),
+    }
 }
 
 /// Explicit native punctuation route, even when a local mode consumes characters.
 #[no_mangle]
 pub extern "C" fn msime_client_punctuation(handle: u64, ascii: u8) -> *mut c_char {
     dispatch(handle, Action::Punctuation(ascii))
+}
+
+pub(crate) fn resolve_punctuation_action(
+    session: &HostSession,
+    ascii: u8,
+    preceding: u32,
+) -> Result<Action, String> {
+    if !ascii.is_ascii_punctuation() {
+        return Err("invalid punctuation".into());
+    }
+    let preceding = if preceding == 0 {
+        None
+    } else {
+        match char::from_u32(preceding) {
+            Some(value) => Some(value),
+            None => return Err("invalid preceding character".into()),
+        }
+    };
+    let route = punctuation_route(session.punctuation_context(ascii, preceding));
+    Ok(match route {
+        PunctuationRoute::Engine => Action::Punctuation(ascii),
+        PunctuationRoute::Ascii => Action::PunctuationAscii(ascii),
+    })
 }
 
 /// Resolve punctuation using the platform editor's immediately preceding
@@ -347,29 +378,8 @@ pub extern "C" fn msime_client_punctuation_with_context(
     ascii: u8,
     preceding: u32,
 ) -> *mut c_char {
-    if !ascii.is_ascii_punctuation() {
-        return response(|| Err("invalid punctuation".into()));
-    }
-    let preceding = if preceding == 0 {
-        None
-    } else {
-        match char::from_u32(preceding) {
-            Some(value) => Some(value),
-            None => return response(|| Err("invalid preceding character".into())),
-        }
-    };
-    let action = SESSIONS.with(|sessions| {
-        let sessions = sessions
-            .try_borrow()
-            .map_err(|_| "reentrant host call".to_owned())?;
-        let session = sessions
-            .get(&handle)
-            .ok_or_else(|| "unknown session or wrong thread".to_owned())?;
-        let route = punctuation_route(session.punctuation_context(ascii, preceding));
-        Ok(match route {
-            PunctuationRoute::Engine => Action::Punctuation(ascii),
-            PunctuationRoute::Ascii => Action::PunctuationAscii(ascii),
-        })
+    let action = with_session(handle, |session| {
+        resolve_punctuation_action(session, ascii, preceding)
     });
     match action {
         Ok(action) => dispatch(handle, action),

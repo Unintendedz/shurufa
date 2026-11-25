@@ -218,6 +218,27 @@ pub extern "C" fn msime_client_clear_online_candidates(handle: u64, source: u8) 
     })
 }
 
+pub(crate) fn select_edge_action(
+    handle: u64,
+    generation: u64,
+    index: usize,
+    edge: u8,
+) -> Result<Action, String> {
+    let edge = match edge {
+        0 => CandidateEdge::FirstHan,
+        1 => CandidateEdge::LastHan,
+        _ => return Err("Invalid candidate edge".into()),
+    };
+    Ok(Action::SelectEdge(
+        CandidateId {
+            session: handle,
+            generation,
+            index,
+        },
+        edge,
+    ))
+}
+
 /// Select one Han edge through Engine using the displayed candidate identity.
 #[no_mangle]
 pub extern "C" fn msime_client_select_edge(
@@ -226,20 +247,8 @@ pub extern "C" fn msime_client_select_edge(
     index: usize,
     edge: u8,
 ) -> *mut c_char {
-    let edge = match edge {
-        0 => CandidateEdge::FirstHan,
-        1 => CandidateEdge::LastHan,
-        _ => return response(|| Err("Invalid candidate edge".into())),
-    };
-    dispatch(
-        handle,
-        Action::SelectEdge(
-            CandidateId {
-                session: handle,
-                generation,
-                index,
-            },
-            edge,
-        ),
-    )
+    match select_edge_action(handle, generation, index, edge) {
+        Ok(action) => dispatch(handle, action),
+        Err(error) => response(|| Err(error)),
+    }
 }

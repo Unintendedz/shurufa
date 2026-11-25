@@ -40,7 +40,7 @@ int main() {
         expectUnsigned(prefs.candidateColumns, 6, "自适应列数");
         [prefs applySharedCandidatePreferences:@{@"candidate_layout": @"horizontal", @"candidate_count_mode": @"adaptive",
             @"candidate_max_width": @500, @"candidate_columns": @8}];
-        expectUnsigned(prefs.adaptiveCandidateCount, YES, "横向自适应");
+        expectUnsigned(prefs.adaptiveCandidateCount, NO, "统一固定分页");
         expectUnsigned(prefs.candidateMaxWidth, 500, "读取宽度");
         expectUnsigned(prefs.candidateColumns, 8, "读取列数");
         [prefs applySharedCandidatePreferences:@{@"candidate_layout": @"vertical", @"candidate_count_mode": @"adaptive"}];

@@ -4643,7 +4643,7 @@ static void TestExpandedCandidatePartialSelection() {
     MSIMERemoveTestPreferenceSuite(defaults, suite);
 }
 
-// 横排候选数量自适应重画时，完整候选快照可能没有当前页的高亮标记；宿主仍应以当前 view 的高亮候选保留页码。
+// 原横排自适应开关在单产品收敛后统一返回 NO；设置写入 adaptive 仍走固定分页。
 static void TestAdaptiveCandidatePaginationKeepsCurrentPage() {
     NSString *suite = [@"msime.adaptive-pagination." stringByAppendingString:NSUUID.UUID.UUIDString];
     NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
@@ -4651,7 +4651,7 @@ static void TestAdaptiveCandidatePaginationKeepsCurrentPage() {
     prefs.vertical = NO;
     prefs.pageSize = 5;
     [prefs applySharedCandidatePreferences:@{@"candidate_count_mode": @"adaptive", @"candidate_max_width": @180}];
-    assert(prefs.adaptiveCandidateCount);
+    assert(!prefs.adaptiveCandidateCount);
 
     ModeController *controller = [ModeController alloc];
     ExpandedGridSession *session = [ExpandedGridSession new];
@@ -4672,8 +4672,8 @@ static void TestAdaptiveCandidatePaginationKeepsCurrentPage() {
     [controller setValue:[session gridView] forKey:@"view"];
     [controller renderCandidates];
     assert(panel.isVisible);
-    NSDictionary *snapshot = [session allCandidatesWithError:nil];
-    assert(MSIMEAdaptiveHighlightIndex(snapshot[@"candidates"], [session gridView]) == 5);
+    NSDictionary *renderedView = [controller valueForKey:@"view"];
+    assert([renderedView[@"page"] isEqual:@1]);
 
     MSIMERemoveTestPreferenceSuite(defaults, suite);
 }
@@ -13913,6 +13913,7 @@ int main(int argc, char **argv) {
             NSSize originalSize = PageButton(layoutPanel.contentView, 0).frame.size;
             CGFloat originalPanelHeight = layoutPanel.frame.size.height;
             word[@"translation"] = @"synthetic glossary";
+            [controller setValue:annotated forKey:@"view"];
             [controller renderCandidates];
             MSIMECandidateButton *translated = PageButton(layoutPanel.contentView, 0);
             assert([translated.translation isEqual:@"synthetic glossary"] && translated.translationBelow == !vertical.boolValue);
@@ -13925,6 +13926,7 @@ int main(int argc, char **argv) {
             assert(bitmap);
             [translated cacheDisplayInRect:translated.bounds toBitmapImageRep:bitmap];
             [word removeObjectForKey:@"translation"];
+            [controller setValue:annotated forKey:@"view"];
         }
         // The reservation is real, not just an absent assertion: with the feature off the horizontal row is
         // shorter than with it on and nothing to show yet. That difference is the space the gloss lands in.
@@ -13948,6 +13950,7 @@ int main(int argc, char **argv) {
             ++fixedCase;
             for (NSNumber *highlighted in @[@NO, @YES]) {
                 word[@"highlighted"] = highlighted;
+                [controller setValue:annotated forKey:@"view"];
                 [controller renderCandidates];
                 scriptButton = PageButton(layoutPanel.contentView, 0);
                 assert(scriptButton.candidateFixed == valid);
@@ -13967,6 +13970,7 @@ int main(int argc, char **argv) {
         [word removeObjectForKey:@"fixed_position"];
         for (NSNumber *source in @[@2, @3]) {
             word[@"source"] = source;
+            [controller setValue:annotated forKey:@"view"];
             NSDictionary *unchanged = [word copy];
             for (NSNumber *vertical in @[@NO, @YES]) {
                 appearance.vertical = vertical.boolValue;
@@ -13983,6 +13987,7 @@ int main(int argc, char **argv) {
         // 走实际偏好缓存和候选按钮，确认两类徽标可以独立切换，固定状态与候选身份保持不变。
         word[@"source"] = @3;
         word[@"fixed_position"] = @1;
+        [controller setValue:annotated forKey:@"view"];
         for (NSDictionary *badgeCase in @[
             @{@"ai": @"robot", @"fixed": @"paperclip", @"show": @YES, @"suffix": @" 🤖 📎"},
             @{@"ai": @"whale", @"fixed": @"pushpin", @"show": @YES, @"suffix": @" 🐳 📌"},

@@ -4,6 +4,21 @@
 #include <cassert>
 #include <initializer_list>
 
+@interface SmokeClient : NSObject <MSIMETextClient>
+@property(nonatomic, copy) NSString *committed;
+@end
+
+@implementation SmokeClient
+- (void)insertText:(id)text replacementRange:(NSRange)range {
+    (void)range;
+    if ([text isKindOfClass:NSAttributedString.class]) self.committed = ((NSAttributedString *)text).string;
+    else if ([text isKindOfClass:NSString.class]) self.committed = text;
+}
+- (void)setMarkedText:(id)text selectionRange:(NSRange)selection replacementRange:(NSRange)replacement {
+    (void)text; (void)selection; (void)replacement;
+}
+@end
+
 static NSDictionary *reload(MSIMEClientSession *session, NSString *directory, BOOL expectError) {
     __block BOOL done = NO;
     __block NSDictionary *loaded = nil;
@@ -233,7 +248,24 @@ int main() {
         assert([hostCommitted[@"feedback"][@"typing_effect"] isEqual:@0]);
         // 失焦的回复不带 feedback：失焦上屏不出声也不画。
         NSDictionary *blurred = [lifecycle setFocused:NO error:&error];
+        assert([blurred isKindOfClass:NSDictionary.class]);
         assert(blurred && blurred[@"feedback"] == nil);
+        // 零拷贝 C 快照路径：通过 ShurufaViewSnapshot / ShurufaTransitionSnapshot 完成聚焦、打字、翻页、选词上屏。
+        assert([lifecycle setFocusedSnapshot:YES error:&error] != nullptr);
+        const ShurufaTransitionSnapshot *typedSnap = nullptr;
+        for (uint8_t character : {'U', '4', 'e', '2', 'd'}) {
+            typedSnap = [lifecycle typeASCIISnapshot:character shift:(character == 'U') error:&error];
+            assert(typedSnap && typedSnap->handled && typedSnap->view.editing_text.len > 0);
+        }
+        const ShurufaViewSnapshot *currentView = [lifecycle viewSnapshotWithError:&error];
+        assert(currentView && currentView->candidates_len > 0 && currentView->focused);
+        assert([lifecycle commandSnapshot:MSIME_NEXT_PAGE error:&error] != nullptr || !error);
+        currentView = [lifecycle viewSnapshotWithError:&error];
+        const ShurufaTransitionSnapshot *selSnap = [lifecycle selectSnapshotGeneration:currentView->generation index:0 error:&error];
+        assert(selSnap && selSnap->has_commit && selSnap->commit.len > 0);
+        SmokeClient *snapClient = [SmokeClient new];
+        MSIMEApplyTransitionSnapshotWithCommitObserver(selSnap, nil, snapClient, MSIMEInlinePreeditStylePinyin, nil, nullptr, nil, nil);
+        assert([snapClient.committed isEqual:@"中"]);
         assert([lifecycle setLifecycleActive:NO]);
         assert([lifecycle closeWithError:&error]);
         assert([lifecycle lifecycleKey:0] == 0 && ![lifecycle setLifecycleActive:YES] && [lifecycle setFieldTraits:MSIME_TRAIT_KNOWN] == 0 && [lifecycle setLifecycle:MSIME_LIFECYCLE_FEEDBACK] == 0);

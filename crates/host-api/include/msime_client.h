@@ -1028,6 +1028,103 @@ char *msime_client_flush_all(void);
 /* value must be NULL or a still-owned pointer returned by this library. */
 void msime_client_string_free(char *value);
 
+/* ===== Shurufa 零拷贝 C ABI 快照（借用会话 ViewBuffer，有效至同一会话下一次视图/派发调用） ===== */
+typedef struct {
+    const uint8_t *ptr;
+    size_t len;
+} ShurufaStringSlice;
+
+typedef struct {
+    /* 0 = curly, 1 = corner */
+    uint8_t quotes;
+    /* 0 = solid, 1 = hollow */
+    uint8_t brackets;
+    bool enumeration_comma_backslash;
+    bool enumeration_comma_slash;
+} ShurufaPunctuationMarks;
+
+typedef struct {
+    uint64_t session;
+    uint64_t generation;
+    size_t index;
+    ShurufaStringSlice text;
+    ShurufaStringSlice code;
+    ShurufaStringSlice annotation;
+    ShurufaStringSlice translation;
+    uint8_t source;
+    /* 0 = 未固定，1 = 置顶首位 */
+    uint8_t fixed_position;
+    bool has_translation;
+    bool corrected;
+    bool highlighted;
+    bool translation_reserved;
+} ShurufaCandidateItem;
+
+typedef struct {
+    uint64_t session;
+    uint64_t generation;
+    uint8_t scheme;
+    /* 0 = Halfwidth, 1 = Fullwidth */
+    uint8_t character_width;
+    bool prediction;
+    bool chinese_text;
+    bool script_conversion;
+    bool microsoft_shuangpin;
+    bool dedicated_english;
+    bool focused;
+    bool caret_edit_suffix;
+    bool provisional;
+    ShurufaPunctuationMarks punctuation_marks;
+    ShurufaStringSlice shuangpin_profile;
+    ShurufaStringSlice local_mode;
+    ShurufaStringSlice spelling_symbols;
+    ShurufaStringSlice preedit;
+    ShurufaStringSlice phrase_prefix;
+    ShurufaStringSlice reading;
+    ShurufaStringSlice display_reading;
+    ShurufaStringSlice editing_text;
+    size_t caret_position;
+    ShurufaStringSlice conversion;
+    size_t conversion_focus_start;
+    size_t conversion_focus_end;
+    ShurufaStringSlice caret_edit_prefix;
+    size_t page;
+    size_t page_size;
+    size_t page_count;
+    const ShurufaCandidateItem *candidates;
+    size_t candidates_len;
+} ShurufaViewSnapshot;
+
+typedef struct {
+    uint8_t scheme;
+    bool script_conversion;
+    bool typing_statistics;
+    ShurufaStringSlice local_mode;
+} ShurufaOutputContext;
+
+typedef struct {
+    bool handled;
+    bool has_commit;
+    ShurufaStringSlice commit;
+    bool has_commit_context;
+    ShurufaOutputContext commit_context;
+    bool has_feedback;
+    uint32_t typing_effect;
+    ShurufaViewSnapshot view;
+} ShurufaTransitionSnapshot;
+
+/* 所有零拷贝入口在失败时返回 NULL，并在 `error_out != NULL` 时写入由 `msime_client_string_free` 释放的 UTF-8 错误串。 */
+const ShurufaViewSnapshot *shurufa_session_view(uint64_t session, char **error_out);
+const ShurufaTransitionSnapshot *shurufa_session_character(uint64_t session, uint8_t ascii, bool shift, char **error_out);
+const ShurufaTransitionSnapshot *shurufa_session_command(uint64_t session, uint32_t command, char **error_out);
+const ShurufaTransitionSnapshot *shurufa_session_punctuation(uint64_t session, uint8_t ascii, uint32_t preceding, bool has_preceding, bool ascii_literal, char **error_out);
+const ShurufaTransitionSnapshot *shurufa_session_select(uint64_t session, uint64_t generation, size_t index, char **error_out);
+const ShurufaTransitionSnapshot *shurufa_session_select_any(uint64_t session, uint64_t generation, size_t index, char **error_out);
+const ShurufaTransitionSnapshot *shurufa_session_select_edge(uint64_t session, uint64_t generation, size_t index, uint8_t edge, char **error_out);
+const ShurufaTransitionSnapshot *shurufa_session_focus(uint64_t session, bool focused, char **error_out);
+const ShurufaViewSnapshot *shurufa_session_poll_neural(uint64_t session, bool *ready_out, bool *moved_out, char **error_out);
+const ShurufaViewSnapshot *shurufa_session_flush_provisional_neural(uint64_t session, bool *flushed_out, char **error_out);
+
 #ifdef __cplusplus
 }
 #endif

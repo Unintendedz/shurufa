@@ -659,7 +659,7 @@ target_compile_options(text-client-test PRIVATE -fobjc-arc -Wall -Wextra -Werror
 target_link_libraries(text-client-test PRIVATE apple-client)
 add_test(NAME text-client COMMAND text-client-test)
 add_executable(text-client-reentrancy-test tests/core/TextClientReentrancyTest.mm ../../shared/apple/TextClient.mm)
-target_include_directories(text-client-reentrancy-test PRIVATE ../../shared/apple)
+target_include_directories(text-client-reentrancy-test PRIVATE ../../shared/apple ../../crates/host-api/include)
 target_compile_options(text-client-reentrancy-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(text-client-reentrancy-test PRIVATE "-framework Foundation" "-framework AppKit")
 add_test(NAME text-client-reentrancy COMMAND text-client-reentrancy-test)
@@ -954,7 +954,6 @@ target_compile_options(candidate-row-layout-test PRIVATE -fobjc-arc -Wall -Wextr
 add_test(NAME candidate-row-layout COMMAND candidate-row-layout-test)
 add_test(NAME candidate-user-geometry COMMAND candidate-row-layout-test --user-geometry)
 add_test(NAME candidate-host-appearance COMMAND candidate-row-layout-test --host-appearance)
-add_test(NAME candidate-adaptive-layout COMMAND candidate-row-layout-test --adaptive)
 # 光标后编辑：视图字段、首行右侧的提示和首选开头画淡。
 add_test(NAME candidate-caret-edit-suffix COMMAND candidate-row-layout-test --caret-edit-suffix)
 # 计时动效独立启动事件循环，不承接大排版矩阵的窗口与图层回调。

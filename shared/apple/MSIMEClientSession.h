@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#include "msime_client.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -69,6 +70,31 @@ typedef void (^MSIMEVoiceProviderPhase)(NSUInteger phase);
 - (nullable NSDictionary *)pinGeneration:(uint64_t)generation index:(NSUInteger)index error:(NSError **)error;
 - (nullable NSDictionary *)removeGeneration:(uint64_t)generation index:(NSUInteger)index error:(NSError **)error;
 - (nullable NSDictionary<NSString *, id> *)viewWithError:(NSError **)error;
+/// 零拷贝 C 结构体视图与转换快照（指针借用会话内部缓冲，有效至同一会话下一次视图或派发调用）。
+- (nullable const ShurufaViewSnapshot *)viewSnapshotWithError:(NSError **)error;
+- (nullable const ShurufaTransitionSnapshot *)typeASCIISnapshot:(uint8_t)character shift:(BOOL)shift error:(NSError **)error;
+- (nullable const ShurufaTransitionSnapshot *)commandSnapshot:(uint32_t)command error:(NSError **)error;
+- (nullable const ShurufaTransitionSnapshot *)punctuationSnapshot:(uint8_t)character
+                                                        preceding:(uint32_t)preceding
+                                                     hasPreceding:(BOOL)hasPreceding
+                                                     literalASCII:(BOOL)literalASCII
+                                                            error:(NSError **)error;
+- (nullable const ShurufaTransitionSnapshot *)selectSnapshotGeneration:(uint64_t)generation
+                                                                 index:(NSUInteger)index
+                                                                 error:(NSError **)error;
+- (nullable const ShurufaTransitionSnapshot *)selectAnyCandidateSnapshotGeneration:(uint64_t)generation
+                                                                             index:(NSUInteger)index
+                                                                             error:(NSError **)error;
+- (nullable const ShurufaTransitionSnapshot *)selectEdgeSnapshotGeneration:(uint64_t)generation
+                                                                     index:(NSUInteger)index
+                                                                      edge:(uint8_t)edge
+                                                                     error:(NSError **)error;
+- (nullable const ShurufaTransitionSnapshot *)setFocusedSnapshot:(BOOL)focused error:(NSError **)error;
+- (nullable const ShurufaViewSnapshot *)pollNeuralSnapshotReady:(nullable BOOL *)ready
+                                                          moved:(nullable BOOL *)moved
+                                                          error:(NSError **)error;
+- (nullable const ShurufaViewSnapshot *)flushProvisionalNeuralSnapshotFlushed:(nullable BOOL *)flushed
+                                                                       error:(NSError **)error;
 /// 配置并启用或关闭 Shurufa 端侧神经服务（由纯 Rust 运行时管理独立子进程、UDS 二进制帧、
 /// 50 ms Prefill 防抖、~28 ms Provisional 防闪窗与热态 Space 条件变量有界等待）。
 @property (nonatomic, readonly) BOOL neuralV2Enabled;

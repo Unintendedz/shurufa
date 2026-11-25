@@ -221,6 +221,7 @@ struct HostSession {
     neural_client: Option<Arc<NeuralServiceClient>>,
     #[cfg(unix)]
     last_neural_prefilled_context: Option<String>,
+    pub(crate) view_buffer: Box<ffi::snapshot::ViewBuffer>,
     // Declared after runtime so the Engine is dropped before releasing access.
     _dictionary_access: DictionaryAccess,
 }
@@ -2360,124 +2361,140 @@ fn dispatch_value(
     action: Action,
     host: Option<lifecycle::InputClass>,
 ) -> Result<Value, String> {
-    with_session(handle, |session| {
-        // 大写锁定改道先于其余处理，后面看到的都是改道后的动作。
-        let action = session.caps_lock_punctuation(action);
-        let action = session.runtime.candidate_shortcut(action);
-        #[cfg(unix)]
-        if matches!(
-            action,
-            Action::SelectHighlighted | Action::Command(Command::CommitCandidate) | Action::Finish
-        ) && session.neural_v2_active()
+    let (result, feedback) = with_session(handle, |session| {
+        dispatch_session_transition(session, action, host)
+    })?;
+    transition_to_value(result, feedback)
+}
+
+pub(crate) fn transition_to_value(
+    result: Transition,
+    feedback: Option<u32>,
+) -> Result<Value, String> {
+    let mut value = serde_json::to_value(result).map_err(|e| e.to_string())?;
+    if let (Some(effect), Value::Object(fields)) = (feedback, &mut value) {
+        fields.insert("feedback".into(), json!({ "typing_effect": effect }));
+    }
+    Ok(value)
+}
+
+/// 零拷贝快照与 JSON 派发共用的核心会话推进逻辑。
+pub(crate) fn dispatch_session_transition(
+    session: &mut HostSession,
+    action: Action,
+    host: Option<lifecycle::InputClass>,
+) -> Result<(Transition, Option<u32>), String> {
+    // 大写锁定改道先于其余处理，后面看到的都是改道后的动作。
+    let action = session.caps_lock_punctuation(action);
+    let action = session.runtime.candidate_shortcut(action);
+    #[cfg(unix)]
+    if matches!(
+        action,
+        Action::SelectHighlighted | Action::Command(Command::CommitCandidate) | Action::Finish
+    ) && session.neural_v2_active()
+    {
+        if let Some((target_gen, remaining)) = session.runtime.provisional_remaining(Instant::now())
         {
-            if let Some((target_gen, remaining)) =
-                session.runtime.provisional_remaining(Instant::now())
-            {
-                if !remaining.is_zero() {
-                    let response = session.neural_client.as_ref().and_then(|client| {
-                        client.wait_for_decode_generation(
-                            session.runtime.session_id(),
-                            target_gen,
-                            remaining,
-                        )
-                    });
-                    if let Some(resp) = response {
-                        let _ = session.runtime.apply_neural_response(&resp, false);
-                    }
-                }
-                session.runtime.mark_presented(target_gen);
-            }
-        }
-        let prev_comp_epoch = session.runtime.composition_epoch();
-        let currency_punctuation = matches!(
-            action,
-            Action::Character { value: b'$', .. } | Action::Punctuation(b'$')
-        );
-        let pending = session.lifecycle_input(&action, host);
-        // Which row the user reached for, read before dispatching because the view it is
-        // relative to is gone afterwards. Every platform host routes candidate selection
-        // through here, so counting it here covers all of them without a line of platform
-        // code; doing it per host would have meant six chances to forget.
-        let position = selected_position(&action);
-        let efficiency = position.and_then(|_| session.efficiency_candidate(&action));
-        let result = session.runtime.dispatch(action).map_err(|e| e.to_string());
-        // 报错前 runtime 可能已经改了组字，生命周期照样收尾。
-        let mut result = session.lifecycle_on_error(pending, result)?;
-        // Text the Engine generated (a calculator result, a command, a mention) was picked, not typed, and stays out of the statistics the way it stays out of learning.
-        let counts_as_typing = result
-            .commit_context
-            .as_ref()
-            .is_none_or(|context| context.typing_statistics);
-        if result.commit.is_some() && counts_as_typing {
-            // 先记效率再记位置：位置攒满一批会立刻写盘并带走待写的效率，这一次的效率要赶上同一批，否则进程在下一批之前被杀就丢了。
-            if let Some(candidate) = efficiency {
-                session.count_efficiency(candidate);
-            }
-            if let Some(position) = position {
-                session.count_selection(position);
-            }
-        }
-        let facts = session.runtime.facts();
-        // 固定标点表返回全角人民币；半角只改本次 `$` 产生的尾巴，候选和短语里的符号保持原文。
-        if currency_punctuation && result.view.character_width == CharacterWidth::Halfwidth {
-            if let Some(commit) = result.commit.as_mut() {
-                if facts.tail_chars == 1 && commit.ends_with('￥') {
-                    commit.truncate(commit.len() - '￥'.len_utf8());
-                    commit.push('¥');
+            if !remaining.is_zero() {
+                let response = session.neural_client.as_ref().and_then(|client| {
+                    client.wait_for_decode_generation(
+                        session.runtime.session_id(),
+                        target_gen,
+                        remaining,
+                    )
+                });
+                if let Some(resp) = response {
+                    let _ = session.runtime.apply_neural_response(&resp, false);
                 }
             }
+            session.runtime.mark_presented(target_gen);
         }
-        let mut result = session.complete_transition(result);
-        // 脚本插件可能在这里改写上屏的 body（`before_commit`），宿主拿到的是改写之后的文本；引擎学习和 AI 上文已经按原文记下。
-        let feedback = session.lifecycle_after(pending, facts, &mut result);
-        #[cfg(unix)]
-        if session.neural_v2_active() {
-            let session_id = session.runtime.session_id();
-            let post_comp_epoch = session.runtime.composition_epoch();
-            let had_commit = result
-                .commit
-                .as_deref()
-                .is_some_and(|commit| !commit.is_empty());
-            if !had_commit
-                && post_comp_epoch != prev_comp_epoch
-                && !result.view.editing_text.is_empty()
-                && result.view.page == 0
-                && !result.view.prediction
-                && !result.view.dedicated_english
-                && result.view.local_mode == "none"
-                && result.view.conversion.is_empty()
-                && !result.view.caret_edit_suffix
-                && result
-                    .view
-                    .candidates
-                    .first()
-                    .is_some_and(|candidate| candidate.highlighted)
-            {
-                if let Some(req) = session.runtime.take_neural_request() {
-                    let enqueued = session.neural_client.as_ref().is_some_and(|client| {
-                        client.enqueue_decode(session_id, &req, NEURAL_PROVISIONAL_WINDOW)
-                    });
-                    if enqueued {
-                        session
-                            .runtime
-                            .begin_provisional(req.generation, NEURAL_PROVISIONAL_WINDOW);
-                        result.view.provisional = session.runtime.is_provisional();
-                    }
-                }
-            } else if had_commit && result.view.editing_text.is_empty() {
-                session.schedule_neural_prefill_if_idle();
-            } else if result.view.editing_text.is_empty() {
-                if let Some(client) = session.neural_client.as_ref() {
-                    client.cancel_pending_decode_for_session(session_id);
-                }
+    }
+    let prev_comp_epoch = session.runtime.composition_epoch();
+    let currency_punctuation = matches!(
+        action,
+        Action::Character { value: b'$', .. } | Action::Punctuation(b'$')
+    );
+    let pending = session.lifecycle_input(&action, host);
+    // Which row the user reached for, read before dispatching because the view it is
+    // relative to is gone afterwards. Every platform host routes candidate selection
+    // through here, so counting it here covers all of them without a line of platform
+    // code; doing it per host would have meant six chances to forget.
+    let position = selected_position(&action);
+    let efficiency = position.and_then(|_| session.efficiency_candidate(&action));
+    let result = session.runtime.dispatch(action).map_err(|e| e.to_string());
+    // 报错前 runtime 可能已经改了组字，生命周期照样收尾。
+    let mut result = session.lifecycle_on_error(pending, result)?;
+    // Text the Engine generated (a calculator result, a command, a mention) was picked, not typed, and stays out of the statistics the way it stays out of learning.
+    let counts_as_typing = result
+        .commit_context
+        .as_ref()
+        .is_none_or(|context| context.typing_statistics);
+    if result.commit.is_some() && counts_as_typing {
+        // 先记效率再记位置：位置攒满一批会立刻写盘并带走待写的效率，这一次的效率要赶上同一批，否则进程在下一批之前被杀就丢了。
+        if let Some(candidate) = efficiency {
+            session.count_efficiency(candidate);
+        }
+        if let Some(position) = position {
+            session.count_selection(position);
+        }
+    }
+    let facts = session.runtime.facts();
+    // 固定标点表返回全角人民币；半角只改本次 `$` 产生的尾巴，候选和短语里的符号保持原文。
+    if currency_punctuation && result.view.character_width == CharacterWidth::Halfwidth {
+        if let Some(commit) = result.commit.as_mut() {
+            if facts.tail_chars == 1 && commit.ends_with('￥') {
+                commit.truncate(commit.len() - '￥'.len_utf8());
+                commit.push('¥');
             }
         }
-        let mut value = serde_json::to_value(result).map_err(|e| e.to_string())?;
-        if let (Some(effect), Value::Object(fields)) = (feedback, &mut value) {
-            fields.insert("feedback".into(), json!({ "typing_effect": effect }));
+    }
+    let mut result = session.complete_transition(result);
+    // 脚本插件可能在这里改写上屏的 body（`before_commit`），宿主拿到的是改写之后的文本；引擎学习和 AI 上文已经按原文记下。
+    let feedback = session.lifecycle_after(pending, facts, &mut result);
+    #[cfg(unix)]
+    if session.neural_v2_active() {
+        let session_id = session.runtime.session_id();
+        let post_comp_epoch = session.runtime.composition_epoch();
+        let had_commit = result
+            .commit
+            .as_deref()
+            .is_some_and(|commit| !commit.is_empty());
+        if !had_commit
+            && post_comp_epoch != prev_comp_epoch
+            && !result.view.editing_text.is_empty()
+            && result.view.page == 0
+            && !result.view.prediction
+            && !result.view.dedicated_english
+            && result.view.local_mode == "none"
+            && result.view.conversion.is_empty()
+            && !result.view.caret_edit_suffix
+            && result
+                .view
+                .candidates
+                .first()
+                .is_some_and(|candidate| candidate.highlighted)
+        {
+            if let Some(req) = session.runtime.take_neural_request() {
+                let enqueued = session.neural_client.as_ref().is_some_and(|client| {
+                    client.enqueue_decode(session_id, &req, NEURAL_PROVISIONAL_WINDOW)
+                });
+                if enqueued {
+                    session
+                        .runtime
+                        .begin_provisional(req.generation, NEURAL_PROVISIONAL_WINDOW);
+                    result.view.provisional = session.runtime.is_provisional();
+                }
+            }
+        } else if had_commit && result.view.editing_text.is_empty() {
+            session.schedule_neural_prefill_if_idle();
+        } else if result.view.editing_text.is_empty() {
+            if let Some(client) = session.neural_client.as_ref() {
+                client.cancel_pending_decode_for_session(session_id);
+            }
         }
-        Ok(value)
-    })
+    }
+    Ok((result, feedback))
 }
 
 /// The one-based position of the candidate an action is about, or `None` when it is not about one.
