@@ -540,13 +540,34 @@ pub fn fuse_neural_response(
     }
 
     // 6. 按唯一统一概率公式为 `Tier 0 ∪ Tier 1` 计分并排序。
-    // 当同池已存在未纠错的真实双字词典整词时，非词典 `[1,1]` 拆字拼接（如 `但反`/`但犯`）
-    // 承担温和的非成词结构先验惩罚（`-1.8 nats`），避免仅凭分桶归一抹平成词优势；
-    // 真实语境必需的拆字组合（如 `把这`/`个事`/`快寄`）在神经分上通常领先 `+4..+12 nats`，仍可稳定胜出。
-    const TWO_CHAR_NON_LEXICAL_SPLIT_PENALTY: f64 = -1.8;
-    let has_exact_two_char_dict = competing_tier0.iter().any(|(_, c, _)| {
-        c.char_count == 2 && is_dict_bucket(c.source) && c.channel_log_prob == 0.0
-    });
+    // (a) 非成词拆字先验：当同池已存在 `2..=4` 字未纠错词典整词（如全拼 `但凡` 或混拼 `que'g'x -> 缺根弦`）时，
+    //     同字数非词典拼接（如 `但反`、`缺钙性`）因独立分桶归零会抹平成词结构优势，对其施加结构先验惩罚；
+    //     若输入含简拼/混拼残缺声母（如 `que'g'x` 中 `g`/`x`），自由拼接的信道分支熵远高于精确词典整词，
+    //     每枚残缺声母叠加 `-1.2 nats`（上限 3 枚）。真实语境必需拆字（`+6..+15 nats` 神经优势）仍可稳定胜出。
+    // (b) 单字纠错跨字数信息量补偿：联合对数概率按每字约 `-4.8 nats` 衰减；当同池存在 2+ 字未纠错词典整词
+    //     （如 `shj -> 时间/手机`、`shh -> 上海`、`zhw -> 中文/这位`）时，单字纠错候选（`char_count == 1`，如 `是`/`这`/`书`）
+    //     会凭少 1 字白赚约 `+4.5..+5.0 nats` 联合概率反压多字简拼整词，须补足 `-4.8 nats` 信息量差；
+    //     多字纠错候选（`char_count >= 2`，如跨音节换位 `jintina -> 今天*`、`meiwentj -> 没问题*`）不施加此惩罚。
+    const BASE_NON_LEXICAL_SPLIT_PENALTY: f64 = -1.8;
+    const BARE_INITIAL_SPLIT_EXTRA_PER_SYLLABLE: f64 = -1.2;
+    const SINGLE_CHAR_TYPO_ENTROPY_COMP: f64 = -4.8;
+    let bare_initial_count = request
+        .segmentation
+        .split('\'')
+        .filter(|piece| !piece.is_empty() && !is_intact(piece))
+        .count();
+    let mut exact_dict_len_mask: u8 = 0;
+    let mut has_multi_char_exact_dict = false;
+    for &(_, c, _) in &competing_tier0 {
+        if is_dict_bucket(c.source) && c.channel_log_prob == 0.0 {
+            if (2..=4).contains(&c.char_count) {
+                exact_dict_len_mask |= 1u8 << c.char_count;
+            }
+            if c.char_count >= 2 {
+                has_multi_char_exact_dict = true;
+            }
+        }
+    }
 
     let mut competitors: Vec<ScoredCompetitor> =
         Vec::with_capacity(competing_tier0.len() + unique_beams.len());
@@ -566,17 +587,26 @@ pub fn fuse_neural_response(
         };
         observed_min_rel_stat =
             Some(observed_min_rel_stat.map_or(rel_stat, |cur| cur.min(rel_stat)));
-        let non_lexical_split_penalty = if has_exact_two_char_dict
-            && cand.char_count == 2
+        let has_same_len_exact_dict = (2..=4).contains(&cand.char_count)
+            && (exact_dict_len_mask & (1u8 << cand.char_count)) != 0;
+        let non_lexical_split_penalty = if has_same_len_exact_dict
             && !is_dict_bucket(cand.source)
             && cand.channel_log_prob == 0.0
         {
-            TWO_CHAR_NON_LEXICAL_SPLIT_PENALTY
+            BASE_NON_LEXICAL_SPLIT_PENALTY
+                + BARE_INITIAL_SPLIT_EXTRA_PER_SYLLABLE * (bare_initial_count.min(3) as f64)
         } else {
             0.0
         };
+        let shorter_typo_len_comp =
+            if cand.channel_log_prob <= -2.0 && cand.char_count == 1 && has_multi_char_exact_dict {
+                SINGLE_CHAR_TYPO_ENTROPY_COMP
+            } else {
+                0.0
+            };
         let total = cand.channel_log_prob
             + non_lexical_split_penalty
+            + shorter_typo_len_comp
             + weights.lambda_neural * (*neural_lp)
             + weights.lambda_stat * rel_stat
             + weights.lambda_user * cand.user_log_prob;
@@ -1319,5 +1349,63 @@ mod tests {
             .collect();
         // 前 4 席：0(兄台), 1(形态*), 4(熊太), 5(凶太)；次优纠错 2(性态*), 3(邢台*) 顺延至后且无损保留。
         assert_eq!(seat_indices, vec![0, 1, 4, 5, 2, 3]);
+    }
+
+    #[test]
+    fn mixed_jianpin_exact_dictionary_word_beats_non_lexical_stitch_and_shorter_typo() {
+        // 1. 混拼 `que'g'x` 中，真实三字词典整词 `缺根弦`（Database）胜过非词典拼接 `缺钙性`（Generated）。
+        let mut exact_idiom = sample_candidate(0, "缺根弦", true, Some(-14.81));
+        exact_idiom.source = CandidateSource::Database as u8;
+        let mut stitch = sample_candidate(1, "缺钙性", true, Some(-7.28));
+        stitch.source = CandidateSource::Generated as u8;
+        let mut req = base_request(vec![exact_idiom, stitch]);
+        req.raw_input = "quegx".into();
+        req.segmentation = "que'g'x".into();
+        let resp = NeuralDecodeResponse {
+            ok: true,
+            session: 1,
+            generation: 10,
+            candidate_scores: vec![
+                NeuralScoredCandidate {
+                    text: "缺根弦".into(),
+                    neural_log_prob: -20.71,
+                },
+                NeuralScoredCandidate {
+                    text: "缺钙性".into(),
+                    neural_log_prob: -19.98,
+                },
+            ],
+            beam_candidates: vec![],
+        };
+        let out = fuse_neural_response(2, &req, &resp, NeuralFusionWeights::default(), false);
+        assert_eq!(out.top1_text.as_deref(), Some("缺根弦"));
+
+        // 2. 简拼 `shj` / 混拼 `tu'ran'j` 中，更短字数纠错候选（`是`/`突然`）须补偿缺失字数信息量，不反超完整字面词。
+        let mut short_typo = sample_candidate(0, "是", true, Some(-2.77));
+        short_typo.source = CandidateSource::Database as u8;
+        short_typo.channel_log_prob = -2.8;
+        let mut exact_jp = sample_candidate(1, "时间", true, Some(-6.54));
+        exact_jp.source = CandidateSource::Database as u8;
+        let mut req2 = base_request(vec![short_typo, exact_jp]);
+        req2.raw_input = "shj".into();
+        req2.segmentation = "shj".into();
+        let resp2 = NeuralDecodeResponse {
+            ok: true,
+            session: 1,
+            generation: 10,
+            candidate_scores: vec![
+                NeuralScoredCandidate {
+                    text: "是".into(),
+                    neural_log_prob: -3.12,
+                },
+                NeuralScoredCandidate {
+                    text: "时间".into(),
+                    neural_log_prob: -7.31,
+                },
+            ],
+            beam_candidates: vec![],
+        };
+        let out2 = fuse_neural_response(2, &req2, &resp2, NeuralFusionWeights::default(), false);
+        assert_eq!(out2.top1_text.as_deref(), Some("时间"));
     }
 }
