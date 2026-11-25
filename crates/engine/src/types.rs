@@ -802,8 +802,8 @@ pub struct WordItem {
     pub source: CandidateSource,
     /// The scheme whose provider produced the row; in mixed wubi it routes learning and removal to the right table.
     pub scheme: SchemeType,
-    /// 0 when unfixed, otherwise the fixed slot 1..=5.
-    pub fixed_position: i32,
+    /// 为 `true` 时表示用户显式置顶至第 1 槽（`PinToFirst`）；已废除 2..9 固定席位。
+    pub pinned_first: bool,
     pub fuzzy: bool,
     /// Non-empty for a row read from an autocorrected spelling; holds the folded letters the user typed.
     pub corrected_from: SharedString,

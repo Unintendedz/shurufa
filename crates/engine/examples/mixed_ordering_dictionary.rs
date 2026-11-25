@@ -61,7 +61,12 @@ impl Probe {
         for character in KEYS.bytes() {
             session.character(character, false)?;
         }
-        Ok(session.snapshot()?.candidate_sources)
+        Ok(session
+            .snapshot()?
+            .candidates
+            .into_iter()
+            .map(|entry| entry.source)
+            .collect())
     }
 }
 

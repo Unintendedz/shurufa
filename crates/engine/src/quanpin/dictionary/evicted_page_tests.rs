@@ -439,7 +439,7 @@ fn page_copy_preserves_all_fields_and_clone_capacities_across_shapes() {
                     weight: i64::MIN + index as i64,
                     source: CandidateSource::Generated,
                     scheme: SchemeType::Shuangpin,
-                    fixed_position: index as i32,
+                    pinned_first: index == 0,
                     fuzzy: index % 2 == 0,
                     corrected_from: "合成纠错".into(),
                     sentence_association: true,
@@ -464,7 +464,7 @@ fn page_copy_preserves_all_fields_and_clone_capacities_across_shapes() {
                     row.weight = i64::MAX;
                     row.source = CandidateSource::Database;
                     row.scheme = SchemeType::Quanpin;
-                    row.fixed_position = -1;
+                    row.pinned_first = false;
                     row.fuzzy = !row.fuzzy;
                     row.corrected_from.clear();
                     row.sentence_association = false;

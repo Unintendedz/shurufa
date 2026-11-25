@@ -360,6 +360,24 @@ impl Session {
         self.input.neural_v2_metadata()
     }
 
+    /// 返回当前组字上下文在本地学习日志 `pinned_candidates` 中显式置顶的候选词文本。
+    pub(crate) fn pinned_candidate_word(&self) -> Option<String> {
+        if !self.prediction.rows.is_empty()
+            || self.input.local_mode != LocalInputMode::None
+            || self.input.dedicated_english
+            || !self.input.has_composition()
+            || !self.input.scheme().is_pinyin()
+        {
+            return None;
+        }
+        let journal = self.input.journal_path();
+        if journal.as_os_str().is_empty() {
+            return None;
+        }
+        let context = self.input.pinyin_ranking_context();
+        crate::user_dictionary::positions::pinned_candidate_for(journal, &context)
+    }
+
     pub fn takes_local_separator(&self) -> bool {
         self.input.takes_local_separator()
     }

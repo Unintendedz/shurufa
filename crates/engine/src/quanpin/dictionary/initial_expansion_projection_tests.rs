@@ -154,7 +154,7 @@ fn expansion_preserves_foreign_rows_slots_order_and_owned_fields() {
             let mut marker =
                 WordItem::new("n", "合成云候选", -13, CandidateSource::AiSuggestion, "nu");
             marker.fuzzy = true;
-            marker.fixed_position = 3;
+            marker.pinned_first = true;
             marker.corrected_from = "合成来源".into();
             marker.sentence_words = vec!["合成片段".to_owned()];
             expected.insert(0, marker.clone());

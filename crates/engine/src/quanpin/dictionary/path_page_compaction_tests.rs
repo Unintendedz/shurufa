@@ -111,7 +111,7 @@ fn compact_page_preserves_metadata_and_both_output_paths() {
             1 => rows[1].pinyin = "other".into(),
             2 => rows[1].source = CandidateSource::Generated,
             3 => rows[1].scheme = SchemeType::Wubi,
-            4 => rows[1].fixed_position = 2,
+            4 => rows[1].pinned_first = true,
             5 => rows[1].fuzzy = true,
             6 => rows[1].corrected_from = "synthetic".into(),
             7 => rows[1].sentence_association = true,

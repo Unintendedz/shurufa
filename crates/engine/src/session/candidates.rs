@@ -52,7 +52,7 @@ pub(super) fn clone_candidate_rows(source: &[WordItem], destination: &mut Vec<Wo
         target.weight = item.weight;
         target.source = item.source;
         target.scheme = item.scheme;
-        target.fixed_position = item.fixed_position;
+        target.pinned_first = item.pinned_first;
         target.fuzzy = item.fuzzy;
         target.corrected_from.clone_from(&item.corrected_from);
         target.sentence_association = item.sentence_association;
@@ -822,7 +822,7 @@ impl InputSession {
                 );
             }
             let pinned =
-                item.fixed_position > 0 || pinned_word.as_deref() == Some(item.word.as_str());
+                item.pinned_first || pinned_word.as_deref() == Some(item.word.as_str());
 
             let exact_literal_dict = !folded_raw.is_empty()
                 && item.source.is_dictionary()

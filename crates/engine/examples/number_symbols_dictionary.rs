@@ -35,7 +35,7 @@ fn verify(
             let index = snapshot
                 .candidates
                 .iter()
-                .position(|word| word == symbol)
+                .position(|entry| entry.text == *symbol)
                 .ok_or_else(|| format!("{label} {input}: 缺少 {symbol}"))?;
             let result = session.select(index)?;
             assert!(result.has_commit, "{label} {input}: 没有提交 {symbol}");
@@ -57,8 +57,7 @@ fn verify(
                 !snapshot
                     .candidates
                     .iter()
-                    .zip(&snapshot.candidate_sources)
-                    .any(|(word, source)| word == symbol && *source == 6),
+                    .any(|entry| entry.text == *symbol && entry.source == 6),
                 "{label} {input}: 关闭符号混输后仍有 {symbol}"
             );
             session.command(Command::Cancel)?;

@@ -63,9 +63,8 @@ impl Probe {
         Ok(snapshot
             .candidates
             .into_iter()
-            .zip(snapshot.candidate_sources)
-            .filter(|(_, source)| *source == ENGLISH)
-            .map(|(word, _)| word)
+            .filter(|entry| entry.source == ENGLISH)
+            .map(|entry| entry.text)
             .collect())
     }
 }

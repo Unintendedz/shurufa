@@ -25,7 +25,12 @@ fn candidates(
     for byte in input.bytes() {
         session.character(byte, false)?;
     }
-    Ok(session.snapshot()?.candidates)
+    Ok(session
+        .snapshot()?
+        .candidates
+        .into_iter()
+        .map(|entry| entry.text)
+        .collect())
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

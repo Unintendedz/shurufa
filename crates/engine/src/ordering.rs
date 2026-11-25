@@ -326,6 +326,35 @@ impl<'a> OrderRowSource<'a> for ParallelOrderRows<'a> {
     }
 }
 
+/// 借用单向候选条目切片参与排序决策，直接复用结构化 [`CandidateEntry`] 字段。
+pub struct CandidateOrderRows<'a>(pub &'a [crate::pipeline::CandidateEntry]);
+
+impl<'a> OrderRowSource<'a> for CandidateOrderRows<'a> {
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn static_evidence(&self, index: usize) -> Option<StaticEvidence> {
+        self.0.get(index)?.static_evidence
+    }
+
+    fn keyboard_runner_up(&self, index: usize) -> bool {
+        self.0
+            .get(index)
+            .is_some_and(|entry| entry.keyboard_runner_up)
+    }
+
+    fn get(&self, index: usize) -> OrderRow<'a> {
+        let entry = &self.0[index];
+        OrderRow {
+            text: &entry.text,
+            source: entry.source,
+            answers_key: entry.answers_key,
+            corrected: entry.corrected,
+        }
+    }
+}
+
 fn row_answers_key(scheme: u8, row: OrderRow<'_>) -> bool {
     row.answers_key
         && !CATALOG_SOURCES.contains(&row.source)

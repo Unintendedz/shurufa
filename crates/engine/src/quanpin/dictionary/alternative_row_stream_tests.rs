@@ -227,7 +227,7 @@ fn alternative_stream_preserves_promotion_ties_and_metadata() {
                             CandidateSource::Database,
                             "xi'an",
                         );
-                        row.fixed_position = (index % 6) as i32;
+                        row.pinned_first = index % 6 == 0;
                         row.fuzzy = index % 2 == 0;
                         row.corrected_from = "synthetic".into();
                         row.sentence_words = vec!["合成".into(), "边界😀".into()];
@@ -350,7 +350,7 @@ fn alternative_stream_keeps_cached_fields_and_fifo_age() {
         row.word.reserve(40);
         row.corrected_from = "synthetic".into();
         row.corrected_from.reserve(40);
-        row.fixed_position = 3;
+        row.pinned_first = true;
         row.fuzzy = true;
         row.sentence_association = true;
         row.sentence_words = vec!["合成".into(), "边界😀".into()];

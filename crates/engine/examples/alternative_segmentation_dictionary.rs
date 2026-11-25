@@ -11,7 +11,7 @@ fn first_page(
         session.character(byte, false)?;
     }
     let list = session.snapshot()?.candidates;
-    Ok(list.into_iter().take(6).collect())
+    Ok(list.into_iter().take(6).map(|entry| entry.text).collect())
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

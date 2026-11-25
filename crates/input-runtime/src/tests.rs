@@ -964,27 +964,30 @@ impl InputEngine for Fixture {
         if self.snapshot_fails {
             return Err(RuntimeError::Engine("injected snapshot failure".into()));
         }
+        let words = if self.text.is_empty() {
+            Vec::new()
+        } else {
+            self.words.clone()
+        };
+        let candidates = words
+            .into_iter()
+            .enumerate()
+            .map(|(index, text)| {
+                let code = self.codes.get(index).cloned().unwrap_or_default();
+                let source = self.sources.get(index).copied().unwrap_or(0);
+                let answers_key = self.answers_key.get(index).copied().unwrap_or(true);
+                let mut entry = msime_engine::CandidateEntry::new(text, code, source);
+                entry.annotation = format!("({index})");
+                entry.corrected = false;
+                entry.answers_key = answers_key;
+                entry.origin = msime_engine::CandidateOrigin::EngineRow(index);
+                entry
+            })
+            .collect();
         Ok(EngineSnapshot {
             prediction: false,
             scheme: self.scheme,
-            candidate_codes: self.codes.clone(),
-            candidate_annotations: self
-                .words
-                .iter()
-                .enumerate()
-                .map(|(index, _)| format!("({index})"))
-                .collect(),
-            candidate_sources: if self.sources.len() == self.words.len() {
-                self.sources.clone()
-            } else {
-                vec![0; self.words.len()]
-            },
-            candidate_corrected: vec![false; self.words.len()],
-            candidate_answers_key: if self.answers_key.len() == self.words.len() {
-                self.answers_key.clone()
-            } else {
-                vec![true; self.words.len()]
-            },
+            candidates,
             microsoft_shuangpin: self.microsoft_shuangpin,
             shuangpin_profile: "xiaohe".into(),
             local_mode: self.local_mode.clone(),
@@ -996,11 +999,6 @@ impl InputEngine for Fixture {
             editing_text: self.text.clone(),
             caret_position: self.text.len(),
             segment_raw_boundaries: vec![],
-            candidates: if self.text.is_empty() {
-                vec![]
-            } else {
-                self.words.clone()
-            },
             ..EngineSnapshot::default()
         })
     }
@@ -1572,7 +1570,7 @@ fn real_engine_escape_preserves_selection_history_and_followup_actions() {
         assert_eq!(kept.commit, None);
         assert_eq!(kept.view.phrase_prefix, "你");
         assert!(kept.view.editing_text.is_empty());
-        assert_eq!(runtime.phrase_selections.len(), 1);
+        assert_eq!(runtime.locked_prefix.len(), 1);
         let restored = matches!(action, Action::Command(Command::Backspace));
         let committed = matches!(
             action,
@@ -1583,7 +1581,7 @@ fn real_engine_escape_preserves_selection_history_and_followup_actions() {
         assert_eq!(result.commit.as_deref(), committed.then_some("你"));
         assert!(result.view.phrase_prefix.is_empty());
         assert_eq!(result.view.editing_text, if restored { "ni" } else { "" });
-        assert!(runtime.phrase_selections.is_empty());
+        assert!(runtime.locked_prefix.is_empty());
     }
 }
 
@@ -1656,14 +1654,24 @@ impl PhraseEngine {
 }
 impl InputEngine for PhraseEngine {
     fn snapshot(&self) -> Result<EngineSnapshot, RuntimeError> {
+        let candidates = if self.reading.is_empty() {
+            Vec::new()
+        } else {
+            self.words
+                .iter()
+                .enumerate()
+                .map(|(index, word)| {
+                    let mut entry = msime_engine::CandidateEntry::new(word, "", 0);
+                    entry.answers_key = true;
+                    entry.origin = msime_engine::CandidateOrigin::EngineRow(index);
+                    entry
+                })
+                .collect()
+        };
         Ok(EngineSnapshot {
             prediction: false,
             scheme: 0,
-            candidate_codes: Vec::new(),
-            candidate_annotations: vec![String::new(); self.words.len()],
-            candidate_sources: vec![0; self.words.len()],
-            candidate_corrected: vec![false; self.words.len()],
-            candidate_answers_key: vec![true; self.words.len()],
+            candidates,
             microsoft_shuangpin: false,
             shuangpin_profile: "xiaohe".into(),
             local_mode: "none".into(),
@@ -1680,11 +1688,6 @@ impl InputEngine for PhraseEngine {
             caret_position: self.caret.min(self.reading.len()),
             segment_raw_boundaries: Vec::new(),
             conversion: self.conversion.clone(),
-            candidates: if self.reading.is_empty() {
-                Vec::new()
-            } else {
-                self.words.clone()
-            },
             ..EngineSnapshot::default()
         })
     }
@@ -1996,13 +1999,12 @@ fn taking_focus_discards_held_phrase_even_if_refresh_fails() {
     let selected = runtime.view().candidates[0].id;
     let held = runtime.dispatch(Action::Select(selected)).unwrap();
     assert_eq!(held.view.phrase_prefix, "海滩");
-    assert_eq!(runtime.phrase_selections.len(), 1);
+    assert_eq!(runtime.locked_prefix.len(), 1);
     runtime.engine.snapshot_fails = true;
 
     assert!(runtime.focus(true).is_err());
 
-    assert!(runtime.phrase_prefix.is_empty());
-    assert!(runtime.phrase_selections.is_empty());
+    assert!(runtime.locked_prefix.is_empty());
     runtime.engine.snapshot_fails = false;
     assert!(runtime.focus(true).unwrap().commit.is_none());
 }
@@ -2233,7 +2235,7 @@ fn backspace_can_keep_every_selected_piece_until_spelling_is_deleted() {
         .dispatch(Action::Command(Command::Backspace))
         .unwrap();
     assert_eq!(next.commit, None);
-    assert!(runtime.phrase_selections.is_empty());
+    assert!(runtime.locked_prefix.is_empty());
 
     let mut runtime = phrase_runtime("haitanpaobux", vec![6, 5]);
     runtime.set_backspace_reverts_selection(false);
@@ -3105,14 +3107,13 @@ fn switching_language_clears_held_phrase_even_if_refresh_fails() {
     let selected = runtime.view().candidates[0].id;
     let held = runtime.dispatch(Action::Select(selected)).unwrap();
     assert_eq!(held.view.phrase_prefix, "海滩");
-    assert_eq!(runtime.phrase_selections.len(), 1);
+    assert_eq!(runtime.locked_prefix.len(), 1);
     runtime.engine.snapshot_fails = true;
 
     assert!(runtime.set_dedicated_english(true).is_err());
 
     assert!(runtime.engine.dedicated_english);
-    assert!(runtime.phrase_prefix.is_empty());
-    assert!(runtime.phrase_selections.is_empty());
+    assert!(runtime.locked_prefix.is_empty());
 }
 
 #[test]
@@ -4228,20 +4229,24 @@ struct DigitCommitsEngine {
 }
 impl InputEngine for DigitCommitsEngine {
     fn snapshot(&self) -> Result<EngineSnapshot, RuntimeError> {
-        let words: Vec<String> = if self.reading.is_empty() {
+        let candidates = if self.reading.is_empty() {
             Vec::new()
         } else {
-            vec!["甲".into(), "乙".into()]
+            ["甲", "乙"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, word)| {
+                    let mut entry = msime_engine::CandidateEntry::new(word, &self.reading, 0);
+                    entry.answers_key = true;
+                    entry.origin = msime_engine::CandidateOrigin::EngineRow(index);
+                    entry
+                })
+                .collect()
         };
-        let count = words.len();
         Ok(EngineSnapshot {
             prediction: false,
             scheme: 0,
-            candidate_codes: vec![self.reading.clone(); count],
-            candidate_annotations: vec![String::new(); count],
-            candidate_sources: vec![0; count],
-            candidate_corrected: vec![false; count],
-            candidate_answers_key: vec![true; count],
+            candidates,
             microsoft_shuangpin: false,
             shuangpin_profile: "xiaohe".into(),
             local_mode: "none".into(),
@@ -4253,7 +4258,6 @@ impl InputEngine for DigitCommitsEngine {
             editing_text: self.reading.clone(),
             caret_position: self.reading.len(),
             segment_raw_boundaries: Vec::new(),
-            candidates: words,
             ..EngineSnapshot::default()
         })
     }
@@ -4879,7 +4883,7 @@ fn a_late_cloud_candidate_keeps_the_page_the_user_opened() {
         .candidates
         .iter()
         .all(|candidate| candidate.text != "云联想"));
-    assert_eq!(paged.cached.candidates[1], "云联想");
+    assert_eq!(paged.cached.candidates[1].text, "云联想");
 
     let typed = paged
         .dispatch(Action::Character {
@@ -5075,7 +5079,9 @@ fn clearing_online_candidates_does_not_change_engine_after_generation_exhaustion
         .unwrap());
     runtime.generation = u64::MAX;
     let before = runtime.engine.snapshot().unwrap().candidates;
-    assert!(before.iter().any(|candidate| candidate == "合成候选"));
+    assert!(before
+        .iter()
+        .any(|candidate| candidate.text == "合成候选"));
 
     assert!(matches!(
         runtime.clear_online_candidates(1),
@@ -6162,4 +6168,115 @@ fn projected_emoji_refresh_and_focus_loss_stay_aligned() {
     assert!(!runtime.view().candidates.iter().any(|c| c.text == "🚀"));
     runtime.set_inline_emoji_projection(true, None);
     assert_eq!(runtime.view().candidates[2].text, "🚀");
+}
+
+#[test]
+fn real_engine_pin_to_first_block_and_locked_prefix_backspace_rollback() {
+    let directory = tempfile::tempdir().unwrap();
+    let dictionaries = directory.path().join("dictionaries");
+    std::fs::create_dir_all(&dictionaries).unwrap();
+    rusqlite::Connection::open(dictionaries.join(msime_engine::assets::MAIN_DICTIONARY))
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE tbl_1_c(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+             INSERT INTO tbl_1_c VALUES('chu','c','出',900000);\
+             INSERT INTO tbl_1_c VALUES('chu','c','处',800000);\
+             CREATE TABLE tbl_1_l(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+             INSERT INTO tbl_1_l VALUES('lou','l','楼',900000);\
+             CREATE TABLE tbl_2_c(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
+             INSERT INTO tbl_2_c VALUES('chu''fa','cf','出发',950000);\
+             INSERT INTO tbl_2_c VALUES('chu''fa','cf','处罚',500000);\
+             INSERT INTO tbl_2_c VALUES('chu''fa','cf','触犯',400000);",
+        )
+        .unwrap();
+    let mut options = real_engine_options(directory.path());
+    options.learning = true;
+    let session = msime_engine::host::Session::new(&options).unwrap();
+    let mut runtime = Runtime::new(session, 6).unwrap();
+    runtime.focus(true).unwrap();
+    runtime.set_phrase_preedit(true);
+
+    // 1. `PinCandidate` 只置顶到第 1 位并锁定首位，`RemoveCandidate` 屏蔽删除候选。
+    type_characters(&mut runtime, "chufa");
+    let punish_id = runtime
+        .view()
+        .candidates
+        .iter()
+        .find(|c| c.text == "处罚")
+        .unwrap()
+        .id;
+    let pinned_view = runtime.dispatch(Action::PinCandidate(punish_id)).unwrap().view;
+    assert_eq!(pinned_view.candidates[0].text, "处罚");
+    assert_eq!(pinned_view.candidates[0].fixed_position, Some(1));
+
+    // 多字词可被屏蔽删除（单字受词典保护不可删除），且删除后重新输入不再出现。
+    let chufan_id = pinned_view
+        .candidates
+        .iter()
+        .find(|c| c.text == "触犯")
+        .unwrap()
+        .id;
+    let after_block = runtime.dispatch(Action::RemoveCandidate(chufan_id)).unwrap().view;
+    assert!(!after_block.candidates.iter().any(|c| c.text == "触犯"));
+    assert_eq!(after_block.candidates[0].text, "处罚");
+    assert_eq!(after_block.candidates[0].fixed_position, Some(1));
+
+    // 2. 分段选词暂存 `locked_prefix` 并进入 `effective_left_context`，退格拆回拼音后可改选并整句上屏学习。
+    runtime.dispatch(Action::Command(Command::Cancel)).unwrap();
+    type_characters(&mut runtime, "chufalou");
+    let punish_prefix_id = runtime
+        .view()
+        .candidates
+        .iter()
+        .find(|c| c.text == "处罚")
+        .unwrap()
+        .id;
+    let held = runtime.dispatch(Action::Select(punish_prefix_id)).unwrap();
+    assert_eq!(held.commit, None);
+    assert_eq!(held.view.phrase_prefix, "处罚");
+    assert_eq!(held.view.editing_text, "lou");
+    assert_eq!(runtime.cursor_snapshot().effective_left_context(), "处罚");
+
+    // 删空剩余拼音并再按一次退格，拆回已选前缀 `处罚` 恢复 `chufa`。
+    for _ in 0..3 {
+        runtime.dispatch(Action::Command(Command::Backspace)).unwrap();
+    }
+    let rolled_back = runtime.view();
+    assert!(rolled_back.phrase_prefix.is_empty());
+    assert_eq!(rolled_back.editing_text, "chufa");
+    assert!(runtime.cursor_snapshot().effective_left_context().is_empty());
+
+    // 改选第 2 项「出发」并补输 `lou` 完成整句上屏（触发整句学习）。
+    let depart_id = rolled_back
+        .candidates
+        .iter()
+        .find(|c| c.text == "出发")
+        .unwrap()
+        .id;
+    runtime.dispatch(Action::Select(depart_id)).unwrap();
+    // 全串被消耗后会直接上屏；再验证一次两段连选整句上屏学词。
+    runtime.dispatch(Action::Command(Command::Cancel)).unwrap();
+    type_characters(&mut runtime, "chufalou");
+    let depart2_id = runtime
+        .view()
+        .candidates
+        .iter()
+        .find(|c| c.text == "出发")
+        .unwrap()
+        .id;
+    let step1 = runtime.dispatch(Action::Select(depart2_id)).unwrap();
+    assert_eq!(step1.view.phrase_prefix, "出发");
+    assert_eq!(step1.view.editing_text, "lou");
+    let lou_id = step1.view.candidates[0].id;
+    let final_commit = runtime.dispatch(Action::Select(lou_id)).unwrap();
+    assert_eq!(final_commit.commit.as_deref(), Some("出发楼"));
+    assert!(final_commit.view.phrase_prefix.is_empty());
+
+    // 新建输入框再打 `chufalou`，刚才整句连选学会的「出发楼」应已入库。
+    type_characters(&mut runtime, "chufalou");
+    assert!(runtime
+        .view()
+        .candidates
+        .iter()
+        .any(|c| c.text == "出发楼"));
 }

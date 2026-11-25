@@ -61,7 +61,12 @@ impl Store {
         for character in keys.bytes() {
             session.character(character, false)?;
         }
-        Ok(session.snapshot()?.candidates)
+        Ok(session
+            .snapshot()?
+            .candidates
+            .into_iter()
+            .map(|entry| entry.text)
+            .collect())
     }
 
     /// Pick the partial candidate, then take the leading one until the input is used up.
@@ -93,12 +98,13 @@ impl Store {
         let index = snapshot
             .candidates
             .iter()
-            .position(|candidate| candidate == PHRASE)
+            .position(|entry| entry.text == PHRASE)
             .ok_or_else(|| format!("the sentence was not offered: {:?}", snapshot.candidates))?;
-        let source = *snapshot
-            .candidate_sources
+        let source = snapshot
+            .candidates
             .get(index)
-            .ok_or("the sentence has no source")?;
+            .ok_or("the sentence has no source")?
+            .source;
         // CandidateSource::Generated and CandidateSource::Fallback are 8 and 9. A packaged or
         // already learned dictionary row would not exercise standalone sentence learning.
         if source != 8 && source != 9 {
@@ -134,7 +140,7 @@ impl Store {
         let index = snapshot
             .candidates
             .iter()
-            .position(|candidate| candidate == ONLINE_PHRASE)
+            .position(|entry| entry.text == ONLINE_PHRASE)
             .ok_or("the synthetic AI candidate disappeared")?;
         let committed = session.select(index)?;
         if !committed.has_commit || committed.commit != ONLINE_PHRASE {

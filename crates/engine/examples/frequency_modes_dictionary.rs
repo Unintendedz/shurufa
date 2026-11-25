@@ -60,10 +60,9 @@ impl Probe {
         Ok(snapshot
             .candidates
             .into_iter()
-            .zip(snapshot.candidate_sources)
             .enumerate()
-            .filter(|(_, (_, source))| *source == DATABASE)
-            .map(|(display, (word, _))| (display, word))
+            .filter(|(_, entry)| entry.source == DATABASE)
+            .map(|(display, entry)| (display, entry.text))
             .collect())
     }
 

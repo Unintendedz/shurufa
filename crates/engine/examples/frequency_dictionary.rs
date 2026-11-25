@@ -4,7 +4,12 @@ use msime_engine::host::{prepare_options, Session};
 fn candidates(session: &mut Session) -> msime_engine::Result<Vec<String>> {
     session.character(b'n', false)?;
     session.character(b'i', false)?;
-    Ok(session.snapshot()?.candidates)
+    Ok(session
+        .snapshot()?
+        .candidates
+        .into_iter()
+        .map(|entry| entry.text)
+        .collect())
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

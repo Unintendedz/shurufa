@@ -25,25 +25,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let rows: Vec<_> = snapshot
             .candidates
             .iter()
-            .zip(&snapshot.candidate_sources)
-            .zip(&snapshot.candidate_codes)
-            .map(|((word, source), code)| format!("{word}[source={source},code={code}]"))
+            .map(|entry| {
+                format!(
+                    "{}[source={},code={}]",
+                    entry.text, entry.source, entry.code
+                )
+            })
             .collect();
         println!("{keys}: {}", rows.join(", "));
         if (keys == "gunqi"
             && snapshot
                 .candidates
                 .first()
-                .is_some_and(|word| word == "滚球" || word == "棍球"))
+                .is_some_and(|entry| entry.text == "滚球" || entry.text == "棍球"))
             || snapshot
                 .candidates
                 .first()
-                .is_some_and(|word| word == rejected)
+                .is_some_and(|entry| entry.text == rejected)
             || snapshot
                 .candidates
                 .iter()
-                .zip(&snapshot.candidate_sources)
-                .any(|(word, source)| word == rejected && *source == 8)
+                .any(|entry| entry.text == rejected && entry.source == 8)
         {
             return Err(format!("rare reading {rejected} won or was generated for {keys}").into());
         }

@@ -2,22 +2,11 @@
 //! providers return asynchronously.
 
 use super::*;
-use msime_engine::ordering::{
-    apply_order_with, ensure_engine_order, runner_up_order, ParallelOrderRows,
+use msime_engine::ordering::{apply_order_with, runner_up_order, CandidateOrderRows};
+use msime_engine::{
+    CandidateEntry, CandidateOrigin, CursorSnapshot, LockedSegment, PurePresenter, SchemeType,
+    UnifiedScorer,
 };
-use msime_engine::slot_allocator::{
-    allocate_slots, AllocatedSlot, SlotBudget, SlotCandidate, SlotCandidateKind,
-};
-
-/// 经 `SlotAllocator` 投影到展示列表中的单个内联 Emoji 席位。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ProjectedEmojiSeat {
-    pub(crate) seat: usize,
-    pub(crate) anchor_word: String,
-    pub(crate) emoji: &'static str,
-}
-
-use msime_engine::SchemeType;
 use std::collections::HashSet;
 
 pub enum Action {
@@ -49,12 +38,6 @@ pub enum Action {
     FirstCandidateOrHome,
 }
 
-/// 分步选词中可由退格撤回的一步选择。
-pub(crate) struct PhraseSelection {
-    pub(crate) word_before: String,
-    pub(crate) reading: String,
-}
-
 pub struct Runtime<E: InputEngine = Session> {
     pub(crate) engine: E,
     pub(crate) session: u64,
@@ -67,11 +50,9 @@ pub struct Runtime<E: InputEngine = Session> {
     pub(crate) translation_scope_highlighted: bool,
     pub(crate) display_page: Option<(u64, Vec<usize>)>,
     pub(crate) cached: EngineSnapshot,
-    pub(crate) engine_order: Vec<usize>,
     pub(crate) online_order_scratch: Vec<usize>,
     pub(crate) inline_emoji_projection: bool,
     pub(crate) emoji_mru: crate::emoji_mru::EmojiMruStore,
-    pub(crate) projected_emojis: Vec<ProjectedEmojiSeat>,
     pub(crate) snapshot_valid: bool,
     pub(crate) character_width: CharacterWidth,
     pub(crate) punctuation_marks: PunctuationMarks,
@@ -84,8 +65,8 @@ pub struct Runtime<E: InputEngine = Session> {
     pub(crate) left_right_navigation: bool,
     pub(crate) vertical_candidates: bool,
     pub(crate) english_first_page_count: usize,
-    pub(crate) phrase_prefix: String,
-    pub(crate) phrase_selections: Vec<PhraseSelection>,
+    /// 段内暂存前缀（单次会话内已选定但尚未整句上屏的词段），可直接拼入左上下文与退格拆回。
+    pub(crate) locked_prefix: Vec<LockedSegment>,
     pub(crate) ai_context: String,
     pub(crate) neural_v2_enabled: bool,
     pub(crate) neural_context: String,
@@ -139,7 +120,7 @@ pub(crate) fn move_to_back<T>(items: &mut [T], moved: &[bool]) {
 
 fn retain_candidate_translations(
     translations: &mut HashMap<String, String>,
-    candidates: &[String],
+    candidates: &[CandidateEntry],
 ) {
     if translations.is_empty() {
         return;
@@ -147,21 +128,15 @@ fn retain_candidate_translations(
     if candidates.is_empty() {
         translations.clear();
     } else if translations.len() <= 8 || candidates.len() <= 8 {
-        translations.retain(|text, _| candidates.contains(text));
+        translations.retain(|text, _| candidates.iter().any(|entry| entry.text == *text));
     } else {
-        let candidates: HashSet<&str> = candidates.iter().map(String::as_str).collect();
+        let candidates: HashSet<&str> = candidates.iter().map(|entry| entry.text.as_str()).collect();
         translations.retain(|text, _| candidates.contains(text.as_str()));
     }
 }
 
-fn order_rows(snapshot: &EngineSnapshot) -> ParallelOrderRows<'_> {
-    ParallelOrderRows::new(
-        &snapshot.candidates,
-        &snapshot.candidate_sources,
-        &snapshot.candidate_answers_key,
-        &snapshot.candidate_corrected,
-    )
-    .with_static_evidence(&snapshot.candidate_static_evidence)
+fn order_rows(snapshot: &EngineSnapshot) -> CandidateOrderRows<'_> {
+    CandidateOrderRows(&snapshot.candidates)
 }
 
 /// [`Runtime::apply_neural_response`] 的应用结果。
@@ -454,6 +429,38 @@ impl Runtime<Session> {
 }
 
 impl<E: InputEngine> Runtime<E> {
+    /// 返回当前会话内已锁定的分段前缀切片。
+    pub fn locked_prefix(&self) -> &[LockedSegment] {
+        &self.locked_prefix
+    }
+
+    /// 拼接当前段内暂存前缀文本。
+    pub fn locked_prefix_text(&self) -> String {
+        let cap: usize = self.locked_prefix.iter().map(|seg| seg.text.len()).sum();
+        let mut out = String::with_capacity(cap);
+        for seg in &self.locked_prefix {
+            out.push_str(&seg.text);
+        }
+        out
+    }
+
+    /// 构造单向候选管线的不可变输入现场快照 [`CursorSnapshot`]。
+    pub fn cursor_snapshot(&self) -> CursorSnapshot {
+        CursorSnapshot {
+            generation: self.generation,
+            scheme: self.cached.scheme,
+            raw_input: self.cached.editing_text.clone(),
+            caret: self.cached.caret_position,
+            locked_prefix: self.locked_prefix.clone(),
+            left_context: self.neural_context.clone(),
+            right_context: self.neural_right_context.clone(),
+            script_conversion: script_conversion(self.cached.scheme, &self.cached.local_mode),
+            emoji_enabled: self.inline_emoji_projection,
+            english_autocomplete_enabled: !self.cached.dedicated_english,
+            page_size: u8::try_from(self.page_size).unwrap_or(6),
+        }
+    }
+
     pub(crate) fn visible_len(&self) -> usize {
         self.cached.candidates.len()
     }
@@ -491,43 +498,21 @@ impl<E: InputEngine> Runtime<E> {
         Ok(())
     }
 
-    /// 一次遍历排列，同步交换候选字段和引擎座位映射，共用循环访问缓冲。
+    /// 一次原地循环置换重排候选列表（`<= 128` 行时零堆分配），每个 [`CandidateEntry`] 已自带 `origin`。
     pub(crate) fn apply_candidate_order(&mut self, order: &[usize]) {
-        ensure_engine_order(&mut self.engine_order, order.len());
-        let snapshot = &mut self.cached;
-        debug_assert_eq!(snapshot.candidates.len(), order.len());
-        debug_assert_eq!(snapshot.candidate_codes.len(), order.len());
-        debug_assert_eq!(snapshot.candidate_annotations.len(), order.len());
-        debug_assert_eq!(snapshot.candidate_sources.len(), order.len());
-        debug_assert_eq!(snapshot.candidate_corrected.len(), order.len());
-        debug_assert_eq!(snapshot.candidate_answers_key.len(), order.len());
-        let engine_order = &mut self.engine_order;
+        let candidates = &mut self.cached.candidates;
+        debug_assert_eq!(candidates.len(), order.len());
         apply_order_with(order, |left, right| {
-            snapshot.candidates.swap(left, right);
-            snapshot.candidate_codes.swap(left, right);
-            snapshot.candidate_annotations.swap(left, right);
-            snapshot.candidate_sources.swap(left, right);
-            snapshot.candidate_corrected.swap(left, right);
-            snapshot.candidate_answers_key.swap(left, right);
-            if snapshot.candidate_static_evidence.len() == order.len() {
-                snapshot.candidate_static_evidence.swap(left, right);
-            }
-            if snapshot.candidate_keyboard_runner_up.len() == order.len() {
-                snapshot.candidate_keyboard_runner_up.swap(left, right);
-            }
-            engine_order.swap(left, right);
+            candidates.swap(left, right);
         });
     }
 
     pub fn set_dedicated_english(&mut self, enabled: bool) -> Result<(), RuntimeError> {
         self.advance()?;
         self.engine.set_dedicated_english(enabled)?;
-        if self.cached.dedicated_english != enabled {
-            self.phrase_selections.clear();
-            if !self.phrase_prefix.is_empty() {
-                self.phrase_prefix.clear();
-                self.bump_composition_epoch();
-            }
+        if self.cached.dedicated_english != enabled && !self.locked_prefix.is_empty() {
+            self.locked_prefix.clear();
+            self.bump_composition_epoch();
         }
         self.refresh()
     }
@@ -764,12 +749,10 @@ impl<E: InputEngine> Runtime<E> {
             highlight_translations: HashMap::new(),
             translation_scope_highlighted: false,
             display_page: None,
-            engine_order: Vec::new(),
+            cached,
             online_order_scratch: Vec::new(),
             inline_emoji_projection: false,
             emoji_mru: crate::emoji_mru::EmojiMruStore::default(),
-            projected_emojis: Vec::new(),
-            cached,
             snapshot_valid: true,
             character_width: CharacterWidth::Halfwidth,
             punctuation_marks: PunctuationMarks::default(),
@@ -781,8 +764,7 @@ impl<E: InputEngine> Runtime<E> {
             left_right_navigation: false,
             english_first_page_count: 1,
             vertical_candidates: false,
-            phrase_prefix: String::new(),
-            phrase_selections: Vec::new(),
+            locked_prefix: Vec::new(),
             facts: DispatchFacts::default(),
             selected_text: String::new(),
             composition_epoch: 0,
@@ -795,23 +777,25 @@ impl<E: InputEngine> Runtime<E> {
             return None;
         }
         self.phrase_preedit = enabled;
-        if enabled || self.phrase_prefix.is_empty() {
-            self.phrase_selections.clear();
+        if enabled || self.locked_prefix.is_empty() {
+            self.locked_prefix.clear();
             return None;
         }
-        self.phrase_selections.clear();
+        let held = self.locked_prefix_text();
+        self.locked_prefix.clear();
         self.bump_composition_epoch();
-        Some(std::mem::take(&mut self.phrase_prefix))
+        (!held.is_empty()).then_some(held)
     }
 
     pub fn set_inline_emoji_projection(&mut self, enabled: bool, mru_path: Option<PathBuf>) {
         self.inline_emoji_projection = enabled;
         self.emoji_mru.configure(mru_path);
-        if !enabled && !self.projected_emojis.is_empty() {
-            self.strip_projected_emojis();
-            let _ = self.advance();
-            self.bump_candidates_epoch();
-        } else if enabled && !self.is_idle() && self.apply_slot_allocator() {
+        if !enabled {
+            if self.strip_projected_emojis() {
+                let _ = self.advance();
+                self.bump_candidates_epoch();
+            }
+        } else if !self.is_idle() && self.apply_slot_allocator() {
             let _ = self.advance();
             self.bump_candidates_epoch();
         }
@@ -894,12 +878,12 @@ impl<E: InputEngine> Runtime<E> {
         let max_neural_candidates = DEFAULT_MAX_NEURAL_CANDIDATES;
         let mut candidates =
             Vec::with_capacity(self.cached.candidates.len().min(max_neural_candidates));
-        let mut pinned_seats: Vec<(usize, usize)> = Vec::new();
+        let mut pinned_first_index: Option<usize> = None;
         let mut seen_texts: std::collections::HashSet<String> =
             std::collections::HashSet::with_capacity(max_neural_candidates);
         let mut base_idx = 0usize;
-        for seat in 0..self.cached.candidates.len() {
-            if self.is_projected_emoji(seat) {
+        for entry in &self.cached.candidates {
+            if matches!(entry.origin, CandidateOrigin::ProjectedEmoji { .. }) {
                 continue;
             }
             let current_base_idx = base_idx;
@@ -910,25 +894,18 @@ impl<E: InputEngine> Runtime<E> {
             if candidates.len() >= max_neural_candidates {
                 continue;
             }
-            let source = self
-                .cached
-                .candidate_sources
-                .get(seat)
-                .copied()
-                .unwrap_or_default();
+            let source = entry.source;
             if !is_neural_v2_source(source) {
                 continue;
             }
-            let text = self.cached.candidates[seat].clone();
-            let pinyin = self
-                .cached
-                .candidate_codes
-                .get(seat)
-                .cloned()
-                .unwrap_or_default();
+            let text = entry.text.clone();
+            let pinyin = entry.code.clone();
             let char_count = text.chars().count();
-            let eng_idx = self.engine_index(seat);
-            let meta = engine_meta.as_ref().and_then(|m| m.candidates.get(eng_idx));
+            let eng_idx = match entry.origin {
+                CandidateOrigin::EngineRow(idx) => Some(idx),
+                CandidateOrigin::InjectedBeam | CandidateOrigin::ProjectedEmoji { .. } => None,
+            };
+            let meta = eng_idx.and_then(|i| engine_meta.as_ref().and_then(|m| m.candidates.get(i)));
 
             let (
                 stat_log_prob,
@@ -944,45 +921,33 @@ impl<E: InputEngine> Runtime<E> {
                     m.user_log_prob,
                     m.exact_span,
                     m.exact_literal_dict,
-                    m.pinned,
+                    m.pinned || entry.pinned_first,
                 )
             } else {
-                let stat = self
-                    .cached
-                    .candidate_static_evidence
-                    .get(seat)
-                    .and_then(|ev| ev.map(|e| e.log_prob_milli_nats as f64 / 1000.0));
-                let corrected = self
-                    .cached
-                    .candidate_corrected
-                    .get(seat)
-                    .copied()
-                    .unwrap_or(false);
-                let channel = if corrected {
+                let stat = entry
+                    .static_evidence
+                    .map(|e| e.log_prob_milli_nats as f64 / 1000.0);
+                let channel = if entry.corrected {
                     DEFAULT_TYPO_CHANNEL_PENALTY
                 } else {
-                    0.0
+                    entry.channel_log_prob
                 };
                 let user = if source == msime_engine::CandidateSource::UserDatabase as u8 {
                     DEFAULT_USER_DICTIONARY_LOG_PRIOR
                 } else {
-                    0.0
+                    entry.user_log_prob
                 };
-                let answers = self
-                    .cached
-                    .candidate_answers_key
-                    .get(seat)
-                    .copied()
-                    .unwrap_or(false);
-                let exact = answers
+                let exact = entry.answers_key
                     && char_count > 0
                     && (primary_syllables == 0 || char_count <= primary_syllables + 1);
-                (stat, channel, user, exact, false, false)
+                (stat, channel, user, exact, false, entry.pinned_first)
             };
 
             if pinned {
-                // 手动置顶（`pinned_candidates`）硬锁定首位 0。
-                pinned_seats.push((current_base_idx, 0));
+                // 手动置顶仅保留首位 0；忽略其余多出项以保持单真源不变量。
+                if pinned_first_index.is_none() {
+                    pinned_first_index = Some(current_base_idx);
+                }
                 continue;
             }
             if !exact_span {
@@ -1011,8 +976,10 @@ impl<E: InputEngine> Runtime<E> {
             return None;
         }
 
-        let has_any_context =
-            !self.neural_context.trim().is_empty() || !self.neural_right_context.trim().is_empty();
+        let cursor = self.cursor_snapshot();
+        let context = cursor.effective_left_context();
+        let right_context = cursor.effective_right_context().to_owned();
+        let has_any_context = !context.trim().is_empty() || !right_context.trim().is_empty();
         let has_single_char_exact_dict = candidates.iter().any(|c| {
             c.char_count == 1
                 && (c.source == msime_engine::CandidateSource::Database as u8
@@ -1026,13 +993,13 @@ impl<E: InputEngine> Runtime<E> {
         let request = NeuralDecodeRequest {
             session: self.session,
             generation: self.generation,
-            context: self.neural_context.clone(),
-            right_context: self.neural_right_context.clone(),
+            context,
+            right_context,
             raw_input,
             segmentation,
             syllable_paths,
             candidates,
-            pinned_seats,
+            pinned_first_index,
             beam_width: DEFAULT_BEAM_WIDTH,
             max_beam_results: DEFAULT_MAX_BEAM_RESULTS,
             enable_constrained_decode: true,
@@ -1046,7 +1013,7 @@ impl<E: InputEngine> Runtime<E> {
         response: &msime_engine::neural_v2::NeuralDecodeResponse,
         lock_slot_0: bool,
     ) -> NeuralApplyOutcome {
-        use msime_engine::neural_v2::{fuse_neural_response, FusedSeat, SOURCE_NEURAL_CONSTRAINED};
+        use msime_engine::neural_v2::{FusedSeat, SOURCE_NEURAL_CONSTRAINED};
 
         let rejected = |generation: u64, locked: bool| NeuralApplyOutcome {
             applied: false,
@@ -1080,7 +1047,7 @@ impl<E: InputEngine> Runtime<E> {
 
         let had_projected = self.strip_projected_emojis();
         let base_len = self.cached.candidates.len();
-        let outcome = fuse_neural_response(
+        let outcome = UnifiedScorer::score(
             base_len,
             &request,
             response,
@@ -1089,97 +1056,46 @@ impl<E: InputEngine> Runtime<E> {
         );
 
         if outcome.moved {
-            ensure_engine_order(&mut self.engine_order, base_len);
-            let old_candidates = std::mem::take(&mut self.cached.candidates);
-            let old_codes = std::mem::take(&mut self.cached.candidate_codes);
-            let old_annotations = std::mem::take(&mut self.cached.candidate_annotations);
-            let old_sources = std::mem::take(&mut self.cached.candidate_sources);
-            let old_corrected = std::mem::take(&mut self.cached.candidate_corrected);
-            let old_answers_key = std::mem::take(&mut self.cached.candidate_answers_key);
-            let old_static_evidence = std::mem::take(&mut self.cached.candidate_static_evidence);
-            let old_keyboard_runner_up =
-                std::mem::take(&mut self.cached.candidate_keyboard_runner_up);
-            let old_engine_order = std::mem::take(&mut self.engine_order);
-
-            let has_codes = old_codes.len() == base_len;
-            let has_annotations = old_annotations.len() == base_len;
-            let has_corrected = old_corrected.len() == base_len;
-            let has_static = old_static_evidence.len() == base_len;
-            let has_runner_up = old_keyboard_runner_up.len() == base_len;
-
-            let new_len = outcome.seats.len();
-            self.cached.candidates.reserve(new_len);
-            if has_codes {
-                self.cached.candidate_codes.reserve(new_len);
-            }
-            if has_annotations {
-                self.cached.candidate_annotations.reserve(new_len);
-            }
-            self.cached.candidate_sources.reserve(new_len);
-            if has_corrected {
-                self.cached.candidate_corrected.reserve(new_len);
-            }
-            self.cached.candidate_answers_key.reserve(new_len);
-            if has_static {
-                self.cached.candidate_static_evidence.reserve(new_len);
-            }
-            if has_runner_up {
-                self.cached.candidate_keyboard_runner_up.reserve(new_len);
-            }
-            self.engine_order.reserve(new_len);
+            let mut old_candidates: Vec<Option<CandidateEntry>> =
+                std::mem::take(&mut self.cached.candidates)
+                    .into_iter()
+                    .map(Some)
+                    .collect();
+            self.cached.candidates.reserve(outcome.seats.len());
 
             for seat in &outcome.seats {
                 match seat {
                     FusedSeat::Existing { index, .. } => {
-                        let id = *index;
-                        self.cached.candidates.push(old_candidates[id].clone());
-                        if has_codes {
-                            self.cached.candidate_codes.push(old_codes[id].clone());
+                        if let Some(mut entry) =
+                            old_candidates.get_mut(*index).and_then(Option::take)
+                        {
+                            if let Some(scored) = response
+                                .candidate_scores
+                                .iter()
+                                .find(|item| item.text == entry.text)
+                            {
+                                entry.tier1_neural_log_prob = Some(scored.neural_log_prob);
+                            }
+                            self.cached.candidates.push(entry);
                         }
-                        if has_annotations {
-                            self.cached
-                                .candidate_annotations
-                                .push(old_annotations[id].clone());
-                        }
-                        self.cached.candidate_sources.push(old_sources[id]);
-                        if has_corrected {
-                            self.cached.candidate_corrected.push(old_corrected[id]);
-                        }
-                        self.cached.candidate_answers_key.push(old_answers_key[id]);
-                        if has_static {
-                            self.cached
-                                .candidate_static_evidence
-                                .push(old_static_evidence[id]);
-                        }
-                        if has_runner_up {
-                            self.cached
-                                .candidate_keyboard_runner_up
-                                .push(old_keyboard_runner_up[id]);
-                        }
-                        self.engine_order.push(old_engine_order[id]);
                     }
-                    FusedSeat::InjectedBeam { text, pinyin, .. } => {
-                        self.cached.candidates.push(text.clone());
-                        if has_codes {
-                            self.cached.candidate_codes.push(pinyin.clone());
-                        }
-                        if has_annotations {
-                            self.cached.candidate_annotations.push(String::new());
-                        }
-                        self.cached
-                            .candidate_sources
-                            .push(SOURCE_NEURAL_CONSTRAINED);
-                        if has_corrected {
-                            self.cached.candidate_corrected.push(false);
-                        }
-                        self.cached.candidate_answers_key.push(true);
-                        if has_static {
-                            self.cached.candidate_static_evidence.push(None);
-                        }
-                        if has_runner_up {
-                            self.cached.candidate_keyboard_runner_up.push(false);
-                        }
-                        self.engine_order.push(usize::MAX);
+                    FusedSeat::InjectedBeam {
+                        text,
+                        pinyin,
+                        neural_log_prob,
+                        channel_log_prob,
+                    } => {
+                        let mut entry = CandidateEntry::new(
+                            text.clone(),
+                            pinyin.clone(),
+                            SOURCE_NEURAL_CONSTRAINED,
+                        );
+                        entry.answers_key = true;
+                        entry.channel_log_prob = *channel_log_prob;
+                        entry.tier1_neural_log_prob = Some(*neural_log_prob);
+                        entry.origin = CandidateOrigin::InjectedBeam;
+                        entry.stamp_generation(self.generation);
+                        self.cached.candidates.push(entry);
                     }
                 }
             }
@@ -1224,10 +1140,11 @@ impl<E: InputEngine> Runtime<E> {
         if self.highlighted == 0 || self.is_projected_emoji(self.highlighted) {
             return None;
         }
+        let entry = self.cached.candidates.get(self.highlighted)?;
         Some((
             self.highlighted,
-            self.cached.candidates.get(self.highlighted)?.clone(),
-            self.cached.candidate_codes.get(self.highlighted).cloned(),
+            entry.text.clone(),
+            Some(entry.code.clone()),
         ))
     }
 
@@ -1320,7 +1237,7 @@ impl<E: InputEngine> Runtime<E> {
                 .enumerate()
                 .skip(start)
                 .take(page_len)
-                .map(|(index, text)| self.candidate_row(index, text, reserve_translation)),
+                .map(|(index, entry)| self.candidate_row(index, entry, reserve_translation)),
         );
         View {
             prediction: self.cached.prediction,
@@ -1333,7 +1250,7 @@ impl<E: InputEngine> Runtime<E> {
             microsoft_shuangpin: self.cached.microsoft_shuangpin,
             shuangpin_profile: self.cached.shuangpin_profile.clone(),
             local_mode: self.cached.local_mode.clone(),
-            spelling_symbols: if self.phrase_prefix.is_empty() || self.cached.local_mode != "none" {
+            spelling_symbols: if self.locked_prefix.is_empty() || self.cached.local_mode != "none" {
                 self.cached.spelling_symbols.clone()
             } else {
                 String::new()
@@ -1343,7 +1260,7 @@ impl<E: InputEngine> Runtime<E> {
             generation: self.generation,
             focused: self.focused,
             preedit: self.cached.preedit.clone(),
-            phrase_prefix: self.phrase_prefix.clone(),
+            phrase_prefix: self.locked_prefix_text(),
             reading: self.cached.reading.clone(),
             display_reading: self.cached.display_reading.clone(),
             editing_text: self.cached.editing_text.clone(),
@@ -1386,20 +1303,15 @@ impl<E: InputEngine> Runtime<E> {
         let mut candidates = Vec::with_capacity(seats.len());
         let mut highlighted = None;
         for index in seats.into_iter().filter(|&index| index < visible) {
-            let Some(text) = self.cached.candidates.get(index) else {
+            let Some(entry) = self.cached.candidates.get(index) else {
                 continue;
             };
             if index == self.highlighted {
                 highlighted = Some(candidates.len());
             }
             candidates.push(TranslationCandidate {
-                text: text.clone(),
-                source: self
-                    .cached
-                    .candidate_sources
-                    .get(index)
-                    .copied()
-                    .unwrap_or_default(),
+                text: entry.text.clone(),
+                source: entry.source,
             });
         }
         (!candidates.is_empty()).then_some(TranslationCandidates {
@@ -1431,7 +1343,7 @@ impl<E: InputEngine> Runtime<E> {
                 .iter()
                 .take(visible)
                 .enumerate()
-                .map(|(index, text)| self.candidate(index, text)),
+                .map(|(index, entry)| self.candidate_row(index, entry, false)),
         );
         CandidateSnapshot {
             session: self.session,
@@ -1447,43 +1359,25 @@ impl<E: InputEngine> Runtime<E> {
         self.cached
             .candidates
             .iter()
-            .zip(&self.cached.candidate_sources)
             .take(visible)
-            .map(|(text, source)| (text.clone(), *source))
+            .map(|entry| (entry.text.clone(), entry.source))
             .collect()
     }
 
     pub fn raw_engine_candidates(&self) -> Vec<(String, u8)> {
-        let count = self.cached.candidates.len();
-        if self.engine_order.len() != count {
-            return self
-                .cached
-                .candidates
-                .iter()
-                .zip(&self.cached.candidate_sources)
-                .enumerate()
-                .filter(|(seat, _)| !self.is_projected_emoji(*seat))
-                .map(|(_, (text, source))| (text.clone(), *source))
-                .collect();
-        }
-        let base_count = self
-            .engine_order
+        let mut rows: Vec<(usize, (String, u8))> = self
+            .cached
+            .candidates
             .iter()
-            .filter(|&&idx| idx != usize::MAX)
-            .count();
-        let mut raw = vec![(String::new(), 0u8); base_count];
-        for (seat, &engine_index) in self.engine_order.iter().enumerate() {
-            if engine_index == usize::MAX {
-                continue;
-            }
-            if let Some(slot) = raw.get_mut(engine_index) {
-                *slot = (
-                    self.cached.candidates[seat].clone(),
-                    self.cached.candidate_sources[seat],
-                );
-            }
-        }
-        raw
+            .filter_map(|entry| match entry.origin {
+                CandidateOrigin::EngineRow(idx) => {
+                    Some((idx, (entry.text.clone(), entry.source)))
+                }
+                CandidateOrigin::InjectedBeam | CandidateOrigin::ProjectedEmoji { .. } => None,
+            })
+            .collect();
+        rows.sort_by_key(|(idx, _)| *idx);
+        rows.into_iter().map(|(_, pair)| pair).collect()
     }
 
     fn displayed_candidate_text(&self, index: usize, text: &str) -> String {
@@ -1495,21 +1389,17 @@ impl<E: InputEngine> Runtime<E> {
         text.to_owned()
     }
 
-    fn candidate(&self, index: usize, text: &str) -> Candidate {
-        self.candidate_row(index, text, false)
-    }
-
-    fn candidate_row(&self, index: usize, text: &str, reserve_translation: bool) -> Candidate {
+    fn candidate_row(
+        &self,
+        index: usize,
+        entry: &CandidateEntry,
+        reserve_translation: bool,
+    ) -> Candidate {
         let highlighted = index == self.highlighted;
+        let text = entry.text.as_str();
         let translation = ((!self.translations.is_empty()
             || !self.highlight_translations.is_empty())
-            && !msime_client_core::translation::source_gets_no_gloss(
-                self.cached
-                    .candidate_sources
-                    .get(index)
-                    .copied()
-                    .unwrap_or_default(),
-            ))
+            && !msime_client_core::translation::source_gets_no_gloss(entry.source))
         .then(|| {
             highlighted
                 .then(|| self.highlight_translations.get(text))
@@ -1529,31 +1419,12 @@ impl<E: InputEngine> Runtime<E> {
                 index,
             },
             text: self.displayed_candidate_text(index, text),
-            code: self
-                .cached
-                .candidate_codes
-                .get(index)
-                .cloned()
-                .unwrap_or_default(),
-            annotation: self
-                .cached
-                .candidate_annotations
-                .get(index)
-                .cloned()
-                .unwrap_or_default(),
-            source: self
-                .cached
-                .candidate_sources
-                .get(index)
-                .copied()
-                .unwrap_or_default(),
-            corrected: self
-                .cached
-                .candidate_corrected
-                .get(index)
-                .copied()
-                .unwrap_or(false),
+            code: entry.code.clone(),
+            annotation: entry.annotation.clone(),
+            source: entry.source,
+            corrected: entry.corrected,
             highlighted,
+            fixed_position: entry.pinned_first.then_some(1),
             translation_reserved: reserve_translation && highlighted,
             translation,
             translation_runs,
@@ -1562,14 +1433,14 @@ impl<E: InputEngine> Runtime<E> {
 
     pub fn is_idle(&self) -> bool {
         self.snapshot_valid
-            && self.phrase_prefix.is_empty()
+            && self.locked_prefix.is_empty()
             && self.cached.preedit.is_empty()
             && self.cached.editing_text.is_empty()
             && (self.cached.prediction || self.cached.candidates.is_empty())
     }
 
     pub fn has_composition(&self) -> bool {
-        !self.phrase_prefix.is_empty()
+        !self.locked_prefix.is_empty()
             || !self.cached.preedit.is_empty()
             || !self.cached.editing_text.is_empty()
             || (!self.cached.prediction && !self.cached.candidates.is_empty())
@@ -1843,13 +1714,17 @@ impl<E: InputEngine> Runtime<E> {
     }
 
     fn load_snapshot(&mut self, snapshot: EngineSnapshot) {
-        self.engine_order.clear();
-        self.projected_emojis.clear();
         self.cached = snapshot;
     }
 
     fn engine_index(&self, seat: usize) -> usize {
-        self.engine_order.get(seat).copied().unwrap_or(seat)
+        match self.cached.candidates.get(seat).map(|entry| &entry.origin) {
+            Some(CandidateOrigin::EngineRow(index)) => *index,
+            Some(CandidateOrigin::InjectedBeam | CandidateOrigin::ProjectedEmoji { .. }) => {
+                usize::MAX
+            }
+            None => seat,
+        }
     }
 
     fn advance(&mut self) -> Result<(), RuntimeError> {
@@ -1878,8 +1753,8 @@ impl<E: InputEngine> Runtime<E> {
         self.facts.selection = self.selection_fact(how, seat, result, edge);
         self.selected_text.clear();
         if self.facts.selection.is_some() {
-            if let Some(text) = self.cached.candidates.get(seat) {
-                self.selected_text.push_str(text);
+            if let Some(entry) = self.cached.candidates.get(seat) {
+                self.selected_text.push_str(&entry.text);
             }
         }
     }
@@ -1891,7 +1766,8 @@ impl<E: InputEngine> Runtime<E> {
         result: &EngineResult,
         edge: Option<CandidateEdge>,
     ) -> Option<SelectionFact> {
-        let text = self.cached.candidates.get(seat)?;
+        let entry = self.cached.candidates.get(seat)?;
+        let text = &entry.text;
         let outcome = if result.has_commit {
             let matches = if self.cached.caret_edit_suffix {
                 let tail = if how == SelectionHow::Edge {
@@ -1929,12 +1805,7 @@ impl<E: InputEngine> Runtime<E> {
         };
         Some(SelectionFact {
             seat: u32::try_from(seat).unwrap_or(u32::MAX),
-            source: self
-                .cached
-                .candidate_sources
-                .get(seat)
-                .copied()
-                .unwrap_or_default(),
+            source: entry.source,
             how,
             outcome,
         })
@@ -1968,7 +1839,7 @@ impl<E: InputEngine> Runtime<E> {
         &mut self,
         action: &Action,
     ) -> Result<Option<Transition>, RuntimeError> {
-        if !self.phrase_preedit || self.phrase_selections.is_empty() {
+        if !self.phrase_preedit || self.locked_prefix.is_empty() {
             return Ok(None);
         }
         let reading = self.cached.editing_text.as_str();
@@ -1978,6 +1849,7 @@ impl<E: InputEngine> Runtime<E> {
                 if !self.backspace_reverts_selection
                     || reading.chars().count() > 1
                     || caret != reading.len()
+                    || self.locked_prefix.last().is_none_or(|seg| seg.reading.is_empty())
                 {
                     return Ok(None);
                 }
@@ -1991,11 +1863,7 @@ impl<E: InputEngine> Runtime<E> {
             }
             _ => return Ok(None),
         };
-        let selection = self
-            .phrase_selections
-            .pop()
-            .expect("the stack was checked above");
-        self.phrase_prefix = selection.word_before;
+        let selection = self.locked_prefix.pop().expect("the stack was checked above");
         self.bump_composition_epoch();
         self.facts.retracted = Some(if restore {
             SelectionRetraction::Restore
@@ -2030,15 +1898,11 @@ impl<E: InputEngine> Runtime<E> {
         }
         let composing = !self.cached.editing_text.is_empty();
         if picked && result.has_commit && composing {
-            if !consumed.is_empty() {
-                self.phrase_selections.push(PhraseSelection {
-                    word_before: self.phrase_prefix.clone(),
-                    reading: consumed.to_owned(),
-                });
-            }
-            self.phrase_prefix.push_str(&result.commit);
+            self.locked_prefix.push(LockedSegment {
+                reading: consumed.to_owned(),
+                text: std::mem::take(&mut result.commit),
+            });
             result.has_commit = false;
-            result.commit = String::new();
             self.facts.held_grew = true;
             self.facts.tail_chars = 0;
             if let Some(selection) = self.facts.selection.as_mut() {
@@ -2047,19 +1911,23 @@ impl<E: InputEngine> Runtime<E> {
             self.bump_composition_epoch();
             return;
         }
-        if self.phrase_prefix.is_empty() || composing {
+        if self.locked_prefix.is_empty() || composing {
             return;
         }
         if keep_for_escape && !discard && !result.has_commit {
             result.handled = true;
             return;
         }
-        if keep_empty && !discard && !result.has_commit && !self.phrase_selections.is_empty() {
+        if keep_empty
+            && !discard
+            && !result.has_commit
+            && self.locked_prefix.iter().any(|seg| !seg.reading.is_empty())
+        {
             result.handled = true;
             return;
         }
-        let held = std::mem::take(&mut self.phrase_prefix);
-        self.phrase_selections.clear();
+        let held = self.locked_prefix_text();
+        self.locked_prefix.clear();
         self.bump_composition_epoch();
         self.facts.held_flushed = !discard;
         if result.has_commit {
@@ -2087,7 +1955,7 @@ impl<E: InputEngine> Runtime<E> {
 
     fn commits_emoji_only(&self) -> bool {
         const EMOJI: u8 = msime_engine::CandidateSource::Emoji as u8;
-        self.phrase_prefix.is_empty()
+        self.locked_prefix.is_empty()
             && self.facts.selection.is_some_and(|selection| {
                 selection.source == EMOJI && selection.outcome == SelectionOutcome::Committed
             })
@@ -2107,9 +1975,10 @@ impl<E: InputEngine> Runtime<E> {
     }
 
     pub(crate) fn is_neural_injected(&self, seat: usize) -> bool {
-        self.engine_order.get(seat) == Some(&usize::MAX)
-            && self.cached.candidate_sources.get(seat)
-                == Some(&msime_engine::neural_v2::SOURCE_NEURAL_CONSTRAINED)
+        matches!(
+            self.cached.candidates.get(seat).map(|e| &e.origin),
+            Some(CandidateOrigin::InjectedBeam)
+        )
     }
 
     fn commit_neural_injected(&mut self, seat: usize) -> Result<EngineResult, RuntimeError> {
@@ -2117,7 +1986,7 @@ impl<E: InputEngine> Runtime<E> {
             .cached
             .candidates
             .get(seat)
-            .cloned()
+            .map(|entry| entry.text.clone())
             .unwrap_or_default();
         let mut result = self.discard_composition()?;
         result.handled = true;
@@ -2171,19 +2040,13 @@ impl<E: InputEngine> Runtime<E> {
 
         let snapshot = &self.cached;
         let count = snapshot.candidates.len();
-        if count < 2
-            || snapshot.candidate_sources.len() != count
-            || snapshot.candidate_codes.len() != count
-            || snapshot.candidate_annotations.len() != count
-            || snapshot.candidate_corrected.len() != count
-            || snapshot.candidate_answers_key.len() != count
-        {
+        if count < 2 {
             return false;
         }
         if !snapshot
-            .candidate_sources
+            .candidates
             .iter()
-            .any(|source| *source == CLOUD || is_ai(*source))
+            .any(|entry| entry.source == CLOUD || is_ai(entry.source))
         {
             return false;
         }
@@ -2204,16 +2067,16 @@ impl<E: InputEngine> Runtime<E> {
             _ => LOCAL_GROUP,
         };
         let mut counts = [0; 6];
-        for source in &snapshot.candidate_sources {
-            counts[group_of(*source)] += 1;
+        for entry in &snapshot.candidates {
+            counts[group_of(entry.source)] += 1;
         }
         let has_cloud = counts[CLOUD_GROUP] > 0;
         let ai_count = counts[AI_GROUP];
         let non_ai = count - ai_count;
         let contact_prefix = snapshot
-            .candidate_sources
+            .candidates
             .iter()
-            .take_while(|source| **source == msime_engine::CandidateSource::Contact as u8)
+            .take_while(|entry| entry.source == msime_engine::CandidateSource::Contact as u8)
             .count();
         let ai_seat = self
             .page_size
@@ -2227,7 +2090,7 @@ impl<E: InputEngine> Runtime<E> {
         let mut tail_starts = [0; 6];
         if has_cloud {
             let promoted_english =
-                counts[LOCAL_GROUP] > 0 && snapshot.candidate_sources[0] == ENGLISH;
+                counts[LOCAL_GROUP] > 0 && snapshot.candidates[0].source == ENGLISH;
             let local_prefix = 1usize.max(contact_prefix);
 
             let mut next_seat = 0;
@@ -2270,8 +2133,8 @@ impl<E: InputEngine> Runtime<E> {
         let mut order = None;
         let mut seen = [0; 6];
         let mut arranged_without_ai = 0;
-        for (index, source) in snapshot.candidate_sources.iter().enumerate() {
-            let group = group_of(*source);
+        for (index, entry) in snapshot.candidates.iter().enumerate() {
+            let group = group_of(entry.source);
             let ordinal = seen[group];
             seen[group] += 1;
             let seat = if group == AI_GROUP {
@@ -2325,69 +2188,41 @@ impl<E: InputEngine> Runtime<E> {
     }
 
     pub(crate) fn is_projected_emoji(&self, seat: usize) -> bool {
-        self.projected_emojis
-            .binary_search_by_key(&seat, |entry| entry.seat)
-            .is_ok()
+        matches!(
+            self.cached.candidates.get(seat).map(|e| &e.origin),
+            Some(CandidateOrigin::ProjectedEmoji { .. })
+        )
     }
 
     fn projected_emoji_at(&self, seat: usize) -> Option<(String, &'static str)> {
-        let index = self
-            .projected_emojis
-            .binary_search_by_key(&seat, |entry| entry.seat)
-            .ok()?;
-        let entry = &self.projected_emojis[index];
-        Some((entry.anchor_word.clone(), entry.emoji))
+        match self.cached.candidates.get(seat).map(|e| &e.origin) {
+            Some(CandidateOrigin::ProjectedEmoji { anchor_word, emoji }) => {
+                Some((anchor_word.clone(), emoji))
+            }
+            _ => None,
+        }
     }
 
     fn strip_projected_emojis(&mut self) -> bool {
-        if self.projected_emojis.is_empty() {
+        if !self
+            .cached
+            .candidates
+            .iter()
+            .any(|entry| matches!(entry.origin, CandidateOrigin::ProjectedEmoji { .. }))
+        {
             return false;
         }
-        let projected = std::mem::take(&mut self.projected_emojis);
-        let count = self.cached.candidates.len();
-        const EMOJI_SOURCE: u8 = msime_engine::CandidateSource::Emoji as u8;
-        debug_assert!(
-            projected.iter().all(|entry| {
-                entry.seat < count
-                    && self.cached.candidate_sources.get(entry.seat) == Some(&EMOJI_SOURCE)
-                    && self.engine_order.len() == count
-                    && self.engine_order[entry.seat] == usize::MAX
-            }),
-            "projected_emojis 与当前快照脱节：projected={projected:?}, count={count}, engine_order_len={}",
-            self.engine_order.len()
-        );
-        let keep: Vec<bool> = (0..count)
-            .map(|seat| {
-                projected
-                    .binary_search_by_key(&seat, |entry| entry.seat)
-                    .is_err()
-            })
-            .collect();
-        let removed_before_highlight = projected
-            .iter()
-            .filter(|entry| entry.seat < self.highlighted)
-            .count();
-        fn retain_seats<T>(values: &mut Vec<T>, keep: &[bool]) {
-            if values.len() != keep.len() {
-                return;
+        let mut removed_before_highlight = 0usize;
+        let mut seat = 0usize;
+        let highlighted = self.highlighted;
+        self.cached.candidates.retain(|entry| {
+            let is_emoji = matches!(entry.origin, CandidateOrigin::ProjectedEmoji { .. });
+            if is_emoji && seat < highlighted {
+                removed_before_highlight += 1;
             }
-            let mut seat = 0;
-            values.retain(|_| {
-                let kept = keep[seat];
-                seat += 1;
-                kept
-            });
-        }
-        let snapshot = &mut self.cached;
-        retain_seats(&mut snapshot.candidates, &keep);
-        retain_seats(&mut snapshot.candidate_codes, &keep);
-        retain_seats(&mut snapshot.candidate_annotations, &keep);
-        retain_seats(&mut snapshot.candidate_sources, &keep);
-        retain_seats(&mut snapshot.candidate_corrected, &keep);
-        retain_seats(&mut snapshot.candidate_answers_key, &keep);
-        retain_seats(&mut snapshot.candidate_static_evidence, &keep);
-        retain_seats(&mut snapshot.candidate_keyboard_runner_up, &keep);
-        retain_seats(&mut self.engine_order, &keep);
+            seat += 1;
+            !is_emoji
+        });
         self.highlighted = self.highlighted.saturating_sub(removed_before_highlight);
         true
     }
@@ -2412,134 +2247,22 @@ impl<E: InputEngine> Runtime<E> {
         {
             return false;
         }
-        let count = self.cached.candidates.len();
-        if self.cached.candidate_sources.len() != count
-            || self.cached.candidate_answers_key.len() != count
-        {
-            return false;
-        }
         self.emoji_mru.ensure_loaded();
-        let engine_meta = self.engine.neural_v2_metadata();
-        let base: Vec<SlotCandidate<'_>> = (0..count)
-            .map(|index| {
-                let pinned = engine_meta
-                    .as_ref()
-                    .and_then(|m| m.candidates.get(self.engine_index(index)))
-                    .is_some_and(|m| m.pinned);
-                SlotCandidate {
-                    id: index,
-                    text: self.cached.candidates[index].as_str(),
-                    kind: SlotCandidateKind::from_source(self.cached.candidate_sources[index]),
-                    answers_key: self.cached.candidate_answers_key[index],
-                    fixed_position: u8::from(pinned),
-                }
-            })
-            .collect();
-        let budget = SlotBudget {
-            page_size: self.page_size,
-            ..SlotBudget::default()
-        };
-        let allocated = allocate_slots(&base, budget, true, |word| self.emoji_mru.preferred(word));
-        if allocated.len() == count {
-            return false;
-        }
-
-        ensure_engine_order(&mut self.engine_order, count);
-        let old_candidates = std::mem::take(&mut self.cached.candidates);
-        let old_codes = std::mem::take(&mut self.cached.candidate_codes);
-        let old_annotations = std::mem::take(&mut self.cached.candidate_annotations);
-        let old_sources = std::mem::take(&mut self.cached.candidate_sources);
-        let old_corrected = std::mem::take(&mut self.cached.candidate_corrected);
-        let old_answers_key = std::mem::take(&mut self.cached.candidate_answers_key);
-        let old_static_evidence = std::mem::take(&mut self.cached.candidate_static_evidence);
-        let old_keyboard_runner_up = std::mem::take(&mut self.cached.candidate_keyboard_runner_up);
-        let old_engine_order = std::mem::take(&mut self.engine_order);
-        let has_codes = old_codes.len() == count;
-        let has_annotations = old_annotations.len() == count;
-        let has_corrected = old_corrected.len() == count;
-        let has_static = old_static_evidence.len() == count;
-        let has_runner_up = old_keyboard_runner_up.len() == count;
-        const EMOJI_SOURCE: u8 = msime_engine::CandidateSource::Emoji as u8;
-
-        let total = allocated.len();
-        self.cached.candidates.reserve(total);
-        if has_codes {
-            self.cached.candidate_codes.reserve(total);
-        }
-        if has_annotations {
-            self.cached.candidate_annotations.reserve(total);
-        }
-        self.cached.candidate_sources.reserve(total);
-        if has_corrected {
-            self.cached.candidate_corrected.reserve(total);
-        }
-        self.cached.candidate_answers_key.reserve(total);
-        if has_static {
-            self.cached.candidate_static_evidence.reserve(total);
-        }
-        if has_runner_up {
-            self.cached.candidate_keyboard_runner_up.reserve(total);
-        }
-        self.engine_order.reserve(total);
-
-        for (seat, slot) in allocated.into_iter().enumerate() {
-            match slot {
-                AllocatedSlot::Base(id) => {
-                    self.cached.candidates.push(old_candidates[id].clone());
-                    if has_codes {
-                        self.cached.candidate_codes.push(old_codes[id].clone());
+        if let Some(engine_meta) = self.engine.neural_v2_metadata() {
+            for entry in &mut self.cached.candidates {
+                if let CandidateOrigin::EngineRow(idx) = entry.origin {
+                    if engine_meta.candidates.get(idx).is_some_and(|m| m.pinned) {
+                        entry.pinned_first = true;
                     }
-                    if has_annotations {
-                        self.cached
-                            .candidate_annotations
-                            .push(old_annotations[id].clone());
-                    }
-                    self.cached.candidate_sources.push(old_sources[id]);
-                    if has_corrected {
-                        self.cached.candidate_corrected.push(old_corrected[id]);
-                    }
-                    self.cached.candidate_answers_key.push(old_answers_key[id]);
-                    if has_static {
-                        self.cached
-                            .candidate_static_evidence
-                            .push(old_static_evidence[id]);
-                    }
-                    if has_runner_up {
-                        self.cached
-                            .candidate_keyboard_runner_up
-                            .push(old_keyboard_runner_up[id]);
-                    }
-                    self.engine_order.push(old_engine_order[id]);
-                }
-                AllocatedSlot::ProjectedEmoji { anchor_word, emoji } => {
-                    self.cached.candidates.push(emoji.to_owned());
-                    if has_codes {
-                        self.cached.candidate_codes.push(String::new());
-                    }
-                    if has_annotations {
-                        self.cached.candidate_annotations.push(String::new());
-                    }
-                    self.cached.candidate_sources.push(EMOJI_SOURCE);
-                    if has_corrected {
-                        self.cached.candidate_corrected.push(false);
-                    }
-                    self.cached.candidate_answers_key.push(false);
-                    if has_static {
-                        self.cached.candidate_static_evidence.push(None);
-                    }
-                    if has_runner_up {
-                        self.cached.candidate_keyboard_runner_up.push(false);
-                    }
-                    self.engine_order.push(usize::MAX);
-                    self.projected_emojis.push(ProjectedEmojiSeat {
-                        seat,
-                        anchor_word,
-                        emoji,
-                    });
                 }
             }
         }
-        true
+        let prev_len = self.cached.candidates.len();
+        let cursor = self.cursor_snapshot();
+        let old = std::mem::take(&mut self.cached.candidates);
+        self.cached.candidates =
+            PurePresenter::present(old, &cursor, |word| self.emoji_mru.preferred(word));
+        self.cached.candidates.len() != prev_len
     }
 
     pub(crate) fn demote_runner_up_readings(&mut self) -> bool {
@@ -2547,25 +2270,19 @@ impl<E: InputEngine> Runtime<E> {
             return false;
         }
         let snapshot = &self.cached;
-        let count = snapshot.candidates.len();
-        if count < 2
-            || snapshot.candidate_codes.len() != count
-            || snapshot.candidate_annotations.len() != count
-            || snapshot.candidate_sources.len() != count
-            || snapshot.candidate_corrected.len() != count
-            || snapshot.candidate_answers_key.len() != count
-        {
+        if snapshot.candidates.len() < 2 {
             return false;
         }
         let Some(mut order) = runner_up_order(snapshot.scheme, &order_rows(snapshot)) else {
             return false;
         };
-        // 若首位被用户显式置顶（`pinned_candidates`），绝不允许整句读法后移挤走首位。
-        let pinned_first = self
-            .engine
-            .neural_v2_metadata()
-            .and_then(|m| m.candidates.get(self.engine_index(0)).map(|c| c.pinned))
-            .unwrap_or(false);
+        // 若首位被用户显式置顶，绝不允许整句读法后移挤走首位。
+        let pinned_first = snapshot.candidates.first().is_some_and(|c| c.pinned_first)
+            || self
+                .engine
+                .neural_v2_metadata()
+                .and_then(|m| m.candidates.get(self.engine_index(0)).map(|c| c.pinned))
+                .unwrap_or(false);
         if pinned_first && order.first().copied() != Some(0) {
             if let Some(pos) = order.iter().position(|&idx| idx == 0) {
                 order[..=pos].rotate_right(1);
@@ -2610,14 +2327,11 @@ impl<E: InputEngine> Runtime<E> {
             .candidates
             .iter()
             .enumerate()
-            .filter(|(index, candidate)| {
+            .filter(|(index, entry)| {
                 *index < visible
                     && *index / page_size >= page
-                    && candidate.as_str() == text
-                    && code.is_none_or(|expected| {
-                        self.cached.candidate_codes.get(*index).map(String::as_str)
-                            == Some(expected)
-                    })
+                    && entry.text == text
+                    && code.is_none_or(|expected| entry.code == expected)
             })
             .min_by_key(|(index, _)| index.abs_diff(previous_highlight))
             .map(|(index, _)| index);
@@ -2630,9 +2344,7 @@ impl<E: InputEngine> Runtime<E> {
             !self.translations.is_empty() || !self.highlight_translations.is_empty();
         self.translations.clear();
         self.highlight_translations.clear();
-        self.engine_order.clear();
         self.neural_pending_request = None;
-        self.projected_emojis.clear();
         let previous_highlight = self.highlighted;
         self.highlighted = 0;
         let snapshot = match self.engine.snapshot() {
@@ -2661,24 +2373,16 @@ impl<E: InputEngine> Runtime<E> {
             && self.cached.conversion == previous.conversion
             && self.cached.conversion_focus_start == previous.conversion_focus_start;
         if composition_held {
-            let candidates_held = self.cached.candidates == previous.candidates
-                && self.cached.candidate_codes == previous.candidate_codes
-                && self.cached.candidate_annotations == previous.candidate_annotations
-                && self.cached.candidate_sources == previous.candidate_sources
-                && self.cached.candidate_corrected == previous.candidate_corrected
-                && self.cached.candidate_answers_key == previous.candidate_answers_key
-                && self.cached.candidate_static_evidence == previous.candidate_static_evidence
-                && self.cached.candidate_keyboard_runner_up
-                    == previous.candidate_keyboard_runner_up;
+            let candidates_held = self.cached.candidates == previous.candidates;
             if candidates_held {
                 self.highlighted = previous_highlight.min(self.visible_len().saturating_sub(1));
             } else if previous_highlight > 0 {
-                if let Some(text) = previous.candidates.get(previous_highlight) {
-                    let code = previous
-                        .candidate_codes
-                        .get(previous_highlight)
-                        .map(String::as_str);
-                    self.keep_highlight_on_same_candidate(previous_highlight, text, code);
+                if let Some(entry) = previous.candidates.get(previous_highlight) {
+                    self.keep_highlight_on_same_candidate(
+                        previous_highlight,
+                        &entry.text,
+                        Some(&entry.code),
+                    );
                 }
             }
         }
@@ -2700,10 +2404,6 @@ impl<E: InputEngine> Runtime<E> {
         if had_translations
             || self.highlighted != previous_highlight
             || cached.candidates != previous.candidates
-            || cached.candidate_codes != previous.candidate_codes
-            || cached.candidate_annotations != previous.candidate_annotations
-            || cached.candidate_sources != previous.candidate_sources
-            || cached.candidate_corrected != previous.candidate_corrected
             || cached.prediction != previous.prediction
         {
             self.bump_candidates_epoch();
@@ -2716,12 +2416,9 @@ impl<E: InputEngine> Runtime<E> {
         self.selected_text.clear();
         self.advance()?;
         self.focused = false;
-        if focused {
-            self.phrase_selections.clear();
-            if !self.phrase_prefix.is_empty() {
-                self.phrase_prefix.clear();
-                self.bump_composition_epoch();
-            }
+        if focused && !self.locked_prefix.is_empty() {
+            self.locked_prefix.clear();
+            self.bump_composition_epoch();
         }
         let commits_on_blur = !focused
             && scheme_type(self.cached.scheme).is_some_and(SchemeType::commits_on_blur)
@@ -2736,7 +2433,7 @@ impl<E: InputEngine> Runtime<E> {
         };
         let may_commit = result
             .as_ref()
-            .is_ok_and(|result| result.has_commit || (!focused && !self.phrase_prefix.is_empty()));
+            .is_ok_and(|result| result.has_commit || (!focused && !self.locked_prefix.is_empty()));
         let refresh_error = match self.refresh() {
             Ok(()) => None,
             Err(error) if may_commit => Some(error),
@@ -2772,7 +2469,7 @@ impl<E: InputEngine> Runtime<E> {
 
     fn punctuation(&mut self, value: u8) -> Result<EngineResult, RuntimeError> {
         if self.cached.spelling_symbols.as_bytes().contains(&value)
-            && (self.cached.local_mode != "none" || self.phrase_prefix.is_empty())
+            && (self.cached.local_mode != "none" || self.locked_prefix.is_empty())
         {
             return self.engine.character(value, false);
         }
@@ -2804,7 +2501,7 @@ impl<E: InputEngine> Runtime<E> {
             Err(error) => return Err(error),
         };
         if !finished.has_commit {
-            if !punctuation.handled && !self.phrase_prefix.is_empty() {
+            if !punctuation.handled && !self.locked_prefix.is_empty() {
                 self.facts.tail_chars = 1;
                 return Ok(literal_mark(value, punctuation.diagnostic));
             }
@@ -2836,7 +2533,7 @@ impl<E: InputEngine> Runtime<E> {
 
     fn punctuation_ascii(&mut self, value: u8) -> Result<EngineResult, RuntimeError> {
         let spells = self.cached.local_mode != "none"
-            || (self.phrase_prefix.is_empty()
+            || (self.locked_prefix.is_empty()
                 && (scheme_type(self.cached.scheme)
                     .is_some_and(|scheme| !scheme.opens_table_modes())
                     || (!self.cached.editing_text.is_empty()
@@ -2862,7 +2559,7 @@ impl<E: InputEngine> Runtime<E> {
             finished
         };
         if !finished.has_commit {
-            if !self.phrase_prefix.is_empty() {
+            if !self.locked_prefix.is_empty() {
                 self.facts.tail_chars = 1;
                 return Ok(literal_mark(value, finished.diagnostic));
             }
@@ -2992,7 +2689,7 @@ impl<E: InputEngine> Runtime<E> {
         let escape_keeps_word = self.escape_keeps_selected_word
             && matches!(action, Action::Command(Command::Cancel))
             && !self.cached.editing_text.is_empty()
-            && !self.phrase_prefix.is_empty();
+            && !self.locked_prefix.is_empty();
         let result = match action {
             Action::ResetCache => {
                 self.engine.reset_cache()?;
@@ -3019,7 +2716,7 @@ impl<E: InputEngine> Runtime<E> {
                 self.finish_seat(self.highlighted)
             }
             Action::Character { value, .. }
-                if !self.phrase_prefix.is_empty()
+                if !self.locked_prefix.is_empty()
                     && self.cached.local_mode == "none"
                     && self.cached.spelling_symbols.as_bytes().contains(&value) =>
             {
@@ -3062,11 +2759,11 @@ impl<E: InputEngine> Runtime<E> {
                 self.engine.conversion_left_from(self.engine_index(seat))
             }
             Action::Command(Command::CommitCandidate) => {
-                let seat = if self.engine_order.is_empty() {
-                    (!self.cached.candidates.is_empty()).then_some(0)
-                } else {
-                    self.engine_order.iter().position(|index| *index == 0)
-                };
+                let seat = self
+                    .cached
+                    .candidates
+                    .iter()
+                    .position(|entry| matches!(entry.origin, CandidateOrigin::EngineRow(0)));
                 pick = seat.map(|seat| (SelectionHow::FirstCandidateCommand, seat));
                 self.engine.command(Command::CommitCandidate)
             }
@@ -3130,7 +2827,7 @@ impl<E: InputEngine> Runtime<E> {
             }
         }
         let needs_commit_context = result.as_ref().is_ok_and(|result| result.has_commit)
-            || !self.phrase_prefix.is_empty();
+            || !self.locked_prefix.is_empty();
         let commit_context = needs_commit_context.then(|| self.output_context());
         let refresh = self.refresh();
         let mut result = result?;

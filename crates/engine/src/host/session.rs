@@ -53,20 +53,23 @@ pub struct EngineSnapshot {
     pub editing_text: String,
     pub caret_position: usize,
     pub segment_raw_boundaries: Vec<u64>,
-    pub candidates: Vec<String>,
-    pub candidate_codes: Vec<String>,
+    pub candidates: Vec<crate::CandidateEntry>,
     pub scheme: u8,
-    pub candidate_annotations: Vec<String>,
-    pub candidate_sources: Vec<u8>,
-    pub candidate_corrected: Vec<bool>,
-    pub candidate_answers_key: Vec<bool>,
-    pub candidate_static_evidence: Vec<Option<crate::ordering::StaticEvidence>>,
-    pub candidate_keyboard_runner_up: Vec<bool>,
     pub conversion: String,
     pub conversion_focus_start: usize,
     pub conversion_focus_end: usize,
     pub caret_edit_suffix: bool,
     pub caret_edit_prefix: String,
+}
+
+impl EngineSnapshot {
+    /// 按展示顺序借用全部候选文本切片，便于轻量断言与旧调用迁移。
+    pub fn candidate_texts(&self) -> Vec<&str> {
+        self.candidates
+            .iter()
+            .map(|entry| entry.text.as_str())
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -126,6 +129,41 @@ impl Session {
     pub fn snapshot(&self) -> Result<EngineSnapshot> {
         let value = self.inner.snapshot_for_host();
         let count = value.candidates.len();
+        let pinned_word = self.inner.pinned_candidate_word();
+        let mut raw_entries = Vec::with_capacity(count);
+        let mut annotations = value.candidate_annotations.into_iter();
+        for (index, candidate) in value.candidates.into_iter().enumerate() {
+            let annotation = annotations
+                .next()
+                .unwrap_or_else(|| candidate.corrected_from.to_string());
+            let source = candidate.source as u8;
+            let kind = crate::CandidateKind::from_source(source);
+            let corrected = !candidate.corrected_from.is_empty();
+            let answers_key = value
+                .candidate_answers_key
+                .get(index)
+                .copied()
+                .unwrap_or(false);
+            let pinned_first =
+                candidate.pinned_first || pinned_word.as_deref() == Some(candidate.word.as_str());
+            let static_evidence = candidate.static_evidence();
+            let keyboard_runner_up = candidate.keyboard_runner_up;
+            let code = candidate.pinyin.into_string();
+            let text = candidate.word.into_string();
+            let mut entry = crate::CandidateEntry::new(text, code, source);
+            entry.kind = kind;
+            entry.annotation = annotation;
+            entry.corrected = corrected;
+            entry.answers_key = answers_key;
+            entry.pinned_first = pinned_first;
+            entry.tier0_gram_log_prob =
+                static_evidence.map(|ev| ev.log_prob_milli_nats as f64 / 1000.0);
+            entry.static_evidence = static_evidence;
+            entry.keyboard_runner_up = keyboard_runner_up;
+            // 在召回池去重与后续重排之前绑定底层原始行号，确保选词/置顶/删除永远命中真实引擎条目。
+            entry.origin = crate::CandidateOrigin::EngineRow(index);
+            raw_entries.push(entry);
+        }
         let mut output = EngineSnapshot {
             prediction: value.prediction,
             local_mode: value.local_mode.name().to_owned(),
@@ -144,47 +182,16 @@ impl Session {
                 .into_iter()
                 .map(|boundary| boundary as u64)
                 .collect(),
-            candidates: Vec::with_capacity(count),
-            candidate_codes: Vec::with_capacity(count),
+            candidates: crate::RecallPool::from_candidates(raw_entries).into_entries(),
             scheme: value.scheme as u8,
-            candidate_annotations: Vec::with_capacity(count),
-            candidate_sources: Vec::with_capacity(count),
-            candidate_corrected: Vec::with_capacity(count),
-            candidate_answers_key: Vec::with_capacity(count),
-            candidate_static_evidence: Vec::with_capacity(count),
-            candidate_keyboard_runner_up: Vec::with_capacity(count),
             conversion: value.conversion,
             conversion_focus_start: value.conversion_focus.0,
             conversion_focus_end: value.conversion_focus.1,
             caret_edit_suffix: value.caret_edit_suffix,
             caret_edit_prefix: value.caret_edit_prefix,
         };
-        let mut annotations = value.candidate_annotations.into_iter();
-        for (index, candidate) in value.candidates.into_iter().enumerate() {
-            let annotation = annotations
-                .next()
-                .unwrap_or_else(|| candidate.corrected_from.to_string());
-            output.candidate_annotations.push(annotation);
-            output.candidate_sources.push(candidate.source as u8);
-            output
-                .candidate_corrected
-                .push(!candidate.corrected_from.is_empty());
-            output.candidate_answers_key.push(
-                value
-                    .candidate_answers_key
-                    .get(index)
-                    .copied()
-                    .unwrap_or(false),
-            );
-            output
-                .candidate_static_evidence
-                .push(candidate.static_evidence());
-            output
-                .candidate_keyboard_runner_up
-                .push(candidate.keyboard_runner_up);
-            output.candidate_codes.push(candidate.pinyin.into_string());
-            output.candidates.push(candidate.word.into_string());
-        }
+        // 清理未使用但保留结构的空字段初始化警告占位，确保编译器零告警。
+        let _ = &mut output;
         Ok(output)
     }
 

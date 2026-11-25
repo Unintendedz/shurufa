@@ -82,7 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Three characters, so "last" cannot be satisfied by taking the second one.
     let mut three = probe.typed("zhonghuaren")?;
-    let word = three.snapshot()?.candidates[0].clone();
+    let word = three.snapshot()?.candidates[0].text.clone();
     assert_eq!(
         word.chars().count(),
         3,
@@ -101,9 +101,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut english = probe.typed("shi")?;
     let snapshot = english.snapshot()?;
     let index = snapshot
-        .candidate_sources
+        .candidates
         .iter()
-        .position(|source| *source != 0)
+        .position(|entry| entry.source != 0)
         .ok_or("this input no longer offers a non-dictionary candidate")?;
     let declined = english.select_edge(index, CandidateEdge::FirstHan)?;
     assert!(

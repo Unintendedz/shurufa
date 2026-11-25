@@ -913,7 +913,7 @@ fn activation_reopens_the_personal_context_store_on_the_restored_journal() {
         let index = snapshot
             .candidates
             .iter()
-            .position(|candidate| candidate == word)
+            .position(|candidate| candidate.text == word)
             .unwrap_or_else(|| panic!("{word} is not offered: {:?}", snapshot.candidates));
         assert!(session.select(index).unwrap().has_commit);
         // Dropping the session writes its queued context.

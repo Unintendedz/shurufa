@@ -99,7 +99,7 @@ fn ordinary_row(row: &WordItem, reading: &str) -> bool {
         weight: _,
         source,
         scheme,
-        fixed_position,
+        pinned_first,
         fuzzy,
         corrected_from,
         sentence_association,
@@ -111,7 +111,7 @@ fn ordinary_row(row: &WordItem, reading: &str) -> bool {
     pinyin == reading
         && *source == CandidateSource::Database
         && *scheme == SchemeType::Quanpin
-        && *fixed_position == 0
+        && !*pinned_first
         && !fuzzy
         && corrected_from.is_empty()
         && !sentence_association

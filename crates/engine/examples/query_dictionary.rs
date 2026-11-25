@@ -21,7 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let index = snapshot
         .candidates
         .iter()
-        .position(|word| word == "你好")
+        .position(|entry| entry.text == "你好")
         .ok_or("expected phrase missing from published dictionary")?;
     let selected = session.select(index)?;
     if !selected.has_commit || selected.commit != "你好" {
@@ -40,7 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let index = snapshot
             .candidates
             .iter()
-            .position(|word| word == "你好")
+            .position(|entry| entry.text == "你好")
             .ok_or("expected edge-selection phrase missing")?;
         let selected = session.select_edge(index, edge)?;
         if !selected.handled
@@ -63,7 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .snapshot()?
             .candidates
             .iter()
-            .any(|word| word == "冰")
+            .any(|entry| entry.text == "冰")
         {
             return Err(
                 format!("published dictionary shuangpin profile {profile} query failed").into(),

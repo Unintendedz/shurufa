@@ -52,7 +52,12 @@ impl Store {
         for character in KEYS {
             session.character(*character, false)?;
         }
-        Ok(session.snapshot()?.candidates)
+        Ok(session
+            .snapshot()?
+            .candidates
+            .into_iter()
+            .map(|entry| entry.text)
+            .collect())
     }
 
     fn select(&self, learning: bool, word: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -63,7 +68,7 @@ impl Store {
         let candidates = session.snapshot()?.candidates;
         let index = candidates
             .iter()
-            .position(|candidate| candidate == word)
+            .position(|candidate| candidate.text == word)
             .ok_or_else(|| format!("{word} is no longer offered: {candidates:?}"))?;
         let committed = session.select(index)?;
         if !committed.has_commit || committed.commit != word {

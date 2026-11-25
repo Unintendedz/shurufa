@@ -142,7 +142,12 @@ fn documented_boundaries(resources: &std::path::Path) -> Result<(), Box<dyn std:
         for character in keys.bytes() {
             session.character(character, false)?;
         }
-        let candidates = session.snapshot()?.candidates;
+        let candidates: Vec<String> = session
+            .snapshot()?
+            .candidates
+            .into_iter()
+            .map(|entry| entry.text)
+            .collect();
         if candidates.is_empty() {
             return Err(format!("{} offered nothing for {keys}", letter as char).into());
         }

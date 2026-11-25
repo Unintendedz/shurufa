@@ -33,19 +33,25 @@ impl FactEngine {
 impl InputEngine for FactEngine {
     fn snapshot(&self) -> Result<EngineSnapshot, RuntimeError> {
         let composing = !self.text.is_empty() || !self.conversion.is_empty();
-        let count = self.words.len();
+        let candidates = if composing {
+            self.words
+                .iter()
+                .enumerate()
+                .map(|(index, word)| {
+                    let source = self.sources.get(index).copied().unwrap_or(0);
+                    let mut entry = msime_engine::CandidateEntry::new(word, "", source);
+                    entry.answers_key = true;
+                    entry.origin = msime_engine::CandidateOrigin::EngineRow(index);
+                    entry
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         Ok(EngineSnapshot {
             prediction: false,
             scheme: self.scheme,
-            candidate_codes: vec![String::new(); count],
-            candidate_annotations: vec![String::new(); count],
-            candidate_sources: if self.sources.len() == count {
-                self.sources.clone()
-            } else {
-                vec![0; count]
-            },
-            candidate_corrected: vec![false; count],
-            candidate_answers_key: vec![true; count],
+            candidates,
             shuangpin_profile: "xiaohe".into(),
             local_mode: if self.local_mode.is_empty() {
                 "none".into()
@@ -59,11 +65,6 @@ impl InputEngine for FactEngine {
             conversion: self.conversion.clone(),
             conversion_focus_start: 0,
             conversion_focus_end: usize::from(!self.conversion.is_empty()),
-            candidates: if composing {
-                self.words.clone()
-            } else {
-                Vec::new()
-            },
             ..EngineSnapshot::default()
         })
     }

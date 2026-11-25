@@ -5,7 +5,7 @@ use super::*;
 use msime_engine::neural_v2::{
     NeuralBeamCandidate, NeuralDecodeResponse, NeuralScoredCandidate, SOURCE_NEURAL_CONSTRAINED,
 };
-use msime_engine::{CandidateSource, SchemeType};
+use msime_engine::{CandidateEntry, CandidateSource, SchemeType};
 
 struct StubNeuralEngine {
     snapshot: EngineSnapshot,
@@ -22,22 +22,19 @@ impl StubNeuralEngine {
             caret_position: raw.len(),
             ..EngineSnapshot::default()
         };
-        for &(text, exact, stat_milli) in candidates {
-            snap.candidates.push(text.into());
-            snap.candidate_codes.push(preedit.into());
-            snap.candidate_annotations.push(String::new());
-            snap.candidate_sources
-                .push(CandidateSource::Generated as u8);
-            snap.candidate_corrected.push(false);
-            snap.candidate_answers_key.push(exact);
-            snap.candidate_static_evidence.push(stat_milli.map(|m| {
+        for (index, &(text, exact, stat_milli)) in candidates.iter().enumerate() {
+            let mut entry =
+                CandidateEntry::new(text, preedit, CandidateSource::Generated as u8);
+            entry.answers_key = exact;
+            entry.static_evidence = stat_milli.map(|m| {
                 msime_engine::ordering::StaticEvidence {
                     log_prob_milli_nats: m,
                     characters: text.chars().count(),
                     keyboard_neural: None,
                 }
-            }));
-            snap.candidate_keyboard_runner_up.push(false);
+            });
+            entry.origin = msime_engine::CandidateOrigin::EngineRow(index);
+            snap.candidates.push(entry);
         }
         Self {
             snapshot: snap,
@@ -59,13 +56,6 @@ impl InputEngine for StubNeuralEngine {
             self.snapshot.editing_text.clear();
             self.snapshot.preedit.clear();
             self.snapshot.candidates.clear();
-            self.snapshot.candidate_codes.clear();
-            self.snapshot.candidate_annotations.clear();
-            self.snapshot.candidate_sources.clear();
-            self.snapshot.candidate_corrected.clear();
-            self.snapshot.candidate_answers_key.clear();
-            self.snapshot.candidate_static_evidence.clear();
-            self.snapshot.candidate_keyboard_runner_up.clear();
         }
         Ok(empty_result(true))
     }
@@ -74,7 +64,7 @@ impl InputEngine for StubNeuralEngine {
             .snapshot
             .candidates
             .get(index)
-            .cloned()
+            .map(|entry| entry.text.clone())
             .unwrap_or_default();
         self.command(Command::Cancel)?;
         Ok(EngineResult {
@@ -230,10 +220,9 @@ fn runtime_neural_v2_skips_zero_context_single_char_and_propagates_following_con
         "xian",
         &[("先", true, Some(-4_100)), ("现", true, Some(-4_460))],
     );
-    engine.snapshot.candidate_sources = vec![
-        CandidateSource::Database as u8,
-        CandidateSource::Database as u8,
-    ];
+    for entry in &mut engine.snapshot.candidates {
+        entry.source = CandidateSource::Database as u8;
+    }
     let mut runtime = Runtime::new(engine, 6).unwrap();
     runtime.focused = true;
     runtime.set_neural_v2_enabled(true);
@@ -254,4 +243,64 @@ fn runtime_neural_v2_skips_zero_context_single_char_and_propagates_following_con
     runtime.set_surrounding_context("你发送看看，先看会不会有被拒绝的");
     let req_end = runtime.take_neural_request().expect("有前文时应派发请求");
     assert!(req_end.right_context.is_empty());
+}
+
+#[test]
+fn locked_prefix_feeds_effective_left_context_and_preserves_pinned_first_across_scorer() {
+    let mut engine = StubNeuralEngine::composing(
+        "paobu",
+        "pao'bu",
+        &[
+            ("刨步", true, Some(-10_500)),
+            ("跑步", true, Some(-11_200)),
+            ("泡布", true, Some(-11_800)),
+        ],
+    );
+    // 将第 3 项置顶到首位，并模拟会话内已经锁定前缀段 `去海滩`。
+    engine.snapshot.candidates[2].pinned_first = true;
+    let mut runtime = Runtime::new(engine, 6).unwrap();
+    runtime.focused = true;
+    runtime.set_neural_v2_enabled(true);
+    runtime.set_surrounding_context("周末一起");
+    runtime.locked_prefix.push(msime_engine::LockedSegment {
+        reading: "quhaitan".into(),
+        text: "去海滩".into(),
+    });
+
+    let cursor = runtime.cursor_snapshot();
+    assert_eq!(cursor.effective_left_context(), "周末一起去海滩");
+
+    let req = runtime
+        .take_neural_request()
+        .expect("locked_prefix 应纳入有效左上下文");
+    assert_eq!(req.context, "周末一起去海滩");
+    assert_eq!(req.pinned_first_index, Some(2));
+    // 置顶项不发往前缀树，未置顶项正常参选。
+    assert_eq!(req.candidates.len(), 2);
+
+    let resp = NeuralDecodeResponse {
+        ok: true,
+        session: req.session,
+        generation: req.generation,
+        candidate_scores: vec![
+            NeuralScoredCandidate {
+                text: "刨步".into(),
+                neural_log_prob: -22.0,
+            },
+            NeuralScoredCandidate {
+                text: "跑步".into(),
+                neural_log_prob: -8.0,
+            },
+        ],
+        beam_candidates: vec![],
+    };
+    let out = runtime.apply_neural_response(&resp, false);
+    assert!(out.applied && out.moved);
+    let view = runtime.view();
+    // 置顶到第 1 位的候选稳居首位 0，且带上 fixed_position = Some(1) 标识；未置顶项按神经得分重排。
+    assert_eq!(view.candidates[0].text, "泡布");
+    assert_eq!(view.candidates[0].fixed_position, Some(1));
+    assert_eq!(view.candidates[1].text, "跑步");
+    assert_eq!(view.candidates[1].fixed_position, None);
+    assert_eq!(view.candidates[2].text, "刨步");
 }

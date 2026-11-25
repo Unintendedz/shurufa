@@ -28,20 +28,6 @@ fn online_seating_skips_identity_storage_when_already_seated() {
             let (_, refresh_allocations, refresh_bytes) =
                 allocations::count_bytes(|| runtime.refresh().unwrap());
             assert_eq!(runtime.cached.candidates, snapshot.candidates);
-            assert_eq!(runtime.cached.candidate_codes, snapshot.candidate_codes);
-            assert_eq!(
-                runtime.cached.candidate_annotations,
-                snapshot.candidate_annotations
-            );
-            assert_eq!(runtime.cached.candidate_sources, snapshot.candidate_sources);
-            assert_eq!(
-                runtime.cached.candidate_corrected,
-                snapshot.candidate_corrected
-            );
-            assert_eq!(
-                runtime.cached.candidate_answers_key,
-                snapshot.candidate_answers_key
-            );
             measurements.push((
                 rows,
                 source,
@@ -89,12 +75,21 @@ fn online_seating_materializes_early_and_late_mismatches() {
                 expected.remove(rows - 1);
                 expected.insert(4, rows - 1);
             }
-            assert_eq!(runtime.engine_order, expected);
+            let actual_order: Vec<usize> = runtime
+                .cached
+                .candidates
+                .iter()
+                .map(|entry| match entry.origin {
+                    msime_engine::CandidateOrigin::EngineRow(idx) => idx,
+                    _ => usize::MAX,
+                })
+                .collect();
+            assert_eq!(actual_order, expected);
             for (seat, &row) in expected.iter().enumerate() {
-                assert_eq!(runtime.cached.candidates[seat], format!("合成候选{row}"));
-                assert_eq!(runtime.cached.candidate_codes[seat], format!("k{row}"));
+                assert_eq!(runtime.cached.candidates[seat].text, format!("合成候选{row}"));
+                assert_eq!(runtime.cached.candidates[seat].code, format!("k{row}"));
                 assert_eq!(
-                    runtime.cached.candidate_annotations[seat],
+                    runtime.cached.candidates[seat].annotation,
                     format!("({row})")
                 );
             }
@@ -109,7 +104,16 @@ fn online_seating_materializes_early_and_late_mismatches() {
             );
             assert_eq!(refresh_bytes - snapshot_bytes, cycle_scratch);
             assert_eq!(runtime.cached.candidates.len(), snapshot.candidates.len());
-            assert_eq!(runtime.engine_order, expected);
+            let refreshed_order: Vec<usize> = runtime
+                .cached
+                .candidates
+                .iter()
+                .map(|entry| match entry.origin {
+                    msime_engine::CandidateOrigin::EngineRow(idx) => idx,
+                    _ => usize::MAX,
+                })
+                .collect();
+            assert_eq!(refreshed_order, expected);
             runtime.focused = true;
             let seat = if late { rows - 2 } else { 4 };
             let id = CandidateId {
@@ -156,25 +160,21 @@ fn seated_source_groups_need_no_order_allocation() {
         let (_, refresh_allocations, refresh_bytes) =
             allocations::count_bytes(|| runtime.refresh().unwrap());
         assert_eq!(runtime.cached.candidates, snapshot.candidates);
-        assert_eq!(runtime.cached.candidate_codes, snapshot.candidate_codes);
-        assert_eq!(
-            runtime.cached.candidate_annotations,
-            snapshot.candidate_annotations
-        );
-        assert_eq!(runtime.cached.candidate_sources, snapshot.candidate_sources);
-        assert_eq!(
-            runtime.cached.candidate_corrected,
-            snapshot.candidate_corrected
-        );
-        assert_eq!(
-            runtime.cached.candidate_answers_key,
-            snapshot.candidate_answers_key
-        );
         assert_eq!(
             (runtime.composition_epoch, runtime.candidates_epoch),
             epochs
         );
-        assert!(runtime.engine_order.is_empty());
+        let actual_order: Vec<usize> = runtime
+            .cached
+            .candidates
+            .iter()
+            .map(|entry| match entry.origin {
+                msime_engine::CandidateOrigin::EngineRow(idx) => idx,
+                _ => usize::MAX,
+            })
+            .collect();
+        let expected_identity: Vec<usize> = (0..rows).collect();
+        assert_eq!(actual_order, expected_identity);
         measurements.push((
             rows,
             refresh_allocations - snapshot_allocations,

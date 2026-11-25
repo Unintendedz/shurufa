@@ -88,26 +88,26 @@ fn check_page(sources: Vec<u8>, page_size: u8) {
     .unwrap();
     runtime.refresh().unwrap();
     for (seat, &index) in expected.iter().enumerate() {
-        assert_eq!(runtime.cached.candidates[seat], format!("合成候选{index}"));
-        assert_eq!(runtime.cached.candidate_codes[seat], format!("k{index}"));
-        assert_eq!(
-            runtime.cached.candidate_annotations[seat],
-            format!("({index})")
-        );
-        assert_eq!(runtime.cached.candidate_sources[seat], sources[index]);
-        assert!(!runtime.cached.candidate_corrected[seat]);
-        assert!(runtime.cached.candidate_answers_key[seat]);
+        let entry = &runtime.cached.candidates[seat];
+        assert_eq!(entry.text, format!("合成候选{index}"));
+        assert_eq!(entry.code, format!("k{index}"));
+        assert_eq!(entry.annotation, format!("({index})"));
+        assert_eq!(entry.source, sources[index]);
+        assert!(!entry.corrected);
+        assert!(entry.answers_key);
+        assert_eq!(entry.origin, msime_engine::CandidateOrigin::EngineRow(index));
     }
     assert_eq!(runtime.cached.candidates.len(), expected.len());
-    if expected
+    let actual_order: Vec<usize> = runtime
+        .cached
+        .candidates
         .iter()
-        .enumerate()
-        .all(|(seat, &index)| seat == index)
-    {
-        assert!(runtime.engine_order.is_empty());
-    } else {
-        assert_eq!(runtime.engine_order, expected);
-    }
+        .map(|entry| match entry.origin {
+            msime_engine::CandidateOrigin::EngineRow(idx) => idx,
+            _ => usize::MAX,
+        })
+        .collect();
+    assert_eq!(actual_order, expected);
 }
 
 #[test]

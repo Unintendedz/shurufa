@@ -228,7 +228,7 @@ fn read_prefix_rows_at(
                         candidate.weight = weight;
                         candidate.source = CandidateSource::EnglishDictionary;
                         candidate.scheme = Default::default();
-                        candidate.fixed_position = 0;
+                        candidate.pinned_first = false;
                         candidate.fuzzy = false;
                         candidate.corrected_from.clear();
                         candidate.sentence_association = false;

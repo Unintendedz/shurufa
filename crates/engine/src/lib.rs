@@ -14,6 +14,7 @@ pub mod neural_v2;
 pub mod ordering;
 mod paths;
 mod pinyin;
+pub mod pipeline;
 mod punctuation;
 mod quanpin;
 mod session;
@@ -28,6 +29,10 @@ mod user_dictionary;
 pub use error::{EngineError, Result};
 pub use lattice::octagram;
 pub use paths::RuntimePaths;
+pub use pipeline::{
+    CandidateEntry, CandidateId, CandidateKind, CandidateOrigin, CursorSnapshot, LockedSegment,
+    PurePresenter, RecallPool, UnifiedScorer,
+};
 pub use punctuation::{BracketMarks, PunctuationMarks, QuoteMarks};
 pub use session::{Clock, Session, SessionOptions, SessionSnapshot};
 pub use types::{

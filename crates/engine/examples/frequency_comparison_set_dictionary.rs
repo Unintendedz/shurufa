@@ -27,7 +27,10 @@ fn climb(
             session.character(byte, false)?;
         }
         let list = session.snapshot()?.candidates;
-        let at = list.iter().position(|w| w == word).ok_or("word missing")?;
+        let at = list
+            .iter()
+            .position(|entry| entry.text == word)
+            .ok_or("word missing")?;
         seen.push(at);
         let picked = session.select(at)?;
         assert!(picked.has_commit && picked.commit == word);

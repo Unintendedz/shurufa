@@ -5,7 +5,12 @@ fn query(options: &EngineOptions) -> msime_engine::Result<Vec<String>> {
     let mut session = Session::new(options)?;
     session.character(b'h', false)?;
     session.character(b'a', false)?;
-    Ok(session.snapshot()?.candidates)
+    Ok(session
+        .snapshot()?
+        .candidates
+        .into_iter()
+        .map(|entry| entry.text)
+        .collect())
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

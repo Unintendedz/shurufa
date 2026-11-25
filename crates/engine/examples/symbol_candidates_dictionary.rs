@@ -99,17 +99,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let name_at = snapshot
             .candidates
             .iter()
-            .position(|word| word.eq_ignore_ascii_case(probe.name));
+            .position(|entry| entry.text.eq_ignore_ascii_case(probe.name));
         // 词库里本来就有这个符号时（来源不是 Emoji）符号行被去重，也算出现。
         let symbol_at = snapshot
             .candidates
             .iter()
-            .position(|word| probe.symbols.contains(&word.as_str()));
+            .position(|entry| probe.symbols.contains(&entry.text.as_str()));
         let first_page: Vec<&str> = snapshot
             .candidates
             .iter()
             .take(6)
-            .map(String::as_str)
+            .map(|entry| entry.text.as_str())
             .collect();
         println!(
             "{}\t{}\t{}\t{}\t{}",
@@ -119,11 +119,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             symbol_at.map_or("-".to_owned(), |at| at.to_string()),
             first_page.join(" ")
         );
-        if snapshot.candidate_sources.first() == Some(&EMOJI)
-            && snapshot
-                .candidates
-                .first()
-                .is_some_and(|word| probe.symbols.contains(&word.as_str()))
+        if snapshot
+            .candidates
+            .first()
+            .is_some_and(|entry| entry.source == EMOJI && probe.symbols.contains(&entry.text.as_str()))
         {
             failures.push(format!("{}: 符号占了首位", probe.input));
         }

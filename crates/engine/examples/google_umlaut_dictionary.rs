@@ -26,18 +26,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rows: Vec<_> = snapshot
         .candidates
         .iter()
-        .zip(&snapshot.candidate_sources)
-        .map(|(word, source)| format!("{word}[source={source}]"))
+        .map(|entry| format!("{}[source={}]", entry.text, entry.source))
         .collect();
     println!("{}", rows.join(", "));
-    if !snapshot.candidates.iter().any(|word| word == "虐待动物") {
+    if !snapshot
+        .candidates
+        .iter()
+        .any(|entry| entry.text == "虐待动物")
+    {
         return Err("Google decoder did not offer 虐待动物 for Xiaohe ntdddswu".into());
     }
     if snapshot
         .candidates
         .iter()
-        .zip(&snapshot.candidate_sources)
-        .any(|(word, source)| *source == 9 && word != "虐待动物")
+        .any(|entry| entry.source == 9 && entry.text != "虐待动物")
     {
         return Err("Google decoder split nve into nv + e".into());
     }
@@ -53,8 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if snapshot
         .candidates
         .iter()
-        .zip(&snapshot.candidate_sources)
-        .any(|(word, source)| word == "虐" && *source == 9)
+        .any(|entry| entry.text == "虐" && entry.source == 9)
     {
         return Err("manual nu'e was flattened into the single syllable nue".into());
     }

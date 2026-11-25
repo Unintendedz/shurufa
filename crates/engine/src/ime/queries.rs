@@ -464,9 +464,9 @@ pub(crate) fn default_quick_phrase_slot(
     Some(page.saturating_sub(seats).max(1))
 }
 
-/// 槽位计数的普通候选（`counts_toward_quick_phrase_slot`，quick_phrase_query.cpp:123-143）：固定位置的行、快捷短语自己和混输/在线/插件/联系人行都不算。
+/// 槽位计数的普通候选（`counts_toward_quick_phrase_slot`，quick_phrase_query.cpp:123-143）：置顶到首位的行、快捷短语自己和混输/在线/联系人行都不算。
 pub(crate) fn counts_toward_quick_phrase_slot(item: &WordItem) -> bool {
-    if item.fixed_position > 0 {
+    if item.pinned_first {
         return false;
     }
     !matches!(
@@ -723,7 +723,7 @@ pub(crate) fn keep_expressive_rows_off_the_lead(list: &mut [WordItem]) {
     let Some(word) = list
         .iter()
         .position(|item| {
-            !expressive(item) && item.fixed_position == 0 && !item.source.takes_online_seat()
+            !expressive(item) && !item.pinned_first && !item.source.takes_online_seat()
         })
         .or_else(|| list.iter().position(|item| !expressive(item)))
     else {
@@ -2304,9 +2304,9 @@ mod tests {
         assert_eq!(words(&only), vec!["😀", "(^_^)"]);
         keep_expressive_rows_off_the_lead(&mut []);
 
-        // 固定在第 3 位的词和第 2 位的云候选原地不动，提到首位的是后面第一个普通词。
+        // 置顶行与云候选原地不动，提到首位的是后面第一个普通词。
         let mut fixed = row("大于", CandidateSource::Database);
-        fixed.fixed_position = 3;
+        fixed.pinned_first = true;
         let mut list = vec![
             row(">", CandidateSource::Emoji),
             row("大鱼", CandidateSource::CloudSuggestion),
@@ -2317,9 +2317,9 @@ mod tests {
         ];
         keep_expressive_rows_off_the_lead(&mut list);
         assert_eq!(words(&list), vec!["大", "大鱼", "大于", ">", "＞", "达"]);
-        // 只剩固定词时退而取第一个词。
+        // 只剩置顶词时退而取第一个词。
         let mut fixed = row("大于", CandidateSource::Database);
-        fixed.fixed_position = 3;
+        fixed.pinned_first = true;
         let mut list = vec![row(">", CandidateSource::Emoji), fixed];
         keep_expressive_rows_off_the_lead(&mut list);
         assert_eq!(words(&list), vec!["大于", ">"]);

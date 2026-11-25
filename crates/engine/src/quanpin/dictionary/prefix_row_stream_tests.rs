@@ -293,7 +293,7 @@ fn prefix_append_preserves_metadata_capacity_and_fifo_age() {
                     row.sentence_words = vec!["合成".to_owned(), "分词😀".to_owned()];
                     row.sentence_words.reserve(8);
                     row.sentence_association = true;
-                    row.fixed_position = 3;
+                    row.pinned_first = true;
                     row.fuzzy = true;
                     if cached_empty {
                         Vec::new()

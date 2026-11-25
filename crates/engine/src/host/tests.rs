@@ -1291,7 +1291,7 @@ fn real_engine_handles_unicode_mode_without_a_dictionary_bundle() {
     assert!(snapshot
         .candidates
         .iter()
-        .any(|candidate| candidate == "中"));
+        .any(|candidate| candidate.text == "中"));
     let result = session.select(0).unwrap();
     assert!(result.has_commit);
     assert_eq!(result.commit, "中");
@@ -2101,7 +2101,7 @@ fn journal_handles_are_released_when_a_thread_is_done_with_them() {
     let index = snapshot
         .candidates
         .iter()
-        .position(|word| word == "拟好")
+        .position(|entry| entry.text == "拟好")
         .unwrap();
     session.select(index).unwrap();
     assert!(thread_holds_journal());
@@ -2147,7 +2147,7 @@ fn a_session_dropped_while_its_thread_exits_does_not_abort() {
                 .unwrap()
                 .candidates
                 .iter()
-                .position(|word| word == "拟好")
+                .position(|entry| entry.text == "拟好")
                 .unwrap();
             session.select(index).unwrap();
         });
@@ -2247,7 +2247,7 @@ fn generated_local_modes_publish_their_spelling_symbols_and_rows() {
     let view = session.snapshot().unwrap();
     assert_eq!(view.local_mode, "expression");
     assert_eq!(view.spelling_symbols, "0123456789+-*/.()%^");
-    assert_eq!(view.candidates[0], "6");
+    assert_eq!(view.candidates[0].text, "6");
     assert!(!session.online_query().unwrap().available);
     session.command(Command::Cancel).unwrap();
 
@@ -2255,14 +2255,14 @@ fn generated_local_modes_publish_their_spelling_symbols_and_rows() {
     type_text(&mut session, b"h");
     let view = session.snapshot().unwrap();
     assert_eq!(view.local_mode, "command");
-    assert_eq!(view.candidates, ["你好"]);
-    assert_eq!(view.candidate_codes, ["hi"]);
-    assert_eq!(view.candidate_annotations, ["问候"]);
+    assert_eq!(view.candidate_texts(), ["你好"]);
+    assert_eq!(view.candidates[0].code, "hi");
+    assert_eq!(view.candidates[0].annotation, "问候");
     session.command(Command::Cancel).unwrap();
 
     assert!(session.character(b'@', false).unwrap().handled);
     type_text(&mut session, b"al");
-    assert_eq!(session.snapshot().unwrap().candidates, ["Alice"]);
+    assert_eq!(session.snapshot().unwrap().candidate_texts(), ["Alice"]);
     session
         .set_mention_entries(&[MentionEntry {
             phone: String::new(),
@@ -2270,7 +2270,7 @@ fn generated_local_modes_publish_their_spelling_symbols_and_rows() {
             key: String::new(),
         }])
         .unwrap();
-    assert_eq!(session.snapshot().unwrap().candidates, ["Alan"]);
+    assert_eq!(session.snapshot().unwrap().candidate_texts(), ["Alan"]);
     session.command(Command::Cancel).unwrap();
     session
         .set_command_table(&[CommandTableEntry {
@@ -2283,8 +2283,9 @@ fn generated_local_modes_publish_their_spelling_symbols_and_rows() {
     type_text(&mut session, b"y");
     // 内置的农历命令 `yinli` 也以 y 开头，排在指令表之后；它的文字随真实时钟变，只核对触发词。
     let view = session.snapshot().unwrap();
-    assert_eq!(view.candidates[0], "哟");
-    assert_eq!(view.candidate_codes, ["yo", "yinli"]);
+    assert_eq!(view.candidates[0].text, "哟");
+    let codes: Vec<&str> = view.candidates.iter().map(|c| c.code.as_str()).collect();
+    assert_eq!(codes, ["yo", "yinli"]);
 }
 
 
