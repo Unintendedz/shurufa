@@ -27,7 +27,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         temporary.path().join("cache").to_str().unwrap(),
         "alt-segmentation-fixture",
     )?;
-    options.helpcode = false;
     options.mixed_english = false;
     options.learning = false;
 

@@ -8,9 +8,6 @@ members = [
     "crates/engine",
     "crates/input-runtime",
     "crates/host-api",
-    "crates/dict-builder",
-    "crates/script-runtime",
-    "crates/script-sdk",
 ]
 default-members = [
     "crates/path-trust",
@@ -21,7 +18,6 @@ default-members = [
     "crates/engine",
     "crates/input-runtime",
     "crates/host-api",
-    "crates/script-runtime",
 ]
 resolver = "2"
 
@@ -79,10 +75,3 @@ opt-level = 3
 
 [profile.dev.package.symphonia-codec-vorbis]
 opt-level = 3
-
-[profile.dev.package.ewts]
-overflow-checks = false
-
-[profile.release.package.ewts]
-debug-assertions = true
-overflow-checks = false

@@ -13,7 +13,7 @@ fn source_by_code(mapping: &[(&'static str, &'static str)], code: &str) -> Optio
         .map(|(source, _)| *source)
 }
 
-/// 将已规范化、用撇号分隔的全拼转为两键分段；任何音节不可编码时整次失败。
+#[cfg(test)]
 pub(crate) fn encode_pinyin(pinyin: &str, profile: &ShuangpinProfile) -> Option<String> {
     let mut codes = Vec::new();
     for syllable in pinyin.split('\'') {
@@ -282,39 +282,6 @@ pub(crate) fn convert_seg_shuangpin_to_seg_complete_pinyin_into(
     result.pop();
 }
 
-/// Double helpcode after a complete even-length prefix (:269-287).
-pub fn is_full_help_mode(pinyin_with_cases: &str, profile: &ShuangpinProfile) -> bool {
-    let bytes = pinyin_with_cases.as_bytes();
-    let length = bytes.len();
-    if length <= 2 || !length.is_multiple_of(2) {
-        return false;
-    }
-    if !(bytes[length - 2].is_ascii_uppercase() || bytes[length - 1].is_ascii_uppercase()) {
-        return false;
-    }
-    let base = &pinyin_with_cases[..length - 2];
-    is_all_complete_pinyin(base, &pinyin_segmentation(base, profile))
-}
-
-/// The last two letters lowercased, swapped when the first was uppercase (:289-305).
-pub fn get_full_help_codes(pinyin_with_cases: &str) -> String {
-    let bytes = pinyin_with_cases.as_bytes();
-    if bytes.len() < 2 {
-        return String::new();
-    }
-    let first = bytes[bytes.len() - 2];
-    let second = bytes[bytes.len() - 1];
-    let (first, second) = if first.is_ascii_uppercase() {
-        (second, first)
-    } else {
-        (first, second)
-    };
-    let mut result = String::with_capacity(2);
-    result.push(char::from(first.to_ascii_lowercase()));
-    result.push(char::from(second.to_ascii_lowercase()));
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,78 +325,6 @@ mod tests {
         assert_eq!(encode_pinyin("a'ming", microsoft).as_deref(), Some("oa'm;"));
         for reading in ["", "ni''hao", "'ni", "ni'", "NI", "ni'bad", "汉字"] {
             assert_eq!(encode_pinyin(reading, xiaohe()), None);
-        }
-    }
-
-    #[test]
-    fn full_help_mode_without_uppercase_codes_does_not_segment_input() {
-        let long = format!("{}ab", "ni".repeat(128));
-        for kind in ALL {
-            let profile = profile(kind).unwrap();
-            for raw in ["nihc", "nihcab", "niHCab", "j;gkab", &long] {
-                assert!(!is_full_help_mode(raw, profile));
-                let (mode, allocations) = crate::ime::personal_rerank::allocations::count(|| {
-                    is_full_help_mode(raw, profile)
-                });
-                assert!(!mode);
-                assert_eq!(allocations, 0, "kind={kind:?}, raw={raw:?}");
-            }
-        }
-    }
-
-    #[test]
-    fn full_help_mode_matches_segmentation_first_reference() {
-        fn reference(raw: &str, profile: &ShuangpinProfile) -> bool {
-            let bytes = raw.as_bytes();
-            let length = bytes.len();
-            if length <= 2 || !length.is_multiple_of(2) {
-                return false;
-            }
-            let base = &raw[..length - 2];
-            is_all_complete_pinyin(base, &pinyin_segmentation(base, profile))
-                && (bytes[length - 2].is_ascii_uppercase()
-                    || bytes[length - 1].is_ascii_uppercase())
-        }
-        let long_lower = format!("{}ab", "ni".repeat(128));
-        let long_upper = format!("{}AB", "ni".repeat(128));
-        for kind in ALL {
-            let profile = profile(kind).unwrap();
-            for &first in b"abcdefghijklmnopqrstuvwxyz;" {
-                for &second in b"abcdefghijklmnopqrstuvwxyz;" {
-                    for suffix in ["ab", "Ab", "aB", "AB"] {
-                        let raw = format!("{}{}{suffix}", char::from(first), char::from(second));
-                        assert_eq!(
-                            is_full_help_mode(&raw, profile),
-                            reference(&raw, profile),
-                            "kind={kind:?}, raw={raw:?}"
-                        );
-                    }
-                }
-            }
-            for raw in [
-                "",
-                "a",
-                "AB",
-                "nihAB",
-                "akAB",
-                "ni'ab",
-                "ni'AB",
-                "ni''AB",
-                "''''",
-                "niHCab",
-                "NIaB",
-                "ni'hcAB",
-                "nihcAB'",
-                "j;gkAB",
-                &long_lower,
-                &long_upper,
-            ] {
-                assert_eq!(
-                    is_full_help_mode(raw, profile),
-                    reference(raw, profile),
-                    "kind={kind:?}, raw={raw:?}"
-                );
-            }
         }
     }
 
@@ -501,13 +396,6 @@ mod tests {
     }
 
     #[test]
-    fn full_help_codes_use_exact_string_capacity() {
-        let result = get_full_help_codes("xxAb");
-        assert_eq!(result, "ba");
-        assert_eq!(result.capacity(), result.len());
-    }
-
-    #[test]
     fn every_profile_accepts_yo_as_one_syllable() {
         for kind in ALL {
             let selected = profile(kind).unwrap();
@@ -574,19 +462,5 @@ mod tests {
 
         assert_eq!(converted, "ni'hao'zhong");
         assert_eq!(allocations, 1);
-    }
-
-    #[test]
-    fn detects_double_helpcodes() {
-        assert!(is_full_help_mode("nihcAB", xiaohe()));
-        assert!(is_full_help_mode("nihcaB", xiaohe()));
-        assert!(!is_full_help_mode("nihcab", xiaohe()));
-        assert!(!is_full_help_mode("AB", xiaohe()));
-        assert!(!is_full_help_mode("nihAB", xiaohe()));
-        assert!(!is_full_help_mode("akAB", xiaohe()));
-        assert_eq!(get_full_help_codes("xxAb"), "ba");
-        assert_eq!(get_full_help_codes("xxaB"), "ab");
-        assert_eq!(get_full_help_codes("xxAB"), "ba");
-        assert_eq!(get_full_help_codes("x"), "");
     }
 }

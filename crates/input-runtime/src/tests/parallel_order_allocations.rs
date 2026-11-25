@@ -72,7 +72,6 @@ fn parallel_candidate_order_keeps_all_metadata_and_composes_engine_seats() {
             .collect();
         for row in 0..rows {
             runtime.cached.candidate_sources[row] = (row % 14) as u8;
-            runtime.cached.candidate_positions[row] = (row % 256) as u8;
             runtime.cached.candidate_corrected[row] = row % 2 == 0;
             runtime.cached.candidate_answers_key[row] = row % 3 == 0;
         }
@@ -101,10 +100,6 @@ fn parallel_candidate_order_keeps_all_metadata_and_composes_engine_seats() {
             assert_eq!(
                 runtime.cached.candidate_sources[seat],
                 original.candidate_sources[row]
-            );
-            assert_eq!(
-                runtime.cached.candidate_positions[seat],
-                original.candidate_positions[row]
             );
             assert_eq!(
                 runtime.cached.candidate_corrected[seat],

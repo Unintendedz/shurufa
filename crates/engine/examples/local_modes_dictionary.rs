@@ -22,7 +22,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (b'M', "kaomoji"),
         (b'J', "super_jianpin"),
         (b'Y', "temporary_english"),
-        (b'R', "temporary_japanese"),
     ];
     for (index, (letter, name)) in modes.into_iter().enumerate() {
         let mut enabled = Session::new(&options)?;
@@ -93,16 +92,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             assert!(committed.has_commit);
             assert!(!committed.commit.is_empty());
         }
-        if letter == b'R' {
-            for character in b"ka" {
-                enabled.character(*character, false)?;
-            }
-            let snapshot = enabled.snapshot()?;
-            assert!(!snapshot.candidates.is_empty());
-            let committed = enabled.select(0)?;
-            assert!(committed.has_commit);
-            assert!(!committed.commit.is_empty());
-        }
         let mut disabled = options.clone();
         match index {
             0 => disabled.local_unicode = false,
@@ -112,7 +101,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             4 => disabled.local_kaomoji = false,
             5 => disabled.local_super_jianpin = false,
             6 => disabled.local_temporary_english = false,
-            7 => disabled.local_temporary_japanese = false,
             _ => unreachable!(),
         }
         let mut session = Session::new(&disabled)?;

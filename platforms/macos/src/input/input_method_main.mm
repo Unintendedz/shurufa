@@ -204,14 +204,8 @@ int main(int argc, const char *argv[]) {
         }
         for (int index = 1; index < argc; ++index) {
             if (strcmp(argv[index], "--migrate-quanpin-helpcode") == 0) {
-                if (!MSIMEEditionIsShurufa()) return 1;
-                NSString *directory = MSIMEDefaultClientStateDirectory(NSFileManager.defaultManager).path;
-                const BOOL migrated = MSIMEMigrateShurufaQuanpinHelpcode(NSUserDefaults.standardUserDefaults,
-                    ^NSDictionary *{ return [MSIMEClientSession loadPreferencesInDirectory:directory error:nil]; },
-                    ^NSDictionary *(uint64_t revision, NSDictionary *snapshot) {
-                        return [MSIMEClientSession savePreferencesInDirectory:directory expectedRevision:revision snapshot:snapshot error:nil];
-                    });
-                return migrated ? 0 : 1;
+                // 全拼辅助码已在核心中彻底移除，保留该启动参数为空操作以兼容升级脚本。
+                return 0;
             }
             if (strcmp(argv[index], "--migrate-grammar-model") == 0) {
                 if (!MSIMEEditionIsShurufa()) return 1;
@@ -310,8 +304,6 @@ int main(int argc, const char *argv[]) {
             [[NSNotificationCenter defaultCenter] removeObserver:closeObserver];
             return 0;
         }
-        // 脚本插件只在输入法进程里运行，上面的独立设置窗口已经返回。在第一个会话之前打开开关，开发构建和 release 构建一样（msime_client.h）。
-        msime_client_scripts_enable(!MSIMEEditionIsShurufa());
         // One input method process is one usage session; the standalone preferences window above is not.
         NSDictionary *reportingOptions = MSIMELoadRuntimeOptions();
         id reportingPreferences = reportingOptions[@"preferences_directory"];

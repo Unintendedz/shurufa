@@ -23,7 +23,6 @@ pub const DIRECTORY: &str = "resource-packs";
 const DESKTOP_LOCK: &str = include_str!("../../../resources/desktop-dictionary.lock.json");
 const LANGUAGE_LOCK: &str = include_str!("../../../resources/language-dictionaries.lock.json");
 const HANDWRITING_LOCK: &str = include_str!("../../../resources/handwriting-model.lock.json");
-const SETTLED_MODEL_LOCK: &str = include_str!("../../../resources/settled-model.lock.json");
 const GRAMMAR_MODELS_LOCK: &str = include_str!("../../../resources/grammar-models.lock.json");
 const WANXIANG_GRAMMAR_FILE: &str = "wanxiang-lts-zh-hans.gram";
 const GRAMMAR_HEADER_BYTES: usize = 44;
@@ -295,8 +294,6 @@ pub enum ResourcePack {
     Japanese,
     LanguageDictionaries,
     Handwriting,
-    /// 桌面神经联想在输入停顿后使用的落定重排模型（`sentence-model-desktop.safetensors`）。
-    SettledModel,
     /// octagram 语法模型万象 LTS（CC-BY-4.0）：`wanxiang-lts-zh-hans.gram`。
     #[serde(rename = "grammar-model-wanxiang")]
     GrammarWanxiang,
@@ -510,11 +507,10 @@ pub struct PackArchive {
 
 impl ResourcePack {
     /// 每一种资源包，包括锁文件还没固定内容的；只要存在的那些用 [`ResourcePack::available`]。
-    pub const ALL: [ResourcePack; 14] = [
+    pub const ALL: [ResourcePack; 13] = [
         ResourcePack::Japanese,
         ResourcePack::LanguageDictionaries,
         ResourcePack::Handwriting,
-        ResourcePack::SettledModel,
         ResourcePack::GrammarWanxiang,
         ResourcePack::GrammarBaguwen,
         ResourcePack::GrammarBaguwenCompact,
@@ -547,7 +543,6 @@ impl ResourcePack {
             ResourcePack::Japanese => "japanese",
             ResourcePack::LanguageDictionaries => "language-dictionaries",
             ResourcePack::Handwriting => "handwriting",
-            ResourcePack::SettledModel => "settled-model",
             ResourcePack::GrammarWanxiang => "grammar-model-wanxiang",
             ResourcePack::GrammarBaguwen => "grammar-model-baguwen",
             ResourcePack::GrammarBaguwenCompact => "grammar-model-baguwen-compact",
@@ -566,7 +561,7 @@ impl ResourcePack {
         ResourcePack::available().find(|pack| pack.id() == id)
     }
 
-    /// 选用这些输入方案时需要该资源包。手写和落定重排模型不对应输入方案。语言词库包只列出锁文件确实固定了 `msime-<方案>.db` 的方案：词库还没发布的方案下载了也装不上，不能当作由这个包提供。
+    /// 选用这些输入方案时需要该资源包。手写不对应输入方案。语言词库包只列出锁文件确实固定了 `msime-<方案>.db` 的方案：词库还没发布的方案下载了也装不上，不能当作由这个包提供。
     pub fn schemes(self) -> &'static [&'static str] {
         static LANGUAGE_SCHEMES: OnceLock<Vec<&'static str>> = OnceLock::new();
         match self {
@@ -584,7 +579,6 @@ impl ResourcePack {
                     .collect()
             }),
             ResourcePack::Handwriting
-            | ResourcePack::SettledModel
             | ResourcePack::GrammarWanxiang
             | ResourcePack::GrammarBaguwen
             | ResourcePack::GrammarBaguwenCompact
@@ -635,7 +629,7 @@ impl ResourcePack {
         if self == ResourcePack::AndroidOcrModule {
             return android_ocr_module_set();
         }
-        static SETS: OnceLock<[ResourceSet; 12]> = OnceLock::new();
+        static SETS: OnceLock<[ResourceSet; 11]> = OnceLock::new();
         static UNPINNED: OnceLock<ResourceSet> = OnceLock::new();
         if self == ResourcePack::MacosVoiceRuntime {
             // 还没固定时是没有文件的空清单，它不能通过 `ResourceSet::validate`，也不会被列出或安装。
@@ -654,8 +648,6 @@ impl ResourcePack {
                 serde_json::from_str(LANGUAGE_LOCK).expect("language dictionaries lock is valid");
             let handwriting: PackLock =
                 serde_json::from_str(HANDWRITING_LOCK).expect("handwriting model lock is valid");
-            let settled: ResourceSet =
-                serde_json::from_str(SETTLED_MODEL_LOCK).expect("settled model lock is valid");
             let grammar: GrammarModelsLock =
                 serde_json::from_str(GRAMMAR_MODELS_LOCK).expect("grammar models lock is valid");
             let glosses: OfflineGlossesLock =
@@ -670,7 +662,6 @@ impl ResourcePack {
                     source_commit: handwriting.source_commit,
                     artifacts: handwriting.artifacts,
                 },
-                settled,
                 Self::grammar_model(&grammar, "wanxiang"),
                 Self::grammar_model(&grammar, "baguwen"),
                 Self::grammar_model(&grammar, "baguwen-compact"),
@@ -702,15 +693,14 @@ impl ResourcePack {
             ResourcePack::Japanese => &sets[0],
             ResourcePack::LanguageDictionaries => &sets[1],
             ResourcePack::Handwriting => &sets[2],
-            ResourcePack::SettledModel => &sets[3],
-            ResourcePack::GrammarWanxiang => &sets[4],
-            ResourcePack::GrammarBaguwen => &sets[5],
-            ResourcePack::GrammarBaguwenCompact => &sets[6],
-            ResourcePack::GrammarBaishuang => &sets[7],
-            ResourcePack::OfflineGlosses => &sets[8],
-            ResourcePack::Pronunciations => &sets[11],
-            ResourcePack::VoiceRuntime => &sets[9],
-            ResourcePack::Wubi => &sets[10],
+            ResourcePack::GrammarWanxiang => &sets[3],
+            ResourcePack::GrammarBaguwen => &sets[4],
+            ResourcePack::GrammarBaguwenCompact => &sets[5],
+            ResourcePack::GrammarBaishuang => &sets[6],
+            ResourcePack::OfflineGlosses => &sets[7],
+            ResourcePack::Pronunciations => &sets[10],
+            ResourcePack::VoiceRuntime => &sets[8],
+            ResourcePack::Wubi => &sets[9],
             ResourcePack::MacosVoiceRuntime | ResourcePack::AndroidOcrModule => {
                 unreachable!("handled above")
             }
@@ -1821,12 +1811,6 @@ mod tests {
         assert!(ResourcePack::Wubi.archive().is_none());
         assert_eq!(ResourcePack::LanguageDictionaries.set().artifacts.len(), 6);
         assert_eq!(ResourcePack::Handwriting.set().artifacts.len(), 2);
-        assert_eq!(ResourcePack::SettledModel.set().artifacts.len(), 1);
-        assert_eq!(
-            ResourcePack::SettledModel.set().artifacts[0].name,
-            "sentence-model-desktop.safetensors"
-        );
-        assert!(ResourcePack::SettledModel.schemes().is_empty());
     }
 
     /// 离线释义包就是 `offline-glosses.lock.json` 固定的那七个文件：六种语言的词典加上必须随它们分发的 NOTICE。

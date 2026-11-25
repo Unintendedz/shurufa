@@ -181,6 +181,7 @@ pub(crate) fn sqlite_read_only_path_no_follow(path: &Path) -> io::Result<PathBuf
 /// packaged language dictionaries, whose established contract permits an
 /// application supplied directory alias. They are opened read-only, so the
 /// link count follows [`sqlite_read_only_path_no_follow`].
+#[cfg(test)]
 pub(crate) fn sqlite_path_no_follow_allow_parent_symlinks(path: &Path) -> io::Result<PathBuf> {
     sqlite_path_no_follow_with_parent_policy(path, false, true)
 }
@@ -369,8 +370,8 @@ mod tests {
         );
         // 没有旧名的文件照常拼接。
         assert_eq!(
-            paths.resource(assets::WUBI_DICTIONARY),
-            paths.resources.join("msime-wubi.db")
+            paths.resource(assets::BIGRAM_TABLE),
+            paths.resources.join("msime-bigram.bin")
         );
         std::fs::write(paths.dictionaries.join("msime-pinyin.db"), b"new").unwrap();
         assert_eq!(

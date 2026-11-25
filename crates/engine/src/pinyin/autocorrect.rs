@@ -3,7 +3,6 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::OnceLock;
 
-use super::active_helpcode::strip_active_helpcodes;
 use super::segment::{cut_one_piece_min_segments, is_complete_pinyin_input};
 use super::syllables::{intact_piece, intact_pinyin_list, is_intact, MAX_SYLLABLE_LENGTH};
 use super::typos::{
@@ -762,9 +761,9 @@ pub fn looks_like_syllable_with_jianpin_tail(pinyin: &str) -> bool {
     !matches!(bytes[position], b'a' | b'e' | b'i' | b'o' | b'u' | b'v')
 }
 
-/// The per-input key autocorrect suppression is recorded under: the helpcode-stripped raw input, lowercased, without `'` (TP:180-189).
-pub fn autocorrect_suppression_key(raw_input: &str, raw_input_with_cases: &str) -> String {
-    strip_active_helpcodes(raw_input, raw_input_with_cases)
+/// 自动纠错抑制记录键：小写、去除隔音符后的原始按键串。
+pub fn autocorrect_suppression_key(raw_input: &str, _raw_input_with_cases: &str) -> String {
+    raw_input
         .chars()
         .filter(|&character| character != '\'')
         .map(|character| character.to_ascii_lowercase())
@@ -1250,8 +1249,6 @@ mod tests {
     fn suppression_keys_fold_the_stripped_input() {
         assert_eq!(autocorrect_suppression_key("sahng", "saHng"), "sahng");
         assert_eq!(autocorrect_suppression_key("sa'hng", "sa'hng"), "sahng");
-        // An active helpcode letter is not part of the key.
-        assert_eq!(autocorrect_suppression_key("shangs", "shangS"), "shang");
         assert_eq!(autocorrect_suppression_key("nihc", "nihC"), "nihc");
     }
 }

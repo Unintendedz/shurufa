@@ -36,7 +36,7 @@ const DICTIONARY_MMAP_SIZE: i64 = 128 * 1024 * 1024;
 // 错误纠正一次最多提交 96 个键；短批次用线性扫描可以省掉临时哈希表分配。
 const SMALL_QUERY_KEY_BATCH: usize = 64;
 
-// 普通九宫格简拼最多取 64 行，小页先放栈上，较大扫描继续使用原堆页预算。
+#[cfg(test)]
 const INLINE_JIANPIN_ROWS: usize = 64;
 
 /// The C++ returned an error code without text for these writes (QD:1502-1536); callers map the failure to their own diagnostic.
@@ -89,28 +89,6 @@ impl PinyinDatabase {
             .is_some_and(|recorded| recorded != current);
         self.data_version = Some(current);
         changed
-    }
-
-    /// 开一个读事务，直到 `end_read` 为止的查询共用一把共享锁和同一份快照。自动提交模式下每条语句都要自己加锁、检查热日志、解锁（`stat`/`fcntl`/`pread`），九键一次刷新几百条语句，这部分开销在手机上和查询本身相当。上次的事务没收尾（中途出错）就先结束它。
-    pub fn begin_read(&self) {
-        let Some(connection) = &self.connection else {
-            return;
-        };
-        if !connection.is_autocommit() {
-            // 失败时下面的 `BEGIN` 也会失败，查询照常按自动提交执行。
-            let _ = connection.execute_batch("COMMIT");
-        }
-        let _ = connection.execute_batch("BEGIN");
-    }
-
-    /// 结束 `begin_read` 开的读事务；只读事务提交不写任何东西。
-    pub fn end_read(&self) {
-        let Some(connection) = &self.connection else {
-            return;
-        };
-        if !connection.is_autocommit() {
-            let _ = connection.execute_batch("COMMIT");
-        }
     }
 
     /// 当前的 `PRAGMA data_version`，不改 `database_changed` 记下的值；词典没打开或读取失败时为 `None`。
@@ -385,14 +363,15 @@ impl PinyinDatabase {
         result
     }
 
-    /// 按简拼查词：`codes` 是同样长度的简拼（每个音节的首字母，`mt`、`cflm`），一个字母一个音节，词条的 `jp` 等于其中任何一个就算。按首字母分表，每张表一条 `jp IN (...)` 语句（`jp` 有索引），合起来按权重从高到低取前 `limit` 行；同一个词按不同的码出现时只留第一行。九宫格用它把每个数字当成一个音节的声母来查（#5640）。
+    #[cfg(test)]
     pub fn query_jianpin_codes(&self, codes: &[String], limit: usize) -> Vec<DictRow> {
         let mut rows = self.query_jianpin_codes_per_table(codes, limit);
         rows.truncate(limit);
         rows
     }
 
-    /// 同 `query_jianpin_codes`，但只截每张首字母表（各取权重最高的 `table_limit` 行），合起来按权重排、去重之后不再截断，最多是表数乘 `table_limit` 行。出货词库里大量词的权重相同（默认的 100），合起来再截时同权重的行按表的先后取舍，排在后面的表里的词会被整批截掉；九宫格要从中找出用户用过的词，所以先拿到每张表各自的前 `table_limit` 行（#6185）。
+    /// 按首字母表分表查询简拼候选。
+    #[cfg(test)]
     pub fn query_jianpin_codes_per_table(
         &self,
         codes: &[String],
@@ -879,7 +858,7 @@ fn batch_sql(table: &str, key_count: usize, limit: i64) -> String {
     sql
 }
 
-/// `batch_sql` 的简拼版：`jp IN (...)`。
+#[cfg(test)]
 fn jianpin_batch_sql(table: &str, code_count: usize, limit: i64) -> String {
     let mut sql = String::with_capacity(
         table

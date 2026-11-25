@@ -1072,29 +1072,11 @@ static BOOL MSIMECandidateListOpen(NSDictionary *view) {
 static BOOL MSIMEKoreanHanjaListOpen(NSDictionary *view) {
     return MSIMECandidateListOpen(view) && MSIMEViewScheme(view) == msime::mac::scheme::Korean;
 }
-// Candidates may carry translation glosses. Temporary Japanese keeps the Chinese scheme number in the view but writes Japanese, which has no glosses.
+// Candidates may carry translation glosses.
 static BOOL MSIMEViewShowsGlosses(NSDictionary *view) {
-    return msime::mac::scheme::ShowsGlosses(MSIMEViewScheme(view)) && ![view[@"local_mode"] isEqual:@"temporary_japanese"];
+    return msime::mac::scheme::ShowsGlosses(MSIMEViewScheme(view));
 }
-// Option+Return (or keypad Enter) with no other modifier while a scheme that opens a candidate list composes, the system Korean input method's Hanja key. Either Option key counts.
-static BOOL MSIMECandidateListTrigger(NSEvent *event, NSDictionary *view) {
-    if (event.type != NSEventTypeKeyDown || (event.keyCode != 36 && event.keyCode != 76)) return NO;
-    if ((event.modifierFlags & (NSEventModifierFlagControl | NSEventModifierFlagShift | NSEventModifierFlagOption |
-                                NSEventModifierFlagCommand)) != NSEventModifierFlagOption) return NO;
-    if (!MSIMESchemeTrait(view, msime::mac::scheme::OpensCandidateList)) return NO;
-    id editing = view[@"editing_text"];
-    return [editing isKindOfClass:NSString.class] && [editing length] > 0;
-}
-// Down with no modifier while a Zhuyin conversion composes and its list is closed: libchewing's key for opening the candidate list. It belongs to the input method whatever the arrow navigation binding says, because with the list closed there is no highlight for that binding to move and nothing else to do with the key. Once the list is open Down moves the highlight as in every other list.
-static BOOL MSIMECandidateListDownKey(NSEvent *event, NSDictionary *view) {
-    if (event.type != NSEventTypeKeyDown || event.keyCode != 125) return NO;
-    if (event.modifierFlags & (NSEventModifierFlagControl | NSEventModifierFlagShift | NSEventModifierFlagOption |
-                               NSEventModifierFlagCommand)) return NO;
-    if (!MSIMESchemeRulesApply(view) || MSIMEViewScheme(view) != msime::mac::scheme::Zhuyin || MSIMECandidateListOpen(view)) return NO;
-    id editing = view[@"editing_text"];
-    return [editing isKindOfClass:NSString.class] && [editing length] > 0;
-}
-// 组字本身，不含候选：编辑中的文本、预编辑、光标和已选定的词组前缀。云候选、AI 回答、整句重排到达时 Engine 换一代候选而这几项不变；打字、删字、选词会改它们。展开的候选网格靠它分辨该重载还是该收起。
+// 组字本身，不含候选：编辑中的文本、预编辑、光标和已选定的词组前缀。
 static NSArray *MSIMEExpandedComposition(NSDictionary *view) {
     id editing = view[@"editing_text"], preedit = view[@"preedit"], caret = view[@"caret_position"], phrase = view[@"phrase_prefix"];
     return @[[editing isKindOfClass:NSString.class] ? editing : @"", [preedit isKindOfClass:NSString.class] ? preedit : @"",
@@ -1933,9 +1915,6 @@ static NSImage *MSIMECandidateLogoImage() {
     NSDictionary *_menuThemePreferences;
     MSIMEDictionaryWindowController *_dictionaryWindow;
     NSTimer *_cloudTimer;
-    NSTimer *_settledTimer;
-    // 单独轮询后台评分；取消停顿计时不得丢失评分中的模型。
-    NSTimer *_settledPollTimer;
     // Shurufa v2 Tier 1 非阻塞异步神经解码状态（仅在 Shurufa 版本且后台服务可用时启用）。
     BOOL _neuralV2Enabled;
     BOOL _neuralDeferredRenderPending;
@@ -1944,10 +1923,6 @@ static NSImage *MSIMECandidateLogoImage() {
     dispatch_source_t _neuralDeferredRenderTimer;
     dispatch_source_t _neuralPrefillTimer;
     NSString *_lastNeuralPrefilledContext;
-    uint64_t _settledToken;
-    uint64_t _settledPollEpoch;
-    MSIMEClientSession *_settledPollSession;
-    id _settledPollClient;
     MSIMECloudCandidateRequest *_cloudRequest;
     NSDictionary *_cloudQuery;
     uint64_t _cloudEpoch;
@@ -2502,80 +2477,6 @@ static const char *MSIMESmartPunctuationScalarClass(uint32_t scalar) {
 // or the arrow keys. Nothing was typed to get there, so leaving the page only has to put back the
 // view that was on screen. This host had no such page at all - Ctrl+Enter fell into "any Ctrl chord
 // finishes the composition and goes back to the application", so it committed what was being typed.
-// Space converts and Enter takes what is on screen - the way every Japanese input method works.
-//
-// Romaji is not what the user typed; かな is. The Engine keeps both (`editing_text` is the romaji,
-// `reading` the kana it converts to), and it has one command for each ending: `MSIME_COMMIT_RAW`
-// gives the romaji back and `MSIME_COMMIT_READING` gives the kana. Every desktop host here sent
-// COMMIT_RAW on Enter for every scheme, so Japanese input committed `nihon` where the user meant
-// にほん - measured against the real Engine, not inferred. The touch hosts already do this
-// correctly (`MSIMEInputService.enter` and `KeyboardViewController.handleReturn`), which is where
-// the rule below comes from.
-//
-// - Space starts the conversion rather than committing it: the first press means "convert", and
-//   further presses step through the candidates. This host committed the first candidate outright,
-//   so there was no way to reach the second.
-// - Enter commits the candidate the user stepped to, or, if they never pressed Space, the kana.
-//
-// Returns NO for every other scheme and for keys this does not claim, which then run as before.
-- (BOOL)handleJapaneseConversionKey:(NSEvent *)event client:(id)sender {
-    if (!_session || !_activeClient || event.type != NSEventTypeKeyDown) return NO;
-    if (MSIMEViewScheme(_view) != 3) return NO;
-    if (event.modifierFlags & (NSEventModifierFlagControl | NSEventModifierFlagOption |
-                               NSEventModifierFlagCommand | NSEventModifierFlagShift))
-        return NO;
-    NSString *reading = [_view[@"editing_text"] isKindOfClass:NSString.class] ? _view[@"editing_text"] : @"";
-    if (!reading.length) return NO;
-    NSArray *candidates = [_view[@"candidates"] isKindOfClass:NSArray.class] ? _view[@"candidates"] : @[];
-    // Editing the reading abandons the conversion that was running on the old one.
-    if (![reading isEqualToString:_japaneseConversionReading ?: @""]) {
-        _japaneseConversionIndex = nil;
-        _japaneseConversionReading = nil;
-    }
-    if (event.keyCode == 49) { // Space
-        if (!candidates.count) return NO;
-        // Let Space reach the Engine's commit when the only row is the raw-text Fallback.
-        NSDictionary *first = [candidates.firstObject isKindOfClass:NSDictionary.class] ? candidates.firstObject : nil;
-        const int firstSource = (int)MSIMEStrictInteger(first[@"source"], -1);
-        if (msime::mac::JapaneseSpaceCommitsFallback(candidates.count, firstSource)) return NO;
-        if (!_japaneseConversionIndex) {
-            // The first press is the conversion itself. The panel already highlights the first
-            // candidate, so nothing has to move - what changes is that Enter now means "take it".
-            _japaneseConversionIndex = @0;
-            _japaneseConversionReading = [reading copy];
-            return YES;
-        }
-        const NSUInteger next = _japaneseConversionIndex.unsignedIntegerValue + 1;
-        const BOOL wraps = next >= candidates.count;
-        _japaneseConversionIndex = @(wraps ? 0 : next);
-        NSDictionary *transition = [_session command:wraps ? MSIME_FIRST_CANDIDATE : MSIME_NEXT_CANDIDATE
-                                               error:nil];
-        if (transition) [self apply:transition];
-        return YES;
-    }
-    if (event.keyCode != 36 && event.keyCode != 76) return NO; // Return, keypad Return
-    if (_japaneseConversionIndex) {
-        NSDictionary *chosen = _japaneseConversionIndex.unsignedIntegerValue < candidates.count
-            ? candidates[_japaneseConversionIndex.unsignedIntegerValue] : nil;
-        NSDictionary *identifier = chosen[@"id"];
-        _japaneseConversionIndex = nil;
-        _japaneseConversionReading = nil;
-        if (!MSIMECurrentCandidateIdentity(identifier, _view)) return NO;
-        uint64_t generation = 0; NSUInteger index = 0;
-        if (!MSIMEStrictUnsignedInteger(identifier[@"generation"], &generation) || !MSIMEStrictUnsignedIntegerValue(identifier[@"index"], &index)) return NO;
-        NSDictionary *transition = [_session selectGeneration:generation index:index error:nil];
-        if (!transition) return NO;
-        [self apply:transition];
-        return YES;
-    }
-    NSDictionary *transition = [_session command:MSIME_COMMIT_READING error:nil];
-    // The Engine answers nothing for a composition it cannot read back as kana; that key then
-    // means what it always meant.
-    if (!transition || !MSIMEStrictBoolean(transition[@"handled"])) return NO;
-    [self apply:transition];
-    return YES;
-}
-
 - (BOOL)glossSensePageActive { return _glossSenses.count > 0; }
 
 - (NSArray<NSString *> *)sensesForHighlightedCandidate {
@@ -4129,7 +4030,6 @@ BOOL MSIMEInputControllerHasUnfinishedInput(void) {
     ++_cloudEpoch;
     [_cloudTimer invalidate];
     _cloudTimer = nil;
-    [self cancelSettledRerank];
     [_cloudRequest cancel];
     _cloudRequest = nil;
     _cloudQuery = nil;
@@ -4142,77 +4042,6 @@ BOOL MSIMEInputControllerHasUnfinishedInput(void) {
 - (MSIMECloudCandidateRequest *)cloudRequestForDescriptor:(NSDictionary *)descriptor completion:(void (^)(NSData *))completion {
     return [[MSIMECloudCandidateRequest alloc] initWithCloudDescriptor:descriptor
         configuration:NSURLSessionConfiguration.ephemeralSessionConfiguration completion:completion];
-}
-
-/// How long the composition stands still before the larger model ranks it.
-///
-/// Shorter than the half second the cloud path waits, because this one is local and it changes
-/// what the user is reading rather than annotating it. Long enough that ordinary typing never lets
-/// it fire, which is what keeps the 24M model off the keystroke path where it measures p95 153ms
-/// against a 16ms frame.
-static const NSTimeInterval kSettledRerankDelay = 0.15;
-/// 主线程只轮询后台结果，不运行模型前向计算，避免后续按键排队。
-static const NSTimeInterval kSettledRerankPoll = 1.0 / 60.0;
-
-- (void)cancelSettledRerank {
-    [_settledTimer invalidate];
-    _settledTimer = nil;
-}
-
-/// 停止停顿计时和轮询；会话销毁时一并放弃在途模型。
-- (void)stopSettledScoring {
-    [self cancelSettledRerank];
-    [_settledPollTimer invalidate];
-    _settledPollTimer = nil;
-    _settledToken = 0;
-    _settledPollSession = nil;
-    _settledPollClient = nil;
-}
-
-- (void)armSettledPoll {
-    [_settledPollTimer invalidate];
-    _settledPollTimer = nil;
-    const uint64_t token = _settledToken;
-    if (token == 0 || !_settledPollSession) return;
-    MSIMEClientSession *session = _settledPollSession;
-    id client = _settledPollClient;
-    const uint64_t epoch = _settledPollEpoch;
-    __weak MSIMEInputController *weakSelf = self;
-    _settledPollTimer = [NSTimer timerWithTimeInterval:kSettledRerankPoll repeats:NO block:^(NSTimer *fired) {
-        (void)fired;
-        MSIMEInputController *controller = weakSelf;
-        if (!controller || controller->_settledToken != token) {
-            // 控制器消失或已切换任务，只向原会话归还模型；已销毁会话的评分已被放弃。
-            [session pollSettledRerank:token accept:NO error:nil];
-            return;
-        }
-        controller->_settledPollTimer = nil;
-        const BOOL same = controller->_cloudEpoch == epoch && controller->_session == session &&
-            controller->_activeClient == client && !controller->_focusPending &&
-            !controller->_appearance.englishMode;
-        NSDictionary *polled = [session pollSettledRerank:token accept:same error:nil];
-        if ([polled[@"status"] isEqual:@"pending"]) {
-            [controller armSettledPoll];
-            return;
-        }
-        [controller finishSettledScore:polled same:same session:session client:client];
-    }];
-    [NSRunLoop.mainRunLoop addTimer:_settledPollTimer forMode:NSRunLoopCommonModes];
-}
-
-/// `current` 表示当前组字及配置已评分；过期结果仅在同一客户端仍组字时重试。
-- (void)finishSettledScore:(NSDictionary *)polled same:(BOOL)same session:(MSIMEClientSession *)session client:(id)client {
-    _settledToken = 0;
-    _settledPollSession = nil;
-    _settledPollClient = nil;
-    if (!polled) return;
-    if (same && MSIMEStrictBoolean(polled[@"moved"])) {
-        [self apply:polled];
-        return;
-    }
-    if (same && MSIMEStrictBoolean(polled[@"current"])) return;
-    if (_session != session || _activeClient != client || _focusPending || _appearance.englishMode) return;
-    [self scheduleSettledRerank];
 }
 
 /// Shurufa v2 Tier 1 非阻塞端侧神经解码状态判定（安全密码框、英文模式与缺失模型时严格关闭）。
@@ -4416,43 +4245,6 @@ static const NSTimeInterval kSettledRerankPoll = 1.0 / 60.0;
         }
     }];
     return YES;
-}
-
-/// 每次刷新都重新等待真实输入停顿，再在后台评分；新按键继续立即处理。
-/// 结果仅发布到仍匹配的组字；未安装模型时立即结束，仅顺序变化才重绘候选窗口。
-- (void)scheduleSettledRerank {
-    [self cancelSettledRerank];
-    if (_neuralV2Enabled) return;
-    if (_settledToken != 0) return;
-    if (!_activeClient || !_session || _focusPending || _appearance.englishMode) return;
-    const uint64_t epoch = _cloudEpoch;
-    MSIMEClientSession *session = _session;
-    id client = _activeClient;
-    __weak MSIMEInputController *weakSelf = self;
-    _settledTimer = [NSTimer timerWithTimeInterval:kSettledRerankDelay repeats:NO block:^(NSTimer *timer) {
-        (void)timer;
-        MSIMEInputController *controller = weakSelf;
-        if (!controller) return;
-        controller->_settledTimer = nil;
-        if (controller->_settledToken != 0 || controller->_cloudEpoch != epoch || controller->_session != session ||
-            controller->_activeClient != client || controller->_focusPending ||
-            controller->_appearance.englishMode) return;
-        NSDictionary *started = [session startSettledRerankWithError:nil];
-        if ([started[@"status"] isEqual:@"pending"]) {
-            uint64_t token = 0;
-            if (!MSIMEStrictUnsignedInteger(started[@"token"], &token) || token == 0) return;
-            controller->_settledToken = token;
-            controller->_settledPollEpoch = epoch;
-            controller->_settledPollSession = session;
-            controller->_settledPollClient = client;
-            [controller armSettledPoll];
-            return;
-        }
-        // Same shape the cloud path applies — a transition carrying the refreshed view — so it
-        // goes through the same method rather than a second way of updating the window.
-        if (MSIMEStrictBoolean(started[@"moved"])) [controller apply:started];
-    }];
-    [NSRunLoop.mainRunLoop addTimer:_settledTimer forMode:NSRunLoopCommonModes];
 }
 
 - (void)synchronizeCloudCandidates {
@@ -4692,8 +4484,6 @@ static const NSTimeInterval kSettledRerankPoll = 1.0 / 60.0;
         traditionalChineseOutputEnabled:_appearance.traditionalOutput];
 }
 - (void)appearanceChanged:(NSNotification *)notification {
-    NSDictionary *outputView = [_session setMultilingualOutput:_appearance.traditionalOutput error:nil];
-    if (outputView) _view = outputView;
     _expandedViewportHeight = 0;
     _expandedGridGeometry.reset();
     _preferenceLoadState.reset(); // Local edits invalidate older disk reads.
@@ -5875,7 +5665,6 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     [self stopCandidateFrameAnimation];
     [MSIMEInputSessionRecoveryPanel dismissForDelegate:self];
     [self stopEditableShiftMouseMonitoring];
-    [self stopSettledScoring];
     [self stopNeuralV2Activity];
     [_capsLockTapTimer invalidate];
     [[NSNotificationCenter defaultCenter] removeObserver:self];
@@ -7321,7 +7110,6 @@ static NSString *MSIMEVoiceArchiveFailureReason(MSIMEVoiceFailure failure, NSStr
         if (!finished) return;
         [self apply:finished];
         [_session setFocused:NO error:nil];
-        [self stopSettledScoring];
         [self stopNeuralV2Activity];
         [_session closeWithError:nil];
         _session = nil;
@@ -7420,7 +7208,6 @@ static constexpr NSUInteger MSIMEIdleDictionarySessionLimit = 4;
     _resumeDedicatedEnglish = !_managedEnglishComposition && MSIMEStrictBoolean(_view[@"dedicated_english"]);
     _managedEnglishComposition = NO;
     [_session setFocused:NO error:nil];
-    [self stopSettledScoring];
     [self stopNeuralV2Activity];
     _neuralV2Enabled = NO;
     [_session closeWithError:nil];
@@ -7476,7 +7263,6 @@ static constexpr NSUInteger MSIMEIdleDictionarySessionLimit = 4;
     _preferenceLoadState.reset();
     [[NSNotificationCenter defaultCenter] removeObserver:self name:MSIMEClientSessionDidReplaceSnapshotNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(snapshotSessionReplaced:) name:MSIMEClientSessionDidReplaceSnapshotNotification object:nil];
-    MSIMESetBackendSelectionObservation([NSNotificationCenter defaultCenter], self, @selector(handwritingCandidateSelected:), YES);
     [self refreshFloatingToolbarState];
     [self ensureAppearance];
     _focusPending = _appearance.englishMode;
@@ -7608,17 +7394,6 @@ static NSString *const MSIMECloudConsentMessage =
         [shared performSelector:@selector(showEmojiDeliveryFailure)];
 }
 
-- (void)handwritingCandidateSelected:(NSNotification *)notification {
-    NSString *text = notification.userInfo[@"text"];
-    if (![text isKindOfClass:NSString.class] || text.length == 0 || !_activeClient) return;
-    [self invalidateSmartPunctuationShadow];
-    @try {
-        [_activeClient insertText:text replacementRange:NSMakeRange(NSNotFound, 0)];
-        MSIMERecordTypingStatistics(_preferencesDirectory ?: [self runtimeOptions][@"preferences_directory"],
-                                    text, msime::mac::TypingSource::Handwriting);
-    } @catch (NSException *) { /* Never log input or client exception details. */ }
-}
-
 // 背景音乐在本进程某个控制器是当前输入法时播放。IMK 不保证上一个客户端的 deactivateServer: 先于下一个的 activateServer:，所以只有最后让音乐响起的控制器能停它。生命周期核心按会话记着真正的所有者，这里只决定哪个控制器在偏好更新、会话新建或重建之后重新报告激活。声明在 snapshotSessionReplaced: 和 prepareSession 之前，它们也读它。
 static __weak MSIMEInputController *MSIMEMusicOwner;
 
@@ -7654,21 +7429,16 @@ static __weak MSIMEInputController *MSIMEMusicOwner;
 // built inside prepareSession, where a test would have to stand up a whole Engine to see it.
 //
 // soundPacks is the bundle's built-in sound-pack directory, or nil when the bundle has none. The host library otherwise looks for it beside `resources`, and here that is EngineResources in Application Support, not in the bundle.
-static NSDictionary *MSIMESessionOptions(NSDictionary *runtimeOptions, NSString *soundPacks,
-                                        NSString *helpcodeResources = nil) {
+static NSDictionary *MSIMESessionOptions(NSDictionary *runtimeOptions, NSString *soundPacks) {
     if (![runtimeOptions isKindOfClass:NSDictionary.class]) return nil;
     NSMutableDictionary *requested = [runtimeOptions mutableCopy];
     // This host draws view.phrase_prefix, so a phrase being assembled out of several selections
     // stays in the composition instead of arriving in the document one piece at a time.
     requested[@"phrase_preedit"] = @YES;
-    requested[@"korean_romaja"] = @YES;
     // macOS 让快捷短语编码参与普通候选；其他宿主仍保留显式 K 模式入口。这是临时宿主能力，不写入偏好。
     requested[@"quick_phrase_candidates"] = @YES;
     // An options file that names a directory itself keeps it.
     if (soundPacks.length && !requested[@"sound_packs"]) requested[@"sound_packs"] = soundPacks;
-    // 旧目录或在线更新代次可能没有内置码表，当前输入法包提供只读回退，不改写磁盘配置。
-    if (helpcodeResources.isAbsolutePath && !requested[@"helpcode_fallback_resources"])
-        requested[@"helpcode_fallback_resources"] = helpcodeResources;
     return requested;
 }
 
@@ -7807,8 +7577,7 @@ static NSString *MSIMESessionUnavailableReason(NSDictionary *options, NSError *e
         NSDictionary *options = nil;
         NSError *sessionError = nil;
         for (NSUInteger attempt = 0; attempt < 2; ++attempt) {
-            options = MSIMESessionOptions([self runtimeOptions], MSIMEBundleSoundPacks(NSBundle.mainBundle),
-                                         NSBundle.mainBundle.resourcePath);
+            options = MSIMESessionOptions([self runtimeOptions], MSIMEBundleSoundPacks(NSBundle.mainBundle));
             // 词库维护持有租约时保持等待，不能用回收重试绕过它。
             if (options && MSIMEDictionaryQuiesced(options)) {
                 if (!_preferencesTimer) [self startPreferencesMonitoring];
@@ -8227,7 +7996,6 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     [self discardExpandedCandidates];
     [self resetModifierTap];
     [self abandonCapsLockTap];
-    MSIMESetBackendSelectionObservation([NSNotificationCenter defaultCenter], self, @selector(handwritingCandidateSelected:), NO);
     _preferenceLoadState.reset();
     // A focus-out is the reference's ClientSuspended, which never changes floating-toolbar visibility: the toolbar keeps this controller as its owner and stays on screen until the next activateServer: hands it on or the user selects another input source.
     [_keymapPanel orderOut:nil];
@@ -9250,19 +9018,6 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         if (transition) { [self apply:transition]; return YES; }
         return YES;
     }
-    // Option+Return opens the scheme's candidate list (the Hanja of the composing Korean syllable, the Zhuyin list), the key the system's Korean input method uses, and closes the list again while it is open. It is decided before the rule below, which would finish the syllable and hand the chord to the application as a line break. While a syllable composes the chord stays the input method's whatever the Engine answers: a lone jamo has no Hanja, and passing the chord on would write the jamo out and break the line. With nothing composing it is the application's as before. A repeat is swallowed so that holding the chord does not flicker the list open and shut.
-    if (MSIMECandidateListTrigger(event, _view)) {
-        if (event.isARepeat) return YES;
-        NSDictionary *transition = [_session command:MSIME_OPEN_CANDIDATE_LIST error:nil];
-        if (transition) [self apply:transition];
-        return YES;
-    }
-    // Down opens a closed Zhuyin list (MSIMECandidateListDownKey). It is decided before the arrow navigation below, which with its binding off would finish the conversion and hand the key to the application.
-    if (MSIMECandidateListDownKey(event, _view)) {
-        NSDictionary *transition = [_session command:MSIME_OPEN_CANDIDATE_LIST error:nil];
-        if (transition) [self apply:transition];
-        return YES;
-    }
     if (event.modifierFlags & (NSEventModifierFlagCommand | NSEventModifierFlagControl | NSEventModifierFlagOption)) {
         [self apply:[_session command:MSIME_FINISH_COMPOSITION error:nil]];
         return NO;
@@ -9464,9 +9219,6 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
             return YES;
         }
     }
-    // Japanese converts with Space and commits with Enter; every other scheme keeps the mapping
-    // below. See handleJapaneseConversionKey: for why the two keys cannot be the shared ones.
-    if ([self handleJapaneseConversionKey:event client:sender]) return YES;
     // 中文方案把 Shift+[ / Shift+] 的大括号映射成「」，和引号键的样式并存。
     // 注音自己使用这两个键，独立英文和本地模式也保留引擎的原始规则。
     if (([event.characters isEqualToString:@"{"] || [event.characters isEqualToString:@"}"]) &&
@@ -10018,7 +9770,6 @@ static NSRange MSIMEVoiceReplacementRangeForClient(id client, BOOL replaceSelect
         _serviceSnapshotView = nil;
     }
     [self synchronizeCloudCandidates];
-    [self scheduleSettledRerank];
     [self synchronizeCandidateGloss];
     [self synchronizeTargetGloss];
     [self synchronizeOnDeviceGloss];
@@ -12162,16 +11913,6 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     ApplyMetasequoiaMenuTheme(menu, [self resolvedMenuThemePreferences]);
     // 置顶只记在 Engine 里（`pinned_candidates`），宿主没有自己的一份可查，和 Linux 一样始终是「置顶」。
     [menu addItem:item(@"置顶", 0)];
-    NSMenuItem *fixed = [[NSMenuItem alloc] initWithTitle:@"固定排位" action:nil keyEquivalent:@""];
-    NSMenu *positions = [[NSMenu alloc] initWithTitle:@"固定排位"];
-    positions.autoenablesItems = NO;
-    ApplyMetasequoiaMenuTheme(positions, [self resolvedMenuThemePreferences]);
-    for (NSInteger position = 1; position <= 5; ++position)
-        [positions addItem:item([NSString stringWithFormat:@"第 %ld 位", (long)position], 10 + position)];
-    [positions addItem:NSMenuItem.separatorItem];
-    [positions addItem:item(@"取消固定", 2)];
-    fixed.submenu = positions;
-    [menu addItem:fixed];
     // Windows hides deletion for one Unicode scalar, including supplementary Han.
     if ([text isKindOfClass:NSString.class] && [text lengthOfBytesUsingEncoding:NSUTF32LittleEndianStringEncoding] / 4 > 1) {
         NSMenuItem *remove = item(@"删除", 1);
@@ -12195,8 +11936,8 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
     if (!MSIMECurrentCandidateIdentity(identifier, _view)) return;
     uint64_t generation = 0; NSUInteger index = 0;
     if (!MSIMEStrictUnsignedInteger(identifier[@"generation"], &generation) || !MSIMEStrictUnsignedIntegerValue(identifier[@"index"], &index)) return;
-    // 菜单项只有置顶、删除、清除位置（0-2）和固定位置（11-15），别的标签不派发，也就不报告。
-    if ((item.tag < 0 || item.tag > 2) && (item.tag < 11 || item.tag > 15)) return;
+    // 菜单项只有置顶与删除（0-1），其余标签不派发，也就不报告。
+    if (item.tag != 0 && item.tag != 1) return;
     // 候选右键菜单的这几项都是指针操作引起的派发，和点选候选一样先开一轮，见 msime_client.h 的顺序契约。
     [self reportPointerToLifecycle];
     if ([self usesPresentedCandidatePages]) {
@@ -12205,14 +11946,9 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
         generation = [identifier[@"generation"] unsignedLongLongValue];
     }
     NSError *error = nil;
-    NSDictionary *result = nil;
-    switch (item.tag) {
-        case 0: result = [_session pinGeneration:generation index:index error:&error]; break;
-        case 1: result = [_session removeGeneration:generation index:index error:&error]; break;
-        case 2: result = [_session clearPositionGeneration:generation index:index error:&error]; break;
-        default:
-            result = [_session fixGeneration:generation index:index position:(uint8_t)(item.tag - 10) error:&error];
-    }
+    NSDictionary *result = item.tag == 0
+        ? [_session pinGeneration:generation index:index error:&error]
+        : [_session removeGeneration:generation index:index error:&error];
     if (result) [self apply:result];
     else if (error) NSBeep();
 }

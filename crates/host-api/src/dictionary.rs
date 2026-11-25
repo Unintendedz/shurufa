@@ -26,36 +26,6 @@ enum Kind {
     Wubi98,
 }
 
-/// 浏览类型独立于个人词库类型，资源词条不能流入编辑、导入或云同步协议。
-#[derive(Clone, Copy, Deserialize, Serialize)]
-#[serde(untagged)]
-enum LookupKind {
-    Personal(Kind),
-    Resource(ResourceKind),
-}
-
-#[derive(Clone, Copy, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum ResourceKind {
-    Japanese,
-    Cantonese,
-    Zhuyin,
-    Stroke,
-    KoreanHanja,
-}
-
-impl From<ResourceKind> for msime_engine::host::dictionary_lookup::ResourceDictionaryKind {
-    fn from(kind: ResourceKind) -> Self {
-        match kind {
-            ResourceKind::Japanese => Self::Japanese,
-            ResourceKind::Cantonese => Self::Cantonese,
-            ResourceKind::Zhuyin => Self::Zhuyin,
-            ResourceKind::Stroke => Self::Stroke,
-            ResourceKind::KoreanHanja => Self::KoreanHanja,
-        }
-    }
-}
-
 /// Where a listed row comes from. A bundled row shipped with the dictionary (or was learned from typing rather than added): its code and word are fixed, so it can only be given another weight or deleted.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -183,9 +153,9 @@ impl TryFrom<DictionaryEntry> for Entry {
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum Operation {
-    /// 浏览个人词库与语言资源；空查询也包含内置词条，不改变旧 `list` 的个人导出语义。
+    /// 浏览个人词库；空查询也包含内置词条，不改变旧 `list` 的个人导出语义。
     Browse {
-        kind: LookupKind,
+        kind: Kind,
         #[serde(default)]
         query: String,
         offset: usize,
@@ -280,32 +250,6 @@ enum Operation {
     QueueHabitsMerge {
         source: String,
     },
-    /// 五笔查码，只读：`text` 里每个不同汉字（以及整段作为一个词）在 86 和 98 码表里的编码（[`wubi_codes_json`]）。
-    WubiCodes {
-        text: String,
-    },
-}
-
-/// 五笔查码一次接受的文字上限（字节）。查码只列出前 `MAX_WUBI_LOOKUP_CHARACTERS` 个不同汉字，更长的粘贴没有意义。
-const MAX_WUBI_LOOKUP_TEXT: usize = 4096;
-
-/// `wubi_codes` 的回答：`{phrase, characters, truncated}`，`phrase` 和每个字都是 `{text, wubi86, wubi98}`，编码短码在前。
-///
-/// 只读五笔码表（会话用的同一份），不拿词库的维护租约：码表由 SQLite 只读打开，维护进行时读到的是替换前或替换后的完整文件，而一次查码不该让维护等它，也不该在 Android 设置进程里因为键盘进程持有维护而失败。移动端的个人词库队列也直接回答它，因为它不改任何东西。
-fn wubi_codes_json(
-    options: &msime_engine::host::EngineOptions,
-    text: &str,
-) -> Result<serde_json::Value, String> {
-    if text.len() > MAX_WUBI_LOOKUP_TEXT {
-        return Err("invalid wubi lookup".into());
-    }
-    let lookup = msime_engine::host::wubi_code_lookup(options, text);
-    let item = |codes: &msime_engine::host::WubiTextCodes| json!({ "text": codes.text, "wubi86": codes.wubi86, "wubi98": codes.wubi98 });
-    Ok(json!({
-        "phrase": lookup.phrase.as_ref().map(item),
-        "characters": lookup.characters.iter().map(item).collect::<Vec<_>>(),
-        "truncated": lookup.truncated,
-    }))
 }
 
 #[derive(Deserialize)]
@@ -811,36 +755,9 @@ pub fn dictionary_request_json(bytes: &[u8]) -> Result<serde_json::Value, String
             )
             .map_err(|_| "dictionary access unavailable")?
             .ok_or("dictionary maintenance busy")?;
-            match kind {
-                LookupKind::Personal(kind) => {
-                    let (entries, has_more) =
-                        table_entries_page(&options, kind, query.trim(), offset, limit)?;
-                    Ok(json!({ "entries": entries, "has_more": has_more, "available": true }))
-                }
-                LookupKind::Resource(resource) => {
-                    let page = msime_engine::host::dictionary_lookup::dictionary_resource_entries(
-                        &options,
-                        resource.into(),
-                        &query,
-                        offset,
-                        limit,
-                    )
-                    .map_err(|_| "dictionary read rejected")?;
-                    let entries: Vec<_> = page
-                        .entries
-                        .into_iter()
-                        .map(|row| {
-                            json!({
-                                "kind": kind, "key": row.key, "value": row.value,
-                                "weight": row.weight, "source": "bundled",
-                            })
-                        })
-                        .collect();
-                    Ok(
-                        json!({ "entries": entries, "has_more": page.has_more, "available": page.available }),
-                    )
-                }
-            }
+            let (entries, has_more) =
+                table_entries_page(&options, kind, query.trim(), offset, limit)?;
+            Ok(json!({ "entries": entries, "has_more": has_more, "available": true }))
         }
         Operation::Updates { .. } => Err("dictionary_update_invalid".into()),
         Operation::List {
@@ -1140,7 +1057,6 @@ pub fn dictionary_request_json(bytes: &[u8]) -> Result<serde_json::Value, String
             )
             .map_err(str::to_owned)
         }
-        Operation::WubiCodes { text } => wubi_codes_json(&options, &text),
     }
 }
 
@@ -1407,10 +1323,6 @@ pub fn personal_dictionary_request_json(bytes: &[u8]) -> Result<serde_json::Valu
             let state = store.read().map_err(personal_dictionary_error)?;
             Ok(json!({ "pending_count": state.pending_count() }))
         }
-        // 查码只读五笔码表，不经过个人词库队列：Android 的设置页把所有词库操作都送到这里，而这一个不必等键盘空闲。
-        Operation::WubiCodes { text } => {
-            wubi_codes_json(&request.options.clone().into_engine_options(), &text)
-        }
     }
 }
 
@@ -1588,9 +1500,7 @@ pub fn personal_dictionary_sync_json(bytes: &[u8]) -> Result<serde_json::Value, 
                         previous: entries[*index].0.as_ref(),
                         replacement: entries[*index].1.as_ref(),
                         request_id: &requests[*index].id,
-                        preserve_existing: requests[*index]
-                            .id
-                            .starts_with(COLLECTION_REQUEST_PREFIX),
+                        preserve_existing: false,
                     })
                     .collect();
                 let applied = msime_engine::host::dictionary_edit_batch(&options, &edits)
@@ -1648,134 +1558,6 @@ pub fn personal_dictionary_sync_json(bytes: &[u8]) -> Result<serde_json::Value, 
         "failed_count": state.requests.iter().filter(|request| request.status == PersonalWordRequestStatus::Failed).count(),
         "snapshot_error": state.snapshot_error,
     }))
-}
-
-/// `msime_client_services::dictionary::collections` 给它排队的请求所加的 id 前缀。
-const COLLECTION_REQUEST_PREFIX: &str = "collections-";
-
-/// 同一有界调用内复用集合状态；个人同步每批独立取得并释放维护租约。
-pub(crate) fn synchronize_collections_with_budget(
-    options: &HostOptions,
-    budget: std::time::Duration,
-) -> Result<serde_json::Value, String> {
-    let directory = options
-        .preferences_directory
-        .as_deref()
-        .filter(|path| Path::new(path).is_absolute())
-        .ok_or("personal dictionary shared directory unavailable")?;
-    let personal = PersonalDictionaryStore::new(Path::new(directory).join("PersonalDictionary"));
-    let collections =
-        msime_client_services::dictionary::collections::DictionaryCollectionsStore::new(
-            directory,
-            PersonalDictionaryStore::new(Path::new(directory).join("PersonalDictionary")),
-        );
-    let started = std::time::Instant::now();
-    let mut flushing = collections
-        .begin_flush()
-        .map_err(|error| error.code().to_owned())?;
-    let bytes = serde_json::to_vec(options).map_err(|_| "invalid dictionary request")?;
-    let engine_options = options.clone().into_engine_options();
-    let mut previous = usize::MAX;
-    loop {
-        // 先成功申请维护租约并应用个人队列，繁忙时不得提前推进集合待发项。
-        let mut synchronized = personal_dictionary_sync_json(&bytes)?;
-        let access = DictionaryAccess::try_maintenance(
-            Path::new(&engine_options.user_data),
-            Path::new(&engine_options.dictionaries),
-        )
-        .map_err(|_| "dictionary access unavailable")?
-        .ok_or("dictionary maintenance busy")?;
-        let view = if budget.is_zero() {
-            flushing.flush()
-        } else {
-            flushing
-                .flush_with_engine(|edits| apply_collection_engine_batch(&engine_options, edits))
-        }
-        .map_err(|error| error.code().to_owned())?;
-        drop(access);
-        let state = personal.read().map_err(personal_dictionary_error)?;
-        let pending = state.pending_count().saturating_add(view.outbox_pending);
-        let sent = view.sent.unwrap_or(0);
-        synchronized["pending_count"] = json!(pending);
-        synchronized["failed_count"] = json!(state
-            .requests
-            .iter()
-            .filter(|request| request.status == PersonalWordRequestStatus::Failed)
-            .count());
-        synchronized["sent"] = json!(sent);
-        if pending == 0 || started.elapsed() >= budget || (sent == 0 && pending >= previous) {
-            return Ok(synchronized);
-        }
-        previous = pending;
-    }
-}
-
-fn apply_collection_engine_batch(
-    options: &msime_engine::host::EngineOptions,
-    edits: &[msime_client_services::dictionary::collections::CollectionEdit],
-) -> Result<
-    Vec<Result<msime_client_services::dictionary::collections::CollectionEditApplied, String>>,
-    String,
-> {
-    use msime_client_services::dictionary::collections::CollectionEditApplied;
-
-    let entries: Vec<_> = edits
-        .iter()
-        .map(|edit| {
-            (
-                edit.previous.as_ref().map(personal_engine_entry),
-                edit.replacement.as_ref().map(personal_engine_entry),
-            )
-        })
-        .collect();
-    let mut outcomes = vec![None; edits.len()];
-    let mut indexes = Vec::new();
-    for (index, edit) in edits.iter().enumerate() {
-        let (previous, replacement) = &entries[index];
-        if let Err(error) = crate::validate_personal_dictionary_edit(
-            options,
-            previous.as_ref(),
-            replacement.as_ref(),
-            &edit.request_id,
-        ) {
-            outcomes[index] = Some(Err(error));
-        } else {
-            indexes.push(index);
-        }
-    }
-    let engine_edits: Vec<_> = indexes
-        .iter()
-        .map(|index| msime_engine::host::DictionaryEdit {
-            previous: entries[*index].0.as_ref(),
-            replacement: entries[*index].1.as_ref(),
-            request_id: &edits[*index].request_id,
-            preserve_existing: true,
-        })
-        .collect();
-    let applied = if engine_edits.is_empty() {
-        Vec::new()
-    } else {
-        msime_engine::host::dictionary_edit_collection_batch(options, &engine_edits)
-            .map_err(|_| "dictionary batch was not committed".to_owned())?
-    };
-    for (index, result) in indexes.into_iter().zip(applied) {
-        outcomes[index] = Some(
-            result
-                .map(|outcome| match outcome {
-                    msime_engine::host::DictionaryApplied::Written => {
-                        CollectionEditApplied::Written
-                    }
-                    msime_engine::host::DictionaryApplied::AlreadyPresent => {
-                        CollectionEditApplied::AlreadyPresent
-                    }
-                })
-                .map_err(|_| "dictionary edit rejected".to_owned()),
-        );
-    }
-    outcomes
-        .into_iter()
-        .map(|outcome| outcome.ok_or_else(|| "dictionary batch result missing".to_owned()))
-        .collect()
 }
 
 /// JNI entry point for the Android IME worker.
@@ -2706,12 +2488,9 @@ pub fn lookup_candidates(
     options.local_kaomoji = false;
     options.local_super_jianpin = false;
     options.local_temporary_english = false;
-    options.local_temporary_japanese = false;
     options.local_expression = false;
     options.local_command = false;
     options.local_mention = false;
-    options.local_chaizi = false;
-    // 日文混输照用户的设置留着：它不学习、不改用户数据，查询看到的就是用户打这串键时看到的那一行日文（`msime expand ohayou`）。
     let _access = DictionaryAccess::try_session(
         Path::new(&options.user_data),
         Path::new(&options.dictionaries),
@@ -2724,41 +2503,21 @@ pub fn lookup_candidates(
         msime_input_runtime::Runtime::new(session, 9).map_err(|error| error.to_string())?;
     // An unfocused runtime drops every keystroke.
     runtime.focus(true).map_err(|error| error.to_string())?;
-    // 五笔四码唯一时，第四键直接上屏（`input-runtime` 的自动上屏），之后候选列表是空的。这时上屏的那个词就是这串编码给出的唯一候选，要照样报告。`committed` 只留最后一键的上屏，连同它的编码从哪一键开始。
-    let mut committed = None;
-    let mut start = 0;
-    for (index, value) in code.bytes().enumerate() {
-        let transition = runtime
+    for value in code.bytes() {
+        runtime
             .dispatch(msime_input_runtime::Action::Character {
                 value,
                 shift: false,
             })
             .map_err(|error| error.to_string())?;
-        committed = transition
-            .commit
-            .map(|text| (code[start..].to_owned(), text));
-        if committed.is_some() {
-            start = index + 1;
-        }
     }
-    // The Engine reports a user's word as a dictionary one, so each is looked up as the row it came from.
-    let word_kind = if options.scheme == 2 && options.wubi_profile == 1 {
-        WordKind::Wubi98
-    } else if options.scheme == 2 {
-        WordKind::Wubi
-    } else {
-        WordKind::Pinyin
-    };
-    let mut candidates: Vec<(String, String, u8)> = runtime
+    let word_kind = WordKind::Pinyin;
+    let candidates: Vec<(String, String, u8)> = runtime
         .all_candidates()
         .candidates
         .into_iter()
         .map(|candidate| (candidate.text, candidate.code, candidate.source))
         .collect();
-    if candidates.is_empty() {
-        // 自动上屏的只会是五笔词条，按词库候选（source 0）去查它的来源。
-        candidates.extend(committed.map(|(code, text)| (text, code, 0)));
-    }
     candidates
         .into_iter()
         .take(limit)
@@ -2784,7 +2543,6 @@ pub fn lookup_candidates(
                 7 => (CandidateOrigin::Kaomoji, None),
                 8 => (CandidateOrigin::Generated, None),
                 9 => (CandidateOrigin::Fallback, None),
-                13 => (CandidateOrigin::Japanese, None),
                 // Cloud (2) and AI (3) suggestions come only from providers this session never has; one here means the lookup is no longer local.
                 _ => return Err("the lookup produced a candidate that is not local".to_owned()),
             };

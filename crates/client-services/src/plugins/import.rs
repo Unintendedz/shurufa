@@ -10,10 +10,7 @@ use std::path::{Component, Path};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
-use super::{
-    is_builtin, kind_directory, load_directory, PluginError, PluginSummary, MAX_PACK_FILES,
-    UNKNOWN_KIND,
-};
+use super::{is_builtin, kind_directory, load_directory, PluginError, PluginSummary, MAX_PACK_FILES};
 use crate::storage::StagingDirectory as Staging;
 
 /// Serializes every write to the plugins root in this process. The file lock below does the same across processes (the settings window and an input process both install and remove packs), but a lock on a file is not something every platform promises to hold between two threads of one process.
@@ -59,35 +56,10 @@ const MAX_TOTAL_BYTES: u64 = super::music_pack::MAX_PACK_BYTES + 2 * 1024 * 1024
 ///
 /// Names starting with a dot (`.DS_Store`, `.git`) and a zip's `__MACOSX` folder are left behind, as the file managers that add them intend; anything else the pack may not contain - a subdirectory, a symbolic link, a file its manifest does not account for - refuses the whole import.
 pub fn import(source: &Path, root: &Path) -> Result<PluginSummary, PluginError> {
-    import_inner(source, root, true)
-}
-
-/// 有脚本插件授权页的设置宿主用的 `import`：桌面外壳的设置页（macOS、Linux），以及经 `msime_client_plugins` 声明了 `script_page` 的 Windows 原生设置应用。三个桌面平台的 release 构建都运行脚本（与 host-api 的 `msime_client_scripts_enable` 一致），所以接受脚本包，导入后要在授权页上授权才会运行。移动端没有 `script` 这个类型，清单解析时就拒绝。
-pub fn import_from_settings(source: &Path, root: &Path) -> Result<PluginSummary, PluginError> {
-    import_inner(source, root, true)
-}
-
-/// 没有授权页的设置宿主（`msime_client_plugins` 不带 `script_page`：Android、HarmonyOS）用的 `import`。它们的目录命令不列出脚本插件，所以 release 构建在安装之前拒绝脚本包，用的是移动端遇到 `script` 时同一条"kind 不是已知的插件类型"；开发构建照旧接受。
-pub fn import_without_script_page(
-    source: &Path,
-    root: &Path,
-) -> Result<PluginSummary, PluginError> {
-    import_inner(source, root, cfg!(debug_assertions))
-}
-
-/// `import`, refusing a script pack before anything is installed or any grant is written when `allow_scripts` is false.
-pub(super) fn import_inner(
-    source: &Path,
-    root: &Path,
-    allow_scripts: bool,
-) -> Result<PluginSummary, PluginError> {
     let archive = is_archive(source)?;
-    install_staged(
-        root,
-        allow_scripts,
-        Existing::Replace,
-        |staging, staging_directory| stage(source, archive, staging, staging_directory),
-    )
+    install_staged(root, Existing::Replace, |staging, staging_directory| {
+        stage(source, archive, staging, staging_directory)
+    })
 }
 
 /// 已经装着同类型、同 id 的包时怎么办。
@@ -102,7 +74,6 @@ pub(super) enum Existing {
 /// 导入和设置页编辑器共用的安装流程：拿插件根目录的写锁、清扫残留、建暂存目录，由 `fill` 往暂存目录里放文件（`fill` 在锁里运行，可以按插件根目录现在的样子决定写什么），再按 `scan` 的规则检查暂存的包，最后整包换进 `<root>/<kind>/<id>`。
 pub(super) fn install_staged(
     root: &Path,
-    allow_scripts: bool,
     existing: Existing,
     fill: impl FnOnce(&Path, Option<&File>) -> Result<(), PluginError>,
 ) -> Result<PluginSummary, PluginError> {
@@ -120,9 +91,6 @@ pub(super) fn install_staged(
     fill(&staging.path, staging_directory.as_ref())?;
     let mut summary = check_staged(&staging.path, ReservedIds::Refuse)?;
     let kind = summary.kind();
-    if !allow_scripts && kind.is_script() {
-        return Err(PluginError::Invalid(UNKNOWN_KIND.into()));
-    }
     let directory = kind_directory(root, kind);
     if !crate::storage::create_directory_and_check(&directory).map_err(|_| PluginError::Storage)? {
         return Err(PluginError::Storage);
@@ -136,23 +104,6 @@ pub(super) fn install_staged(
     // A stray file or link where the pack goes is not a pack anyone could have chosen; it is replaced like one.
     if fs::symlink_metadata(&target).is_ok_and(|metadata| !metadata.is_dir()) {
         crate::storage::remove_private_file(&target)?;
-    }
-    // 脚本包的授权绑定在内容哈希上：在同一把锁里、替换包目录之前更新它的条目。先改授权再换包，写授权失败时包还是旧的，替换失败时授权已经收紧，两头都不会让授权落到另一份内容上。
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "windows",
-        all(target_os = "linux", not(target_env = "ohos"))
-    ))]
-    if let super::PluginContent::Script(pack) = &summary.content {
-        let replaces_installed =
-            fs::symlink_metadata(&target).is_ok_and(|metadata| metadata.is_dir());
-        super::script_grants::installing(
-            root,
-            &_writes,
-            &summary.id,
-            &pack.content_hash,
-            replaces_installed,
-        )?;
     }
     // Named uniquely, so a backup a crashed import left behind, too young yet for the sweep, cannot stand in the way of this one.
     let backup = directory.join(format!(
@@ -188,51 +139,6 @@ pub fn validate_with(source: &Path, reserved: ReservedIds) -> Result<PluginSumma
     let mut summary = check_staged(staging.path(), reserved)?;
     summary.directory = source.to_path_buf();
     Ok(summary)
-}
-
-/// 按 [`validate_with`] 的规则暂存并检查 `source`（文件夹或 `.zip`），再从同一份暂存里读出脚本包的模块，交给调用方编译。只给 `msime-pack run` 和 `msime-pack hash` 用：它们处理的必须是 `validate` 接受的那个包，压缩包也一样。不是脚本包时返回 `plugin_invalid`。
-#[cfg(any(
-    target_os = "macos",
-    target_os = "windows",
-    all(target_os = "linux", not(target_env = "ohos"))
-))]
-pub fn load_script_source(
-    source: &Path,
-    reserved: ReservedIds,
-) -> Result<super::script_pack::LoadedScript, PluginError> {
-    let archive = is_archive(source)?;
-    let staging = tempfile::Builder::new().prefix("msime-pack-").tempdir()?;
-    stage(source, archive, staging.path(), None)?;
-    let summary = check_staged(staging.path(), reserved)?;
-    if !summary.kind().is_script() {
-        return Err(PluginError::Invalid(format!(
-            "这是 {} 插件，只有脚本插件（kind = \"script\"）能运行",
-            summary.kind().as_str()
-        )));
-    }
-    let summary = super::load_directory_with(staging.path(), super::DataFiles::Module)
-        .map_err(PluginError::Invalid)?;
-    let super::PluginContent::Script(mut pack) = summary.content else {
-        return Err(PluginError::Invalid("不是脚本插件".into()));
-    };
-    let wasm = pack
-        .module_bytes
-        .take()
-        .ok_or_else(|| PluginError::Invalid(format!("{} 无法读取或太大", pack.module)))?
-        .0;
-    let data = pack
-        .data_contents
-        .take()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|bytes| bytes.0)
-        .collect();
-    Ok(super::script_pack::LoadedScript {
-        id: summary.id,
-        pack,
-        wasm,
-        data,
-    })
 }
 
 /// Whether `source` is a `.zip` file (true) or a folder (false); anything else is not a pack source.

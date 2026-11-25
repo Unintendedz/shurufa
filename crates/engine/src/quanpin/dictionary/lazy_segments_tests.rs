@@ -377,7 +377,7 @@ impl QuanpinDictionary {
         }
         let segments = self.resolve_segments(raw, segmentation);
         let association = self.sentence_association.clone();
-        let has_rerankers = !self.rerankers.is_empty();
+        let has_rerankers = false;
         let context = &self.rescoring_context;
         let (resolution_hash, (resolution, pinyin_segmentation, marking_alternatives, slot)) =
             project_cached_resolution(

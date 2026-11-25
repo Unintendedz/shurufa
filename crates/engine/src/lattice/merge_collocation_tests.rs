@@ -8,7 +8,6 @@ fn merge(
     options: &LatticeOptions<'_>,
 ) -> Vec<crate::types::WordItem> {
     let mut candidates = Vec::new();
-    let mut rerankers = Vec::new();
     merge_lattice_candidates(
         &mut candidates,
         &syllables("yi'ming'yi'sheng"),
@@ -16,8 +15,6 @@ fn merge(
         "yi'ming'yi'sheng",
         options,
         None,
-        &mut rerankers,
-        "",
     );
     candidates
 }

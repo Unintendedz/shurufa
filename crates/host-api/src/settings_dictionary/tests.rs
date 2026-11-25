@@ -647,9 +647,6 @@ fn dictionary_mutations_quiesce_but_reads_do_not() {
     assert!(!action_requires_quiesce(
         &serde_json::json!({"operation": "export"})
     ));
-    assert!(!action_requires_quiesce(
-        &serde_json::json!({"operation": "wubi_codes", "text": "你"})
-    ));
 }
 
 /// 桌面的路径：细胞词库转出的文本像任何 `standard` 文件一样分批送给宿主，坏词条的行号就是它在词库里的词序，跨批也不错位。

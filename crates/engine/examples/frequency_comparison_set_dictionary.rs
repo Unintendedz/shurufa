@@ -16,7 +16,6 @@ fn climb(
         temporary.path().join("cache").to_str().unwrap(),
         "frequency-comparison-fixture",
     )?;
-    options.helpcode = false;
     options.mixed_english = false;
     options.learning = true;
     options.frequency_mode = "promote".into();

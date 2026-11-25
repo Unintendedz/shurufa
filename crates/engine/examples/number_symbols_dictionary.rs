@@ -20,16 +20,12 @@ fn verify(
         "number-symbols-probe",
     )?;
     options.learning = false;
-    options.helpcode = false;
     options.mixed_symbols = enabled;
     if label == "xiaohe" {
         options.scheme = 1;
         options.shuangpin_profile = ShuangpinProfileKind::Xiaohe as u8;
     }
     let mut session = Session::new(&options)?;
-    if label == "nine-key" {
-        session.set_nine_key_enabled(true)?;
-    }
     for symbol in symbols {
         for byte in input.bytes() {
             session.character(byte, false)?;
@@ -106,14 +102,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     assert_eq!(numbers, 50);
-    for (label, input, symbols) in [
-        ("xiaohe", "erui", vec!["⑳", "⒇", "⒛"]),
-        ("nine-key", "94", vec!["①", "⑴", "⒈"]),
-    ] {
+    for (label, input, symbols) in [("xiaohe", "erui", vec!["⑳", "⒇", "⒛"])] {
         for enabled in [true, false] {
             verify(resources, temporary.path(), label, input, &symbols, enabled)?;
         }
     }
-    println!("number symbols: 50 names, selection, switch, shuangpin and nine-key passed");
+    println!("number symbols: 50 names, selection, switch and shuangpin passed");
     Ok(())
 }

@@ -7,9 +7,6 @@
 extern "C" {
 #endif
 
-/* 离线单字手写识别，仅工作线程调用；请求 {model:绝对路径,request:{language:"zh-CN",strokes:[{points:[{x,y}]}]}}，坐标在 420×420 内，最多 262144 字节。返回标准封装 {candidates:[文字]}；不联网，Android 使用自己的 ML Kit 入口。 */
-char *msime_client_handwriting(const uint8_t *request, size_t length);
-
 /* Host-neutral focus lease and key event contract. Values are opaque to the ABI. */
 typedef struct msime_client_focus_lease {
   uint64_t client;
@@ -243,7 +240,6 @@ char *msime_client_cloud_dictionary(const uint8_t *request, size_t length);
  * installers ship (<kind>/<id>/ folders: the uuid script plugin, the latex-symbols phrase
  * table); absent means plugin-packs beside the built-in sound packs, and nothing when that
  * directory is not there (mobile, development builds without them).
- * 可选 helpcode_fallback_resources 是随包资源的绝对根目录。仅主资源缺少内置辅助码表时才从这里读取 helpcodes/；已有表、自定义表和插件表继续优先。resources 换成下载的词库代次时，msime_client_prepare_host 自己写这个键；文档没有它时，建会话会从词库更新记录里找随包目录，宿主一般不必设置。宿主自己注入时可仅放在内存配置中，避免旧版宿主读取不认识的持久化键。
  * Do not delete .msime-dictionary-access.lock files. Legacy/external writers do
  * not participate; preparation/upgrades still require stopped sessions.
  */
@@ -382,8 +378,6 @@ char *msime_client_resolve_app_theme(const uint8_t *request, size_t length);
 char *msime_client_shuangpin_key_hints(const uint8_t *profile, size_t length);
 /* The double-pinyin codes of the whole zero-initial syllables for one profile name, as a JSON object mapping each syllable to its two-key code, e.g. {"a":"aa","ang":"ah",...}. Read out of the Engine's own profile tables. An unknown profile name yields an empty object. */
 char *msime_client_shuangpin_zero_initials(const uint8_t *profile, size_t length);
-/* 九键双拼方案在宿主看来的样子。request 是 JSON {"profile": "migala2"|"migala3"|"gushi2_low"|"custom", "table"?: {initials, finals, zero_initials}}，table 是 custom 用的表（与 nine_key_shuangpin_custom_profile 同形，键是数字）。Value 是 {effective, table, problem, keys}：effective 是输入法实际用的方案（custom 的表不能用时是默认的 migala3，与建会话时的回退相同），table 是它的表，problem 是 custom 表的问题（形状同自定义双拼表的问题，只有 unknown_unit、duplicate_unit、missing_unit、invalid_key 四种，能用时为 null），keys 按 1 到 9、0 的顺序列出每个用到的数字键的 {key, initials, finals, zero_initial}，键面从这里取，宿主不另存键位。不留存任何东西，编辑表时每改一格都可以调用。不认识的方案名或多余的字段报错。 */
-char *msime_client_nine_key_shuangpin_layout(const uint8_t *request, size_t length);
 /* 规范化中文触屏快捷符号：{symbols: string[]}，最多 64 KiB。标准响应 value 为去重的单字素列表，最多十二项；无有效项时返回共享默认值。不落盘，用 string_free 释放。 */
 char *msime_client_touch_quick_symbols(const uint8_t *value, size_t length);
 
@@ -444,11 +438,6 @@ int32_t msime_client_typing_statistics_enabled(const uint8_t *directory, size_t 
 char *msime_client_vocabulary_review(const uint8_t *request, size_t length);
 /* Scan an absolute UTF-8 skin root and return the catalog the settings page sees: {packages:[...],issues:[...]}. Reads the directory: use a worker. An unreadable root is an empty catalog; an invalid package becomes an issue and is never returned as renderable. Presenters must still check that a package supports the layout and theme before adopting its colors. Keys are camelCase, the same document the settings page consumes. Besides the colours (drawn through msime_client_resolve_theme, where a palette's translation becomes secondary) a package carries what a presenter draws itself: minWidthDip; cornerRadiusDip (0-32, null keeps the host radius); decorationTopDip, decorationWidthDip and decorationImage (package-relative, null unless decorated) placed by decorationAlign ("left"|"center"|"right"), with decorationMotion ("none"|"float"|"sway"|"breathe"|"bounce", an idle motion of the whole image while the window is on screen), decorationMotionPeriodMs (1200-8000) and decorationFrames (0 without a decoration image, 1 for a still image, the animation frame count of an APNG, GIF or WebP otherwise; a host that cannot play frames draws the first); background null or {image,fit:"cover"|"contain"|"stretch",opacity:0-1}, drawn over the surface and under the candidates, clipped to the card outline; toolbar {cornerRadiusDip|null, light, dark} where each mode is {background,border,handle,divider,icon,hover}, each #RRGGBB, #RRGGBBAA or null for the host's own. A package may also carry notices, non-fatal strings about manifest keys it parsed but does not apply here (canvas-only keys on a non-canvas base, or a canvas package's nine-slice panel and widgets, which no msime host draws); the key is absent when there are none and the package stays usable. Image paths are already confined to the package and are images; read them with msime_client_skin_resource. */
 char *msime_client_skin_catalog(const uint8_t *directory, size_t length);
-/* Scan an absolute Engine resource directory for optional custom helper-code tables. The
- * response value is an array of {schema,file_stem,name,name_en}; missing or unreadable
- * helpcodes/custom is an empty array. Display metadata comes from leading # name: and
- * # name_en: comments, while the Engine remains the owner of table parsing. */
-char *msime_client_helpcode_schemas(const uint8_t *resources, size_t length);
 /* JSON {directory:absolute skin root,id:package folder}. Validates that one package with the same loader as msime_client_skin_catalog and returns one of its camelCase packages entries; an invalid, built-in, symlinked or missing package is {ok:false,error} with the loader's reason. Reads the package: resolve on a skin or appearance change, never while drawing. */
 char *msime_client_skin_package(const uint8_t *request, size_t length);
 
@@ -634,20 +623,6 @@ char *msime_client_voice_capture(uint32_t milliseconds);
  * "windows". Other targets fail with "voice capture devices unavailable". Enumerates through
  * COM: call off the UI thread. Ids and labels may identify the user's hardware: never log them. */
 char *msime_client_voice_capture_devices(void);
-#ifdef _WIN32
-/* 原生语音审阅面板复用 Server 控制协议。create 不录音，返回 {handle:uint64}，至多 32 个活动句柄。
- * recognize 消费句柄一次，在工作线程阻塞到识别结束，返回 {text}；不自动输入或修改剪贴板。
- * language 为 1..64 字节 ASCII 语言标签。progress 可空，非空时在调用线程借用 UTF-8 JSON
- * {phase:connecting|recording|recognizing|processing|complete|cancelled|failed,level:0..1,text?:string}。
- * 回调不能展开异常，可重入 control；不保留其借用缓冲区，也不记录或落盘音频／文本。
- * control 可从任何线程调用：0 请求结束录音，1 取消，2 关闭并取消；关闭后句柄永不复用。
- * 执行中的调用继续持有自己的取消信号；宿主关闭窗口时先 control(2)，再等待 recognize 返回。
- * 完成／失败不隐式关闭句柄，调用方必须 control(2)。所有返回字符串用 string_free 释放。 */
-char *msime_client_windows_voice_session_create(void);
-char *msime_client_windows_voice_session_control(uint64_t handle, uint32_t operation);
-char *msime_client_windows_voice_session_recognize(uint64_t handle, const uint8_t *language, size_t length,
-    void (*progress)(const uint8_t *, size_t, void *), void *context);
-#endif
 char *msime_client_voice_apply(uint64_t session, uint64_t generation,
                                const uint8_t *text, size_t length);
 /* On-device speech models and user-dictionary hotwords. JSON request buffers of length bytes; standard responses. Error text of the model calls is a stable code beginning with "local_model_".
@@ -875,22 +850,8 @@ char *msime_client_english_completions_request(const uint8_t *request,
 // Live per-session mode, not a persisted preference. Preserves composition and
 // candidate generation; remains authoritative across preference replacement.
 char *msime_client_set_chinese_punctuation(uint64_t session, bool enabled);
-/* 即时设置来源 18 混合候选的中文片段输出，保留组字与候选身份；返回最新 View。
- * 不落盘，变体沿用最新共享偏好；后续偏好更新可替换此临时值。 */
-char *msime_client_set_multilingual_output(uint64_t session, bool traditional);
 char *msime_client_set_character_width(uint64_t session, bool fullwidth);
 char *msime_client_set_english_mode(uint64_t session, bool enabled);
-/* 引擎负责的九键模式，用于全拼九宫格或注音九键（注音下 View.nine_key_spellings 是目标音节的候选读音）。只在组字结束后调用。View.nine_key 和 View.nine_key_spellings 是权威状态。对其他方案开启、或在组字中切换模式都会被拒绝。等同于 msime_client_set_key_grid 的 1（开）和 0（关），所以关掉时 14 键也一并关掉。
- * 创建和重建会话时按偏好自动开启：全拼看 touch_keyboard_layout 是否为 nine_key（fourteen_key 则开 14 键）；注音还要求 touch_keyboard_schemes 选中（或在没有选中项时启用了）zhuyin_nine_key，这个方案只有 Android 写，桌面宿主为全拼九宫格写下的 nine_key 不会让注音会话离开大千键位。宿主设下的网格只保留到方案或 touch_keyboard_layout 改变为止。
- * View.touch_keyboard_layout 是已应用的宿主呈现偏好；日文九键宿主只用它，不开启引擎的九键模式。 */
-char *msime_client_set_nine_key_mode(uint64_t session, bool enabled);
-/* 切换引擎的组码网格：0 关闭，1 九键（同 msime_client_set_nine_key_mode），2 当前全拼、双拼或五笔方案的 14 键（QWERTY 上相邻两个字母一个键，L、M 单独一键），3 九键双拼（表按已应用的 nine_key_shuangpin_profile 取），4 十八键全拼，5 十八键双拼（Q WE RT Y U IO P / A SD FG H JK L / Z XC V BN M）。只在组字结束后调用；14 键只给全拼、双拼或五笔，九键双拼和网格 4 只给全拼，网格 5 只给双拼。对其他方案开启、在组字中切换都会被拒绝，其他取值报错，会话不变。返回值中的 View 反映结果。
- * View.key_grid 是权威状态："none"、"nine_key"、"fourteen_key"、"eighteen_key" 或 "nine_key_shuangpin"；两种十八键均为 "eighteen_key"，按 scheme 区分。View.nine_key 只在九键下为真。Android 和 iOS 双拼会话在创建和重建时按 touch_shuangpin_layout 选择 26、14 或 18 键，五笔会话按 touch_wubi_layout 选择 26 或 14 键（鸿蒙的五笔 14 键由宿主自己调用本函数开启网格 2），touch_keyboard_layout 为 eighteen_key 的全拼会话在这两个宿主上开启网格 4；其他宿主创建会话时不据这两个 18 键偏好开网格（鸿蒙的全拼 18 键由宿主自己按偏好调用本函数开启网格 4）。字母双拼网格从已应用的 shuangpin_profile 及自定义表派生，分号与 L 共键。五笔 14 键不经九宫格会话：组码由五笔方案按组展开码表，没有拼音选择、单字和笔画筛选，nine_key_spellings 为空，nine_key_reading 是首选编码的前几位（同 preedit），候选按五笔照常选择；View.key_grid 仍是 "fourteen_key"，按 scheme 区分。其余几种网格共用 View.nine_key_spellings、nine_key_reading、nine_key_single_character、nine_key_strokes，以及 msime_client_choose_nine_key_spelling 和 msime_client_set_nine_key_filter；字母网格的分词键照九键送 '\''。字母网格下数字不是输入，照常是选词键。九键双拼的数字从 msime_client_character 进来（方案用到的数字，可以有 1 和 0），和九键一样不当选词键，没有英文九键；创建和重建会话时 touch_keyboard_layout 为 nine_key_shuangpin 的全拼会话自动开启它。 */
-char *msime_client_set_key_grid(uint64_t session, uint8_t grid);
-/* 字母网格的一键：letter 是这一组里的任一小写字母，引擎归成这一组，宿主约定送当前网格各组的首字母。仅十八键双拼另接受 A-Z，表示同一网格里的精确小写字母；editing_text 保留大写标记用于编辑和恢复，它不是 Shift 或英文字母上屏。返回与 msime_client_character 相同的输入响应。不在 14 或 18 键下、方案不支持当前网格、在本地模式或专用英文里、26 键正在组字、或 letter 不在上述范围（双拼另接受分号）时 handled=false，会话不变。
- * 五笔 14 键最多四码：四码之后的一键先把首选顶上屏，再开始下一组编码，组码里没有 z，所以 z 通配、z 拼音反查和混输拼音都不作用于它；四码唯一时与 26 键一样按偏好自动上屏。
- * 硬件键盘的字母照常经 msime_client_character 走当前方案的 26 键：字母网格组字进行中它们 handled=false，同九键。 */
-char *msime_client_grid_key(uint64_t session, uint8_t letter);
 /* 标出隐私会话（隐私模式、不允许学习的输入框）：不记录选词位置和上屏效率，并立即禁止、清除上屏后联想；宿主须重新读取 View，以丢弃旧候选代次。用户单独关掉学习不算隐私会话；学习本身仍由 learning 偏好决定。Value 是设下的布尔值。 */
 char *msime_client_set_private_session(uint64_t session, bool enabled);
 /* 组字开始前由宿主同步光标前的现成文本（最多 4096 字节 UTF-8，length 为 0 时 context 可为空指针），供重排模型与 AI 联想读取上文，空闲时不产生候选。隐私会话、安全/私密输入字段会清空已有上下文并返回 false；组字进行中返回 false 且不改状态；同步成功返回 true。 */
@@ -942,11 +903,8 @@ enum MsimeCommand {
     MSIME_CANCEL = 3, MSIME_MOVE_LEFT = 4, MSIME_MOVE_RIGHT = 5,
     MSIME_MOVE_HOME = 6, MSIME_MOVE_END = 7, MSIME_DELETE_FORWARD = 8,
     MSIME_FINISH_COMPOSITION = 9,
-    MSIME_CYCLE_KANA_VARIANT = 10, MSIME_COMMIT_READING = 11,
     MSIME_BACKSPACE_SEGMENT = 12, MSIME_MOVE_LEFT_SEGMENT = 13, MSIME_MOVE_RIGHT_SEGMENT = 14,
     MSIME_COMMIT_RAW_WITHOUT_LEARNING = 15,
-    MSIME_CONVERT_HANJA = 16,
-    MSIME_OPEN_CANDIDATE_LIST = 16,
     MSIME_CONVERSION_LEFT = 17, MSIME_CONVERSION_RIGHT = 18,
     /* 宿主已经自己把文本写进了文档，再丢弃组字：对会话的作用同 MSIME_CANCEL（一次，组字没结束时照旧再发一次），区别只在生命周期里结束原因记 HostCommit、不出取消音。 */
     MSIME_CANCEL_AFTER_HOST_COMMIT = 19,
@@ -959,26 +917,7 @@ enum MsimeCommand {
     MSIME_FIRST_CANDIDATE_OR_HOME = 106
 };
 char *msime_client_command(uint64_t session, uint32_t command);
-/* Re-rank the visible candidates with the settled model, once the host's typing pause elapses.
- * The host owns the clock: it is the only side that knows whether a keystroke arrived while the
- * pass was being decided. Answers {"moved": false} when the order did not change, or
- * {"moved": true, "view": ...} after a reorder. The false case lets the host leave the candidate
- * window alone without serializing a view it will discard. Inert, and immediately false, when no
- * settled model is installed. */
-char *msime_client_rerank_settled(uint64_t session);
-/* 宿主等待输入停顿后，在后台启动模型评分。
- * 无需改动或只做呈现整理时返回 {"status":"done","moved":false,"current":true}；
- * 呈现整理改变顺序时返回 {"status":"done","moved":true,"current":true,"view":...}。
- * 后台评分返回 {"status":"pending","token":N}，经 msime_client_poll_settled_rerank 轮询。
- * 每会话只运行一个任务，重复启动返回相同令牌；评分期间可以继续处理按键。 */
-char *msime_client_start_settled_rerank(uint64_t session);
-/* token 来自启动接口；评分未完成时返回 {"status":"pending","token":N}，
- * 完成后返回 {"status":"done","moved":...,"current":...}。
- * current 为真表示当前组字及配置已评分；按键、开关或模型改变，或 accept=false 时为假。
- * 未知令牌返回 {"status":"done","moved":false,"current":false}。
- * 宿主已离开原组字时传 accept=false，只归还仍适用的模型。必须在会话线程调用。 */
-char *msime_client_poll_settled_rerank(uint64_t session, uint64_t token, bool accept);
-/* Shurufa v2 Tier 1 两阶段异步神经解码开关：开启时废除旧停顿锁首策略，由宿主 22 ms 延迟绘制与 80 ms 槽 0 锁防闪烁。 */
+/* Shurufa v2 Tier 1 两阶段异步神经解码开关。 */
 char *msime_client_set_neural_v2_enabled(uint64_t session, bool enabled);
 /* 组字开始前同步光标右侧同行现成后文（最多 4096 字节 UTF-8，遇换行截断保留头部至多 16 字），供句中补字双向消歧；隐私/安全字段清空上下文并返回 false，组字中返回 false 不改状态。 */
 char *msime_client_set_following_context(uint64_t session, const uint8_t *context, size_t length);
@@ -997,20 +936,6 @@ char *msime_client_select(uint64_t session, uint64_t generation, size_t index);
 char *msime_client_select_any_candidate(uint64_t session, uint64_t generation, size_t index);
 char *msime_client_pin_candidate(uint64_t session, uint64_t generation, size_t index);
 char *msime_client_remove_candidate(uint64_t session, uint64_t generation, size_t index);
-/* Fix a dictionary candidate to slot 1..5 for the current input context. */
-char *msime_client_fix_candidate_position(uint64_t session, uint64_t generation, size_t index,
-                                          uint8_t position);
-/* Clear a previously fixed dictionary candidate position. */
-char *msime_client_clear_candidate_position(uint64_t session, uint64_t generation, size_t index);
-/* 从 View.nine_key_spellings 里选一项，generation 拒绝过期的界面。全拼下把这个拼写锁进数字；注音下只钉住目标音节的读音（不上屏），nine_key_spellings 随后换成下一个有歧义的音节。 */
-char *msime_client_choose_nine_key_spelling(uint64_t session, uint64_t generation, size_t index);
-/* 全拼九键组字时筛选候选，作用到这次组字结束：single_character 只留单字；strokes 是 length 字节的笔顺前缀（h 横、s 竖、p 撇、n 点、z 折，<=64），只留首字笔顺以它开头的候选，length 为 0 时不按笔画筛选（strokes 可为 NULL）。当前状态见 View.nine_key_single_character 和 View.nine_key_strokes。没有九键组字或 strokes 含其他字节时 handled=false；笔画字典不可用时 handled=true 并带 diagnostic LANGUAGE_DICTIONARY_UNAVAILABLE，筛选不变。
- * View.nine_key_spellings 在全拼九键下的含义：先是完整音节；再是下一个数字键上能起头一个音节的字母，大写（M N O），选它限定下一个音节的首字母；最后是这个数字本身（6），只在没有锁定的音节时出现，选它直接上屏这个数字。数字全部锁定后它是最后一次锁定时的选项，选其中一项就换掉那次锁定。这时退格先撤销最后一次锁定，其余情况退格删数字。
- * 14 键下含义相同，只是没有最后那一项「原样上屏」：完整音节，再是下一键上能起头一个音节的大写字母（Q W）。preedit 是组码字母（bugao），不是拼音，读音行用 View.nine_key_reading。 */
-char *msime_client_set_nine_key_filter(uint64_t session, bool single_character,
-                                       const uint8_t *strokes, size_t length);
-/* 滑行输入：手指一笔滑过字母键，由引擎解码成最可能拼出的全拼字母，像打字一样写到组字的光标处（与已有字母之间用 ' 隔开）。request 是 length 字节的 UTF-8 JSON（<=65536，拒绝未知键）：{"keys":[[x,y] x 26],"key_width":w,"key_height":h,"points":[[x,y] 或 [x,y,ms]，2..1024 个]}，keys 是 a..z 各键中心（按此次序），key_width/key_height 是一个字母键的尺寸，全部在宿主自选的同一个坐标系里；ms 是距笔画开始的毫秒数，有了它，手指在键上停一下就能确认那个键。返回与 msime_client_character 相同的输入响应。方案不是全拼、在本地模式或专用英文里、九键数字正在组字，或者没有音节跟得上这一笔时 handled=false：宿主丢掉这一笔，不得把它经过的键当作按键输入。在会话线程上、手指抬起时调用；一次触摸是滑行还是点按只由宿主判断。 */
-char *msime_client_glide(uint64_t session, const uint8_t *request, size_t length);
 enum MsimeCandidateEdge { MSIME_FIRST_HAN = 0, MSIME_LAST_HAN = 1 };
 /* Engine selects one Han character and clears composition on success.
  * A candidate without Han text is unhandled and keeps composition; no fallback
@@ -1101,34 +1026,11 @@ char *msime_client_translation_gloss_save(const uint8_t *request, size_t request
 /* TranslationQuery accepts the optional sentence:true flag for an explicit
  * single-item sentence request (up to 512 Unicode characters); ordinary
  * candidate gloss requests retain their normal limits. */
-#if defined(_WIN32)
-/* Windows 原生手写面板，阻塞调用，只能放在工作线程，不依赖 WebView。
- * 请求为 <=262144 字节的 JSON；{operation:"status"} 返回 {system_recognizer:bool}。
- * {operation:"recognize",request:{language?:"zh-CN",strokes:[{points:[{x,y},...]}]},model?:绝对路径}
- * 使用 420×420 DIP 坐标；系统识别优先，失败或无结果时可用可信模型回退。
- * 返回标准封装 {candidates:[...]}；错误码 invalid_stroke、no_chinese_recognizer、
- * handwriting_unavailable、invalid_handwriting_model；本安装包不提供手写时为 handwriting_not_offered。
- * 不访问输入会话、不联网、不保留请求；调用方用 msime_client_string_free 释放响应。 */
-char *msime_client_windows_handwriting(const uint8_t *request, size_t length);
-#endif
 #if !defined(_WIN32)
 char *msime_client_translation_provider_request(const uint8_t *query,
                                                 size_t query_length,
                                                 const uint8_t *socket_path,
                                                 size_t socket_length);
-/* Linux handwriting panel adapter. The query is a bounded JSON object with
- * language and normalized stroke arrays; the user-owned socket returns
- * {candidates:[...]} and owns recognizer/model policy. */
-char *msime_client_handwriting_provider_request(const uint8_t *query,
-                                                size_t query_length,
-                                                const uint8_t *socket_path,
-                                                size_t socket_length);
-/* Run the optional offline Engine recognizer against a trusted packaged model.
- * The model path must be absolute; response is {candidates:[...]} or an error. */
-char *msime_client_handwriting_local_request(const uint8_t *query,
-                                             size_t query_length,
-                                             const uint8_t *model_path,
-                                             size_t model_length);
 /* Linux standalone emoji panel adapter. The query contains search/category
  * text and a bounded result limit; the socket returns {items:[...]}. */
 char *msime_client_emoji_provider_request(const uint8_t *query,
@@ -1328,10 +1230,6 @@ uint32_t msime_client_set_lifecycle(uint64_t session, uint32_t flags);
 uint32_t msime_client_key(uint64_t session, uint32_t key);
 uint32_t msime_client_set_field_traits(uint64_t session, uint32_t traits);
 bool msime_client_set_active(uint64_t session, bool active);
-/* 脚本插件（桌面）。msime_client_scripts_enable 是进程级开关，返回开关的实际状态；任何线程都可以调用，不分配要释放的内存。只由 4 个桌面入口在启动时、第一个会话之前调用 msime_client_scripts_enable(true)：macOS 输入法进程、Windows Server、IBus 引擎进程和 Fcitx5 addon。Windows TIP（与 Server 共用同一份库，被注入每个应用进程）、设置应用和 MCP 从不调用，所以解释器的代码在它们的进程里，但从不执行。iOS、Android 和 HarmonyOS 上恒返回 false。
- * 授权文件 <state root>/plugins/script-grants.json 在用户可写的目录下，不签名：同一用户下的进程能伪造授权。三个桌面平台的开发构建和 release 构建都运行脚本，这一残余风险写在授权页上：macOS 和 Linux 是共享设置页，Windows 是原生设置应用（经 msime_client_plugins 的 script_page 和三项授权操作）；Windows 的提权窗口（MSIME_TRAIT_ELEVATED）里从不运行脚本。
- * 脚本运行要同时满足：开关开着；会话经 msime_client_set_lifecycle 选择加入；字段属性带 MSIME_TRAIT_KNOWN，且不带 SECURE、PRIVATE、ELEVATED。属性变得不满足时正在跑的实例当场丢弃。每次 msime_client_focus(true) 之后属性都要重新确认：宿主在聚焦之前调过 msime_client_set_field_traits（属性没变也算），或者聚焦之后按了第一个不带 MSIME_KEY_PASSTHROUGH 的键（msime_client_key；交给应用的键在 Windows 上经 Aux 管道异步上报，和属性没有先后保证，不算确认）；确认之前不实例化、不投递，所以想让脚本收到 focus_in 的宿主要在 msime_client_focus(true) 之前报告属性。观察类事件（focus_in、focus_out、input、selection_retracted、candidate_selected、commit、composition_start/update/end、candidates_shown/hidden）来自派发类调用、focus 和 destroy；msime_client_key 的按键、字段属性、激活和旁路调用的视图事件不投递。修改类钩子只在派发类调用里运行：candidates 在候选刷新和展开之后，插件可以重排、隐藏、注释候选，视图和选择 ID 按重排之后的顺序，被隐藏的行不出现在视图、分页和 msime_client_all_candidates 里、任何选择都选不到，插件的注释放在候选的 "script_annotation" 键里（没有时不出现，不改 "annotation"，由宿主另行绘制）；设着 MSIME_LIFECYCLE_COMMIT_OBSERVE_ONLY 时 candidates 不运行也不重放；before_commit 在上屏之前，可改写时（选中候选、原样上屏或暂存段送出，本地模式 none 且算打字，不是以词定字，没设 MSIME_LIFECYCLE_COMMIT_OBSERVE_ONLY，不是 MSIME_LIFECYCLE_HOST_HOLDS_PIECES 下宿主暂存的一段）插件可以改写标点和顶字尾巴之前的那一段，回复里的 commit 就是改写之后的文本，引擎学习和 AI 上文仍按原文。旁路调用不运行脚本，只按候选身份重放最近一次的重排、隐藏和注释。command 钩子给插件自己的 / 指令出候选：选择加入时和每次 msime_client_focus(true) 时，会话把启用、授予了 provide_commands 的插件在清单里声明的触发词交给引擎（用户指令表赢、插件按执行顺序先到先得）；用户在 / 指令里打完某个触发词时，派发类调用只投递给第一个声明它的插件一次，事件带触发词、后面的字母和 64 字节系统随机数，插件给的行是来源 14 的候选（"script_annotation" 是「标题 注释」），由引擎按预编辑串缓存，旁路调用、移动高亮和翻页都不再投递；运行条件不满足或设着 MSIME_LIFECYCLE_COMMIT_OBSERVE_ONLY 时只有原样的那一行。脚本只能经授权的 import 在钩子调用期间读文本，读不到宿主的任何别的状态，也不能回调宿主。每次 msime_client_focus（两个方向）和 destroy 都丢弃这个会话的全部脚本实例。fuel 按 msime_client_key 开启的轮次给：没有先调 msime_client_key 的派发（修饰键组合、快捷键、失焦命令）和上一次按键共用那一轮的配额；本轮配额用完时插件跳过这次投递，不算失败；运行到一半被本轮配额截断的插件在这次聚焦里不再运行，这一次用掉的不到单个钩子自己上限的一半时同样不算失败，达到一半就和超出单个钩子自己的上限一样算一次失败（candidates 的单次上限和每轮配额相等，同一轮里 input 先花过 fuel 时它的死循环先撞上每轮配额，这样也照样熔断）。脚本的失败不影响上屏：一次失败只丢弃它这次的结果，trap 之后这个插件在这次聚焦里不再运行，连续失败按插件熔断；被停用的插件和停用的类别（invalid、init、failed、slow，不带次数、具体原因和任何文本）在失焦时写进 <user_data>/script-health.json。 */
-bool msime_client_scripts_enable(bool on);
 /* The typing effect of one key, for the host to draw beside the caret: the session's combo count and the resolved style: the selected effect pack's (preferences.plugins.effect_pack) when one is set, preferences.plugins.effect_style otherwise. Also for the key path: integer arithmetic on the session's own state, no lock, no allocation, no file, no free; it works on every platform, iOS, Android and HarmonyOS included. Call it once per key the host handles while effect_style is not "off", effect_pack is set or combo_counter is on, alongside key_sound, and once per commit; skip keys typed into a secure (password) field.
  * event bits 0-7: 0 any other key, 1 space, 2 enter, 3 backspace (the key_sound classes), 4 commit, 5 backspace by any other route (a delete that bypasses key_sound). 0-2 count one key; 3 and 5 end the combo; 4 counts nothing and only reports the state.
  * event bit 8 (0x100): the key is an auto-repeat of a held key; drawn, not counted. Bit 9 (0x200): sounds must stay quiet now (a full-screen foreground application on Windows); the tier-up sound is neither queued nor reported due. Other bits are ignored.
@@ -1362,46 +1260,6 @@ char *msime_client_music_pack(const uint8_t *request, size_t length);
  * "clear_script_data" {id}：删掉这个插件的持久存储（persist_data），输入法手上还没写盘的部分一并作废。
  * 失败时为 {ok:false, error: 失败码, detail?}：失败码与桌面外壳相同（invalid、storage、plugin_invalid、plugin_unsupported_source、plugin_archive、plugin_reserved、plugin_storage、plugin_exists、plugin_not_editable、plugin_script_missing、plugin_script_changed、plugin_script_grant_invalid、plugin_script_limit、plugin_script_memory、plugin_script_grants_format、plugin_script_setting_invalid、plugin_script_settings_format、mention_invalid、mention_format、mention_storage），detail 存在时是被拒的包或条目违反的规则，中文，给设置页显示。会读写文件，导入最多复制一个音乐包大小的数据：宿主有工作线程时在工作线程上调用。 */
 char *msime_client_plugins(const uint8_t *request, size_t length);
-/* 离线世界时钟；JSON 请求最多 16384 字节，返回值用 msime_client_string_free 释放。 */
-char *msime_client_world_clock(const uint8_t *request, size_t length);
-/* 不带编码的常用语（<=4 MiB）：{directory: 偏好目录的绝对路径, action:{operation, ...}}。
- * 正文操作：load、add{text,note?}、remove{id}、replace{id,text,note?}、move{id,index}、install_pack{resource}、remove_pack{id}。
- * 本机分类：add_category{name}、rename_category{id,name}、remove_category{id}、categorize{id,category:UUID|null}、set_expanded_category{category:UUID|"all"|""}。
- * 备份分类合并：import_categories{categories:[{id,name,texts:[正文]}],expanded_category:备份分类UUID|"all"|"",phrase_ids:[本次新增UUID]}，原子合并，保留已有正文归属。
- * Value 为 {phrases:[{id,text,pack,note?,category?}],packs:[{id,name,revision}],categories?:[{id,name}],expanded_category?:UUID|"",skipped?}；省略 expanded_category 表示 "all"。
- * 错误码：common_phrases_io、_corrupt、_invalid、_note_invalid、_duplicate、_limit、_too_large、_not_found、_category_invalid、_category_duplicate、_category_limit。
- * 设置进程和键盘进程都会调用，调用时锁住文件。在工作线程上调用。 */
-
-char *msime_client_common_phrases(const uint8_t *request, size_t length);
-/* 具名词库集合（<=17 MiB）：{options: 带 preferences_directory 的 HostOptions, action:{operation:"load"|"create"|"rename"|"delete"|"set_enabled"|"add_words"|"remove_words"|"import"|"install_community"|"queue_words"{entries}|"flush"|"synchronize"|"third_party_matches"{entries}, ...}}，格式见 client-services 的 dictionary::collections；import 的 format 为 "scel"（搜狗细胞词库）时文件按 base64 放在 bytes_base64（不超过 8 MiB），不带 text，结构损坏时是 import_malformed；queue_words 把不属于任何集合的词（本地备份恢复的个人词库，每次最多 20000 个）排进待发送队列，value 带 queued；third_party_matches 只读地核对最多 128 个准备发布到社区的词，value 的 third_party_matches 是其中出现在搜狗细胞词库导入的集合里的下标。词条经个人词库队列传过去，键盘在下一次会话时应用。synchronize 在 budget_millis（1–2000，默认 2000）毫秒软预算内逐批应用个人队列并补充待发项，每批至多 128 项并释放维护租约，返回 {synchronized,pending_count,failed_count,snapshot_error,sent}，pending_count 包括未发送的集合条目；普通操作的 Value 是集合视图；错误是固定的代码（collections_*、builtin_locked、unsupported_format、import_*、personal_dictionary_*）。在工作线程上调用。 */
-char *msime_client_dictionary_collections(const uint8_t *request, size_t length);
-/* 诊断包（<=65536 字节）：{state_root: 偏好目录, include:{crash_logs,performance_logs,input_events,config_snapshot}, sources:{crash_logs,performance_logs,input_events: 绝对路径|null}, destination: .zip 的绝对路径|null}。输入事件和性能记录只有恰好是 {t_ms, kind (key_down|key_up|candidate_shown|candidate_selected|commit|backspace|panel_open|panel_close|ime_start|ime_finish|input_failure_runtime_rejected|input_failure_invalid_response|input_failure_editor_rejected|input_failure_jni_link), duration_ms} 时才保留，带其他任何键（text、key、candidate……）的整行都丢掉并计数。崩溃记录只保留异常类型和栈帧：异常说明可能带着正在输入的文字，message 只留冒号前的异常类型，stack 的说明行同样处理，路径只留文件名。input_failure_* 仅供本地诊断，云端上传器须按服务端白名单过滤。配置快照把所有凭据换成 "<redacted>"。给了 destination 时写出 zip，value 是 {path,bytes,counts}；没给时 value 是 {counts,sections}，sections 是上传请求体的对象（crash_logs、perf_trace、input_events、config_snapshot）。错误：diagnostics_invalid、diagnostics_source、diagnostics_preferences、diagnostics_write。在工作线程上调用。 */
-char *msime_client_diagnostic_bundle(const uint8_t *request, size_t length);
-/* 账号设置文档导出（<=4 MiB）：{preferences_directory, feedback?:{soundEnabled,hapticsEnabled,hapticStrength}|null, custom_keyboard_skins?: JSON 数组字符串|null, android_local?: {同步键: 值}|null, schema?: 偏好字段表|null, cloud?: {revision,settings}|null}。Value {settings, merged?}：settings 按本版本过滤（给了 schema 时再按它的字段过滤）；同时给了 schema 和 cloud 时，merged 是带着云端 revision 去 PUT 的整份文档。android_local 是 Android 本机设置文件里参与同步的值（应用主题、单手模式、按键细节、工具栏的常用语/方案/隐藏项、手写、离线语音），不认识的键和非法值不导出。凭据和诊断日志从不导出；隐私模式、开发者选项和语音贡献只在 Android 本机文件里，从不同步。 */
-char *msime_client_account_settings_export(const uint8_t *request, size_t length);
-/* 账号设置文档应用（<=4 MiB）：{preferences_directory, cloud:{revision,settings}, schema, feedback?: 宿主当前的按键反馈|null}。把文档应用到本机偏好，按读到的 revision 做比较并交换后保存。本机不认识或超出范围的取值只跳过那一个键；本机选着账号装不下的方案（粤拼、注音、越南文、藏文、笔画）时导出不写 input.schema，应用时也不拿云端的方案盖掉本机的方案。Value {preferences: 保存后的快照, feedback: 应用后的按键反馈|null（宿主自己存）, custom_keyboard_skins: 云端皮肤库 JSON|null（宿主合并）, android_local:{同步键: 值}（宿主写进本机设置文件）, skipped:[键]}。 */
-char *msime_client_account_settings_apply(const uint8_t *request, size_t length);
-/* iOS 的账号设置文档导出（<=4 MiB），与 Tauri iOS 的 account_preferences_upload 相同，但不联网、不读会话：{preferences_directory, ios_native, schema, cloud?}。ios_native 是 App Group 里的键盘设置，字段与 Tauri 插件的 loadKeyboardPreferences 相同（camelCase：inputScheme、traditionalChineseOutput、soundEnabled、hapticsEnabled、hapticStrength、englishSuggestions、candidatePaletteFollowsDesktop、inlinePreedit、hapticsAvailable、tabletFullKeys?、tabletSplitKeyboard?、dictionaryLearning、globalTheme、customKeyboardSkin）；schema 是服务端的偏好字段表，必需，因为服务端只要有一个键不在表里就拒绝整份文档，platform.ios.global_theme 和 platform.ios.custom_theme_base 目前不在表里，导出时会被去掉。Value {settings, merged?}：settings 按 preferences_directory 所属的版本过滤、只留字段表收录的键；给了 cloud（{revision,settings}）时 merged 是带着云端 revision 去 PUT 的整份文档。一个键都没有时 error 是 account_unavailable；ios_native 不合规是 account_storage，请求不合法是 account_invalid。 */
-char *msime_client_account_ios_settings_export(const uint8_t *request, size_t length);
-/* iOS 的账号设置文档应用（<=4 MiB），与 Tauri iOS 的 account_preferences_apply 相同，分两步，不读会话也不检查会话代次，下载文档以后账号有没有变由宿主负责：{preferences_directory, cloud:{revision,settings}, step:"plan"|"commit", ios_native?, saved_native?}。与导出不同，应用不带 schema、不按字段表过滤（与 Tauri iOS 的 apply 相同），请求里多出任何字段（包括 schema）都是 account_invalid。cloud 先按 preferences_directory 所属的版本过滤，再整份校验，任何一个值不合规都是 account_invalid。step 为 plan 时要带 ios_native（App Group 里当前的键盘设置），Value {ios_native: 要写进 App Group 的键盘设置}，什么也不写；ios_native 的方案是账号装不下的粤拼、注音、越南文、藏文或笔画时（导出不写方案），要写的键盘设置保留本机的方案。cloud 里有 input.wubi_schema 时总是把它写进共享偏好的五笔版本，不管 input.schema 是不是 wubi（与 Android、桌面和鸿蒙的映射相同），不认识的取值与其余的键一样是 account_invalid；没有这个键时保留本机的五笔版本。宿主写进 App Group 以后，用实际保存下来的值作 saved_native 调 step 为 commit：按读到的修订号比较并交换写回共享偏好，Value {preferences: 保存后的 PreferencesSnapshot}。commit 失败时宿主把 App Group 恢复成旧值，顺序与 Tauri 相同：先写 App Group，再写共享偏好，失败时回滚 App Group。写回失败时 error 是 conflict（本机设置已在别处更新）或 storage，映射失败是 account_invalid 或 account_storage。 */
-char *msime_client_account_ios_settings_apply(const uint8_t *request, size_t length);
-/* 鸿蒙的账号设置文档导出（<=4 MiB），原来是鸿蒙账号桥 preferences_upload 里 AccountPreferencePlan 的那部分，不联网、不读会话：{preferences_directory, feedback?:{soundEnabled,hapticsEnabled,hapticStrength}|null, schema, cloud?}。鸿蒙的本机设置就是 preferences_directory 里的共享偏好，与 Android 是同一套映射，平台键放在 platform.harmony.* 下（不写 platform.android.*，也不导出只有 Android 才有的工具栏、按键音包、语音语言、本地设置和皮肤库）；全拼 14 键不上传（云端保留原值），鸿蒙不提供的全局主题按 system、不认得的振动强度按 medium 上传。feedback 是宿主反馈文件里的值，不带时不导出那三个键。schema 是服务端的偏好字段表，必需，服务端收录 platform.harmony.* 之前只有 input.* 留下来。Value {settings, merged?}：settings 按 preferences_directory 所属的版本过滤、只留字段表收录的键；给了 cloud（{revision,settings}）时 merged 是带着云端 revision 去 PUT 的整份文档，别的设备写的键原样保留。一个键都没有时 error 是 account_unavailable；读不出共享偏好是 account_storage，请求不合法或合并时键不在字段表里、类型不对、超出字节上限是 account_invalid。 */
-char *msime_client_account_harmony_settings_export(const uint8_t *request, size_t length);
-/* 鸿蒙的账号设置文档应用（<=4 MiB），原来是鸿蒙账号桥 preferences_apply 里 AccountPreferencePlan 的那部分，不读会话也不检查会话代次，下载文档以后账号有没有变由宿主负责：{preferences_directory, cloud:{revision,settings}, schema, feedback?: 反馈文件里当前的值|null}。cloud 先按 preferences_directory 所属的版本过滤，再整份校验：字段表声明了的键类型不对、文档或字段表本身不合规时整份拒绝；只读 input.* 和 platform.harmony.*，本机不认识或超出范围的取值只跳过那一个键。导出不上传的两项应用时也不改：本机是全拼 14 键时不应用 platform.harmony.keyboard_layout，本机选着账号装不下的方案（粤拼、注音、越南文、藏文、笔画）时不应用 input.schema，否则上传后写回、或下载时会被云端留着的旧值改回去。文档和字段表里都有按键反馈的键而没带 feedback 时是 account_invalid。偏好有变化时按读到的修订号比较并交换写回整份快照。Value {preferences: 保存后的 PreferencesSnapshot, feedback: 应用后的按键反馈|null（不为 null 时宿主写回反馈文件，失败时不回滚已经写好的偏好）, skipped:[键]}。写回失败时 error 是 conflict（本机设置已在别处更新）或 storage，读不出共享偏好是 account_storage，映射失败是 account_invalid 或 account_unavailable（字段表不可信）。 */
-char *msime_client_account_harmony_settings_apply(const uint8_t *request, size_t length);
-/* 多分类自动云同步（设置、Android 的自定义键盘皮肤库、无编码常用语、个人词库）的编排，原来在 iOS 的 CloudSync 和 Android 的 home/CloudSync 各有一份。Request 是 length 字节（最多 4 MiB）的 UTF-8 JSON {directory?|session_store?, legacy_directory?, state_directory, preferences_directory?, options?, snapshot_queue_directory?, action}。会话的来源与 msime_client_account 相同（directory 和 session_store 恰好给一个），只用登录账号；peek、mark_dirty 和 import_legacy 只碰状态文件（import_legacy 还只读快照激活队列），可以不带会话来源，也从不按会话对齐。state_directory 是绝对路径，状态在它下面的 cloud-sync/state.json（版本 2，最多 256 KiB，同目录 state.lock 用 flock 保护，基线和收不下的常用语只存 SHA-256）和 pending.json；iOS 传 App Group 的根目录，键盘扩展和应用读写同一份。preferences_directory 是共享偏好和常用语所在的偏好目录，run 和 commit 要带。options 是 Engine 的宿主选项（与 msime_client_dictionary 相同，要带 preferences_directory），snapshot_queue_directory 是词库快照激活队列的目录（Android 是 files/bootstrap/state/dictionary-snapshots），同步词库时两个都要带；sign_out 带上队列目录时取消旧账号排队中的快照；import_legacy 导入 Android 旧状态时也要带上队列目录（只读）。status、set_enabled 和 run 每次调用都按会话里的用户 id 对齐：账号变了（或已经退出）就清空进度、关掉开关；同一个账号重新登录保留进度。会话读不出来（钥匙串不可用）时不对齐。所以只有持有登录的那个进程（iOS 和鸿蒙的应用、Android 的主进程、桌面的设置程序）可以调 status、set_enabled、run、commit 和 sign_out；会话来源里看不到登录的进程（键盘扩展、Android 的 :ime、注入存储读出 0 字节的扩展）调 status 会被当成已经退出，把共享的同步进度清空、开关关掉，这些进程看开关一律用 peek，记改动用 mark_dirty。
- * action 是下列之一：
- * {operation:"status"} → 状态 S：{enabled, disabled_on_cloud_cleared, account_id|null, sections:{settings|skins|phrases|dictionary:{cursor|null, dirty, cleared, last_outcome?:{outcome,reason?}}}, last_attempt_ms, last_synced_ms, not_before_ms, pending_choice:"merge"|"use_cloud"|null, running, failure:{section,reason,status?,code?,message}|null, skins_trimmed, unheld_phrases, status_line}。status_line 是「我的」页同步行的一句话，措辞与两端原来的相同，只有两句是新的：等「云端被清空」的选择时是「云端数据已被清空，请选择合并、使用云端或关闭同步」，用户在那里选了「关闭同步」以后、再开关同步之前是「云端数据已被清空，已关闭同步，本机数据没有改动」，这时 disabled_on_cloud_cleared 为 true（打开、关闭同步和换账号、退出都把它清成 false）。
- * {operation:"peek"} → S：只读 state.json，不读会话、不对齐、不写任何东西（状态目录还不存在时是全新的默认值），给不持有登录的进程看开关；请求可以不带会话来源，带了也不用。
- * {operation:"sign_out"} → S 加 snapshots_cancelled：退出登录时调用，同步清空状态、代次加一，进行中的那一轮因此提交不了。它不读会话，但请求仍要带会话来源，按 session_store 时要在注销这个存储之前调用，否则是 cloud_sync_invalid、状态不清。
- * {operation:"set_enabled", enabled} → S：打开时要有登录的账号（否则是 cloud_sync_signed_out），并把全部分类标成待上传；关闭时保留游标。
- * {operation:"mark_dirty", section:"settings"|"skins"|"phrases"|"dictionary"} → {marked}：只读写状态文件，不读会话、不联网，键盘扩展和 Android 的 :ime 进程用户改了本机内容时调用；开关关着时不记（marked 为 false）。同步自己写本机不经过这里，宿主也不要为同步写的值再打标记。
- * {operation:"run", trigger:"active"|"enable"|"choice"|"manual", choice?:"merge"|"use_cloud"|"disable", capabilities:{settings,skins_library,phrases,dictionary}, host_inputs?:{ios_native?, harmony?, feedback?, android_local?, custom_keyboard_skins?, settings_locked?, excluded_phrase_texts?}} → R：{outcome:"skipped"|"needs_choice"|"done"|"pending_commit"|"disabled", reason?, run_id?, host_writes?:{ios_native?, feedback?, android_local?, custom_keyboard_skins?, adopt_texts?}, sections?:{<分类>:{outcome:"synced"|"unchanged"|"skipped"|"failed"|"needs_choice", reason?}}（分类是 settings、phrases、dictionary，皮肤库没有动时还有 skins）, status: S}。active 是回到前台，按节流跑（距上次满 5 分钟，参与的分类有待上传标记时满 30 秒）；enable、manual 和这一次请求带了 choice 的不等节流，状态里记着的选择（另一轮在跑时记下的 pending_choice、词库合并没做完时留给词库的选择）不让下一轮跳过节流；所有触发都尊重服务端的 Retry-After（记成 not_before_ms，期间是 skipped/backoff）：超过 24 小时的按 24 小时记，离现在超过 24 小时的 not_before_ms（时钟往回拨以前记下的）不再挡、status 里是 null，所以手动同步最多被挡 24 小时。trigger 为 choice 时必须带 choice。capabilities 是宿主这一端同步哪几类：iOS 是 {settings, phrases}，Android 四类都开，鸿蒙不开 skins_library；skins_library 要和 settings 一起开，dictionary 要带 options 和 snapshot_queue_directory，否则是 cloud_sync_invalid。host_inputs 是宿主保管、Rust 读不到的本机值：带 ios_native（App Group 里的键盘设置，字段同 msime_client_account_ios_settings_export）时设置按 iOS 映射，harmony 为 true 时按鸿蒙映射（platform.harmony.*，同 msime_client_account_harmony_settings_export，按键反馈放在 feedback，不能同时带 ios_native、android_local、custom_keyboard_skins 或开 skins_library，否则是 cloud_sync_invalid），否则按 Android 映射（feedback、android_local、custom_keyboard_skins 同 msime_client_account_settings_export）；custom_keyboard_skins 不是 JSON 数组、或者云端的皮肤库读不懂（不是 JSON 数组，可能是更新的版本写的）时，上传的设置文档里皮肤库原样用云端的值，不删也不拿另一份替换它，设置照常同步，sections.skins 是 skipped，reason 为 skins_library_unreadable 或 cloud_skins_library_unreadable；settings_locked 为 true（iOS 社区皮肤试用中）时这一轮不同步设置；excluded_phrase_texts 是 Android 本机预置、还没被认领的示例常用语，不上传，也不会被当成本机多出来的删掉。
- * run 的 outcome：skipped 时 reason 是 signed_out、disabled、throttled、backoff、busy（另一轮还在跑；这时带的 choice 记成 pending_choice，下一轮用它，但下一轮照样等节流）、awaiting_choice（要问用户但 5 分钟内刚问过）、session_unavailable、dictionary_storage（同步词库时建不出 state_directory 下的 cloud-sync/work）或 stale_run（跑到一半账号变了、开关被关或另一处写了状态，这一轮作废）。needs_choice 时 reason 是 first_run（有分类第一次同步而云端已有数据）或 cloud_cleared（云端被清空，多半是「删除云端数据」；写入因修订号冲突而重读云端时读到被清空的云端也算，不拿旧基线合并），整轮什么都没写，宿主弹「合并 / 使用云端」（cloud_cleared 时多一个「关闭同步，保留本机」），用户选了再以 trigger:"choice" 调一次；choice 为 disable 只回答 cloud_cleared，只能和 trigger:"choice" 一起给（否则是 cloud_sync_invalid）：它不联网、不跑一轮，也不读写本机的设置、常用语和词库（所以可以不带 preferences_directory），只在状态锁里关掉这台设备的同步，R 是 {outcome:"disabled", status: S}；不等节流、Retry-After 和另一轮（在跑的那一轮因此提交不了，它在这之前写到云端的不撤回），也不记成 pending_choice，记着的选择（pending_choice、词库留下的选择）一起丢掉；清空的标记和游标留着，用户以后重新打开同步，第一轮读完云端照样先问，不会把本机传回被清空的云端。账号对齐与 run 相同；没有登录、开关关着、或者没有分类记着清空（包括首次同步的提示）时是 skipped，reason 为 signed_out、disabled 或 not_cloud_cleared，状态不变；会话读不出来是 skipped/session_unavailable。「使用云端」遇到从没上传过（revision 0）或为空的云端、而本机有数据时按合并处理，不清空本机；词库还没同步过时按云端词库现在的条数（GET /v1/users/me/data/summary）判断空不空，不管改动历史里有没有 reset，读不出条数时按不空处理。词库另有一条硬性约束：下载下来要整份替换本机的云端快照一个词都没有（entry 减去标成删除的 overlay）、而本机这一轮读到自己的词时，不管是「使用云端」、首次同步还是之后云端有改动的下载，都不替换，改按合并处理：两边的词都留着，sections.dictionary 照常是 synced，游标推进到快照的修订号，词库再标一次待上传，下一轮把本机的词传回云端（读不出条数时选了「使用云端」、或者在云词库面板里把词删光，都走这一条）。done 时各类的结果在 sections，一类失败不挡其他类，第一条失败记在 status.failure；冲突重读才发现云端被清空、而排在前面的分类这一轮已经写过时，整轮照常是 done 或 pending_commit，那一类在 sections 里是 needs_choice（cloud_cleared），状态里记下清空（status 显示清空的提示），下一轮读完云端再问。设置写回本机时按这一轮读本机时共享偏好的修订号比较并交换：期间另一个进程里用户改了设置时不覆盖它，sections.settings 是 skipped、reason 为 settings_changed，不算失败，游标和基线不动、设置再标一次待上传，下一轮按三方合并（这时云端可能已经写过）。pending_commit 时宿主先把 host_writes 里的值写进自己的存储（ios_native 写进 App Group；feedback（Android 和鸿蒙）、android_local 写回本机；custom_keyboard_skins 按 id 和更新时间合并进皮肤库；adopt_texts 里的示例常用语认领为用户自己的），再以 run_id 调 commit；游标、清标记和基线只在提交时推进，宿主不提交时 180 秒后租约过期，下一轮重新下载，结果相同。
- * {operation:"commit", run_id, host_results?:{saved_native?}} → S：提交 pending_commit 的那一轮。iOS 要带 saved_native（按 host_writes.ios_native 写进 App Group 以后实际保存下来的值），据此把设置文档应用到共享偏好，和 run 写回设置一样按这一轮读本机时共享偏好的修订号比较并交换；那一步失败时 error 是 conflict（共享偏好在这一轮读本机以后被别处改过，包括宿主写 App Group 期间用户在设置页改的）或 storage，这一轮作废，什么都不推进、设置的待上传标记留着，宿主把 App Group 恢复成旧值，下一轮按三方合并。期间有别的写入（sign_out、set_enabled、另一轮）或账号变了时是 stale_run，什么都不推进。
- * {operation:"import_legacy", ios_v1?: iOS 第 1 版的 CloudSync/state.json 对象, android?:{sync_v1: msime_sync_v1 偏好的键值, cloud_sync_status: msime_cloud_sync_status 偏好的键值}} → {imported, status: S}：两者恰好给一个。只在还没有任何进度（没有导入过、用户没有开关过同步、开关关着、没有游标）、而且状态没有绑定账号或绑定的就是旧状态里的账号时导入开关、账号、游标、改动代数、收不下的常用语和几个时间，免得迁移以后又弹首次选择，所以导入之前先调过 status 或 run 也不要紧；导入过一次、调过 set_enabled（打开或关闭）以后不再导入，退出、换账号也不重新开放，宿主可以每次启动都带着旧状态调用，用户关掉的同步不会被旧状态改回打开；在 set_enabled 之前调用。已经有进度、导入已经关上、绑定的是别的账号或读不懂时 imported 为 false。Android 的词库游标要对照 snapshot_queue_directory：旧版本下载词库时先把快照交给激活队列、同时就把游标记成云端修订号，队列里还有这个账号没应用的快照请求（在等激活，或者冲突、失败、取消而结束）时，把它记成等激活的快照，第一轮按等激活或没激活处理（没激活就按合并补上云端的词，不上传）；没带队列目录或读不出队列时不导入词库的游标，词库下一轮按首次同步处理。
- * 合并规则：设置按键三方合并（本机自上次同步以来改过的键用本机的值，其余用云端的），上传前按本轮读到的字段表过滤，字段表外和隐私相关的键既不上传也不写回本机；常用语按正文三方合并，一侧删掉的不会在另一侧复活，两边都有的沿用云端 id，合并后 id 冲突的换新 id，超过 500 条（phrases_over_limit）或请求体超过 256 KiB（phrases_too_large）时这一类失败、两边都不写；词库是整份快照，快照里的词是 entry 减去同一 (kind, code, word) 上标成删除的 overlay（不按 id 匹配：云词库面板改词时新旧两条 overlay 和改后的 entry 共用一个 id），合并时把本机还没有的云端词排进本机导入队列，等键盘应用以后下一轮再整份上传；只有云端的每个词都已经在本机（或本机排着删除、改掉它）时才算合并完，在这之前这一类失败，游标不推进、不上传，首次同步（或云端被清空以后）的选择只留给词库的下一轮（不进 pending_choice，设置和常用语以后遇到云端被清空照样要问），下一轮跳过已经在本机或已在队列里的词接着排：词还在排队、或队列一次排不下（最多 128 个没应用完的请求）时是 dictionary_merge_pending，云端有本机导入不了的词（本机新词的规则不收，或键盘应用时拒绝了）时是 dictionary_merge_rejected，被导入队列里别的失败请求挡住时是 dictionary_merge_blocked；键盘因为暂时拿不到词库而没应用的请求会重排，权重超出新词范围（1 到 100000000）的云端词收进范围后导入。合并没做完、或者键盘还没发布过本机词库版本（dictionary_unpublished，新装以后还没打开过键盘就打开了同步，下载的快照交不给激活队列）时，选择一样留给词库（dictionary_unpublished 而本机这一轮还没有自己的词时留成 merge：这时两个选择都是下载云端快照，留着 use_cloud 会在以后那一轮拿快照整份替换键盘期间学到的词），词库这一类还要退避；本机这一侧读写词库失败（dictionary_storage、dictionary_invalid 这类，不是联网失败）时也一样退避，只是选择不留。退避第一次 5 分钟，之后每多一轮没有进展就翻倍，最多 6 小时；这一轮往导入队列里排进了新的词、或者云端快照里已经在本机的词比上一次记下的多（键盘应用了排着的词）时从 5 分钟重新数，只重排了键盘因为暂时拿不到词库而没应用的请求不算进展；退避期间 active 跳过词库（sections 里词库是 skipped、reason 为 dictionary_backoff，这一轮不算同步成功，status.failure 留着上次的原因），词库的待上传标记也不把节流缩到 30 秒，manual、enable 和带 choice 的不等退避，状态里记着另一轮在跑时做的 pending_choice 时这一轮词库也不等退避（选择在这一轮用掉，词库跳过就会丢掉它；它仍不让这一轮跳过节流）。导入队列没清空（个人词库导入队列里还有没应用的请求，或者具名词库集合的待发送队列里还有没送进去的增删，例如 Android 本地备份恢复排下的大批词）、或下载的云端快照还在激活队列里等键盘激活时推迟上传（dictionary_pending），等激活期间词库这一类也不下载、不合并；下载的快照没有激活就结束了（冲突、失败或取消）时，下一轮改按合并处理（本机没有词时重新下载），不上传。
- * 错误：请求不合法是 cloud_sync_invalid，状态文件读写失败是 cloud_sync_storage，会话读不出来是 account_* 码。会联网（每个请求最长约 30 秒，词库快照最长 10 分钟），在工作线程上调用；不要在主线程上调用。 */
 char *msime_client_cloud_sync(const uint8_t *request, size_t length);
 char *msime_client_destroy(uint64_t session);
 /* Write the selection counts held by every session on the calling thread and all queued personal-context learning, without ending any session. Call from the host's will-terminate hook (e.g. NSApplicationWillTerminateNotification) on the thread that owns the sessions; the C++ Engine did this from atexit. Returns null on success. */

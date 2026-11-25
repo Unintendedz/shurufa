@@ -31,54 +31,18 @@ use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
-/// 社区库接受的类型：全部八种数据类插件，桌面上（macOS、Windows、非 ohos 的 Linux）另有脚本插件（`script`）。特效包除了清单不带任何文件，但它挑的样式、颜色和节奏仍是值得分享的作品，服务端也早已接受并校验 `effect`。以后给 [`PluginKind`] 加的类型，只有列进这里、并在 [`KINDS_DECLARATION`] 里声明之后才会分享。
-///
-/// 脚本插件在服务端先审后发：审核通过之前只有作者看得到（数据类插件发布即公开）。安装一个脚本包不授予任何能力，用户要在脚本插件页启用并逐项授权它才会运行，和本地导入的脚本包一样。移动端和鸿蒙没有 `script` 这个类型，既不声明也收不到它。
-#[cfg(any(
-    target_os = "macos",
-    target_os = "windows",
-    all(target_os = "linux", not(target_env = "ohos"))
-))]
-pub const PUBLISHABLE_KINDS: [PluginKind; 9] = [
+/// 社区库接受的类型：全部七种数据类插件。
+pub const PUBLISHABLE_KINDS: [PluginKind; 7] = [
     PluginKind::Sound,
     PluginKind::Music,
     PluginKind::CommandTable,
     PluginKind::Effect,
     PluginKind::PhraseTable,
-    PluginKind::Helpcode,
-    PluginKind::Wordbook,
-    PluginKind::SymbolSet,
-    PluginKind::Script,
-];
-/// 社区库接受的类型：全部八种数据类插件；这个平台不运行脚本插件。
-#[cfg(not(any(
-    target_os = "macos",
-    target_os = "windows",
-    all(target_os = "linux", not(target_env = "ohos"))
-)))]
-pub const PUBLISHABLE_KINDS: [PluginKind; 8] = [
-    PluginKind::Sound,
-    PluginKind::Music,
-    PluginKind::CommandTable,
-    PluginKind::Effect,
-    PluginKind::PhraseTable,
-    PluginKind::Helpcode,
     PluginKind::Wordbook,
     PluginKind::SymbolSet,
 ];
-/// 向服务端声明本客户端能安装的新插件类型（`sound`、`music`、`command_table`、`effect` 之外的）。服务端只把冻结的旧类型集合与这里声明的类型返回给列表和详情请求，因此不带声明的已发布客户端永远不会收到它不认识的类型。每支持一种新类型就把它追加进来；`kinds_declaration_lists_the_new_publishable_kinds` 测试保证它与 [`PUBLISHABLE_KINDS`] 一致。
-#[cfg(any(
-    target_os = "macos",
-    target_os = "windows",
-    all(target_os = "linux", not(target_env = "ohos"))
-))]
-pub(crate) const KINDS_DECLARATION: &str = "kinds=phrase_table,helpcode,wordbook,symbol_set,script";
-#[cfg(not(any(
-    target_os = "macos",
-    target_os = "windows",
-    all(target_os = "linux", not(target_env = "ohos"))
-)))]
-pub(crate) const KINDS_DECLARATION: &str = "kinds=phrase_table,helpcode,wordbook,symbol_set";
+/// 向服务端声明本客户端能安装的新插件类型（`sound`、`music`、`command_table`、`effect` 之外的）。
+pub(crate) const KINDS_DECLARATION: &str = "kinds=phrase_table,wordbook,symbol_set";
 /// Largest archive the server stores for one pack.
 pub const MAX_COMMUNITY_ARCHIVE_BYTES: usize = 8 * 1024 * 1024;
 /// Largest offset the server pages to.
@@ -99,11 +63,6 @@ const KIND: &str = "plugin_community_kind";
 const TOO_LARGE: &str = "plugin_community_too_large";
 const CHECKSUM: &str = "plugin_community_checksum";
 const MISMATCH: &str = "plugin_community_mismatch";
-/// 发布脚本插件时服务端以「请求不合法」拒绝：还不认识 `script` 的旧服务端就是这样回答的（400 `invalid_kind`）。打包时已经用和安装同一份校验器检查过包，元数据也在本机检查过，所以这里把它说成服务端还不接受脚本插件，而不是笼统的「请求无效」。
-const SCRIPT_UNSUPPORTED: &str = "plugin_community_script_unsupported";
-/// 社区条目 `permissions` 的上限：能力名的个数和每个名字的字节数。服务端可能比本客户端多认识几种能力（第二批能力先在服务端放行），所以这里只检查形状，不按本客户端的能力表拒绝，未知的能力名由页面原样列出。
-const MAX_LISTED_PERMISSIONS: usize = 16;
-const MAX_PERMISSION_NAME_BYTES: usize = 32;
 const STORAGE: &str = "storage";
 
 fn write_private_archive(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -477,28 +436,13 @@ fn community_failure(error: AccountError) -> PluginFailure {
     PluginFailure::code(error.community_code())
 }
 
-/// 发布失败的说法：脚本插件被服务端以「请求不合法」拒绝时是 [`SCRIPT_UNSUPPORTED`]，其余同 [`community_failure`]。
-fn publish_failure(kind: PluginKind, error: AccountError) -> PluginFailure {
-    if kind.is_script() && error == AccountError::Invalid {
-        return PluginFailure::code(SCRIPT_UNSUPPORTED);
-    }
+fn publish_failure(_kind: PluginKind, error: AccountError) -> PluginFailure {
     community_failure(error)
 }
 
-/// 条目的 `permissions` 形状合法：只有脚本插件带，至多 [`MAX_LISTED_PERMISSIONS`] 个不重复的名字，每个是 1 到 [`MAX_PERMISSION_NAME_BYTES`] 个小写字母或 `_`。
+/// 数据类插件不带任何权限声明。
 fn valid_permissions(item: &CommunityPlugin) -> bool {
-    if !item.kind.is_script() {
-        return item.permissions.is_empty();
-    }
-    let mut seen = HashSet::with_capacity(item.permissions.len());
-    item.permissions.len() <= MAX_LISTED_PERMISSIONS
-        && item.permissions.iter().all(|name| {
-            (1..=MAX_PERMISSION_NAME_BYTES).contains(&name.len())
-                && name
-                    .bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
-                && seen.insert(name.as_str())
-        })
+    item.permissions.is_empty()
 }
 
 /// What [`pack`] made of an installed pack before anything is uploaded, so a publish dialog can show a refusal, or the archive's size against the limit, before the user fills in the form. Serialized in the page's camelCase.

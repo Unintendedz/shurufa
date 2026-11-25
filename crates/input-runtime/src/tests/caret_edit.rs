@@ -187,34 +187,3 @@ fn the_view_fields_are_absent_when_the_mode_is_not_active() {
     let json = serde_json::to_value(&view).unwrap();
     assert!(json.get("caret_edit_suffix").is_none() && json.get("caret_edit_prefix").is_none());
 }
-
-/// 首选接着固定的那段，重排模型不能把别的行提到它前面。
-#[test]
-fn the_reranker_leaves_the_caret_edit_list_in_engine_order() {
-    let typed = |caret_edit_suffix: bool| {
-        let mut runtime = Runtime::new(
-            WubiMixedEngine {
-                scheme: 0,
-                answered_by_pinyin_fallback: false,
-                reading: String::new(),
-                caret_edit_suffix,
-            },
-            5,
-        )
-        .unwrap();
-        let model = favouring_model(&['态', '太', '快', '顿'], &['太', '快']);
-        runtime.set_reranker(Some(Reranker::new(std::sync::Arc::new(model))));
-        runtime.focus(true).unwrap();
-        for value in *b"dyn" {
-            runtime
-                .dispatch(Action::Character {
-                    value,
-                    shift: false,
-                })
-                .unwrap();
-        }
-        texts(&runtime.view())
-    };
-    assert_eq!(typed(false), ["太快", "态", "顿"]);
-    assert_eq!(typed(true), ["态", "太快", "顿"]);
-}

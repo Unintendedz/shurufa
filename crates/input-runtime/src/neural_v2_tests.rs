@@ -28,7 +28,6 @@ impl StubNeuralEngine {
             snap.candidate_annotations.push(String::new());
             snap.candidate_sources
                 .push(CandidateSource::Generated as u8);
-            snap.candidate_positions.push(0);
             snap.candidate_corrected.push(false);
             snap.candidate_answers_key.push(exact);
             snap.candidate_static_evidence.push(stat_milli.map(|m| {
@@ -63,7 +62,6 @@ impl InputEngine for StubNeuralEngine {
             self.snapshot.candidate_codes.clear();
             self.snapshot.candidate_annotations.clear();
             self.snapshot.candidate_sources.clear();
-            self.snapshot.candidate_positions.clear();
             self.snapshot.candidate_corrected.clear();
             self.snapshot.candidate_answers_key.clear();
             self.snapshot.candidate_static_evidence.clear();
@@ -114,10 +112,7 @@ fn runtime_neural_v2_preserves_punctuation_context_and_rescues_beam_candidate() 
     );
     let mut runtime = Runtime::new(engine, 6).unwrap();
     runtime.focused = true;
-    runtime.set_settled_lock_leader(true);
     runtime.set_neural_v2_enabled(true);
-    // 开启 neural_v2 后自动废除旧版停顿锁首。
-    assert!(!runtime.settled_lock_leader());
 
     let ctx = "昨天刚聊完，这个兄弟 API 2.0 应该多少还是";
     runtime.set_surrounding_context(ctx);

@@ -203,7 +203,7 @@ pub fn latin_name_symbols(code: &str) -> impl Iterator<Item = &'static str> {
         .flat_map(move |&index| table.entries[index].symbols())
 }
 
-/// 九宫格混排：依次按 `readings`（小写全拼，没有 `'`，可能性高的在前）找全拼与读法完全相等、并且通过 `accept` 的名称。不认首字母（数字串的首字母读法太多），也不认拉丁名称。行的 `pinyin` 是命中的读法，调用方换成整串数字。
+#[cfg(test)]
 pub fn query_symbol_readings(readings: &[String], accept: &dyn Fn(&str) -> bool) -> Vec<SymbolRow> {
     let table = table();
     let mut rows = Vec::new();

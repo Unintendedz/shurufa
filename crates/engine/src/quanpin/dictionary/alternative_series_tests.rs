@@ -330,35 +330,6 @@ fn extra_syllable_literal_cut_sentences_follow_primary_runner_ups_with_length_de
         expected_channel_deduction,
         "多出 1 个零声母切分边界应仅扣除小额真实信道代价（-0.60 nats），不再施加 -30 nats 死刑"
     );
-
-    let model = Arc::new(crate::lattice::merge::block_buffer_tests::favouring_model(
-        &['转', '专', '巴', '主', '案', '吧'],
-        &['转'],
-    ));
-    dictionary
-        .rerankers
-        .push(NeuralReranker::new(CandidateSource::NeuralKeyboard, model));
-    dictionary.reset_cache();
-    let reranked_rows = dictionary.query_exact("zhuanba", "", 0);
-    let reranked_prefix_pos = reranked_rows
-        .iter()
-        .position(|row| row.word == "转" && !row.sentence_association)
-        .expect("启用重排器后主切分应包含前缀词");
-    let reranked_extra_cut = reranked_rows
-        .iter()
-        .position(|row| row.word == "主案吧" && row.sentence_association)
-        .expect("启用重排器后多拆音节备选整句仍应保留");
-    assert!(
-        reranked_extra_cut < reranked_prefix_pos,
-        "启用重排器后零声母备选整句应与主切分整句一同留在前缀词之前平等竞争: {reranked_rows:?}"
-    );
-    let reranked_extra = &reranked_rows[reranked_extra_cut];
-    assert!(!reranked_extra.keyboard_runner_up);
-    assert_eq!(reranked_extra.extra_syllables, 0);
-    assert_eq!(
-        raw_extra.weight - reranked_extra.weight,
-        expected_channel_deduction
-    );
 }
 
 #[test]

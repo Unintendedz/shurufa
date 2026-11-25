@@ -200,38 +200,6 @@ fn start_and_end_never_appear_together_and_continuation_suppresses_both() {
 }
 
 #[test]
-fn a_korean_syllable_that_continues_commits_without_ending() {
-    let events = events(
-        dispatch(InputClass::Character),
-        ordinary(),
-        composing(3, 0, false),
-        composing(4, 0, false),
-        DispatchFacts::default(),
-        Some(typed(1)),
-        PageSample::default(),
-    );
-    assert_eq!(
-        events,
-        [
-            LifecycleEvent::BeforeCommit {
-                origin: CommitOrigin::SchemeText,
-                body_chars: 1,
-                tail_chars: 0,
-                rewritable: false,
-            },
-            LifecycleEvent::Commit {
-                origin: CommitOrigin::SchemeText,
-                chars: 1,
-                rewritten: false,
-                continues: true,
-                generated: false,
-            },
-            LifecycleEvent::CompositionUpdate,
-        ]
-    );
-}
-
-#[test]
 fn the_commit_origin_follows_the_facts() {
     let origin = |call: Call, facts: DispatchFacts| {
         events(

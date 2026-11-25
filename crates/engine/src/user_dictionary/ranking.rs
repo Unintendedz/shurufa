@@ -8,7 +8,7 @@ use super::journal::{
     open_dictionary_for_writing, open_journal, pinyin_segments, pinyin_table, write_upsert,
     MISSING_ROW, UNSTORABLE_ENTRY,
 };
-use super::positions::{is_fixed, pinned_value};
+use super::positions::pinned_value;
 use crate::error::{EngineError, Result};
 use crate::types::{
     CandidateSource, FrequencyAdjustmentMode, FrequencyAdjustmentOptions, PersonalDictionaryKind,
@@ -26,10 +26,7 @@ const CORE_LEADER_MOAT_RATIO: i64 = 8;
 /// 护城河内单次自动调频的最小绝对增量，防止极低权重词起步过慢。
 const CORE_LEADER_MIN_STEP: i64 = 15_000;
 
-/// A fixed candidate keeps its slot by position, not by weight, so learning never moves it (J:1356-1358).
-const FIXED_CANDIDATE: &str = "The candidate has a fixed position";
-
-/// One learning pick. `main_db` is `msime-pinyin.db` for pinyin and wubi and `msime-english.db` for English.
+/// 单次词频学习请求。
 #[derive(Debug, Clone, Copy)]
 pub struct RankingRequest<'a> {
     pub main_db: &'a Path,
@@ -79,15 +76,6 @@ fn begin_ranking<'a>(
 fn check_request(request: &RankingRequest<'_>) -> Result<()> {
     if request.entry_key.is_empty() || request.value.is_empty() || request.ordered.is_empty() {
         return Err(EngineError::invalid(UNSTORABLE_ENTRY));
-    }
-    // Runs before the disabled check and opens (creates) the journal, as the reference does.
-    if is_fixed(
-        request.user_db,
-        request.context_key,
-        request.entry_key,
-        request.value,
-    ) {
-        return Err(EngineError::invalid(FIXED_CANDIDATE));
     }
     Ok(())
 }
@@ -872,17 +860,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_fixed_candidate_is_not_ranked() {
-        let dir = frequency_fixture();
-        super::super::positions::set_fixed_position(&dir.journal(), "ni", "ni", "己", 2).unwrap();
-        assert!(pick(&dir, "己", FrequencyAdjustmentMode::Promote, 1, 1).is_err());
-        // Before the disabled check, as in the reference.
-        assert!(pick(&dir, "己", FrequencyAdjustmentMode::Disabled, 1, 1).is_err());
-        assert_eq!(dir.weight("ni", "己"), Some(50));
-    }
-
-    /// F7 (test_input_session.cpp:1204-1217).
+/// F7 (test_input_session.cpp:1204-1217).
     #[test]
     fn a_journal_that_is_a_directory_fails() {
         let dir = frequency_fixture();
@@ -919,97 +897,6 @@ mod tests {
             count(
                 &dir.journal(),
                 "SELECT count(*) FROM candidate_selection_state"
-            ),
-            0
-        );
-    }
-
-    #[test]
-    fn wubi_writes_to_wubi86_and_requires_the_row() {
-        let dir = Dir::new();
-        dir.wubi(&[("aaaa", "工", 100), ("aaaa", "或", 50)]);
-        let mut ordered = vec![item("aaaa", "工", 100), item("aaaa", "或", 50)];
-        for row in &mut ordered {
-            row.canonical_pinyin.clear();
-        }
-        let (main_db, user_db) = (dir.main_db(), dir.journal());
-        let request = RankingRequest {
-            main_db: &main_db,
-            user_db: &user_db,
-            context_key: "aaaa",
-            ordered: &ordered,
-            entry_key: "aaaa",
-            value: "或",
-            mode: FrequencyAdjustmentMode::Pin,
-            linear_step: 1,
-            trigger_count: 1,
-            force_top: true,
-            kind: PersonalDictionaryKind::Wubi,
-        };
-        assert!(adjust_candidate_ranking(&request).unwrap());
-        assert_eq!(
-            query_i64(&main_db, "SELECT weight FROM wubi86 WHERE value='或'"),
-            Some(600)
-        );
-        assert_eq!(
-            count(&user_db, "SELECT count(*) FROM user_dictionary_operations WHERE dictionary='wubi' AND key='aaaa' AND value='或' AND weight=600"),
-            1
-        );
-        Sqlite::open(&main_db)
-            .unwrap()
-            .execute_batch("DELETE FROM wubi86 WHERE value='或'")
-            .unwrap();
-        assert!(adjust_candidate_ranking(&request).is_err());
-    }
-
-    #[test]
-    fn wubi98_writes_to_wubi98_under_its_own_kind() {
-        let dir = Dir::new();
-        dir.wubi(&[("aaaa", "工", 100)]);
-        let main_db = dir.main_db();
-        Sqlite::open(&main_db)
-            .unwrap()
-            .execute_batch(
-                "CREATE TABLE wubi98(key TEXT,value TEXT,weight INTEGER);\
-                 INSERT INTO wubi98 VALUES('aaaa','工',100);\
-                 INSERT INTO wubi98 VALUES('aaaa','式',50);",
-            )
-            .unwrap();
-        let mut ordered = vec![item("aaaa", "工", 100), item("aaaa", "式", 50)];
-        for row in &mut ordered {
-            row.canonical_pinyin.clear();
-        }
-        let user_db = dir.journal();
-        let request = RankingRequest {
-            main_db: &main_db,
-            user_db: &user_db,
-            context_key: "aaaa",
-            ordered: &ordered,
-            entry_key: "aaaa",
-            value: "式",
-            mode: FrequencyAdjustmentMode::Pin,
-            linear_step: 1,
-            trigger_count: 1,
-            force_top: true,
-            kind: PersonalDictionaryKind::Wubi98,
-        };
-        assert!(adjust_candidate_ranking(&request).unwrap());
-        assert_eq!(
-            query_i64(&main_db, "SELECT weight FROM wubi98 WHERE value='式'"),
-            Some(600)
-        );
-        assert_eq!(
-            query_i64(&main_db, "SELECT weight FROM wubi86 WHERE value='工'"),
-            Some(100)
-        );
-        assert_eq!(
-            count(&user_db, "SELECT count(*) FROM user_dictionary_operations WHERE dictionary='wubi98' AND key='aaaa' AND value='式' AND weight=600"),
-            1
-        );
-        assert_eq!(
-            count(
-                &user_db,
-                "SELECT count(*) FROM user_dictionary_operations WHERE dictionary='wubi'"
             ),
             0
         );

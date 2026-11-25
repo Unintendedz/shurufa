@@ -257,8 +257,6 @@ fn legal_empty_plan_is_reached_by_the_sentence_merge_source() {
         "aaa",
         &crate::lattice::decode::LatticeOptions::default(),
         Some(&mut source),
-        &mut [],
-        "",
     );
     assert!(visited.get(), "真实句子合并必须进入纠错源");
     assert!(typo.is_none());

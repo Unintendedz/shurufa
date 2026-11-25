@@ -11,7 +11,7 @@ use msime_client_base::text::{
     is_ascii_lowercase, is_bounded_ascii_identifier, is_bounded_utf16,
 };
 use msime_client_base::{bounded_io, calendar, file_lock, storage, text};
-use msime_client_core::{cloud, edition, endpoint, helpcode, host_surface, preferences, theme};
+use msime_client_core::{cloud, edition, endpoint, host_surface, preferences, theme};
 
 pub mod account;
 /// 自建云剪贴板中继的客户端：自己联网，所以不在只做 sans-IO 的 `cloud` 下面。

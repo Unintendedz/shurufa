@@ -144,18 +144,6 @@ static NSDictionary *decode(char *response, NSError **error) {
     return NO;
 }
 - (NSDictionary *)hostOptions { return _hostOptions; }
-- (NSDictionary *)rerankSettledWithError:(NSError **)error {
-    id value = decodeValue(msime_client_rerank_settled(_handle), error);
-    return [value isKindOfClass:NSDictionary.class] ? value : nil;
-}
-- (NSDictionary *)startSettledRerankWithError:(NSError **)error {
-    id value = decodeValue(msime_client_start_settled_rerank(_handle), error);
-    return [value isKindOfClass:NSDictionary.class] ? value : nil;
-}
-- (NSDictionary *)pollSettledRerank:(uint64_t)token accept:(BOOL)accept error:(NSError **)error {
-    id value = decodeValue(msime_client_poll_settled_rerank(_handle, token, accept), error);
-    return [value isKindOfClass:NSDictionary.class] ? value : nil;
-}
 - (BOOL)setNeuralV2Enabled:(BOOL)enabled error:(NSError **)error {
     return decodeValue(msime_client_set_neural_v2_enabled(_handle, enabled), error) != nil;
 }
@@ -415,21 +403,6 @@ static void MSIMEInvokeAnnounce(void *context) {
     if (!data) return nil;
     return decode(msime_client_dictionary_scel_text(static_cast<const uint8_t *>(data.bytes), data.length), error);
 }
-+ (NSDictionary *)handwritingProviderRequest:(NSDictionary<NSString *, id> *)request error:(NSError **)error {
-    if (![request isKindOfClass:NSDictionary.class] || ![NSJSONSerialization isValidJSONObject:request]) { setError(error, @"手写请求格式错误"); return nil; }
-    NSString *socketPath = request[@"socket_path"];
-    if (![socketPath isKindOfClass:NSString.class] || !socketPath.isAbsolutePath || socketPath.length > 4096) { setError(error, @"手写 provider 路径无效"); return nil; }
-    NSData *data = [NSJSONSerialization dataWithJSONObject:request options:0 error:error];
-    if (!data || data.length > 65536) { setError(error, @"手写请求过大"); return nil; }
-    NSData *socket = [socketPath dataUsingEncoding:NSUTF8StringEncoding];
-    return decode(msime_client_handwriting_provider_request(static_cast<const uint8_t *>(data.bytes), data.length,
-                                                            static_cast<const uint8_t *>(socket.bytes), socket.length), error);
-}
-+ (NSDictionary *)handwritingProviderRequest:(NSDictionary<NSString *, id> *)request {
-    NSError *error = nil;
-    NSDictionary *result = [self handwritingProviderRequest:request error:&error];
-    return result ?: @{ @"error": error ?: [NSError errorWithDomain:MSIMEClientErrorDomain code:1 userInfo:nil] };
-}
 + (NSDictionary *)captureClipboardHistoryRequest:(NSDictionary<NSString *, id> *)request {
     if (![NSJSONSerialization isValidJSONObject:request]) return @{ @"error": @YES };
     NSError *error = nil;
@@ -688,10 +661,6 @@ static void MSIMEInvokeAnnounce(void *context) {
     if (view) _punctuationOverride = @(enabled);
     return view;
 }
-- (nullable NSDictionary *)setMultilingualOutput:(BOOL)traditional error:(NSError **)error {
-    if (![self checkThreadAndHandle:error]) return nil;
-    return decode(msime_client_set_multilingual_output(_handle, traditional), error);
-}
 - (nullable NSDictionary *)setPairedPunctuationEnabled:(BOOL)enabled error:(NSError **)error {
     if (![self checkThreadAndHandle:error]) return nil;
     NSDictionary *view = decode(msime_client_set_paired_punctuation(_handle, enabled), error);
@@ -831,14 +800,6 @@ static void MSIMEInvokeAnnounce(void *context) {
 - (nullable NSDictionary *)removeGeneration:(uint64_t)generation index:(NSUInteger)index error:(NSError **)error {
     if (![self checkThreadAndHandle:error]) return nil;
     return decode(msime_client_remove_candidate(_handle, generation, index), error);
-}
-- (nullable NSDictionary *)fixGeneration:(uint64_t)generation index:(NSUInteger)index position:(uint8_t)position error:(NSError **)error {
-    if (![self checkThreadAndHandle:error]) return nil;
-    return decode(msime_client_fix_candidate_position(_handle, generation, index, position), error);
-}
-- (nullable NSDictionary *)clearPositionGeneration:(uint64_t)generation index:(NSUInteger)index error:(NSError **)error {
-    if (![self checkThreadAndHandle:error]) return nil;
-    return decode(msime_client_clear_candidate_position(_handle, generation, index), error);
 }
 // No NSError and no main-thread check here: these run on every key press, and the host library already answers false for a closed handle or another thread.
 - (BOOL)keySound:(uint32_t)keyClass {

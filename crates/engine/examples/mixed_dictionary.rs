@@ -21,12 +21,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         temporary.path().join("cache").to_str().unwrap(),
         "mixed-fixture",
     )?;
-    options.helpcode = false;
     options.learning = false;
     options.mixed_english = false;
     // The two-letter probe needs English from two letters; `prepare_options` has defaulted to five since the Windows parity change, which left this probe with no English to find.
     options.english_minimum_prefix = 2;
-    for scheme in 0..4 {
+    for scheme in 0..2 {
         options.scheme = scheme;
         let baseline = query(&options)?;
         let mut leading = Vec::new();

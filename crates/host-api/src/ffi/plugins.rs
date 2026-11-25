@@ -6,28 +6,6 @@ use crate::*;
 use key_sound::{KeyClass, PluginRoots, SessionSound};
 use msime_client_services::plugins::mentions::{MentionEntry, MentionStore};
 use msime_client_services::plugins::{self, PluginFailure};
-#[cfg(any(
-    target_os = "macos",
-    target_os = "windows",
-    all(target_os = "linux", not(target_env = "ohos"))
-))]
-use msime_client_services::plugins::{
-    script_commands, script_grants, script_settings, script_storage,
-};
-
-/// 授权页说明插件指令的状态时用的用户指令表：状态目录 `state_root`（插件根目录的上一级，偏好文件也在这里）里偏好启用的指令表包，和输入法交给引擎的是同一份。偏好读不出时按没有启用任何指令表说明。
-#[cfg(any(
-    target_os = "macos",
-    target_os = "windows",
-    all(target_os = "linux", not(target_env = "ohos"))
-))]
-fn user_command_triggers(state_root: &str, root: &Path) -> Vec<String> {
-    let enabled = msime_client_core::preferences::PreferencesStore::new(state_root)
-        .load()
-        .map(|snapshot| snapshot.preferences.plugins.command_tables)
-        .unwrap_or_default();
-    script_commands::user_triggers(root, &enabled)
-}
 
 /// 拿会话的声音设置执行 `action`。未知会话、错线程、重入调用和 panic（不能越过 C 边界）都返回 false。会话开了生命周期的 FEEDBACK 时同样返回 false、什么都不做：声音由核心驱动，宿主再调一次会响两遍。
 fn with_sound(handle: u64, action: impl FnOnce(&SessionSound) -> bool) -> bool {
@@ -192,12 +170,12 @@ pub unsafe extern "C" fn msime_client_plugins(request: *const u8, length: usize)
     struct Request {
         state_root: String,
         sound_packs: Option<String>,
-        /// 桌面安装包随带的官方插件包目录，同宿主选项的 `plugin_packs`：没有时取 `sound_packs` 旁边的 `plugin-packs`。目录、授权和授权页的指令状态都按它找官方包。
+        /// 官方插件包目录（绝对路径，`<kind>/<id>/`）。
         plugin_packs: Option<String>,
-        /// 宿主有脚本插件的授权页（列出、授权、排序、写明残余风险）。没有时为假。
+        #[allow(dead_code)]
         #[serde(default)]
         script_page: bool,
-        /// 输入法的 `user_data` 目录（宿主选项里的同名项）：授权的回答带上它下面 `script-health.json` 里的停用记录。没有时不带停用记录。
+        #[allow(dead_code)]
         user_data: Option<String>,
         action: PluginAction,
     }
@@ -212,10 +190,6 @@ pub unsafe extern "C" fn msime_client_plugins(request: *const u8, length: usize)
             kind: String,
             id: String,
         },
-        ImportHelpcodeTable {
-            file_name: String,
-            text: String,
-        },
         LoadMentions,
         SaveMentions {
             entries: Vec<MentionEntry>,
@@ -227,64 +201,8 @@ pub unsafe extern "C" fn msime_client_plugins(request: *const u8, length: usize)
         },
         /// 设置页编辑器保存一个包，走导入同一条暂存、校验和替换的路径。
         AuthoringSave {
-            pack: plugins::authoring::AuthoredPack,
+            pack: Box<plugins::authoring::AuthoredPack>,
             replace: bool,
-        },
-        /// 脚本插件的授权、执行顺序和输入法记下的停用。
-        #[cfg(any(
-            target_os = "macos",
-            target_os = "windows",
-            all(target_os = "linux", not(target_env = "ohos"))
-        ))]
-        ScriptGrants,
-        /// 授予、调整或撤销一个脚本插件的授权；`hash` 是页面展示给用户的内容哈希。
-        #[cfg(any(
-            target_os = "macos",
-            target_os = "windows",
-            all(target_os = "linux", not(target_env = "ohos"))
-        ))]
-        SetScriptGrant {
-            id: String,
-            hash: String,
-            enabled: bool,
-            granted: Vec<String>,
-        },
-        /// 调整执行顺序：`ids` 按给出的顺序排在最前。
-        #[cfg(any(
-            target_os = "macos",
-            target_os = "windows",
-            all(target_os = "linux", not(target_env = "ohos"))
-        ))]
-        ReorderScripts {
-            ids: Vec<String>,
-        },
-        /// 插件详情页：清单里每一项设置现在的值和持久存储占的字节数。
-        #[cfg(any(
-            target_os = "macos",
-            target_os = "windows",
-            all(target_os = "linux", not(target_env = "ohos"))
-        ))]
-        ScriptPluginState {
-            id: String,
-        },
-        /// 整份替换一个插件的设置值；没写的项用默认值。
-        #[cfg(any(
-            target_os = "macos",
-            target_os = "windows",
-            all(target_os = "linux", not(target_env = "ohos"))
-        ))]
-        SetScriptSettings {
-            id: String,
-            values: serde_json::Map<String, Value>,
-        },
-        /// 「清除数据」：删掉一个插件的持久存储。
-        #[cfg(any(
-            target_os = "macos",
-            target_os = "windows",
-            all(target_os = "linux", not(target_env = "ohos"))
-        ))]
-        ClearScriptData {
-            id: String,
         },
     }
     plugin_response(|| {
@@ -310,49 +228,15 @@ pub unsafe extern "C" fn msime_client_plugins(request: *const u8, length: usize)
             "",
         );
         let root = roots.installed.clone().ok_or_else(invalid)?;
-        #[cfg_attr(
-            not(any(
-                target_os = "macos",
-                target_os = "windows",
-                all(target_os = "linux", not(target_env = "ohos"))
-            )),
-            allow(unused_variables)
-        )]
-        let builtin_packs = roots.builtin_packs.as_deref();
-        #[cfg_attr(
-            not(any(
-                target_os = "macos",
-                target_os = "windows",
-                all(target_os = "linux", not(target_env = "ohos"))
-            )),
-            allow(unused_variables)
-        )]
-        let user_data = request.user_data.as_deref().map(Path::new);
         let value = match request.action {
-            // 没有授权页的宿主看不到脚本插件。
-            PluginAction::Catalog => {
-                let catalog = plugins::scan(&root, roots.builtin());
-                serde_json::to_value(if request.script_page {
-                    catalog
-                } else {
-                    catalog.without_scripts()
-                })
-            }
+            PluginAction::Catalog => serde_json::to_value(plugins::scan(&root, roots.builtin())),
             PluginAction::Import { source } => {
                 if !absolute_path(&source) {
                     return Err(invalid());
                 }
                 let source = Path::new(&source);
-                serde_json::to_value(if request.script_page {
-                    plugins::import_from_settings(source, &root)?
-                } else {
-                    plugins::import_without_script_page(source, &root)?
-                })
+                serde_json::to_value(plugins::import(source, &root)?)
             }
-            // 移动端选到的是 content URI 或 security-scoped URL，没有能交给 `import` 的路径：宿主严格按 UTF-8 解码后把码表正文放进请求。
-            PluginAction::ImportHelpcodeTable { file_name, text } => serde_json::to_value(
-                plugins::helpcode_pack::import_table(&root, &file_name, text.as_bytes())?,
-            ),
             PluginAction::Remove { kind, id } => {
                 plugins::remove_named(&root, &kind, &id)?;
                 Ok(Value::Null)
@@ -367,77 +251,6 @@ pub unsafe extern "C" fn msime_client_plugins(request: *const u8, length: usize)
             PluginAction::SaveMentions { entries } => {
                 MentionStore::new(root).save(&entries)?;
                 Ok(Value::Null)
-            }
-            #[cfg(any(
-                target_os = "macos",
-                target_os = "windows",
-                all(target_os = "linux", not(target_env = "ohos"))
-            ))]
-            PluginAction::ScriptGrants => serde_json::to_value(script_grants::view(
-                &root,
-                builtin_packs,
-                script_grants::read(&root),
-                user_data,
-                &user_command_triggers(&request.state_root, &root),
-            )),
-            #[cfg(any(
-                target_os = "macos",
-                target_os = "windows",
-                all(target_os = "linux", not(target_env = "ohos"))
-            ))]
-            PluginAction::SetScriptGrant {
-                id,
-                hash,
-                enabled,
-                granted,
-            } => {
-                let granted = script_grants::capabilities(&granted)?;
-                let grants =
-                    script_grants::set(&root, builtin_packs, &id, &hash, enabled, granted)?;
-                serde_json::to_value(script_grants::view(
-                    &root,
-                    builtin_packs,
-                    grants,
-                    user_data,
-                    &user_command_triggers(&request.state_root, &root),
-                ))
-            }
-            #[cfg(any(
-                target_os = "macos",
-                target_os = "windows",
-                all(target_os = "linux", not(target_env = "ohos"))
-            ))]
-            PluginAction::ReorderScripts { ids } => serde_json::to_value(script_grants::view(
-                &root,
-                builtin_packs,
-                script_grants::reorder(&root, &ids)?,
-                user_data,
-                &user_command_triggers(&request.state_root, &root),
-            )),
-            #[cfg(any(
-                target_os = "macos",
-                target_os = "windows",
-                all(target_os = "linux", not(target_env = "ohos"))
-            ))]
-            PluginAction::ScriptPluginState { id } => {
-                serde_json::to_value(script_settings::state(&root, builtin_packs, &id)?)
-            }
-            #[cfg(any(
-                target_os = "macos",
-                target_os = "windows",
-                all(target_os = "linux", not(target_env = "ohos"))
-            ))]
-            PluginAction::SetScriptSettings { id, values } => {
-                serde_json::to_value(script_settings::set(&root, builtin_packs, &id, values)?)
-            }
-            #[cfg(any(
-                target_os = "macos",
-                target_os = "windows",
-                all(target_os = "linux", not(target_env = "ohos"))
-            ))]
-            PluginAction::ClearScriptData { id } => {
-                script_storage::clear(&root, &id)?;
-                serde_json::to_value(script_settings::state(&root, builtin_packs, &id)?)
             }
         };
         value.map_err(|_| PluginFailure::code("storage"))

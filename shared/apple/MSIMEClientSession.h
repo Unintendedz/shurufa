@@ -19,8 +19,6 @@ FOUNDATION_EXPORT NSNotificationName const MSIMEClientSessionDidReplaceSnapshotN
 - (nullable NSDictionary<NSString *, id> *)setFocused:(BOOL)focused error:(NSError **)error;
 /// Returns the current View, not a transition; preserves live composition.
 - (nullable NSDictionary<NSString *, id> *)setChinesePunctuationEnabled:(BOOL)enabled error:(NSError **)error;
-/// 即时投影连续多语言候选中的中文段，保留组字并返回最新视图；不落盘。
-- (nullable NSDictionary *)setMultilingualOutput:(BOOL)traditional error:(NSError **)error;
 /// 中日英循环切换的目标（`msime_client_language_cycle`）：中 → 日 → 英 → 中，顺序和「有组字时先上屏」在
 /// `crates/client-core/src/language_cycle.rs`。返回 null 表示这一键不循环（开关关着），宿主照旧自己处理；
 /// 返回 `{mode, scheme, commit_raw}` 时按它执行。`lastChineseScheme` 是 `last_chinese_scheme` 的引擎方案编号，
@@ -73,21 +71,7 @@ FOUNDATION_EXPORT NSNotificationName const MSIMEClientSessionDidReplaceSnapshotN
 - (nullable NSDictionary *)selectAnyCandidateGeneration:(uint64_t)generation index:(NSUInteger)index error:(NSError **)error;
 - (nullable NSDictionary *)pinGeneration:(uint64_t)generation index:(NSUInteger)index error:(NSError **)error;
 - (nullable NSDictionary *)removeGeneration:(uint64_t)generation index:(NSUInteger)index error:(NSError **)error;
-- (nullable NSDictionary *)fixGeneration:(uint64_t)generation index:(NSUInteger)index position:(uint8_t)position error:(NSError **)error;
-- (nullable NSDictionary *)clearPositionGeneration:(uint64_t)generation index:(NSUInteger)index error:(NSError **)error;
 - (nullable NSDictionary<NSString *, id> *)viewWithError:(NSError **)error;
-/// Re-rank the visible candidates with the settled model, after the host's typing pause.
-///
-/// The host owns the clock: only it knows whether a keystroke arrived while the pass ran. Answers
-/// {moved, view}; `moved` is NO when the order did not change, which is the signal to leave the
-/// candidate window alone rather than repaint it identically. Inert, and immediately NO, when no
-/// settled model is installed. No network I/O.
-- (nullable NSDictionary *)rerankSettledWithError:(NSError **)error;
-/// 后台启动重排；`status` 为 `done` 或 `pending`，后者携带用于轮询的 `token`。不联网。
-- (nullable NSDictionary *)startSettledRerankWithError:(NSError **)error;
-/// 已离开原组字时传 `accept: NO`，只归还仍适用的模型；完成前返回 `pending`，
-/// 完成后与启动接口的 `done` 结构一致。不联网。
-- (nullable NSDictionary *)pollSettledRerank:(uint64_t)token accept:(BOOL)accept error:(NSError **)error;
 /// 启用或关闭 Shurufa v2 Tier 1 两阶段异步神经解码。
 - (BOOL)setNeuralV2Enabled:(BOOL)enabled error:(NSError **)error;
 /// 取出当前代次的 Tier 1 神经解码请求 JSON 字典；无请求时返回 nil（且 error 为 nil）。
@@ -203,8 +187,6 @@ FOUNDATION_EXPORT NSNotificationName const MSIMEClientSessionDidReplaceSnapshotN
                                                                 error:(NSError **)error;
 /// 搜狗细胞词库转成标准 TSV 文本（`msime_client_dictionary_scel_text`），回答 `{name, category, entries, text}`；拒绝时 error 的描述是 `dictionary_scel_*` 或 `dictionary_too_large`。
 + (nullable NSDictionary<NSString *, id> *)scelText:(NSData *)bytes error:(NSError **)error;
-+ (nullable NSDictionary<NSString *, id> *)handwritingProviderRequest:(NSDictionary<NSString *, id> *)request error:(NSError **)error;
-+ (NSDictionary<NSString *, id> *)handwritingProviderRequest:(NSDictionary<NSString *, id> *)request;
 + (NSDictionary<NSString *, id> *)emojiCatalogRequest:(NSDictionary<NSString *, id> *)request;
 + (NSDictionary<NSString *, id> *)clipboardHistoryRequest:(NSString *)directory;
 + (NSDictionary<NSString *, id> *)enableClipboardHistoryRequest:(NSString *)directory;

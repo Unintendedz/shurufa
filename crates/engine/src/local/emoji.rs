@@ -152,7 +152,8 @@ fn query_mixed(
     query_readings(catalog, prefixes.iter(), others_db, &|_| true)
 }
 
-/// 九宫格混排：依次按 `readings`（小写全拼，可能性高的在前）查 emoji，见 `query_readings`。
+/// 依次按 `readings` 查 emoji，见 `query_readings`。
+#[cfg(test)]
 pub fn query_emoji_readings(
     readings: &[String],
     others_db: &Path,
@@ -166,7 +167,8 @@ pub fn query_emoji_readings(
     )
 }
 
-/// 九宫格混排：依次按 `readings` 查颜文字，见 `query_readings`。
+/// 依次按 `readings` 查颜文字，见 `query_readings`。
+#[cfg(test)]
 pub fn query_kaomoji_readings(
     readings: &[String],
     others_db: &Path,

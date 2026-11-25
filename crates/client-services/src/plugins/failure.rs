@@ -53,33 +53,6 @@ impl From<MentionError> for PluginFailure {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    target_os = "windows",
-    all(target_os = "linux", not(target_env = "ohos"))
-))]
-impl From<super::script_grants::ScriptGrantError> for PluginFailure {
-    fn from(value: super::script_grants::ScriptGrantError) -> Self {
-        use super::script_grants::ScriptGrantError;
-        match value {
-            ScriptGrantError::Missing(reason) => Self::with_detail("plugin_script_missing", reason),
-            ScriptGrantError::Changed => Self::code("plugin_script_changed"),
-            ScriptGrantError::Invalid(reason) => {
-                Self::with_detail("plugin_script_grant_invalid", reason)
-            }
-            ScriptGrantError::Limit => Self::code("plugin_script_limit"),
-            ScriptGrantError::Memory => Self::code("plugin_script_memory"),
-            ScriptGrantError::Format => Self::code("plugin_script_grants_format"),
-            ScriptGrantError::SettingInvalid(reason) => {
-                Self::with_detail("plugin_script_setting_invalid", reason)
-            }
-            ScriptGrantError::SettingsFormat => Self::code("plugin_script_settings_format"),
-            ScriptGrantError::Storage => Self::code("plugin_storage"),
-            ScriptGrantError::Io(_) => Self::code("storage"),
-        }
-    }
-}
-
 /// 按页面的称呼方式删除一个已安装的包：种类按 `PluginKind::as_str` 的拼法，再加上 id。未知种类返回 `invalid`，其余错误由 `remove` 决定。
 pub fn remove_named(root: &Path, kind: &str, id: &str) -> Result<(), PluginFailure> {
     let kind = PluginKind::parse(kind).ok_or(PluginFailure::code("invalid"))?;

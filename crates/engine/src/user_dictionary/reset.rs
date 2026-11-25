@@ -12,7 +12,7 @@ use crate::assets;
 use crate::diagnostics;
 use crate::error::{EngineError, Result};
 use crate::paths::RuntimePaths;
-use crate::user_dictionary::generation::{copy_private_file, merge_split_wubi, weakly_canonical};
+use crate::user_dictionary::generation::{copy_private_file, weakly_canonical};
 use crate::user_dictionary::journal::{close_cached_journals, ensure_schema, open_database};
 
 /// SQLite files that sit beside the journal. A leftover `-wal` would bring the learned data the user just erased back on the next open.
@@ -92,13 +92,7 @@ pub fn reset_learned_data_with(paths: &RuntimePaths, main_dictionary: bool) -> R
         return Err(EngineError::failed(diagnostics::RESET_JOURNAL_FAILED));
     }
 
-    let swapped = swap(
-        &mut replacements,
-        &paths.resources,
-        main_dictionary,
-        &sources,
-        &journal,
-    );
+    let swapped = swap(&mut replacements, &sources, &journal);
     match swapped {
         Ok(()) => {
             // Every replacement is published; the originals are no longer needed.
@@ -116,19 +110,12 @@ pub fn reset_learned_data_with(paths: &RuntimePaths, main_dictionary: bool) -> R
 
 fn swap(
     replacements: &mut [Replacement],
-    resources: &Path,
-    main_dictionary: bool,
     sources: &[PathBuf],
     journal: &Path,
 ) -> Result<()> {
     // A plain copy, as the reference made: the packaged bundle is immutable, so it has no WAL to lose.
     for (source, replacement) in sources.iter().zip(replacements.iter()) {
         copy_private_file(source, &replacement.temporary)
-            .map_err(|_| EngineError::failed(diagnostics::RESET_STAGE_DICTIONARIES_FAILED))?;
-    }
-    // 与准备代次相同：单独发布的五笔码表并回新的工作主词库，否则重置之后五笔学习与删词都找不到表。没有工作主词库时 `replacements[0]` 是英文词库，不并。
-    if main_dictionary {
-        merge_split_wubi(resources, &replacements[0].temporary)
             .map_err(|_| EngineError::failed(diagnostics::RESET_STAGE_DICTIONARIES_FAILED))?;
     }
     for replacement in replacements.iter_mut() {
@@ -374,45 +361,6 @@ mod tests {
             cache: path("cache"),
             dictionaries: path("dictionaries"),
         }
-    }
-
-    /// 拆分发布布局：`msime-pinyin.db` 没有五笔表，重置后的工作主词库要把 `msime-wubi.db` 的码表并回来，五笔学习与删词才有表可写。
-    #[test]
-    fn reset_merges_the_split_wubi_tables_into_the_fresh_working_copy() {
-        let temporary = tempfile::tempdir().unwrap();
-        let paths = paths(temporary.path());
-        sql(
-            &paths.resource(assets::MAIN_DICTIONARY),
-            "CREATE TABLE tbl_2_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);",
-        );
-        sql(
-            &paths.resource(assets::WUBI_DICTIONARY),
-            "CREATE TABLE wubi86(key TEXT,value TEXT,weight INTEGER);
-             INSERT INTO wubi86 VALUES('aaaa','工',200);
-             CREATE TABLE wubi98(key TEXT,value TEXT,weight INTEGER);",
-        );
-        sql(
-            &paths.resource(assets::ENGLISH_DICTIONARY),
-            "CREATE TABLE english_words(word TEXT,display TEXT,weight INTEGER);",
-        );
-
-        reset_learned_data(&paths).unwrap();
-
-        assert_eq!(
-            weight(
-                &paths.dictionary(assets::MAIN_DICTIONARY),
-                "SELECT weight FROM wubi86 WHERE key='aaaa'"
-            ),
-            Some(200)
-        );
-        assert_eq!(
-            weight(
-                &paths.dictionary(assets::MAIN_DICTIONARY),
-                "SELECT count(*) FROM wubi98"
-            ),
-            Some(0)
-        );
-        assert!(!paths.dictionary(assets::WUBI_DICTIONARY).exists());
     }
 
     // engine-bridge tests.rs `reset_learned_data_restores_packaged_dictionaries_and_clears_journal`, for an ASCII root and one carrying Chinese characters.

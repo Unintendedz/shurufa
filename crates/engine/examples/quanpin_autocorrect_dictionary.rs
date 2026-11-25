@@ -19,7 +19,6 @@ fn candidates(
     )?;
     options.autocorrect_transposition = true;
     options.autocorrect_neighbor = true;
-    options.helpcode = false;
     options.mixed_english = false;
     options.learning = false;
     let mut session = Session::new(&options)?;

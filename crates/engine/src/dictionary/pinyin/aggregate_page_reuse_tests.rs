@@ -283,8 +283,6 @@ fn real_lattice_merge_saves_one_allocation_per_nonempty_lookup() {
             "pingguo",
             &options,
             None,
-            &mut [],
-            "",
         );
         (candidates, typo, hits)
     };

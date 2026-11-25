@@ -9,7 +9,7 @@ use crate::text::count_han_chars;
 use crate::types::{
     CandidateSource, KeyResult, LocalInputMode, QueryRequest, SchemeType, WordItem,
 };
-use crate::user_dictionary::positions::apply_fixed_positions_with_state;
+use crate::user_dictionary::positions::rehome_online_candidates;
 
 const LITERAL_SYMBOLS: &str = "#$%&";
 
@@ -100,44 +100,13 @@ impl InputSession {
         {
             return false;
         }
-        let raw = self.raw_with_cases();
         if self.has_literal_symbols() {
             return true;
         }
-        // 辅助码段（`` ` ``/`|`/大写码）在请求里已剥掉：字面大写判定看去段后的查询串，
-        // 句中段的码（`b;j;X`）不再误当字面大写尾巴，末尾段（`nihcXY`）也不靠豁免。
+        let raw = self.raw_with_cases();
         let probe = self.engine.request().raw_input_with_cases.as_str();
         let probe = if probe.is_empty() { raw } else { probe };
-        let Some(first) = probe.bytes().position(|byte| byte.is_ascii_uppercase()) else {
-            return false;
-        };
-        // 末尾辅助码只能接在没有字面大写的拼音之后，全大写词不能被误判为「拼音加双辅助码」。
-        let trailing_helpcode =
-            first > 0 && first >= probe.len().saturating_sub(2) && self.has_active_helpcode();
-        !trailing_helpcode
-            && !(self.is_shuangpin()
-                && self.engine.request().enable_shuangpin_helpcode
-                && self
-                    .helpcode_keymap
-                    .as_ref()
-                    .is_some_and(|keymap| !keymap.is_empty())
-                && self
-                    .engine
-                    .request()
-                    .shuangpin_helpcode_modes
-                    .direct_helpcode
-                && crate::shuangpin::engine::direct_helpcodes_own_capitals(
-                    probe,
-                    self.profile,
-                    self.engine
-                        .request()
-                        .shuangpin_helpcode_modes
-                        .direct_helpcode_slash,
-                    self.engine
-                        .request()
-                        .shuangpin_helpcode_modes
-                        .direct_helpcode_uppercase,
-                ))
+        probe.bytes().any(|byte| byte.is_ascii_uppercase())
     }
 
     /// 含特殊符号时只提供原文；否则只转换第一个小写片段，大写及后续片段保留原文边界。
@@ -164,7 +133,6 @@ impl InputSession {
             literal_first =
                 start > 0 && !spells_whole_syllables(lower, self.scheme(), self.profile);
             for item in self.engine.query_raw_candidates(lower, lower) {
-                // 双拼字典也可能返回全拼读音；只有实际匹配原文的编码才能直接作为字节数。
                 let effective = if self.is_shuangpin() {
                     let code_length = item.pinyin.bytes().filter(|&byte| byte != b'\'').count();
                     if code_length > 0
@@ -188,7 +156,6 @@ impl InputSession {
                 }
                 let consumed = raw_length_for_effective_prefix(lower, effective);
                 let mut consumed_end = start + consumed;
-                // 转完这个小写片段后，紧接的大写片段可以一起保留，下一段小写仍独立查询。
                 if lower[consumed..].bytes().all(|byte| byte == b'\'') {
                     consumed_end = lower_end;
                     consumed_end += prefix[lower_end..]
@@ -221,7 +188,6 @@ impl InputSession {
                 rows.push(literal);
             }
         }
-        // 英文行保留词库身份，大小写只在快照和上屏副本中恢复。内部光标时不提供会整段结束组字的英文行。
         let english_min_prefix = if self.english_options.short_prefix_completion {
             2
         } else {
@@ -239,7 +205,6 @@ impl InputSession {
                 .english_dictionary()
                 .query_prefix(&key, MIXED_ENGLISH_LIMIT);
             if self.english_options.short_prefix_completion {
-                // 不同大小写词形按用户输入投影后可能同名（如 `python` 与 `Python`），只留权重最高的一条。
                 let mut seen_displays = Vec::with_capacity(english.len());
                 english.retain(|item| {
                     let mut display = item.word.clone();
@@ -284,7 +249,6 @@ impl InputSession {
                         rows.splice(front_end..front_end, extra);
                         rows.extend(english);
                     } else {
-                        // 未打完的大写前缀把原文放在首选，紧跟前排高频补全，不让 `C啦` 等拼凑单字挤占首页。
                         if let Some(fallback_index) = rows.iter().position(|row| {
                             row.source == CandidateSource::Fallback && row.word == raw
                         }) {
@@ -305,7 +269,6 @@ impl InputSession {
                     }
                 }
             } else {
-                // 完全匹配的英文优先，补全仍可选择；未知词的原文始终有自己的候选。
                 if let Some(index) = english.iter().position(|row| row.pinyin == key) {
                     let exact = english.remove(index);
                     let mut display = exact.word.clone();
@@ -319,17 +282,7 @@ impl InputSession {
                 }
                 rows.extend(english);
             }
-            let journal = self.journal_path();
-            let context = self.position_context(true, false);
-            apply_fixed_positions_with_state(
-                journal,
-                context.as_ref(),
-                &mut rows,
-                false,
-                None,
-                true,
-                journal.try_exists().unwrap_or(false),
-            );
+            rehome_online_candidates(&mut rows, true);
         }
         self.prefix_active = end < raw.len();
         self.personal_reranked = false;

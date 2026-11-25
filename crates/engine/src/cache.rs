@@ -20,6 +20,7 @@ impl<K: Hash + Eq, V: Clone> FifoCache<K, V> {
         }
     }
 
+    #[cfg(test)]
     pub fn get(&self, key: &K) -> Option<V> {
         self.entries.peek(key).cloned()
     }

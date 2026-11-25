@@ -467,6 +467,7 @@ pub fn decode_sentences(
 }
 
 /// 按音节位置约束词边后再解码，保证低频的辅助码匹配字不会在束搜索前被淘汰。
+#[cfg(test)]
 pub fn decode_constrained_sentences(
     syllables: &[String],
     lookup: &mut LatticeLookup<'_>,

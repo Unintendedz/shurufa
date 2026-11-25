@@ -36,7 +36,6 @@ impl InputSession {
         self.caret_edit_suffix
             && !self.dedicated_english
             && self.local_mode == LocalInputMode::None
-            && self.temporary_original_scheme.is_none()
             && matches!(
                 self.engine.current_scheme_type(),
                 SchemeType::Quanpin | SchemeType::Shuangpin
@@ -156,7 +155,6 @@ impl InputSession {
         ) {
             return Some(KeyResult::handled());
         }
-        self.helpcode_entry = None;
         let mut text = String::new();
         let mut diagnostic = None;
         if let Some(prefix) = self.caret_edit.prefix_row.clone() {

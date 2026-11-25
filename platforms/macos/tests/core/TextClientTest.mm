@@ -268,17 +268,6 @@ static void TestEngineMaintenance() {
     assert(result && !error && [result[@"handled"] boolValue]);
     assert([result[@"view"][@"candidates"][0][@"text"] isEqual:@"拟好"]);
     identifier = MaintenanceCandidate(session);
-    result = [session fixGeneration:[identifier[@"generation"] unsignedLongLongValue] index:[identifier[@"index"] unsignedIntegerValue] position:2 error:&error];
-    assert(result && !error && [result[@"handled"] boolValue]);
-    NSDictionary *fixedCandidate = nil;
-    for (NSDictionary *candidate in result[@"view"][@"candidates"])
-        if ([candidate[@"text"] isEqual:@"拟好"]) fixedCandidate = candidate;
-    assert(fixedCandidate && [fixedCandidate[@"text"] isEqual:@"拟好"]);
-    assert([fixedCandidate[@"fixed_position"] isEqual:@2]);
-    identifier = MaintenanceCandidate(session);
-    result = [session clearPositionGeneration:[identifier[@"generation"] unsignedLongLongValue] index:[identifier[@"index"] unsignedIntegerValue] error:&error];
-    assert(result && !error && [result[@"handled"] boolValue]);
-    identifier = MaintenanceCandidate(session);
     result = [session removeGeneration:[identifier[@"generation"] unsignedLongLongValue] index:[identifier[@"index"] unsignedIntegerValue] error:&error];
     assert(result && !error && [result[@"handled"] boolValue] && !MaintenanceCandidate(session));
     assert([session closeWithError:&error] && !error);

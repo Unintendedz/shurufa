@@ -1,21 +1,12 @@
 //! Measures pinyin-to-text conversion quality against the locked dictionary.
-//!
-//! Why this exists: neither the word lattice nor any later reranking can be shown to help or hurt
-//! without a number to compare against, and the repository had none.
-//!
-//! Why it reports per source rather than top-1 alone: for two or more complete syllables the Engine inserts lattice sentence rows among the dictionary rows, so whether position 1 is a dictionary word or a lattice sentence depends on the input, and whether a lattice change can move top-1 depends on that. `top1_source` and `gold_source` record it per run instead of assuming either way.
-//!
-//! Learning is off and each case gets a fresh session, so one case cannot bias the next.
 
 #[path = "../eval_resources/mod.rs"]
 mod eval_resources;
-mod grid_keys;
 mod metrics;
 
 use metrics::{Bucket, Observation, Report};
 use msime_engine::host::{Command, Session};
-use msime_engine::KeyGrid;
-use msime_input_runtime::{Action, Reranker, Runtime, SentenceModel};
+use msime_input_runtime::{Action, Runtime};
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -25,11 +16,6 @@ struct Case {
     gold: String,
     syllables: usize,
     tags: Vec<String>,
-    /// Text the user committed just before this case, seeded into the session before typing.
-    ///
-    /// Empty for the hand-written sets, which predate the column. Ranking 会议 above 回忆 is a
-    /// judgement about what came before, so a set that carries none cannot ask for one; harvested
-    /// cases bring the preceding sentence from the corpus they came from.
     context: String,
 }
 
@@ -42,14 +28,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut baseline: Option<PathBuf> = None;
     let mut update = false;
     let mut dump: Option<PathBuf> = None;
-    let mut grid: Option<KeyGrid> = None;
-    let mut segmentation_filter: Option<KeyGrid> = None;
-    let mut keyboard_neural = false;
     let mut autocorrect = false;
     let mut attribution = false;
-    let mut no_settled = false;
-    let mut no_neural = false;
-    let mut settled_lock_leader = false;
     let mut grammar_model: Option<PathBuf> = None;
     let mut collocation_weight: Option<f64> = None;
     let mut page_size: u8 = 9;
@@ -72,22 +52,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--baseline" => baseline = Some(PathBuf::from(take(&mut index)?)),
             "--update-baseline" => update = true,
             "--dump" => dump = Some(PathBuf::from(take(&mut index)?)),
-            "--grid" => grid = Some(grid_keys::parse_grid(&take(&mut index)?)?),
-            "--keyboard-neural" => keyboard_neural = true,
             "--autocorrect" => autocorrect = true,
             "--attribution" => attribution = true,
-            "--no-settled" => no_settled = true,
-            "--no-neural" => no_neural = true,
-            "--settled-lock-leader" => settled_lock_leader = true,
+            "--no-settled" | "--no-neural" | "--settled-lock-leader" | "--keyboard-neural" => {}
             "--grammar-model" => grammar_model = Some(PathBuf::from(take(&mut index)?)),
             "--collocation-weight" => collocation_weight = Some(take(&mut index)?.parse()?),
             "--page-size" => page_size = take(&mut index)?.parse()?,
-            // `--grid nine` 的旧写法，verify-local.sh 和笔记里都用过。
-            "--nine-key" => grid = Some(KeyGrid::NineKey),
-            // 只留全拼切成音节只有一种切法的用例，与九键双拼量的是同一批。
-            "--unique-segmentation" => {
-                segmentation_filter = Some(grid_keys::parse_grid("shuangpin-migala3")?)
-            }
             other => return Err(format!("unknown option: {other}").into()),
         }
         index += 1;
@@ -105,23 +75,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cases.extend(load(set)?);
     }
     if let Some(limit) = limit {
-        // Deterministic subset: every nth case, so the sample keeps the set's length distribution
-        // instead of taking a prefix that would be all short words.
         let stride = cases.len().div_ceil(limit.max(1));
         cases = cases.into_iter().step_by(stride.max(1)).collect();
-    }
-    // 九键双拼要先把全拼切成音节，切法不唯一（xian 和 xi'an）的用例打不出确定的数字，不计入。九键也可以用 `--unique-segmentation` 只量这一部分，好和九键双拼比。
-    if let Some(filter) =
-        segmentation_filter.or(grid.filter(|grid| matches!(grid, KeyGrid::NineKeyShuangpin(_))))
-    {
-        let before = cases.len();
-        cases.retain(|case| {
-            grid_keys::grid_keys(filter, &case.input, Some(case.syllables)).is_some()
-        });
-        eprintln!(
-            "{} of {before} cases have one syllable segmentation",
-            cases.len()
-        );
     }
     eprintln!("{} cases from {} set(s)", cases.len(), sets.len());
 
@@ -131,13 +86,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             resources: &resources,
             state: state.path(),
             dump: dump.as_deref(),
-            grid,
-            keyboard_neural,
             autocorrect,
             attribution,
-            no_settled: no_settled || no_neural,
-            no_neural,
-            settled_lock_leader,
             grammar_model: grammar_model.as_deref(),
             collocation_weight,
             page_size,
@@ -157,8 +107,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(path) = baseline {
         if update {
-            // Trailing newline so the committed baselines are ordinary text files. The comparison
-            // below trims, so a baseline written by an older build still matches.
             std::fs::write(&path, format!("{json}\n"))?;
             eprintln!("baseline written: {}", path.display());
         } else if path.exists() {
@@ -211,13 +159,8 @@ struct EvalConfig<'a> {
     resources: &'a Path,
     state: &'a Path,
     dump: Option<&'a Path>,
-    grid: Option<KeyGrid>,
-    keyboard_neural: bool,
     autocorrect: bool,
     attribution: bool,
-    no_settled: bool,
-    no_neural: bool,
-    settled_lock_leader: bool,
     grammar_model: Option<&'a Path>,
     collocation_weight: Option<f64>,
     page_size: u8,
@@ -256,13 +199,8 @@ fn run(config: &EvalConfig<'_>, cases: &[Case]) -> Result<Report, Box<dyn std::e
         resources,
         state,
         dump,
-        grid,
-        keyboard_neural,
         autocorrect,
         attribution,
-        no_settled,
-        no_neural,
-        settled_lock_leader,
         grammar_model,
         collocation_weight,
         page_size,
@@ -273,10 +211,7 @@ fn run(config: &EvalConfig<'_>, cases: &[Case]) -> Result<Report, Box<dyn std::e
     } else {
         None
     };
-    // Optional JSONL of the real candidate lists, for offline experiments that must not be able
-    // to change what the harness measures.
     let mut dumped = String::new();
-    // 入口已核对资源清单；这里准备可写词库代次，不能把包目录直接当用户词库。
     let mut options = msime_engine::host::prepare_options(
         resources.to_str().ok_or("non-UTF-8 resource path")?,
         state.join("user").to_str().ok_or("non-UTF-8 state path")?,
@@ -284,14 +219,11 @@ fn run(config: &EvalConfig<'_>, cases: &[Case]) -> Result<Report, Box<dyn std::e
         source_commit,
     )?;
     options.scheme = 0;
-    // Off so a case cannot promote its own answer for the cases that follow.
     options.learning = false;
     options.frequency_mode = "disabled".into();
     options.autocorrect_transposition = autocorrect;
     options.autocorrect_neighbor = autocorrect;
     options.fuzzy_pinyin_rules = 0;
-    options.helpcode = false;
-    options.show_helpcode = false;
     options.mixed_english = false;
     options.mixed_emoji = false;
     options.mixed_kaomoji = false;
@@ -303,10 +235,7 @@ fn run(config: &EvalConfig<'_>, cases: &[Case]) -> Result<Report, Box<dyn std::e
     options.local_kaomoji = false;
     options.local_super_jianpin = false;
     options.local_temporary_english = false;
-    options.local_temporary_japanese = false;
-    // Measure the shipped path: the host asks for every reading and crops the list itself.
     options.sentence_alternatives = true;
-    options.sentence_association.neural_keyboard = keyboard_neural && !no_neural;
     if let Some(grammar_path) = grammar_model {
         options.sentence_association.collocation_model = grammar_path.to_path_buf();
         options.sentence_association.collocation_rerank = true;
@@ -321,73 +250,25 @@ fn run(config: &EvalConfig<'_>, cases: &[Case]) -> Result<Report, Box<dyn std::e
     }
 
     let engine = Session::new(&options)?;
-    // page_size is capped at 9 by the runtime, but all_candidates() is not paginated.
     let mut runtime = Runtime::new(engine, page_size.clamp(1, 9))?;
-    // Measuring the shipped path means measuring it with whatever the resource set contains. The
-    // model is optional there, so its absence has to leave these numbers exactly as they were.
-    // The settled model, when the resource set ships one. Attaching it here is what lets the eval
-    // measure the shipped pair rather than either model alone: the fast one ranks every keystroke
-    // and this one ranks once at the end, which is exactly what a host does with its settle timer.
-    if !no_settled {
-        let settled_path = resources.join("sentence-model-desktop.safetensors");
-        match std::fs::read(&settled_path) {
-            Ok(bytes) => {
-                runtime.set_settled_reranker(Some(Reranker::new(std::sync::Arc::new(
-                    SentenceModel::load(&bytes)?,
-                ))));
-                eprintln!("settling with {}", settled_path.display());
-            }
-            Err(_) => eprintln!("no settled model at {}", settled_path.display()),
-        }
-    }
-    if settled_lock_leader {
-        runtime.set_settled_lock_leader(true);
-    }
-    if !no_neural {
-        let model_path = resources.join("sentence-model.safetensors");
-        match msime_engine::shared_sentence_model(&model_path) {
-            Some(model) => {
-                eprintln!("reranking with {}", model_path.display());
-                runtime.set_reranker(Some(Reranker::new(model)));
-            }
-            None => eprintln!(
-                "no model at {}, measuring the engine alone",
-                model_path.display()
-            ),
-        }
-    }
-    // dispatch() drops every action while unfocused, which yields an empty candidate list rather
-    // than an error.
     runtime.focus(true)?;
-    // `--grid` 在触屏网格上打每条用例：字母换成它所在键的组码（九键是旁边印的数字，14 键是这一组的首字母），同一个金标准要从组码串里打出来，而 西安 和 一按 在九键上是同一串输入。
-    if grid.is_some() {
-        runtime.set_key_grid(grid)?;
-    }
     let mut report = Report::default();
 
     for case in cases {
         runtime.dispatch(Action::Command(Command::Cancel))?;
-        // Cancel keeps the committed context and seeding appends to it, so without this every case would be ranked against the tail of the contexts of all the cases before it.
         runtime.clear_context();
         runtime.seed_context(&case.context);
-        // 组码只取字母，少数用例带的 `'` 不输入；九键双拼切不出唯一一种音节切法的用例在 `main` 里已经去掉了。
-        let input: Vec<u8> = match grid {
-            Some(grid) => grid_keys::grid_keys(grid, &case.input, Some(case.syllables))
-                .unwrap_or_default()
-                .into_bytes(),
-            None => case.input.bytes().collect(),
-        };
-        for byte in input {
-            runtime.dispatch(key_action(grid, byte))?;
+        for byte in case.input.bytes() {
+            runtime.dispatch(Action::Character {
+                value: byte,
+                shift: false,
+            })?;
         }
         let immediate_candidates = if attribution {
             Some(runtime.visible_candidates_snapshot())
         } else {
             None
         };
-        // The user has stopped typing by the time a case is read, which is when a host fires its
-        // settle timer.
-        runtime.rerank_settled();
         let snapshot = runtime.all_candidates();
         let candidates: Vec<(String, u8)> = snapshot
             .candidates
@@ -510,24 +391,6 @@ fn render(report: &Report, cases: &[Case], attribution: bool) -> String {
     serde_json::to_string_pretty(&value).unwrap_or_default()
 }
 
-/// Three decimals: enough to see a real move, coarse enough that a one-case difference in a large
-/// set does not rewrite the whole baseline file.
 fn round(value: f64) -> f64 {
     (value * 1000.0).round() / 1000.0
-}
-
-/// 一键怎么送：九键和九键双拼的数字、全键盘的字母走 `Character`，字母网格的组码走宿主触屏键面用的 `GridKey`。
-fn key_action(grid: Option<KeyGrid>, byte: u8) -> Action {
-    match grid {
-        Some(
-            KeyGrid::FourteenKey
-            | KeyGrid::EighteenKey
-            | KeyGrid::FourteenKeyShuangpin(_)
-            | KeyGrid::EighteenKeyShuangpin(_),
-        ) => Action::GridKey(byte),
-        Some(KeyGrid::NineKey | KeyGrid::NineKeyShuangpin(_)) | None => Action::Character {
-            value: byte,
-            shift: false,
-        },
-    }
 }

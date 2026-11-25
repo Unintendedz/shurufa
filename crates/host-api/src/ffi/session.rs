@@ -60,15 +60,9 @@ pub(crate) fn create_session(bytes: &[u8], usage: SessionUse) -> Result<Value, S
         })
     };
     // Taken before the options are consumed, and kept separate from the engine's own paths.
-    let sentence_model_path = options.sentence_model.clone();
-    let recorded_settled_model = options.settled_model.clone();
     let phrase_preedit = options.phrase_preedit.unwrap_or(false);
     // 聚焦时据此重新查找按需下载的资源包，见 `HostSession::refresh_resource_packs`。
     let state_root = absolute_state_root(options.preferences_directory.as_deref());
-    let recorded_language_dictionaries = options
-        .language_dictionaries
-        .as_deref()
-        .map(std::path::PathBuf::from);
     let plugin_roots = key_sound::PluginRoots::new(
         options.preferences_directory.as_deref(),
         options.sound_packs.as_deref(),
@@ -77,7 +71,6 @@ pub(crate) fn create_session(bytes: &[u8], usage: SessionUse) -> Result<Value, S
     );
     let edition = options.edition();
     let quick_phrase_candidates_requested = options.quick_phrase_candidates.unwrap_or(false);
-    let korean_romaja_requested = options.korean_romaja.unwrap_or(false);
     let mut options = options.into_engine_options();
     let plugin_tables = plugin_tables::PluginTables::stamp(
         plugin_roots.installed.as_deref(),
@@ -107,13 +100,6 @@ pub(crate) fn create_session(bytes: &[u8], usage: SessionUse) -> Result<Value, S
             state,
             std::path::Path::new(&options.resources),
         );
-    }
-    // Gate on the scheme actually run, as `apply_pending` does, so a preferred scheme that fell back to Quanpin starts in the same mode a rebuild would give it.
-    let default_key_grid = layout_key_grid(SchemeType::from_u8(options.scheme), &applied);
-    if default_key_grid.is_some() {
-        engine
-            .set_key_grid(default_key_grid)
-            .map_err(|e| e.to_string())?;
     }
     // Places in `@` mode start off in every engine, so the session carries the preference over itself, as `apply_pending` does on a rebuild.
     engine
@@ -145,36 +131,9 @@ pub(crate) fn create_session(bytes: &[u8], usage: SessionUse) -> Result<Value, S
     runtime.set_escape_keeps_selected_word(applied.escape_keeps_selected_word);
     runtime.set_left_right_navigation(applied.navigation.left_right);
     runtime.set_vertical_candidates(crate::host_vertical_candidates(applied.candidate_layout));
-    runtime.set_wubi_auto_commit_unique(applied.wubi_auto_commit_unique);
-    runtime.set_wubi_fifth_code_top_commit(applied.wubi_fifth_code_top_commit);
-    runtime.set_wubi_candidate_selection(applied.wubi_candidate_selection.clone());
     runtime.set_second_third_candidate(applied.second_third_candidate);
     runtime.set_punctuation_marks(msime_client_core::punctuation::punctuation_marks(&applied));
-    runtime.set_multilingual_output(
-        applied.traditional_chinese_output,
-        applied.traditional_chinese_variant,
-    );
-    runtime.set_reranker(keyboard_reranker(&options, sentence_model_path.as_deref()));
 
-    // The settled model is optional and independent: a resource set that ships only the small
-    // one behaves exactly as before, and one that ships both gets the fast model per keystroke
-    // and the large one when typing stops.
-    // 随包的模型优先，没有时用已下载的 `settled-model` 资源包；会话打开后才装好的由 `refresh_resource_packs` 接上。
-    let settled_model = settled_model_file(
-        &options.resources,
-        recorded_settled_model.as_deref(),
-        state_root.as_deref(),
-    );
-    runtime.set_settled_reranker(
-        settled_model
-            .as_deref()
-            .and_then(std::path::Path::to_str)
-            .and_then(|path| sentence_model_settled(&options.resources, Some(path)))
-            .map(Reranker::new),
-    );
-    // Loaded whenever it is installed, run only while the desktop model preference is on; `apply_pending` follows later changes of the switch.
-    runtime.set_settled_rerank_enabled(applied.sentence_association.neural_desktop);
-    runtime.set_settled_lock_leader(edition.id == "shurufa");
     let emoji_mru = (!options.user_data.is_empty())
         .then(|| std::path::PathBuf::from(&options.user_data).join("emoji_mru.json"));
     runtime.set_inline_emoji_projection(
@@ -191,7 +150,6 @@ pub(crate) fn create_session(bytes: &[u8], usage: SessionUse) -> Result<Value, S
                 runtime,
                 options,
                 quick_phrase_candidates_requested,
-                korean_romaja_requested,
                 edition,
                 applied,
                 requested: None,
@@ -202,7 +160,6 @@ pub(crate) fn create_session(bytes: &[u8], usage: SessionUse) -> Result<Value, S
                 english_mode: false,
                 caps_lock: false,
                 page_size_override: None,
-                key_grid_override: None,
                 statistics_private: false,
                 preview: usage == SessionUse::Preview,
                 ai_credential: None,
@@ -215,12 +172,7 @@ pub(crate) fn create_session(bytes: &[u8], usage: SessionUse) -> Result<Value, S
                 sound,
                 plugin_tables,
                 state_root,
-                recorded_language_dictionaries,
                 resources_pending: false,
-                recorded_sentence_model: sentence_model_path,
-                recorded_settled_model,
-                settled_model,
-                settled_model_loading: None,
                 lifecycle: None,
                 _dictionary_access: dictionary_access,
             },
@@ -245,9 +197,7 @@ pub(crate) fn focus_session(handle: u64, focused: bool) -> Result<Value, String>
             msime_engine::flush_personal_learning();
         } else {
             session.refresh_plugin_tables();
-            // 脚本插件：在本次 focus 的任何事件之前丢弃上一个字段的实例，授权文件或包变了就重读。
-            session.lifecycle_focus_in();
-            // 设置应用可能刚下载好日文、粤拼、注音、笔画的资源包或落定重排模型；Engine 重建和模型加载在随后的 `complete_transition` 里空闲时进行。
+            // 聚焦时刷新按需下载的语法模型包；Engine 重建在随后的 `complete_transition` 里空闲时进行。
             session.refresh_resource_packs();
             // The settings page may have imported the pack in use again, or removed it, since this session last looked.
             session.sound.restamp();
@@ -271,9 +221,7 @@ pub extern "C" fn msime_client_reset_cache(handle: u64) -> *mut c_char {
 /// Releases process-level model caches without requiring a live session handle. This is for host
 /// memory-pressure callbacks after an input session has already been destroyed.
 #[no_mangle]
-pub extern "C" fn msime_client_release_process_cache() {
-    release_japanese_dictionary_cache();
-}
+pub extern "C" fn msime_client_release_process_cache() {}
 
 #[no_mangle]
 pub extern "C" fn msime_client_voice_start(handle: u64) -> *mut c_char {

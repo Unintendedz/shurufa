@@ -10,46 +10,27 @@ pub struct CandidateId {
     pub index: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-pub struct NineKeySpellingId {
-    pub session: u64,
-    pub generation: u64,
-    pub index: usize,
-}
-
 #[derive(Clone, Debug, Serialize)]
 pub struct Candidate {
     pub id: CandidateId,
     pub text: String,
     /// Engine input code that produced this candidate, aligned with `text`.
-    /// Presentation layers may use it for scheme-specific hints without changing selection.
     pub code: String,
     /// Engine-derived display suffix, never part of selection or committed text.
     pub annotation: String,
     /// Engine candidate source, stable for the lifetime of this view.
     pub source: u8,
     /// True when Engine corrected the typed spelling for this candidate.
-    /// Presentation layers may mark it without changing committed text.
     pub corrected: bool,
-    /// Engine fixed-position slot, or zero when dynamically ranked.
-    pub fixed_position: u8,
     pub highlighted: bool,
-    /// 「仅当前高亮」的候选词翻译生效时，高亮这一行要留出译文的位置，回答还没到也留：竖排的宿主据此给这一行留一行译文高（两种目标语言时留两行，和横排的预留行数一样），移动高亮时窗口高度不跳。为假时不出现在 JSON 里，旧宿主可忽略。
+    /// 「仅当前高亮」的候选词翻译生效时，高亮这一行要留出译文的位置，回答还没到也留。
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub translation_reserved: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub translation: Option<String>,
-    /// 与 `translation` 同源的 UTF-8 字节范围；空时省略，旧宿主可忽略。
+    /// 与 `translation` 同源的 UTF-8 字节范围；空时省略。
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub translation_runs: Vec<msime_client_core::translation::TranslationRun>,
-    /// 脚本插件给这一行加的注释（≤ 32 个 UTF-16 码元，不含控制和格式字符），和引擎的 `annotation` 分开放：宿主按 `annotation` 画辅助码、韩文汉字释义，插件的注释不能混进去。没有时不出现在 JSON 里，只在桌面编译。
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "windows",
-        all(target_os = "linux", not(target_env = "ohos"))
-    ))]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub script_annotation: Option<String>,
 }
 
 /// The candidate fields needed by translation providers, without copying the rest of a display row.
@@ -96,73 +77,38 @@ pub struct View {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub prediction: bool,
     pub scheme: u8,
-    /// The active scheme writes Chinese (`SchemeType::is_chinese`): what 中文 returns to and what the Chinese statistics count. Hosts branch on this rather than on scheme ordinals.
+    /// 当前方案输入中文（`SchemeType::is_chinese`）。
     pub chinese_text: bool,
-    /// The host's Simplified-to-Traditional conversion applies to this view's preedit and to its commits: a scheme it applies to (`SchemeType::script_conversion_applies`) outside the `unicode` and `temporary_japanese` modes, whose text is not Chinese to convert.
+    /// 简繁转换适用于本页预编辑与上屏。
     pub script_conversion: bool,
-    /// 引擎的触屏九键模式：开着时数字是输入，不当选词键。只表示九键（全拼九宫格或注音九键），字母组网格下为假。
-    pub nine_key: bool,
-    /// 引擎当前的组码网格：`"none"`、`"nine_key"`、`"fourteen_key"`、`"nine_key_shuangpin"` 或 `"eighteen_key"`。宿主据此决定是否显示拼音条、读音行和三栏面板：几种网格共用 `nine_key_spellings`、`nine_key_reading`、`nine_key_single_character` 和 `nine_key_strokes`。九键双拼的数字和九键一样不当选词键，但 `nine_key` 为假（它没有英文九键，也不开注音九键）。
-    pub key_grid: &'static str,
-    pub nine_key_spellings: Vec<String>,
-    /// 全拼九键组字时，首选候选覆盖的数字显示成它的拼音（`xi'an`），给键盘的读音行用；其他情况为空，包括注音九键。全拼下 `preedit` 仍是数字；注音下是转换结果加上未完成的数字。
-    pub nine_key_reading: String,
-    /// 九宫格候选当前只留单字（`Action::SetNineKeyFilter`）。组字结束时恢复为假。
-    pub nine_key_single_character: bool,
-    /// 九宫格候选当前按这几笔的笔顺前缀筛选（`hspnz`），空表示不按笔画。组字结束时清空。
-    pub nine_key_strokes: String,
-    /// Applied touch presentation, independent of Engine-owned Chinese nine-key digit handling.
     pub touch_keyboard_layout: TouchKeyboardLayout,
-    /// Applied Engine configuration, not a newer deferred preference snapshot.
     pub character_width: CharacterWidth,
-    /// 已应用的引号与方头括号样式和顿号键（`quote_style`、`bracket_style`、`enumeration_comma_*`，`corner_when_traditional` 已按繁体开关解析、两个顿号键已按「至少留一个」归一）。宿主画键面、做成对补全和英文模式下的中文标点时读它，不各自再解析偏好。和引擎同步：偏好改了要等空闲重建后才变。
     pub punctuation_marks: PunctuationMarks,
     pub microsoft_shuangpin: bool,
     pub shuangpin_profile: String,
-    pub answered_by_pinyin_fallback: bool,
-    /// Authoritative Engine mode, never inferred from displayed text.
     pub local_mode: String,
-    /// The non-letter characters the Engine takes as input in this state: the active local mode's spelling (digits and operators in `expression`, digits in `unicode`), or with nothing composed the keys that open a mode (`/`, `@`). A host sends these as characters, and treats a digit listed here as input rather than a candidate shortcut; the runtime already routes them away from punctuation.
     pub spelling_symbols: String,
-    /// Authoritative Engine English mode, independent of temporary local modes.
     pub dedicated_english: bool,
     pub session: u64,
     pub generation: u64,
     pub focused: bool,
     pub preedit: String,
-    /// The already chosen part of a phrase still being composed, which the host draws ahead of the
-    /// editing text rather than receiving as a commit. Empty unless the host asked for it.
-    ///
-    /// It is a field of its own rather than a prefix on `editing_text` because `caret_position` is
-    /// an offset into that text, and the hosts each read it in their own string unit - the two have
-    /// agreed so far only because the editing text is ASCII. A host prepends this itself and moves
-    /// its own caret by this string's length in whatever unit it measures.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub phrase_prefix: String,
-    /// Engine-owned kana reading for Japanese, the composing Hangul for Korean (the text a host marks inline); empty for other schemes.
     pub reading: String,
-    /// 行内画出来的读音：日文罗马字末尾单个 `n` 留作字母（`かn`），其余与 [`View::reading`] 相同。`reading` 才是确定时上屏的读音，宿主不经引擎结束组字区、且组字区还在时应换成 `reading` 再结束（规则见 `msime_client.h` 的 `View.display_reading`）。
     pub display_reading: String,
     pub editing_text: String,
-    /// Byte offset in Engine's ASCII editing_text, not an OS UTF-16 offset.
     pub caret_position: usize,
-    /// 整句改字时改好的整句，宿主在它非空时把它（接在 `phrase_prefix` 后面）画在行内代替拼音，光标画在 `conversion_focus_start` 处，`conversion_focus_start..conversion_focus_end` 是候选所替换的那一段；候选是这一段的字和词。不在改字时为空。
     pub conversion: String,
-    /// 光标在 `conversion` 的第几个字之前，按 Unicode 标量计，宿主自己换算成它的字符串单位。
     pub conversion_focus_start: usize,
-    /// 光标处那一段的结尾，按 Unicode 标量计；光标在句末时等于 `conversion_focus_start`，没有候选。
     pub conversion_focus_end: usize,
-    /// 光标后编辑（偏好 `caret_edit_suffix`）正在生效：候选是组字光标后那段的，首选是整句。宿主在候选窗右侧显示「候选编辑：光标后」。没有生效时不出现在 JSON 里。
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub caret_edit_suffix: bool,
-    /// 光标后编辑里首选（`Candidate::id.index` 为 0 的那一行）开头固定的那段文字：光标前那段原文的最佳转换，加上本模式已经暂存的部分。能分段画候选的宿主把首选的这几个字（按 Unicode 标量数）画淡。空时不出现在 JSON 里。
     #[serde(skip_serializing_if = "String::is_empty")]
     pub caret_edit_prefix: String,
     pub page: usize,
     pub page_size: usize,
     pub page_count: usize,
-    /// The scheme's openable candidate list (the Korean Hanja list) is showing. Hosts read this instead of inferring it from the scheme and a non-empty candidate list.
-    pub candidate_list_open: bool,
     pub candidates: Vec<Candidate>,
 }
 
@@ -170,13 +116,8 @@ pub struct View {
 pub struct OutputContext {
     pub scheme: u8,
     pub local_mode: String,
-    /// Whether the host's Simplified-to-Traditional conversion applies to this commit, decided by the mode the commit was made in ([`View::script_conversion`]).
     pub script_conversion: bool,
-    /// Whether the host counts this commit in typing statistics. False for text the Engine generated in the expression, command and mention modes, which the user did not type out.
     pub typing_statistics: bool,
-    /// 这次上屏的是脚本插件在 `/` 指令里给的行（来源 14）。只给 host-api 判断要不要转全角（插件行同网址一样原样上屏），不上线缆。
-    #[serde(skip)]
-    pub plugin_row: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -470,24 +411,7 @@ pub struct CredentialTestResult {
     pub message: String,
 }
 
-/// A bounded stroke payload sent by a Linux handwriting panel to its
-/// user-owned recognizer service. Coordinates are normalized panel pixels;
-/// the recognizer decides how to map them to a platform model.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-pub struct HandwritingPoint {
-    pub x: f32,
-    pub y: f32,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-pub struct HandwritingQuery {
-    #[serde(default)]
-    pub language: String,
-    pub strokes: Vec<Vec<HandwritingPoint>>,
-}
-
-/// Search request for a standalone Linux emoji panel. The panel owns its
-/// category/search UI while the provider supplies the catalog and annotations.
+/// Search request for an emoji panel.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct EmojiPanelQuery {
     #[serde(default)]

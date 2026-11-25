@@ -1085,9 +1085,7 @@ pub enum SchemeKey {
     Apostrophe,
     /// The Microsoft shuangpin `ing` final.
     Semicolon,
-    /// The Japanese long vowel mark.
-    Minus,
-    /// Any other printable non-letter ASCII key a scheme claims through its spelling symbols (Zhuyin's `;`, `-`, digits and space). Kept apart from `Semicolon` and `Minus` so the shuangpin and Japanese meanings of those keys never change; the existing schemes ignore it.
+    /// Any other printable non-letter ASCII key a scheme claims through its spelling symbols. Kept apart from `Semicolon` so shuangpin meanings never change; existing schemes ignore it.
     Symbol(u8),
     Backspace,
     /// Re-run the query without changing the composition.

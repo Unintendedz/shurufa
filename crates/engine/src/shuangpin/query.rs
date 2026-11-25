@@ -2,11 +2,9 @@
 //!
 //! Raw input is ASCII (see `utils`), so offsets are byte offsets and letters are bytes.
 
-use std::borrow::Cow;
-
 use super::utils::{
     convert_seg_shuangpin_to_seg_complete_pinyin,
-    convert_seg_shuangpin_to_seg_complete_pinyin_into, is_all_complete_pinyin, is_full_help_mode,
+    convert_seg_shuangpin_to_seg_complete_pinyin_into, is_all_complete_pinyin,
     pinyin_segmentation, takes_two_keys,
 };
 use super::ShuangpinProfile;
@@ -205,6 +203,7 @@ pub fn raw_length_for_effective_prefix(raw: &str, length: usize) -> usize {
 }
 
 /// Drop the last `count` letters, keeping the `'` before them; "" with fewer letters (:144-169).
+#[cfg(test)]
 pub fn trim_trailing_letters_preserve_delimiters(raw: &str, count: usize) -> String {
     if count == 0 || raw.is_empty() {
         return raw.to_string();
@@ -220,37 +219,6 @@ pub fn trim_trailing_letters_preserve_delimiters(raw: &str, count: usize) -> Str
         }
     }
     String::new()
-}
-
-/// 2 for a double helpcode after a complete base not followed by `'`, else 0 (:171-190).
-pub fn detect_active_double_helpcode_length(
-    raw: &str,
-    raw_with_cases: &str,
-    profile: &ShuangpinProfile,
-) -> usize {
-    let cased = if raw_with_cases.is_empty() {
-        raw
-    } else {
-        raw_with_cases
-    };
-    let effective_with_cases = if cased.contains('\'') {
-        Cow::Owned(remove_manual_delimiters(cased))
-    } else {
-        Cow::Borrowed(cased)
-    };
-    if !is_full_help_mode(&effective_with_cases, profile) {
-        return 0;
-    }
-    let raw_base_length =
-        raw_length_for_effective_prefix(raw, effective_input_length(raw).saturating_sub(2));
-    if raw.as_bytes().get(raw_base_length) == Some(&b'\'') {
-        return 0;
-    }
-    if is_complete_input(&raw[..raw_base_length], profile) {
-        2
-    } else {
-        0
-    }
 }
 
 /// :192-219.
@@ -428,50 +396,6 @@ mod tests {
         assert_eq!(trim_trailing_letters_preserve_delimiters("ui'u", 1), "ui'");
         assert_eq!(trim_trailing_letters_preserve_delimiters("a", 2), "");
         assert_eq!(trim_trailing_letters_preserve_delimiters("ab", 0), "ab");
-    }
-
-    #[test]
-    fn double_helpcode_needs_a_complete_undelimited_base() {
-        assert_eq!(
-            detect_active_double_helpcode_length("nihcab", "nihcAB", xiaohe()),
-            2
-        );
-        assert_eq!(
-            detect_active_double_helpcode_length("nihcab", "nihcab", xiaohe()),
-            0
-        );
-        assert_eq!(
-            detect_active_double_helpcode_length("nihc'ab", "nihc'AB", xiaohe()),
-            0
-        );
-        assert_eq!(
-            detect_active_double_helpcode_length("ni'hcab", "ni'hcAB", xiaohe()),
-            2
-        );
-        // A trailing delimiter after the codes does not reach the base (test_input_session.cpp:1019).
-        assert_eq!(
-            detect_active_double_helpcode_length("nihcab'", "nihcAB'", xiaohe()),
-            2
-        );
-        assert_eq!(
-            detect_active_double_helpcode_length("nihcab", "", xiaohe()),
-            0
-        );
-    }
-
-    #[test]
-    fn double_helpcode_detection_without_delimiters_does_not_copy_input() {
-        let profile = xiaohe();
-        assert_eq!(
-            detect_active_double_helpcode_length("nihcab", "nihcAB", profile),
-            2
-        );
-        let (length, allocations) = crate::ime::personal_rerank::allocations::count(|| {
-            detect_active_double_helpcode_length("nihcab", "nihcAB", profile)
-        });
-
-        assert_eq!(length, 2);
-        assert_eq!(allocations, 1);
     }
 
     #[test]

@@ -4,7 +4,6 @@ use std::borrow::Cow;
 
 use crate::assets;
 use crate::dictionary::english::EnglishDictionary;
-use crate::local::chaizi::query_chaizi;
 use crate::local::command::{
     command_title, plugin_command_source, query_command, translation_source, usable_command_table,
     usable_plugin_commands,
@@ -67,8 +66,6 @@ pub struct CandidateQueries {
     mentions: Vec<MentionEntry>,
     /// Whether `@` mode offers the embedded places after the list.
     mention_places: bool,
-    /// 宿主开着繁体输出：拆字行按转换后的字形去重。
-    chaizi_traditional_output: bool,
 }
 
 impl CandidateQueries {
@@ -83,7 +80,6 @@ impl CandidateQueries {
             quick_phrase_table: Vec::new(),
             mentions: Vec::new(),
             mention_places: false,
-            chaizi_traditional_output: false,
         }
     }
 
@@ -93,20 +89,6 @@ impl CandidateQueries {
         // 用户的指令表永远赢：表变了，插件指令按新表重新过滤。
         self.plugin_commands =
             usable_plugin_commands(&self.command_table, &self.requested_plugin_commands);
-    }
-
-    /// 换上宿主算好的插件指令，只留下引擎能用的（见 `usable_plugin_commands`）。
-    pub fn set_plugin_commands(&mut self, commands: &[PluginCommand]) {
-        self.requested_plugin_commands = commands.to_vec();
-        self.plugin_commands = usable_plugin_commands(&self.command_table, commands);
-    }
-
-    /// 生效的插件指令里 `trigger` 的标题；`trigger` 不属于任何生效的插件指令时为 `None`。宿主交来的表里触发词重复、或者标题不合规时，标题以过滤之后留下的那一条为准。
-    pub fn plugin_command_title(&self, trigger: &str) -> Option<&str> {
-        self.plugin_commands
-            .iter()
-            .find(|command| command.trigger == trigger)
-            .map(|command| command.title.as_str())
     }
 
     /// `/` 之后的输入属于哪条生效的插件指令：（触发词，参数）。
@@ -239,11 +221,6 @@ impl CandidateQueries {
         self.mention_places = enabled;
     }
 
-    /// 宿主是否把候选转成繁体输出；开着时拆字行按繁体字形去重，否则简繁两种字形都列出。
-    pub fn set_chaizi_traditional_output(&mut self, enabled: bool) {
-        self.chaizi_traditional_output = enabled;
-    }
-
     /// The annotation of an `@` row: a place's parent division, empty for the user's own entries.
     pub fn mention_annotation(&self, text: &str, key: &str) -> &'static str {
         if !self.mention_places {
@@ -331,14 +308,8 @@ impl CandidateQueries {
             LocalInputMode::Mention => {
                 rows(query_mentions(code, &self.mentions, self.mention_places))
             }
-            // 网址模式不查任何候选，只留显示整段预编辑的兜底行。
-            LocalInputMode::Url => LocalQueryResult::default(),
-            LocalInputMode::Chaizi => rows(query_chaizi(
-                code,
-                scheme,
-                shuangpin,
-                self.chaizi_traditional_output,
-            )),
+            // 网址与已移除的拆字模式不查任何候选，只留显示整段预编辑的兜底行。
+            LocalInputMode::Url | LocalInputMode::Chaizi => LocalQueryResult::default(),
             // 符号模式查两张编进引擎的表（分组码与符号名），不发诊断：表总在，输入只是没命中。
             LocalInputMode::Symbol => rows(crate::local::symbol_groups::query_symbol_mode(
                 code,
@@ -669,7 +640,7 @@ fn insert_mixed_rows_with_japanese(
     candidates
 }
 
-/// 九宫格的混排：英文行已经按九宫格自己的规则插进了列表，emoji、颜文字和符号按与 26 键相同的规则去重、定位（`insert_mixed_rows_with_japanese`）。
+#[cfg(test)]
 pub(crate) fn insert_expressive_rows(
     candidates: Vec<WordItem>,
     emoji: Vec<ExpressiveRow>,

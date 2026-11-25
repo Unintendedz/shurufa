@@ -1,6 +1,4 @@
-//! The user journal `msime_user.db` and everything that writes learned state (user-dictionary.md, data-formats.md §6): ranking, fixed positions and pins, removal, pick pairs, typo learning, the personal n-gram store, replay into a generation, generation staging, reset, dictionary-state export and import, and the personal dictionary API. The journal gets the full v4 schema on every new connection and never branches on `user_version`: existing users are at v3.
-//!
-//! Two owners share this directory: `journal`, `ranking`, `positions`, `removal`, `picks`, `typo_profile` and `ngram_store` (learning) and `replay`, `generation`, `reset`, `state`, `personal` and `bundled` (administration). This file only wires them together.
+//! 用户日志 `msime_user.db` 与个人学习状态：排名、置顶、删词、选词对、错拼习惯、个人 n-gram、代次回放、重置、词库状态导入导出与个人词典接口。
 
 pub mod bundled;
 pub mod generation;
@@ -17,4 +15,3 @@ pub mod replay;
 pub mod reset;
 pub mod state;
 pub mod typo_profile;
-pub(crate) mod wubi_learning;

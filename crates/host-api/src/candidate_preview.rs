@@ -88,17 +88,16 @@ pub fn source_name(source: u8) -> &'static str {
         Some(Source::Kaomoji) => "kaomoji",
         Some(Source::Generated) => "generated",
         Some(Source::Fallback) => "fallback",
-        Some(Source::NeuralKeyboard) => "sentence_model",
         Some(Source::AiPending) => "ai_pending",
-        Some(Source::MixedJapanese) => "japanese",
-        Some(Source::Plugin) => "plugin",
         Some(Source::CloudPending) => "cloud_pending",
         Some(Source::Contact) => "contact",
         Some(Source::Collocation) => "collocation",
-        Some(Source::Multilingual) => "multilingual",
         Some(Source::NeuralV2) => "neural_v2",
         Some(Source::NeuralConstrained) => "neural_constrained",
-        None => "other",
+        Some(
+            Source::NeuralKeyboard | Source::MixedJapanese | Source::Plugin | Source::Multilingual,
+        )
+        | None => "other",
     }
 }
 
@@ -250,7 +249,6 @@ fn type_keys(
     }
     debug_assert!(editing_caret <= editing);
     with_session(handle, |session| {
-        crate::ffi::settled::settle_now(session)?;
         let view = session.runtime.view();
         let traditional = session.applied.traditional_chinese_output && view.script_conversion;
         let variant = session.applied.traditional_chinese_variant;
@@ -526,9 +524,19 @@ mod tests {
 
     #[test]
     fn every_source_has_a_name() {
-        for source in 0..=18 {
-            if msime_engine::CandidateSource::from_u8(source).is_some() {
-                assert_ne!(source_name(source), "other", "{source}");
+        for source in 0..=20 {
+            if let Some(kind) = msime_engine::CandidateSource::from_u8(source) {
+                if matches!(
+                    kind,
+                    msime_engine::CandidateSource::NeuralKeyboard
+                        | msime_engine::CandidateSource::MixedJapanese
+                        | msime_engine::CandidateSource::Plugin
+                        | msime_engine::CandidateSource::Multilingual
+                ) {
+                    assert_eq!(source_name(source), "other", "{source}");
+                } else {
+                    assert_ne!(source_name(source), "other", "{source}");
+                }
             }
         }
         assert_eq!(source_name(200), "other");

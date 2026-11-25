@@ -21,6 +21,9 @@ if [[ -n "$(git status --porcelain)" ]]; then
   echo "工作区有未提交的改动，bundle 不写源码修订" >&2
   revision=""
 fi
+bundle="$root/target/macos-isolated/Shurufa.app"
+# 清空旧 bundle 目录再配置与装配，避免已删除的资源残留，同时让 CMake configure 重新生成 Info.plist。
+rm -rf "$bundle"
 cmake -G Ninja -S platforms/macos -B target/macos-isolated \
   -DCMAKE_BUILD_TYPE=Release \
   -DMSIME_EDITION=shurufa -DMSIME_ENABLE_SPARKLE=OFF \
@@ -30,7 +33,6 @@ cmake -G Ninja -S platforms/macos -B target/macos-isolated \
   -DCMAKE_OSX_SYSROOT="$SDKROOT" -DCMAKE_PREFIX_PATH="$CMAKE_PREFIX_PATH" \
   -DPython3_EXECUTABLE="$(brew --prefix python@3.14)/bin/python3.14"
 cmake --build target/macos-isolated --target MSIMEClientInputMethod --parallel "$CARGO_BUILD_JOBS"
-bundle="$root/target/macos-isolated/Shurufa.app"
 
 signing_name="${SHURUFA_SIGNING_NAME:-Shurufa Local Signing}"
 find_identity() { security find-certificate -c "$signing_name" -Z 2>/dev/null | awk '/^SHA-1 hash:/{print $3; exit}'; }

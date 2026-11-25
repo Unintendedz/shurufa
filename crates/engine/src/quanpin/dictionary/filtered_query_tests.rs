@@ -437,7 +437,7 @@ impl QuanpinDictionary {
         let mut segments = None;
         let segmentation_cache = &mut self.segmentation_cache;
         let association = self.sentence_association.clone();
-        let has_rerankers = !self.rerankers.is_empty();
+        let has_rerankers = false;
         let context = &self.rescoring_context;
         let (resolution_hash, (resolution, pinyin_segmentation, marking_alternatives, slot)) =
             project_cached_resolution_with(

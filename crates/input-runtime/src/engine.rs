@@ -8,14 +8,10 @@ pub enum RuntimeError {
     InvalidPageSize,
     #[error("candidate belongs to an expired view or another session")]
     StaleCandidate,
-    #[error("nine-key spelling belongs to an expired view or another session")]
-    StaleNineKeySpelling,
     #[error("session identity exhausted")]
     IdentityExhausted,
     #[error("cannot replace an engine while composition is active")]
     CompositionActive,
-    #[error("nine-key mode requires the quanpin or zhuyin scheme")]
-    InvalidNineKeyScheme,
     #[error("punctuation action requires an ASCII punctuation character")]
     InvalidPunctuation,
     #[error("engine action failed: {0}")]
@@ -31,8 +27,7 @@ pub trait InputEngine {
     fn set_rescoring_context(&mut self, _context: &str) {}
     /// 首页放得下几行，宿主改每页候选数时跟着分页一起下发；没有按切分查词库的引擎忽略它。
     fn set_first_page_rows(&mut self, _rows: usize) {}
-    /// Moves the caret prefix decoding answers for; `None` returns to the end of the composition. Engines without
-    /// prefix decoding ignore it and report nothing pending below.
+    /// Moves the caret prefix decoding answers for; `None` returns to the end of the composition.
     fn set_caret(&mut self, _caret: Option<usize>) {}
     fn prefix_end(&self) -> usize {
         0
@@ -40,39 +35,19 @@ pub trait InputEngine {
     fn pending_suffix(&self) -> String {
         String::new()
     }
-    /// Whether an apostrophe is input to the open local mode (`3jin'g`, `/fyhello'world`) rather than punctuation that ends it. Engines without such modes answer no.
+    /// Whether an apostrophe is input to the open local mode (`3jin'g`, `/fyhello'world`) rather than punctuation that ends it.
     fn takes_local_separator(&self) -> bool {
         false
     }
-    /// The `/fy` translation request, the only request a local mode makes. Engines without the command answer none.
+    /// The `/fy` translation request, the only request a local mode makes.
     fn command_translation_query(&self) -> Option<CommandTranslationQuery> {
         None
     }
-    /// Put a translation of the live `/fy` text first; false for a stale query. Engines without the command refuse it.
+    /// Put a translation of the live `/fy` text first; false for a stale query.
     fn apply_command_translation(
         &mut self,
         _query: &CommandTranslationQuery,
         _translation: &str,
-    ) -> bool {
-        false
-    }
-    /// 脚本插件在 `/` 模式里的指令；没有 `/` 模式的引擎忽略它。
-    fn set_plugin_commands(&mut self, _commands: &[PluginCommand]) -> Result<(), RuntimeError> {
-        Ok(())
-    }
-    /// 插件指令要宿主去问的那一次；没有 `/` 模式的引擎永远没有。
-    fn plugin_command_query(&self) -> Option<PluginCommandQuery> {
-        None
-    }
-    /// 生效的插件指令里 `trigger` 的标题；没有 `/` 模式的引擎永远没有。
-    fn plugin_command_title(&self, _trigger: &str) -> Option<&str> {
-        None
-    }
-    /// 把插件给的行（文本，插件注释）放到 `/` 列表前面；过期的查询返回 false。没有 `/` 模式的引擎一律拒绝。
-    fn apply_plugin_command_rows(
-        &mut self,
-        _query: &PluginCommandQuery,
-        _rows: &[(String, String)],
     ) -> bool {
         false
     }
@@ -106,91 +81,30 @@ pub trait InputEngine {
     fn set_dedicated_english(&mut self, _enabled: bool) -> Result<(), RuntimeError> {
         Ok(())
     }
-    fn set_nine_key_enabled(&mut self, _enabled: bool) -> Result<(), RuntimeError> {
-        Err(RuntimeError::Engine("Nine-key mode is unsupported".into()))
-    }
-    /// 触屏的组码网格（九键、14 键），`None` 不用网格；没有九宫格的引擎不支持。
-    fn set_key_grid(&mut self, _grid: Option<KeyGrid>) -> Result<(), RuntimeError> {
-        Err(RuntimeError::Engine("Key grids are unsupported".into()))
-    }
-    /// 14 键的一键，`letter` 是这一组里的任一字母；没有网格的引擎不处理。
-    fn grid_key(&mut self, _letter: u8) -> Result<EngineResult, RuntimeError> {
-        Ok(EngineResult {
-            handled: false,
-            has_commit: false,
-            commit: String::new(),
-            diagnostic: String::new(),
-        })
-    }
-    /// Replace the `/` mode's command table. Engines without the mode ignore it.
+    /// Replace the `/` mode's command table.
     fn set_command_table(&mut self, _table: &[CommandTableEntry]) -> Result<(), RuntimeError> {
         Ok(())
     }
-    /// 替换宿主给的辅助码表；`None` 回到方案自己的表。没有辅助码的引擎忽略它。
-    fn set_helpcode_table(&mut self, _table: Option<SharedKeymap>) -> Result<(), RuntimeError> {
-        Ok(())
-    }
-    /// 替换 K 模式的宿主短语表。没有这个模式的引擎忽略它。
+    /// 替换 K 模式的宿主短语表。
     fn set_quick_phrase_table(&mut self, _table: &[QuickPhraseEntry]) -> Result<(), RuntimeError> {
         Ok(())
     }
-    /// Replace the `@` mode's name list. Engines without the mode ignore it.
+    /// Replace the `@` mode's name list.
     fn set_mention_entries(&mut self, _entries: &[MentionEntry]) -> Result<(), RuntimeError> {
         Ok(())
     }
-    /// Offer the places after the `@` mode's name list. Engines without the mode ignore it.
+    /// Offer the places after the `@` mode's name list.
     fn set_mention_places(&mut self, _enabled: bool) -> Result<(), RuntimeError> {
         Ok(())
     }
-    /// Ask for candidates withheld from the first answer, reporting whether the list grew. The
-    /// default answers no, which is what an engine that already returns everything it has means.
+    /// Ask for candidates withheld from the first answer, reporting whether the list grew.
     fn expand_initial_candidates(&mut self) -> Result<bool, RuntimeError> {
         Ok(false)
-    }
-    fn choose_nine_key_spelling(&mut self, _index: usize) -> Result<EngineResult, RuntimeError> {
-        Err(RuntimeError::Engine(
-            "Nine-key spelling selection is unsupported".into(),
-        ))
-    }
-    /// 九宫格候选只留单字、按笔顺前缀筛选；没有九宫格的引擎不支持。
-    fn set_nine_key_filter(
-        &mut self,
-        _single_character: bool,
-        _strokes: &str,
-    ) -> Result<EngineResult, RuntimeError> {
-        Err(RuntimeError::Engine(
-            "Nine-key candidate filters are unsupported".into(),
-        ))
-    }
-    /// 滑行的一笔；没有滑行输入的引擎不处理。
-    fn glide(
-        &mut self,
-        _keyboard: &GlideKeyboard,
-        _points: &[GlidePoint],
-    ) -> Result<EngineResult, RuntimeError> {
-        Ok(EngineResult {
-            handled: false,
-            has_commit: false,
-            commit: String::new(),
-            diagnostic: String::new(),
-        })
     }
     fn snapshot(&self) -> Result<EngineSnapshot, RuntimeError>;
     /// 为 Tier 1 两阶段异步神经解码提供权威音节路径与候选静态分；未实现时由 runtime 按快照降级推导。
     fn neural_v2_metadata(&self) -> Option<msime_engine::neural_v2::EngineNeuralMetadata> {
         None
-    }
-    /// 后续按键能继续当前五笔混输拼音时保留组字；没有混输的引擎沿用顶字。
-    fn wubi_pinyin_continues(&self, _value: u8, _shift: bool) -> bool {
-        false
-    }
-    /// 五笔拼音混输是否打开。顶字关掉时，混输关着就没有地方容纳第五个字母，仍要顶字上屏；混输开着才让它并进混输串。
-    fn wubi_mixed_pinyin(&self) -> bool {
-        false
-    }
-    /// 九宫格组码到上限时，这一键能不能先选掉首选再接着打。`grid_key` 为真时 `value` 来自 `grid_key`，否则来自 `character`。没有九宫格的引擎没有上限。
-    fn grid_limit_pick_ready(&self, _value: u8, _grid_key: bool) -> bool {
-        false
     }
     fn character(&mut self, value: u8, shift: bool) -> Result<EngineResult, RuntimeError>;
     fn command(&mut self, command: Command) -> Result<EngineResult, RuntimeError>;
@@ -229,15 +143,13 @@ pub trait InputEngine {
             let after = self.snapshot()?;
             if needs_dangling_segment_delimiter_backspace(&after.editing_text, after.caret_position)
             {
-                // The boundary is owned by Engine; remove only the separator
-                // left adjacent to the new caret through Engine's command path.
                 result = self.command(Command::Backspace)?;
             }
         }
         Ok(result)
     }
     fn select(&mut self, index: usize) -> Result<EngineResult, RuntimeError>;
-    /// 整句改字的左移，进入改字时从引擎的第 `index` 个候选开始。没有整句改字的引擎当作普通的改字命令。
+    /// 整句改字的左移，进入改字时从引擎的第 `index` 个候选开始。
     fn conversion_left_from(&mut self, _index: usize) -> Result<EngineResult, RuntimeError> {
         self.command(Command::ConversionLeft)
     }
@@ -249,20 +161,6 @@ pub trait InputEngine {
     fn remove_candidate(&mut self, _index: usize) -> Result<EngineResult, RuntimeError> {
         Err(RuntimeError::Engine(
             "Candidate removal is unsupported".into(),
-        ))
-    }
-    fn fix_candidate_position(
-        &mut self,
-        _index: usize,
-        _position: u8,
-    ) -> Result<EngineResult, RuntimeError> {
-        Err(RuntimeError::Engine(
-            "Candidate position fixing is unsupported".into(),
-        ))
-    }
-    fn clear_candidate_position(&mut self, _index: usize) -> Result<EngineResult, RuntimeError> {
-        Err(RuntimeError::Engine(
-            "Candidate position clearing is unsupported".into(),
         ))
     }
     fn select_edge(
@@ -316,23 +214,6 @@ impl InputEngine for Session {
     ) -> bool {
         Session::apply_command_translation(self, query, translation)
     }
-    fn set_plugin_commands(&mut self, commands: &[PluginCommand]) -> Result<(), RuntimeError> {
-        Session::set_plugin_commands(self, commands)
-            .map_err(|error| RuntimeError::Engine(error.to_string()))
-    }
-    fn plugin_command_query(&self) -> Option<PluginCommandQuery> {
-        Session::plugin_command_query(self)
-    }
-    fn plugin_command_title(&self, trigger: &str) -> Option<&str> {
-        Session::plugin_command_title(self, trigger)
-    }
-    fn apply_plugin_command_rows(
-        &mut self,
-        query: &PluginCommandQuery,
-        rows: &[(String, String)],
-    ) -> bool {
-        Session::apply_plugin_command_rows(self, query, rows)
-    }
     fn reset_cache(&mut self) -> Result<(), RuntimeError> {
         Session::reset_cache(self);
         Ok(())
@@ -363,25 +244,12 @@ impl InputEngine for Session {
         Session::set_dedicated_english(self, enabled)
             .map_err(|e| RuntimeError::Engine(e.to_string()))
     }
-    fn set_nine_key_enabled(&mut self, enabled: bool) -> Result<(), RuntimeError> {
-        Session::set_nine_key_enabled(self, enabled)
-            .map_err(|e| RuntimeError::Engine(e.to_string()))
-    }
-    fn set_key_grid(&mut self, grid: Option<KeyGrid>) -> Result<(), RuntimeError> {
-        Session::set_key_grid(self, grid).map_err(|e| RuntimeError::Engine(e.to_string()))
-    }
-    fn grid_key(&mut self, letter: u8) -> Result<EngineResult, RuntimeError> {
-        Session::grid_key(self, letter).map_err(|e| RuntimeError::Engine(e.to_string()))
-    }
     fn set_command_table(&mut self, table: &[CommandTableEntry]) -> Result<(), RuntimeError> {
         Session::set_command_table(self, table).map_err(|e| RuntimeError::Engine(e.to_string()))
     }
     fn set_quick_phrase_table(&mut self, table: &[QuickPhraseEntry]) -> Result<(), RuntimeError> {
         Session::set_quick_phrase_table(self, table)
             .map_err(|e| RuntimeError::Engine(e.to_string()))
-    }
-    fn set_helpcode_table(&mut self, table: Option<SharedKeymap>) -> Result<(), RuntimeError> {
-        Session::set_helpcode_table(self, table).map_err(|e| RuntimeError::Engine(e.to_string()))
     }
     fn set_mention_entries(&mut self, entries: &[MentionEntry]) -> Result<(), RuntimeError> {
         Session::set_mention_entries(self, entries).map_err(|e| RuntimeError::Engine(e.to_string()))
@@ -392,25 +260,6 @@ impl InputEngine for Session {
     fn expand_initial_candidates(&mut self) -> Result<bool, RuntimeError> {
         Session::expand_initial_candidates(self).map_err(|e| RuntimeError::Engine(e.to_string()))
     }
-    fn choose_nine_key_spelling(&mut self, index: usize) -> Result<EngineResult, RuntimeError> {
-        Session::choose_nine_key_spelling(self, index)
-            .map_err(|e| RuntimeError::Engine(e.to_string()))
-    }
-    fn set_nine_key_filter(
-        &mut self,
-        single_character: bool,
-        strokes: &str,
-    ) -> Result<EngineResult, RuntimeError> {
-        Session::set_nine_key_filter(self, single_character, strokes)
-            .map_err(|e| RuntimeError::Engine(e.to_string()))
-    }
-    fn glide(
-        &mut self,
-        keyboard: &GlideKeyboard,
-        points: &[GlidePoint],
-    ) -> Result<EngineResult, RuntimeError> {
-        Session::glide(self, keyboard, points).map_err(|e| RuntimeError::Engine(e.to_string()))
-    }
     fn punctuation(&mut self, value: u8) -> Result<EngineResult, RuntimeError> {
         Session::punctuation(self, value).map_err(|error| RuntimeError::Engine(error.to_string()))
     }
@@ -419,15 +268,6 @@ impl InputEngine for Session {
     }
     fn neural_v2_metadata(&self) -> Option<msime_engine::neural_v2::EngineNeuralMetadata> {
         Session::neural_v2_metadata(self)
-    }
-    fn wubi_pinyin_continues(&self, value: u8, shift: bool) -> bool {
-        Session::wubi_pinyin_continues(self, value, shift)
-    }
-    fn wubi_mixed_pinyin(&self) -> bool {
-        Session::wubi_mixed_pinyin(self)
-    }
-    fn grid_limit_pick_ready(&self, value: u8, grid_key: bool) -> bool {
-        Session::grid_limit_pick_ready(self, value, grid_key)
     }
     fn character(&mut self, value: u8, shift: bool) -> Result<EngineResult, RuntimeError> {
         Session::character(self, value, shift)
@@ -448,18 +288,6 @@ impl InputEngine for Session {
     }
     fn remove_candidate(&mut self, index: usize) -> Result<EngineResult, RuntimeError> {
         Session::remove_candidate(self, index).map_err(|e| RuntimeError::Engine(e.to_string()))
-    }
-    fn fix_candidate_position(
-        &mut self,
-        index: usize,
-        position: u8,
-    ) -> Result<EngineResult, RuntimeError> {
-        Session::fix_candidate_position(self, index, position)
-            .map_err(|e| RuntimeError::Engine(e.to_string()))
-    }
-    fn clear_candidate_position(&mut self, index: usize) -> Result<EngineResult, RuntimeError> {
-        Session::clear_candidate_position(self, index)
-            .map_err(|e| RuntimeError::Engine(e.to_string()))
     }
     fn finish(&mut self, index: usize) -> Result<EngineResult, RuntimeError> {
         Session::finish(self, index).map_err(|error| RuntimeError::Engine(error.to_string()))

@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""核对实际产物的标识、架构、模型和运行时路径；不读取或输出凭据。"""
-import hashlib
+"""核对实际产物的标识、架构、纯净资源边界和运行时路径；不读取或输出凭据。"""
 import json
 import plistlib
 import subprocess
@@ -30,15 +29,18 @@ assert subprocess.check_output(["lipo", "-archs", str(executable)], text=True).s
 linked = subprocess.check_output(["otool", "-L", str(executable)], text=True)
 assert "Sparkle" not in linked
 assert (contents / "MacOS/shurufa-voice-local").is_file()
+assert (contents / "Helpers/ShurufaNeuralService").is_file()
 assert not (contents / "MacOS/msime-voice-local").exists()
-model = contents / "Resources/EngineResources/sentence-model.safetensors"
-assert model.stat().st_size == 4486280
-assert hashlib.sha256(model.read_bytes()).hexdigest() == "86ac529510cb3b4968a5e6ade83ec8080f5b34a0a681e75c362accbbd387d1c1"
-# 「停顿后精排」的模型随包，与 resources/settled-model.lock.json 固定的那份逐字节相同。
-settled_lock = json.loads((Path(__file__).resolve().parents[3] / "resources/settled-model.lock.json").read_text(encoding="utf-8"))["artifacts"][0]
-settled = contents / "Resources/settled-model" / settled_lock["name"]
-assert settled.stat().st_size == settled_lock["size"]
-assert hashlib.sha256(settled.read_bytes()).hexdigest() == settled_lock["sha256"]
+# 确认已剔除旧模型、五笔词库、笔画词库与辅助码表。
+engine_res = contents / "Resources/EngineResources"
+assert (engine_res / "msime-pinyin.db").is_file()
+assert (engine_res / "msime-english.db").is_file()
+assert (engine_res / "msime-others.db").is_file()
+assert not (engine_res / "sentence-model.safetensors").exists()
+assert not (engine_res / "msime-wubi.db").exists()
+assert not (engine_res / "msime-stroke.db").exists()
+assert not (engine_res / "helpcodes").exists()
+assert not (contents / "Resources/settled-model").exists()
 identity = json.loads(subprocess.check_output([str(executable), "--describe-host"], text=True))
 assert identity["bundle_id"] == identifier
 assert identity["preferences_domain"] == identifier
@@ -47,7 +49,10 @@ assert identity["voice_keychain"] == identifier + ".voice"
 assert identity["dictionary_notification"].endswith(".shurufa")
 assert identity["statistics_notification"].endswith(".shurufa")
 assert identity["voice_helper"] == "shurufa-voice-local"
-print(json.dumps({"bundle": str(bundle), "modes": modes, "identity": identity,
-    "architecture": "arm64", "sparkle": False, "neural_model_bytes": model.stat().st_size,
-    "settled_model_bytes": settled.stat().st_size},
-    ensure_ascii=False, indent=2))
+print(json.dumps({
+    "bundle": str(bundle),
+    "modes": modes,
+    "identity": identity,
+    "architecture": "arm64",
+    "sparkle": False,
+}, ensure_ascii=False, indent=2))

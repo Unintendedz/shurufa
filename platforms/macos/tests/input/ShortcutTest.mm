@@ -1899,28 +1899,13 @@ static void AssertShiftCornerQuotes(NSDictionary *overrides, NSString *typed, NS
         assert([NSFileManager.defaultManager createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:nil]);
         options[name] = path;
     }
-    // 可选方案必须有对应资源才能启用；用合成空库，避免「请求五笔、实际回退全拼」的假覆盖。
-    options[@"language_dictionaries"] = options[@"resources"];
-    for (NSString *name in @[@"msime-wubi.db", @"msime-zhuyin.db"]) {
-        sqlite3 *database = nullptr;
-        NSString *path = [options[@"resources"] stringByAppendingPathComponent:name];
-        assert(sqlite3_open(path.fileSystemRepresentation, &database) == SQLITE_OK);
-        assert(sqlite3_exec(database,
-            "CREATE TABLE metadata(name TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;"
-            "INSERT INTO metadata VALUES('format_version','1');"
-            "CREATE TABLE syllables(syllable TEXT PRIMARY KEY) WITHOUT ROWID;"
-            "CREATE TABLE entries(key TEXT NOT NULL, text TEXT NOT NULL, weight INTEGER NOT NULL, PRIMARY KEY(key,text)) WITHOUT ROWID;"
-            "CREATE TABLE wubi86(key TEXT,value TEXT,weight INTEGER);", nullptr, nullptr, nullptr) == SQLITE_OK);
-        assert(sqlite3_close(database) == SQLITE_OK);
-    }
     NSError *error = nil;
     MSIMEClientSession *session = [[MSIMEClientSession alloc] initWithOptions:options error:&error];
     if (!session || error) fprintf(stderr, "corner quote session: %s\n", error.localizedDescription.UTF8String);
     assert(session && !error);
     NSDictionary *view = [session setFocused:YES error:&error][@"view"];
     assert(view && !error);
-    NSDictionary *schemes = @{@"quanpin": @0, @"shuangpin": @1, @"wubi": @2, @"korean": @4,
-        @"zhuyin": @6, @"vietnamese": @7};
+    NSDictionary *schemes = @{@"quanpin": @0, @"shuangpin": @1};
     assert([view[@"scheme"] isEqual:schemes[preferences[@"scheme"]]]);
     NSString *suite = [@"msime.shift-corner-quotes." stringByAppendingString:NSUUID.UUID.UUIDString];
     NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
@@ -1956,7 +1941,7 @@ static void AssertShiftCornerQuotes(NSDictionary *overrides, NSString *typed, NS
 }
 
 static void TestShiftCornerQuotesThroughRealSession() {
-    for (NSString *scheme in @[@"quanpin", @"shuangpin", @"wubi"]) {
+    for (NSString *scheme in @[@"quanpin", @"shuangpin"]) {
         for (NSNumber *paired in @[@NO, @YES]) {
             for (NSString *width in @[@"halfwidth", @"fullwidth"]) {
                 NSDictionary *preferences = @{@"scheme": scheme, @"paired_punctuation": paired, @"character_width": width};
@@ -1977,9 +1962,6 @@ static void TestShiftCornerQuotesThroughRealSession() {
     AssertShiftCornerQuotes(@{@"caps_lock_ascii_punctuation": @YES, @"paired_punctuation": @NO},
         @"{}", @"{}", NSEventModifierFlagCapsLock);
     AssertShiftCornerQuotes(@{@"caps_lock_ascii_punctuation": @NO}, @"{}", @"「」", NSEventModifierFlagCapsLock);
-    AssertShiftCornerQuotes(@{@"scheme": @"korean"}, @"{}", @"{}");
-    AssertShiftCornerQuotes(@{@"scheme": @"vietnamese"}, @"{}", @"{}");
-    AssertShiftCornerQuotes(@{@"scheme": @"zhuyin"}, @"{}", @"『』");
 
     // 文档里已有自动补出的右引号时，只有 tracker 和光标后文字同时匹配才跨过。
     NSString *suite = [@"msime.corner-quote-skip." stringByAppendingString:NSUUID.UUID.UUIDString];
@@ -2604,36 +2586,24 @@ static void TestSessionOptions() {
     NSDictionary *requested = MSIMESessionOptions(file, nil);
     assert([requested[@"phrase_preedit"] isEqual:@YES]);
     assert([requested[@"quick_phrase_candidates"] isEqual:@YES]);
-    assert([requested[@"korean_romaja"] isEqual:@YES]);
-    // 原配置中的字段及嵌套对象保持原样，宿主额外声明三项运行时能力。
+    // 原配置中的字段及嵌套对象保持原样，宿主额外声明两项运行时能力。
     for (NSString *key in file) assert([requested[key] isEqual:file[key]]);
-    assert(requested.count == file.count + 3);
+    assert(requested.count == file.count + 2);
     // 不修改调用方的字典，原配置仍供其他读取方使用。
     assert(!file[@"phrase_preedit"]);
-    assert(!file[@"korean_romaja"]);
 
     // An options file that already says something about it does not get to say no: this host draws
     // the field, and a stale file predates the behaviour entirely.
-    NSDictionary *stale = MSIMESessionOptions(@{@"api_version":@1, @"phrase_preedit":@NO, @"korean_romaja":@NO}, nil);
+    NSDictionary *stale = MSIMESessionOptions(@{@"api_version":@1, @"phrase_preedit":@NO}, nil);
     assert([stale[@"phrase_preedit"] isEqual:@YES]);
     assert([stale[@"quick_phrase_candidates"] isEqual:@YES]);
-    assert([stale[@"korean_romaja"] isEqual:@YES]);
 
     // The built-in sound packs live in the bundle, while resources is EngineResources in Application Support, so the host library cannot find them beside it: the bundle's directory is named, unless the options file names one itself.
     NSDictionary *sounds = MSIMESessionOptions(file, @"/synthetic/bundle/Contents/Resources/sound-packs");
     assert([sounds[@"sound_packs"] isEqual:@"/synthetic/bundle/Contents/Resources/sound-packs"]);
-    assert(sounds.count == file.count + 4 && !file[@"sound_packs"]);
+    assert(sounds.count == file.count + 3 && !file[@"sound_packs"]);
     NSDictionary *named = MSIMESessionOptions(@{@"api_version":@1, @"sound_packs":@"/configured/sound-packs"}, @"/synthetic/sound-packs");
     assert([named[@"sound_packs"] isEqual:@"/configured/sound-packs"]);
-
-    // 下载词库缺少辅助码时，会话从当前输入法包回退；原始配置继续供旧宿主读取。
-    NSDictionary *helpcodes = MSIMESessionOptions(file, nil, @"/synthetic/bundle/Contents/Resources");
-    assert([helpcodes[@"helpcode_fallback_resources"] isEqual:@"/synthetic/bundle/Contents/Resources"]);
-    assert(!file[@"helpcode_fallback_resources"] && helpcodes.count == file.count + 4);
-    assert(!MSIMESessionOptions(file, nil, @"relative/resources")[@"helpcode_fallback_resources"]);
-    NSDictionary *explicitHelpcodes = MSIMESessionOptions(@{@"helpcode_fallback_resources":@"/configured/resources"},
-        nil, @"/synthetic/bundle/Contents/Resources");
-    assert([explicitHelpcodes[@"helpcode_fallback_resources"] isEqual:@"/configured/resources"]);
 
     NSString *root = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
     NSString *bundlePath = [root stringByAppendingPathComponent:@"Synthetic.bundle"];
@@ -3549,111 +3519,6 @@ static void TestCandidatePanelSingleOwner() {
     // Focus moving back hands the window over the other way.
     [stale claimCandidatePanel];
     assert(!currentPanel.isVisible);
-}
-
-static void TestJapaneseConversionKeys(MSIMEAppearancePreferences *appearance) {
-    ModeController *controller = [ModeController alloc];
-    ShortcutSession *session = [ShortcutSession new];
-    ShortcutClient *client = [ShortcutClient new];
-    TestCandidatePanel *panel = [TestCandidatePanel new];
-    panel.visible = YES;
-    [controller setValue:appearance forKey:@"appearance"];
-    [controller setValue:session forKey:@"session"];
-    [controller setValue:client forKey:@"activeClient"];
-    [controller setValue:panel forKey:@"panel"];
-    appearance.englishMode = NO;
-
-    NSDictionary *(^composing)(NSInteger) = ^(NSInteger scheme) {
-        // The identities carry the session and generation the view is on; the host refuses any
-        // candidate whose identity does not match what is on screen.
-        return @{ @"focused": @YES, @"scheme": @(scheme), @"editing_text": @"nihon",
-                  @"caret_position": @5, @"reading": @"にほん", @"session": @4, @"generation": @7,
-                  @"candidates": @[@{ @"text": @"日本", @"highlighted": @YES,
-                                      @"id": @{ @"session": @4, @"generation": @7, @"index": @0 } },
-                                   @{ @"text": @"にほん",
-                                      @"id": @{ @"session": @4, @"generation": @7, @"index": @1 } },
-                                   @{ @"text": @"二本",
-                                      @"id": @{ @"session": @4, @"generation": @7, @"index": @2 } }] };
-    };
-    // Stepping through candidates leaves the list on screen with the highlight moved, which is
-    // what the Engine answers; a stub that dropped the candidates would take the identities the
-    // next Enter has to name.
-    session.nextTransition = @{ @"handled": @YES, @"view": composing(3) };
-
-    // Enter with no conversion started commits the reading, not the romaji.
-    [controller setValue:composing(3) forKey:@"view"];
-    session.lastCommand = UINT32_MAX;
-    assert([controller handleEvent:ModeKey(36, 0, NO) client:client]);
-    assert(session.lastCommand == MSIME_COMMIT_READING);
-
-    // Space starts the conversion instead of committing it: nothing reaches the Engine, because
-    // the first candidate is already the highlighted one.
-    [controller setValue:composing(3) forKey:@"view"];
-    session.lastCommand = UINT32_MAX;
-    NSUInteger selectsBefore = session.selectCalls;
-    assert([controller handleEvent:ModeKey(49, 0, NO) client:client]);
-    assert(session.lastCommand == UINT32_MAX && session.selectCalls == selectsBefore);
-
-    // The next press steps to the following candidate.
-    assert([controller handleEvent:ModeKey(49, 0, NO) client:client]);
-    assert(session.lastCommand == MSIME_NEXT_CANDIDATE);
-
-    // Enter now takes the candidate that was stepped to rather than the reading.
-    assert([controller handleEvent:ModeKey(36, 0, NO) client:client]);
-    assert(session.selectCalls == selectsBefore + 1);
-    assert(session.selectedGeneration == 7 && session.selectedIndex == 1);
-
-    // Stepping past the end comes back to the first candidate.
-    [controller setValue:composing(3) forKey:@"view"];
-    for (int press = 0; press < 3; ++press)
-        assert([controller handleEvent:ModeKey(49, 0, NO) client:client]);
-    session.lastCommand = UINT32_MAX;
-    assert([controller handleEvent:ModeKey(49, 0, NO) client:client]);
-    assert(session.lastCommand == MSIME_FIRST_CANDIDATE);
-
-    // Editing the reading abandons the conversion: Enter is the kana again.
-    [controller setValue:composing(3) forKey:@"view"];
-    assert([controller handleEvent:ModeKey(49, 0, NO) client:client]);
-    NSMutableDictionary *edited = [composing(3) mutableCopy];
-    edited[@"editing_text"] = @"nihong";
-    [controller setValue:edited forKey:@"view"];
-    session.lastCommand = UINT32_MAX;
-    assert([controller handleEvent:ModeKey(36, 0, NO) client:client]);
-    assert(session.lastCommand == MSIME_COMMIT_READING);
-
-    // Every other scheme keeps the keys it had: Space commits the candidate, Enter the raw input.
-    [controller setValue:composing(0) forKey:@"view"];
-    session.lastCommand = UINT32_MAX;
-    assert([controller handleEvent:ModeKey(49, 0, NO) client:client]);
-    assert(session.lastCommand == MSIME_COMMIT_CANDIDATE);
-    [controller setValue:composing(0) forKey:@"view"];
-    session.lastCommand = UINT32_MAX;
-    assert([controller handleEvent:ModeKey(36, 0, NO) client:client]);
-    assert(session.lastCommand == MSIME_COMMIT_RAW);
-
-    // A Japanese composition with no candidates leaves Space alone, and a chord is never this.
-    NSMutableDictionary *bare = [composing(3) mutableCopy];
-    bare[@"candidates"] = @[];
-    [controller setValue:bare forKey:@"view"];
-    session.lastCommand = UINT32_MAX;
-    assert([controller handleEvent:ModeKey(49, 0, NO) client:client]);
-    assert(session.lastCommand == MSIME_COMMIT_CANDIDATE);
-
-    // A bare Shift+R shows its raw prefix as the one Fallback candidate (source 9). Like Windows, the first Space commits it; there is nothing to convert.
-    NSMutableDictionary *fallback = [composing(3) mutableCopy];
-    fallback[@"editing_text"] = @"R";
-    fallback[@"reading"] = @"";
-    fallback[@"local_mode"] = @"temporary_japanese";
-    fallback[@"candidates"] = @[@{ @"text": @"R", @"source": @9, @"highlighted": @YES,
-                                   @"id": @{ @"session": @4, @"generation": @7, @"index": @0 } }];
-    [controller setValue:fallback forKey:@"view"];
-    session.lastCommand = UINT32_MAX;
-    assert([controller handleEvent:ModeKey(49, 0, NO) client:client]);
-    assert(session.lastCommand == MSIME_COMMIT_CANDIDATE);
-    [controller setValue:composing(3) forKey:@"view"];
-    session.lastCommand = UINT32_MAX;
-    [controller handleEvent:ModeKey(36, NSEventModifierFlagControl, NO) client:client];
-    assert(session.lastCommand != MSIME_COMMIT_READING);
 }
 
 // #7616：连续按住 Shift 打大写时，只有这一串的第一枚字母能进快捷模式，规则在共享引擎里（`crates/engine/src/session/tests.rs`）。
@@ -4954,7 +4819,6 @@ static void TestSchemeTraitsFromView(MSIMEAppearancePreferences *appearance) {
     // Glosses: the three Chinese schemes that always had them, not temporary Japanese inside them, and none of the schemes after them. A view without a scheme is quanpin.
     for (NSNumber *scheme in @[@0, @1, @2, @4]) assert(MSIMEViewShowsGlosses(@{@"scheme": scheme}));
     for (NSNumber *scheme in @[@3, @5, @6, @7, @8, @9, @99]) assert(!MSIMEViewShowsGlosses(@{@"scheme": scheme}));
-    assert(!MSIMEViewShowsGlosses(@{@"scheme": @0, @"local_mode": @"temporary_japanese"}));
     assert(MSIMEViewShowsGlosses(@{}));
     // Scheme traits hold only while the scheme's own rules do: dedicated English and the local modes keep theirs.
     assert(MSIMESchemeTrait(@{@"scheme": @6}, msime::mac::scheme::LocksCaret));
@@ -4984,22 +4848,6 @@ static void TestSchemeTraitsFromView(MSIMEAppearancePreferences *appearance) {
         assert([controller handleEvent:ModeKey(51, NSEventModifierFlagControl, NO) client:client] == !locked);
         assert(session.lastCommand == (locked ? MSIME_FINISH_COMPOSITION : MSIME_BACKSPACE_SEGMENT));
     }
-
-    // Option+Return opens the candidate list of a scheme that has one to open (Korean, Zhuyin) and is swallowed while composing; elsewhere it finishes the composition and goes to the application as before.
-    for (NSNumber *scheme in @[@0, @3, @5, @7, @8, @9, @4, @6]) {
-        const BOOL opens = scheme.intValue == 4 || scheme.intValue == 6;
-        [controller setValue:composing(scheme) forKey:@"view"];
-        session.lastCommand = UINT32_MAX;
-        assert([controller handleEvent:ModeKey(36, NSEventModifierFlagOption, NO) client:client] == opens);
-        assert(session.lastCommand == (opens ? MSIME_OPEN_CANDIDATE_LIST : MSIME_FINISH_COMPOSITION));
-    }
-    // Dedicated English keeps its own rules inside Zhuyin: no list to open there.
-    NSMutableDictionary *dedicated = [composing(@6) mutableCopy];
-    dedicated[@"dedicated_english"] = @YES;
-    [controller setValue:dedicated forKey:@"view"];
-    session.lastCommand = UINT32_MAX;
-    assert(![controller handleEvent:ModeKey(36, NSEventModifierFlagOption, NO) client:client]);
-    assert(session.lastCommand == MSIME_FINISH_COMPOSITION);
 
     // 没有组字时，大写锁定下的大写字母交还给应用，除非方案自己组它：韩文折成不带 Shift 的字母键，越南文和藏文打出大写字母（威利转写里大写是另一个字母）。
     NSEvent *capsA = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:NSEventModifierFlagCapsLock timestamp:0
@@ -5073,123 +4921,6 @@ static void TestSchemeKeyRouting() {
     BOOL (^send)(NSDictionary *, NSEvent *, BOOL) = ^BOOL(NSDictionary *state, NSEvent *event, BOOL panelVisible) {
         return handle(state, event, panelVisible) && session.asciiCalls == asciiBefore + 1;
     };
-    NSString *const zhuyinIdle = @"125890,./;-";
-    NSString *const zhuyinComposing = @"1234567890,./;- ";
-    NSString *const zhuyinListOpen = @"0,./;-";
-    const NSUInteger punctuationRoutes = 0;
-
-    // Idle Zhuyin: `,` and `1` are bopomofo, typed into the Engine rather than written as a mark or a digit.
-    assert(send(view(@6, @"", zhuyinIdle, NO), key(43, @",", 0), NO) && session.lastASCII == ',');
-    assert(send(view(@6, @"", zhuyinIdle, NO), key(18, @"1", 0), NO) && session.lastASCII == '1');
-    // With the list open, `-` spells ㄦ instead of turning a page and `0` spells ㄢ instead of picking a row.
-    assert(send(view(@6, @"su3", zhuyinListOpen, YES), key(27, @"-", 0), YES) && session.lastASCII == '-');
-    assert(session.lastCommand != MSIME_PREVIOUS_PAGE);
-    const NSUInteger selectsBefore = session.selectCalls;
-    assert(send(view(@6, @"su3", zhuyinListOpen, YES), key(29, @"0", 0), YES) && session.lastASCII == '0');
-    assert(session.selectCalls == selectsBefore);
-    // Space is the first tone while a syllable is pending, panel or not: a character, not the commit command.
-    for (NSNumber *visible in @[@NO, @YES]) {
-        assert(send(view(@6, @"su", zhuyinComposing, NO), key(49, @" ", 0), visible.boolValue) && session.lastASCII == ' ');
-        assert(session.lastCommand == UINT32_MAX);
-    }
-    // Shift+`{` is the Engine's 『 in Zhuyin, so the host does not open a `{` pair of its own.
-    assert(send(view(@6, @"su3", zhuyinComposing, NO), key(33, @"{", NSEventModifierFlagShift), NO) && session.lastASCII == '{');
-    assert(session.punctuationASCIICalls == punctuationRoutes && client.committed == nil && client.insertions.count == 0);
-    // Keypad `-` and `.` spell ㄦ and ㄡ like the keypad digits do, rather than taking the keypad punctuation route that would finish the conversion and append the ASCII mark.
-    assert(send(view(@6, @"su3", zhuyinComposing, NO), KeypadKey(78, @"-", 0, NO), NO) && session.lastASCII == '-');
-    assert(send(view(@6, @"", zhuyinIdle, NO), KeypadKey(65, @".", 0, NO), NO) && session.lastASCII == '.');
-    assert(session.punctuationASCIICalls == punctuationRoutes && session.enginePunctuationCalls == 0 && client.insertions.count == 0);
-    // Shift+`:` after an ASCII letter is the Engine's overlay mark, not the host's contextual smart punctuation, which Quanpin still takes.
-    appearance.smartPunctuation = YES;
-    client.document = @"a";
-    client.selection = NSMakeRange(1, 0);
-    NSEvent *colon = key(41, @":", NSEventModifierFlagShift);
-    assert(send(view(@6, @"", zhuyinIdle, NO), colon, NO) && session.lastASCII == ':' && session.lastShift);
-    assert(session.contextualPunctuationCalls == 0 && session.enginePunctuationCalls == 0);
-    assert(handle(view(@0, @"", @"", NO), colon, NO) && session.contextualPunctuationCalls == 1 && session.lastPrecedingScalar == 'a');
-    appearance.smartPunctuation = NO;
-    session.contextualPunctuationCalls = 0;
-    session.enginePunctuationCalls = 0;
-    client.document = @"";
-    client.selection = NSMakeRange(0, 0);
-    client.insertions = [NSMutableArray array];
-    client.committed = nil;
-
-    // Down opens a closed Zhuyin list whatever the arrow binding says (it is off here) and is never handed to the application.
-    const NSEventModifierFlags arrowFlags = NSEventModifierFlagFunction | NSEventModifierFlagNumericPad;
-    NSString *down = [NSString stringWithFormat:@"%C", (unichar)NSDownArrowFunctionKey];
-    assert(handle(view(@6, @"su3", zhuyinComposing, NO), key(125, down, arrowFlags), NO));
-    assert(session.lastCommand == MSIME_OPEN_CANDIDATE_LIST && session.asciiCalls == asciiBefore);
-    [appearance applySharedCandidatePreferences:@{@"navigation": @{@"arrows": @YES}}];
-    assert(handle(view(@6, @"su3", zhuyinComposing, NO), key(125, down, arrowFlags), NO));
-    assert(session.lastCommand == MSIME_OPEN_CANDIDATE_LIST && session.asciiCalls == asciiBefore);
-    // With the list open Down moves the highlight as in any list, and with Shift held or nothing composing it is not the list key.
-    appearance.vertical = YES;
-    assert(handle(view(@6, @"su3", zhuyinListOpen, YES), key(125, down, arrowFlags), YES));
-    assert(session.lastCommand == MSIME_NEXT_CANDIDATE && session.asciiCalls == asciiBefore);
-    appearance.vertical = NO;
-    send(view(@6, @"su3", zhuyinComposing, NO), key(125, down, arrowFlags | NSEventModifierFlagShift), NO);
-    assert(session.lastCommand != MSIME_OPEN_CANDIDATE_LIST);
-    send(view(@6, @"", zhuyinIdle, NO), key(125, down, arrowFlags), NO);
-    assert(session.lastCommand != MSIME_OPEN_CANDIDATE_LIST);
-    // Down in a scheme without a Down-opened list keeps its arrow meaning.
-    for (NSNumber *scheme in @[@0, @4, @5, @7, @9]) {
-        send(view(scheme, @"abc", @"", NO), key(125, down, arrowFlags), NO);
-        assert(session.lastCommand == MSIME_NEXT_CANDIDATE);
-    }
-    [appearance applySharedCandidatePreferences:@{@"navigation": @{@"arrows": @NO}}];
-
-    // Cantonese: the syllable apostrophe goes to the Engine as input, not to the quote pairing or punctuation routes.
-    assert(send(view(@5, @"ngo", @"'", NO), key(39, @"'", 0), NO) && session.lastASCII == '\'');
-    assert(session.punctuationASCIICalls == punctuationRoutes && session.enginePunctuationCalls == 0 && session.contextualPunctuationCalls == 0);
-    assert(client.insertions.count == 0 && client.committed == nil);
-
-    // Vietnamese keeps the letter's case while composing, with Shift or with Caps Lock.
-    assert(send(view(@7, @"vie", @"", NO), key(9, @"V", NSEventModifierFlagShift), NO) && session.lastASCII == 'V' && session.lastShift);
-    assert(send(view(@7, @"vie", @"", NO), key(9, @"V", NSEventModifierFlagCapsLock), NO) && session.lastASCII == 'V' && !session.lastShift);
-
-    // 藏文（威利转写）：空闲时 `'` 开始一个 achung 音节，`/` 由引擎单独写出垂符，都作为字符交给引擎，不走引号配对或标点路由。
-    NSString *const tibetanIdle = @"'/";
-    NSString *const tibetanComposing = @"'+-./";
-    assert(send(view(@8, @"", tibetanIdle, NO), key(39, @"'", 0), NO) && session.lastASCII == '\'');
-    assert(send(view(@8, @"", tibetanIdle, NO), key(44, @"/", 0), NO) && session.lastASCII == '/');
-    // 组字时叠加的 `+`、消歧的 `.`、`-`、`'` 和写垂符的 `/` 都是拼写，开着减号翻页也不翻页。
-    assert(send(view(@8, @"pad", tibetanComposing, NO), key(24, @"+", NSEventModifierFlagShift), NO) && session.lastASCII == '+');
-    assert(send(view(@8, @"g", tibetanComposing, NO), key(47, @".", 0), NO) && session.lastASCII == '.');
-    assert(send(view(@8, @"k", tibetanComposing, NO), key(27, @"-", 0), NO) && session.lastASCII == '-');
-    assert(session.lastCommand != MSIME_PREVIOUS_PAGE);
-    assert(send(view(@8, @"bsgra", tibetanComposing, NO), key(39, @"'", 0), NO) && session.lastASCII == '\'');
-    assert(send(view(@8, @"bkra shis", tibetanComposing, NO), key(44, @"/", 0), NO) && session.lastASCII == '/');
-    assert(session.punctuationASCIICalls == punctuationRoutes && session.enginePunctuationCalls == 0 && session.contextualPunctuationCalls == 0);
-    assert(client.insertions.count == 0 && client.committed == nil);
-    // 威利转写区分大小写：Shift 和大写锁定打出的大写字母都原样送进引擎。
-    assert(send(view(@8, @"", tibetanIdle, NO), key(17, @"T", NSEventModifierFlagShift), NO) && session.lastASCII == 'T' && session.lastShift);
-    assert(send(view(@8, @"k", tibetanComposing, NO), key(0, @"A", NSEventModifierFlagCapsLock), NO) && session.lastASCII == 'A' && !session.lastShift);
-    // 空格上屏藏文加音节点、回车只上屏藏文、Esc 先退回威利原文，都是引擎命令，不是字符。
-    assert(handle(view(@8, @"bkra", tibetanComposing, NO), key(49, @" ", 0), NO) && session.lastCommand == MSIME_COMMIT_CANDIDATE && session.asciiCalls == asciiBefore);
-    assert(handle(view(@8, @"bkra", tibetanComposing, NO), key(36, @"\r", 0), NO) && session.lastCommand == MSIME_COMMIT_RAW && session.asciiCalls == asciiBefore);
-    assert(handle(view(@8, @"bkra", tibetanComposing, NO), key(53, @"\x1b", 0), NO) && session.lastCommand == MSIME_CANCEL && session.asciiCalls == asciiBefore);
-
-    // Stroke spells with the letters h s p n z and the wildcard x, so it publishes no spelling symbols: every stroke key reaches the Engine as a plain letter, idle or composing, and the Engine decides which of them start a composition.
-    const struct { unsigned short code; char letter; } strokeKeys[] = {{4, 'h'}, {1, 's'}, {35, 'p'}, {45, 'n'}, {6, 'z'}, {7, 'x'}};
-    for (const auto &stroke : strokeKeys) {
-        NSString *characters = [NSString stringWithFormat:@"%c", stroke.letter];
-        assert(send(view(@9, @"", @"", NO), key(stroke.code, characters, 0), NO) && session.lastASCII == stroke.letter && !session.lastShift);
-        assert(send(view(@9, @"hs", @"", NO), key(stroke.code, characters, 0), NO) && session.lastASCII == stroke.letter);
-    }
-    assert(session.punctuationASCIICalls == punctuationRoutes && session.enginePunctuationCalls == 0 && client.insertions.count == 0);
-    // With the stroke candidates up the physical digits still pick a row and Space still commits the highlighted one; strokes are never digits.
-    NSMutableDictionary *stroke = [view(@9, @"hs", @"", YES) mutableCopy];
-    stroke[@"candidate_list_open"] = @NO;
-    stroke[@"preedit"] = @"一丨";
-    stroke[@"reading"] = @"一丨";
-    [controller setValue:stroke forKey:@"view"];
-    panel.requestedVisible = YES;
-    asciiBefore = session.asciiCalls;
-    assert([controller handleEvent:key(18, @"1", 0) client:client] && session.asciiCalls == asciiBefore);
-    assert(!send(stroke, key(49, @" ", 0), YES) && session.lastCommand == MSIME_COMMIT_CANDIDATE);
-    assert(session.asciiCalls == asciiBefore);
-
     // Quanpin is unchanged: with the panel up a digit picks a row, `-` turns the page and Space commits the candidate.
     // An ordinary conversion's panel: candidates shown with no opened list, which would make the paging marks punctuation.
     NSMutableDictionary *quanpin = [view(@0, @"zhong", @"", YES) mutableCopy];
@@ -6246,38 +5977,38 @@ static void TestModeSwitchReachesTheSessionBeforeTheNextKey() {
         assert([controller handleEvent:KeypadKey(keyCode, letter, 0, NO) client:client]);
     };
 
-    // 中 切到 한：紧接着的字母就是韩文字母（자모）。
-    [controller systemDidReportInputMode:MSIMEKoreanInputModeID client:client];
-    type(15, @"r");
-    assert(scheme() == msime::mac::KoreanScheme && [client.marked isEqual:@"\u3131"]);
-    // 音节未完成时从 한 切到 中：先把音节上屏，下一个字母按拼音处理。
-    [controller systemDidReportInputMode:MSIMEChineseInputModeID client:client];
-    assert([client.insertions.lastObject isEqual:@"\u3131"]);
+    // 全拼先打出一个字母，再经系统输入模式切换到双拼：原有未提交拼音先收敛，下一键立即按双拼（scheme == 1）处理。
     type(45, @"n");
     assert(scheme() == 0 && [client.marked isEqual:@"n"]);
-    // 中 切到 日 再切回来。
-    [controller systemDidReportInputMode:MSIMEJapaneseInputModeID client:client];
-    type(40, @"k");
-    assert(scheme() == 3);
-    [controller systemDidReportInputMode:MSIMEChineseInputModeID client:client];
+    const NSUInteger beforeShuangpinSwitch = client.insertions.count;
+    [controller systemDidReportInputMode:MSIMEShuangpinInputModeID client:client];
+    assert(client.insertions.count == beforeShuangpinSwitch + 1);
+    type(35, @"p");
+    assert(scheme() == 1 && [client.marked isEqual:@"p"]);
+    // 经菜单项切回全拼，立即生效且先把前一组字收敛上屏。
+    NSMenuItem *quanpin = [[NSMenuItem alloc] initWithTitle:@"全拼" action:@selector(selectInputScheme:) keyEquivalent:@""];
+    quanpin.representedObject = @"quanpin";
+    const NSUInteger beforeQuanpinSwitch = client.insertions.count;
+    [controller selectInputScheme:quanpin];
+    assert(client.insertions.count == beforeQuanpinSwitch + 1);
     type(45, @"n");
     assert(scheme() == 0 && [client.marked isEqual:@"n"]);
-    // 输入法菜单里的方案项走同一条路径。
-    NSMenuItem *korean = [[NSMenuItem alloc] initWithTitle:@"韩语" action:@selector(selectInputScheme:) keyEquivalent:@""];
-    korean.representedObject = @"korean";
-    [controller selectInputScheme:korean];
-    type(15, @"r");
-    assert(scheme() == msime::mac::KoreanScheme && [client.marked isEqual:@"\u3131"]);
+    // 再经菜单项切到双拼，后面的后台保存不会把它改回全拼。
+    NSMenuItem *shuangpin = [[NSMenuItem alloc] initWithTitle:@"双拼" action:@selector(selectInputScheme:) keyEquivalent:@""];
+    shuangpin.representedObject = @"shuangpin";
+    [controller selectInputScheme:shuangpin];
+    type(35, @"p");
+    assert(scheme() == 1 && [client.marked isEqual:@"p"]);
 
     // 外观改动触发的后台保存会再写一遍相同的偏好，之后的重新载入既不会再切换一次，也不会切回去。
     [controller persistAppearancePreferences];
     SettleWindowLayout();
     NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:1.5];
     while (deadline.timeIntervalSinceNow > 0) [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
-    type(15, @"r");
-    assert(scheme() == msime::mac::KoreanScheme && [prefs.inputScheme isEqual:@"korean"]);
+    type(35, @"p");
+    assert(scheme() == 1 && [prefs.inputScheme isEqual:@"shuangpin"]);
     NSDictionary *stored = [MSIMEClientSession loadPreferencesInDirectory:[root stringByAppendingPathComponent:@"preferences"] error:&error];
-    assert(!error && [stored[@"preferences"][@"scheme"] isEqual:@"korean"]);
+    assert(!error && [stored[@"preferences"][@"scheme"] isEqual:@"shuangpin"]);
 
     MSIMEFocusedController = nil;
     MSIMEResetSystemInputModeState(MSIMESharedSystemInputModeState());
@@ -7415,13 +7146,12 @@ static void DrainMainQueue();
 }
 @end
 
-// 用户在五笔下连着打 `0.10.1`，智能标点开着却得到 `0。10。1`。这里按用户的偏好建真会话，从 handleEvent: 一路打进去：控制器不收的键由应用自己写进文档，和真实宿主一样。全拼做对照。`typed` 只含数字和句号。
+// 用户连着打 `0.10.1`，智能标点开着时应保持 ASCII 版本号。这里按真实偏好建会话并经 handleEvent: 送入按键，对照全拼与双拼行为。
 static NSString *TypeThroughRealSession(NSString *scheme, ShortcutClient *client, NSString *typed, BOOL chinesePunctuation) {
     NSString *root = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
     NSDictionary *preferences = @{
-        @"scheme": scheme, @"wubi_profile": @"wubi86", @"default_ime_mode": @"chinese", @"candidate_page_size": @6,
+        @"scheme": scheme, @"default_ime_mode": @"chinese", @"candidate_page_size": @6,
         @"learning": @NO, @"chinese_punctuation": @(chinesePunctuation), @"punctuation_lock": @"follow",
-        @"wubi_mixed_pinyin": @YES, @"wubi_auto_commit_unique": @YES, @"wubi_code_hint": @YES,
         @"number_row_selection": @YES, @"smart_punctuation": @YES, @"smart_punctuation_direct_digit": @YES,
         @"smart_punctuation_direct_letter": @YES, @"smart_punctuation_repeat": @YES,
         @"smart_punctuation_space_convert": @NO, @"paired_punctuation": @YES, @"character_width": @"halfwidth"};
@@ -7476,7 +7206,7 @@ static void AssertTypedThroughRealSession(NSString *scheme, ShortcutClient *clie
 
 // 没有组字时智能标点判为 ASCII，Engine 把键交回宿主；宿主要自己写出字面标点，不能再把键交给后面的普通标点路线，否则 Engine 照常写成中文标点。读不回文档的客户端靠影子判断，结果一样。
 static void TestSmartPunctuationVersionNumberThroughRealSession() {
-    for (NSString *scheme in @[@"quanpin", @"shuangpin", @"wubi"]) {
+    for (NSString *scheme in @[@"quanpin", @"shuangpin"]) {
         for (Class type in @[ShortcutClient.class, UnreadableShortcutClient.class]) {
             AssertTypedThroughRealSession(scheme, [type new], @"0.10.1", YES, @"0.10.1");
             // 前面没有数字或字母的句号仍是中文句号。
@@ -7492,8 +7222,8 @@ static void TestSmartPunctuationVersionNumberThroughRealSession() {
     NSString *root = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
     assert([NSFileManager.defaultManager createDirectoryAtPath:root withIntermediateDirectories:YES attributes:nil error:nil]);
     msime_macos_diagnostic_configure(root.fileSystemRepresentation, true);
-    AssertTypedThroughRealSession(@"wubi", [UnreadableShortcutClient new], @"0.10.", YES, @"0.10.");
-    AssertTypedThroughRealSession(@"wubi", [ShortcutClient new], @".", YES, @"。");
+    AssertTypedThroughRealSession(@"quanpin", [UnreadableShortcutClient new], @"0.10.", YES, @"0.10.");
+    AssertTypedThroughRealSession(@"quanpin", [ShortcutClient new], @".", YES, @"。");
     msime_macos_diagnostic_configure(root.fileSystemRepresentation, false);
     NSString *log = [NSString stringWithContentsOfFile:[root stringByAppendingPathComponent:@"diagnostic.log"]
                                               encoding:NSUTF8StringEncoding error:nil];
@@ -7505,70 +7235,6 @@ static void TestSmartPunctuationVersionNumberThroughRealSession() {
     assert([decisions[1] hasSuffix:@"[smart-punctuation] composing=0 shadow=digit preceding=shadow:digit decision=ascii_literal"]);
     assert([decisions[2] hasSuffix:@"[smart-punctuation] composing=0 shadow=invalid preceding=document:none decision=engine"]);
     [NSFileManager.defaultManager removeItemAtPath:root error:nil];
-}
-
-// 使用真实 Rust 会话走原生按键入口，覆盖减号翻页开关的两种状态。
-static void TestTemporaryJapaneseLongVowelThroughRealSession(BOOL paging) {
-    // 复用引擎 golden 的微型模型，让真实 Host API 保持临时日文可用，不依赖本机安装的词库。
-    NSString *fixturePath = [[@(__FILE__).stringByDeletingLastPathComponent
-        stringByAppendingPathComponent:@"../../../../crates/engine/tests/golden/scenarios/ri_japanese_model_a.json"] stringByStandardizingPath];
-    NSData *fixtureData = [NSData dataWithContentsOfFile:fixturePath];
-    assert(fixtureData);
-    NSDictionary *fixture = [NSJSONSerialization JSONObjectWithData:fixtureData options:0 error:nil];
-    NSData *model = [fixture[@"fixture"][@"files"][@"msime-japanese.dat"] dataUsingEncoding:NSUTF8StringEncoding];
-    assert(model.length);
-    for (NSString *scheme in @[@"quanpin", @"shuangpin"]) {
-        NSString *root = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
-        NSDictionary *preferences = @{@"scheme":scheme, @"learning":@NO, @"cloud_candidates":@NO,
-            @"candidate_page_size":@6, @"default_ime_mode":@"chinese", @"chinese_punctuation":@YES};
-        NSMutableDictionary *options = [@{@"api_version":@1, @"preferences":preferences} mutableCopy];
-        for (NSString *name in @[@"resources", @"user_data", @"cache", @"dictionaries"]) {
-            NSString *path = [root stringByAppendingPathComponent:name];
-            assert([NSFileManager.defaultManager createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:nil]);
-            options[name] = path;
-        }
-        assert([model writeToFile:[options[@"resources"] stringByAppendingPathComponent:@"msime-japanese.dat"] atomically:YES]);
-        NSError *error = nil;
-        MSIMEClientSession *session = [[MSIMEClientSession alloc] initWithOptions:options error:&error];
-        assert(session && !error);
-        NSDictionary *view = [session setFocused:YES error:&error][@"view"];
-        assert(view && !error);
-        NSString *suite = [@"msime.temporary-japanese." stringByAppendingString:NSUUID.UUID.UUIDString];
-        NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
-        MSIMEAppearancePreferences *prefs = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults skinsRoot:[NSURL fileURLWithPath:root]];
-        [prefs applySharedInputPreferences:preferences];
-        [prefs applySharedCandidatePreferences:@{@"navigation":@{@"minus_equal":@(paging)},
-            @"word_character":@{@"enabled":@NO, @"keys":@"minus_equal"}}];
-        prefs.englishMode = NO;
-        ShortcutClient *client = [ShortcutClient new];
-        client.document = @"";
-        client.selection = NSMakeRange(0, 0);
-        client.caret = NSMakeRect(100, 100, 1, 16);
-        ModeController *controller = [ModeController alloc];
-        [controller setValue:prefs forKey:@"appearance"];
-        [controller setValue:session forKey:@"session"];
-        [controller setValue:client forKey:@"activeClient"];
-        [controller setValue:view forKey:@"view"];
-        [controller setValue:[[HiddenCandidatePanel alloc] init] forKey:@"panel"];
-        for (NSArray *stroke in @[@[@"R", @15], @[@"k", @40], @[@"o", @31], @[@"-", @27], @[@"h", @4], @[@"i", @34], @[@"-", @27]]) {
-            NSString *character = stroke[0];
-            NSEventModifierFlags flags = [character isEqual:@"R"] ? NSEventModifierFlagShift : 0;
-            assert([controller handleEvent:KeypadKey([stroke[1] unsignedShortValue], character, flags, NO) client:client]);
-            assert(client.insertions.count == 0);
-        }
-        NSDictionary *composed = [controller valueForKey:@"view"];
-        assert([composed[@"editing_text"] isEqual:@"Rko-hi-"]);
-        assert([composed[@"local_mode"] isEqual:@"temporary_japanese"]);
-        NSDictionary *katakana = nil;
-        for (NSDictionary *row in composed[@"candidates"]) if ([row[@"text"] isEqual:@"コーヒー"]) katakana = row;
-        assert(katakana);
-        [controller apply:[session selectGeneration:[composed[@"generation"] unsignedLongLongValue]
-            index:[katakana[@"id"][@"index"] unsignedIntegerValue] error:&error]];
-        assert(!error && [client.committed isEqual:@"コーヒー"]);
-        assert([session closeWithError:&error] && !error);
-        MSIMERemoveTestPreferenceSuite(defaults, suite);
-        assert([NSFileManager.defaultManager removeItemAtPath:root error:&error] && !error);
-    }
 }
 
 // 用真实 NSEvent、控制器和 Rust 会话检查调频，客户端仅记录合成上屏。
@@ -7697,113 +7363,6 @@ static void TestInitialLearningThroughRealKeys(BOOL numeric, BOOL priorContext) 
     assert([NSFileManager.defaultManager removeItemAtPath:root error:&error] && !error);
 }
 
-// 只注入一次命令失败，其余按键、快照、偏好保存和方案切换均走真实引擎。
-@interface CycleFailureSession : MSIMEClientSession
-@property(nonatomic) BOOL failRaw;
-@end
-@implementation CycleFailureSession
-- (NSDictionary *)command:(uint32_t)command error:(NSError **)error {
-    if (self.failRaw && command == MSIME_COMMIT_RAW) return nil;
-    return [super command:command error:error];
-}
-@end
-
-static void TestRealTrilingualCycle() {
-    NSString *root = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
-    NSString *directory = [root stringByAppendingPathComponent:@"preferences"];
-    NSError *error = nil;
-    NSDictionary *snapshot = [MSIMEClientSession loadPreferencesInDirectory:directory error:&error];
-    assert(snapshot && !error);
-    NSMutableDictionary *preferences = [snapshot[@"preferences"] mutableCopy];
-    preferences[@"scheme"] = @"japanese";
-    preferences[@"last_chinese_scheme"] = NSNull.null;
-    preferences[@"learning"] = @NO;
-    preferences[@"candidate_translations"] = @NO;
-    preferences[@"cloud_candidates"] = @NO;
-    NSMutableDictionary *keys = [preferences[@"keybindings"] mutableCopy];
-    keys[@"trilingual_cycle"] = @YES;
-    preferences[@"keybindings"] = keys;
-    NSDictionary *saved = [MSIMEClientSession savePreferencesInDirectory:directory
-        expectedRevision:[snapshot[@"revision"] unsignedLongLongValue]
-        snapshot:@{@"format_version":@1, @"revision":snapshot[@"revision"], @"preferences":preferences} error:&error];
-    assert(saved && !error);
-    NSMutableDictionary *options = [@{@"api_version":@1, @"preferences_directory":directory} mutableCopy];
-    for (NSString *name in @[@"resources", @"user_data", @"cache", @"dictionaries"]) {
-        NSString *path = [root stringByAppendingPathComponent:name];
-        assert([NSFileManager.defaultManager createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:nil]);
-        options[name] = path;
-    }
-    CycleFailureSession *session = [[CycleFailureSession alloc] initWithOptions:options error:&error];
-    assert(session && !error);
-    NSString *suite = [@"msime.real-cycle." stringByAppendingString:NSUUID.UUID.UUIDString];
-    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
-    MSIMEAppearancePreferences *prefs = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults skinsRoot:[NSURL fileURLWithPath:root]];
-    [prefs applySharedInputPreferences:saved[@"preferences"]];
-    prefs.inputModeHUD = YES;
-    MSIMEInputModeHUDPanel *hud = MSIMEInputModeHUDPanel.sharedPanel;
-    [hud orderOut:nil];
-    prefs.controlOptionSpaceShortcut = YES;
-    prefs.englishMode = YES;
-    assert([prefs.lastChineseScheme isEqual:@"quanpin"]);
-    ShortcutClient *client = [ShortcutClient new];
-    client.document = @"";
-    client.caret = NSMakeRect(100, 100, 1, 16);
-    ModeController *controller = [ModeController alloc];
-    [controller setValue:prefs forKey:@"appearance"];
-    [controller setValue:session forKey:@"session"];
-    [controller setValue:client forKey:@"activeClient"];
-    [controller setValue:directory forKey:@"preferencesDirectory"];
-    [controller setValue:[[HiddenCandidatePanel alloc] init] forKey:@"panel"];
-    [controller setValue:[session setFocused:YES error:&error][@"view"] forKey:@"view"];
-    assert(!error);
-    auto scheme = [&]() { return ((NSDictionary *)[controller valueForKey:@"view"])[@"scheme"]; };
-    auto toggle = [&]() {
-        assert([controller handleEvent:ModeKey(49, NSEventModifierFlagControl | NSEventModifierFlagOption, NO) client:client]);
-    };
-    auto compose = [&]() {
-        assert([controller handleEvent:KeypadKey(32, @"U", NSEventModifierFlagShift, NO) client:client]);
-        for (NSArray *stroke in @[@[@21, @"4"], @[@14, @"e"], @[@19, @"2"], @[@2, @"d"]])
-            assert([controller handleEvent:KeypadKey([stroke[0] unsignedShortValue], stroke[1], 0, NO) client:client]);
-        assert([client.marked isEqual:@"U4e2d"]);
-    };
-
-    // 从未选过中文方案的日语用户，也能从英文回到真实的中文方案。
-    toggle();
-    assert(!prefs.englishMode && [prefs.inputScheme isEqual:@"quanpin"] && [scheme() isEqual:@0]);
-    assert([hud.displayedText isEqual:@"中"]);
-    [hud orderOut:nil];
-    compose();
-    session.failRaw = YES;
-    toggle();
-    assert(!prefs.englishMode && [scheme() isEqual:@0] && [client.marked isEqual:@"U4e2d"] && client.insertions.count == 0);
-    assert(!hud.visible);
-    session.failRaw = NO;
-    toggle();
-    assert(!prefs.englishMode && [scheme() isEqual:@3]);
-    assert([hud.displayedText isEqual:@"日"]);
-    assert(client.marked.length == 0 && client.insertions.count == 1 && [client.insertions[0] isEqual:@"U4e2d"]);
-    toggle();
-    assert(prefs.englishMode && [scheme() isEqual:@3]);
-    assert([hud.displayedText isEqual:@"英"]);
-    toggle();
-    assert(!prefs.englishMode && [scheme() isEqual:@0]);
-
-    // 关闭循环后，组合键仍取消组字；轻点修饰键仍提交原文。
-    prefs.trilingualCycle = NO;
-    compose();
-    toggle();
-    assert(prefs.englishMode && client.marked.length == 0 && client.insertions.count == 1);
-    toggle();
-    compose();
-    [controller toggleInputModeFromModifierTap];
-    assert(prefs.englishMode && client.marked.length == 0 && client.insertions.count == 2);
-    assert([client.insertions[1] isEqual:@"U4e2d"]);
-    assert([session closeWithError:&error] && !error);
-    [hud orderOut:nil];
-    [defaults removePersistentDomainForName:suite];
-    [NSFileManager.defaultManager removeItemAtPath:root error:nil];
-}
-
 // 按键从 handleEvent: 进入真实引擎，再把组字和提交写回合成编辑器，覆盖桩会话测不到的接缝。
 // 尚未覆盖的只有系统 IMK 投递入口，那需要选中已安装的输入源。
 static void TestRealSessionComposition() {
@@ -7891,282 +7450,6 @@ static void TestRealSessionComposition() {
     assert(client.insertions.count == 1 && [client.insertions[0] isEqual:@"Observable"] && client.marked.length == 0);
 
     assert([session closeWithError:&error] && !error);
-
-    // The reference reserves the physical ANSI minus key for Japanese: it must pass through this
-    // controller into the real Engine and become the long-vowel mark, even when minus/equal paging
-    // is enabled by default.  The helper-only paging tests cannot prove the last half of that path.
-    NSMutableDictionary *japaneseOptions = [options mutableCopy];
-    NSMutableDictionary *japanesePreferences = [options[@"preferences"] mutableCopy];
-    japanesePreferences[@"scheme"] = @"japanese";
-    japaneseOptions[@"preferences"] = japanesePreferences;
-    MSIMEClientSession *japaneseSession = [[MSIMEClientSession alloc] initWithOptions:japaneseOptions error:&error];
-    assert(japaneseSession && !error);
-    NSDictionary *japaneseView = [japaneseSession setFocused:YES error:&error];
-    assert(japaneseView && !error);
-    [controller setValue:japaneseSession forKey:@"session"];
-    [controller setValue:japaneseView forKey:@"view"];
-    [client.insertions removeAllObjects];
-
-    assert([controller handleEvent:KeypadKey(27, @"-", 0, NO) client:client]);
-    assert([client.marked isEqual:@"ー"]);
-    assert([controller handleEvent:enter client:client]);
-    assert(client.insertions.count == 1 && [client.insertions[0] isEqual:@"ー"]);
-    assert(client.marked.length == 0);
-
-    // A preceding bare n must settle to ん before the same key contributes ー. This is the converter
-    // edge in the source change, exercised here through the product host instead of against the converter.
-    [client.insertions removeAllObjects];
-    assert([controller handleEvent:KeypadKey(45, @"n", 0, NO) client:client]);
-    assert([controller handleEvent:KeypadKey(27, @"-", 0, NO) client:client]);
-    assert([client.marked isEqual:@"んー"]);
-    assert([controller handleEvent:enter client:client]);
-    assert(client.insertions.count == 1 && [client.insertions[0] isEqual:@"んー"]);
-    assert([japaneseSession closeWithError:&error] && !error);
-
-    // Korean composes Dubeolsik syllables in the marked text through the real Engine. Each key is the ASCII letter the user typed, cased by Shift alone.
-    NSMutableDictionary *koreanOptions = [options mutableCopy];
-    NSMutableDictionary *koreanPreferences = [options[@"preferences"] mutableCopy];
-    koreanPreferences[@"scheme"] = @"korean";
-    koreanOptions[@"preferences"] = koreanPreferences;
-    MSIMEClientSession *koreanSession = [[MSIMEClientSession alloc] initWithOptions:koreanOptions error:&error];
-    assert(koreanSession && !error);
-    // Focus answers with a transition; the controller keeps the view inside it, which is where the scheme it reads lives.
-    NSDictionary *koreanView = [koreanSession setFocused:YES error:&error][@"view"];
-    assert(koreanView && !error && [koreanView[@"scheme"] isEqual:@4]);
-    [controller setValue:koreanSession forKey:@"session"];
-    [controller setValue:koreanView forKey:@"view"];
-    // The syllable is drawn inline even when the preedit display preference hides the composition: there is no candidate window to show it instead.
-    [prefs applySharedInputPreferences:@{@"tsf_preedit_style": @"empty"}];
-    [client.insertions removeAllObjects];
-    client.document = @"";
-    client.selection = NSMakeRange(0, 0);
-    NSEvent *(^letter)(NSString *, unsigned short, NSEventModifierFlags) = ^NSEvent *(NSString *typed, unsigned short code, NSEventModifierFlags flags) {
-        return [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:flags timestamp:0 windowNumber:0
-                                 context:nil characters:typed charactersIgnoringModifiers:typed.lowercaseString isARepeat:NO keyCode:code];
-    };
-    for (NSArray *stroke in @[@[@"d", @2], @[@"k", @40], @[@"s", @1]])
-        assert([controller handleEvent:letter(stroke[0], [stroke[1] unsignedShortValue], 0) client:client]);
-    assert([client.marked isEqual:@"안"] && client.insertions.count == 0);
-    // The fourth key starts a new syllable, so the finished one is written out while the next composes.
-    assert([controller handleEvent:letter(@"s", 1, 0) client:client]);
-    assert(client.insertions.count == 1 && [client.insertions[0] isEqual:@"안"] && [client.marked isEqual:@"ㄴ"]);
-    assert([controller handleEvent:letter(@"u", 32, 0) client:client]);
-    assert([controller handleEvent:letter(@"d", 2, 0) client:client]);
-    assert([client.marked isEqual:@"녕"]);
-    // Caps Lock types the unshifted jamo, ㄱ rather than ㄲ, and does not hand the letter to the application.
-    assert([controller handleEvent:letter(@"R", 15, NSEventModifierFlagCapsLock) client:client]);
-    assert(client.insertions.count == 2 && [client.insertions[1] isEqual:@"녕"] && [client.marked isEqual:@"ㄱ"]);
-    // Space writes the syllable out and is still the application's to insert.
-    assert(![controller handleEvent:ModeKey(49, 0, NO) client:client]);
-    assert(client.insertions.count == 3 && [client.insertions[2] isEqual:@"ㄱ"] && client.marked.length == 0);
-    // Shift+R is ㄲ, not a temporary Japanese entry, and punctuation follows the syllable in one half-width commit.
-    assert([controller handleEvent:letter(@"R", 15, NSEventModifierFlagShift) client:client]);
-    assert([controller handleEvent:letter(@"k", 40, 0) client:client]);
-    assert([client.marked isEqual:@"까"]);
-    assert([controller handleEvent:comma client:client]);
-    assert(client.insertions.count == 4 && [client.insertions[3] isEqual:@"까,"] && client.marked.length == 0);
-    // With nothing composing the mark is the application's, ASCII whatever the Chinese punctuation switch says.
-    assert(![controller handleEvent:comma client:client]);
-    assert(client.insertions.count == 4);
-    // Backspace takes one jamo, Escape drops the syllable, and an idle Backspace belongs to the application.
-    assert([controller handleEvent:letter(@"r", 15, 0) client:client]);
-    assert([controller handleEvent:letter(@"k", 40, 0) client:client]);
-    NSEvent *backspace = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0
-                                           context:nil characters:@"\b" charactersIgnoringModifiers:@"\b" isARepeat:NO keyCode:51];
-    assert([controller handleEvent:backspace client:client]);
-    assert([client.marked isEqual:@"ㄱ"]);
-    NSEvent *escape = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0
-                                        context:nil characters:@"\e" charactersIgnoringModifiers:@"\e" isARepeat:NO keyCode:53];
-    assert([controller handleEvent:escape client:client]);
-    assert(client.marked.length == 0 && client.insertions.count == 4);
-    assert(![controller handleEvent:backspace client:client]);
-    // Enter writes the syllable out and still reaches the application as a newline.
-    assert([controller handleEvent:letter(@"r", 15, 0) client:client]);
-    assert([controller handleEvent:letter(@"k", 40, 0) client:client]);
-    assert(![controller handleEvent:enter client:client]);
-    assert(client.insertions.count == 5 && [client.insertions[4] isEqual:@"가"] && client.marked.length == 0);
-    // Leaving the client commits the open syllable to it instead of dropping it.
-    assert([controller handleEvent:letter(@"r", 15, 0) client:client]);
-    [controller apply:[koreanSession setFocused:NO error:&error]];
-    assert(!error && client.insertions.count == 6 && [client.insertions[5] isEqual:@"ㄱ"] && client.marked.length == 0);
-    [controller apply:[koreanSession setFocused:YES error:&error]];
-    assert(!error);
-
-    // Option+Return converts the composing syllable to Hanja: the list opens in the candidate window, the syllable stays marked, and nothing reaches the document.
-    [client.insertions removeAllObjects];
-    NSEvent *(^chord)(NSString *, unsigned short, NSEventModifierFlags) = ^NSEvent *(NSString *typed, unsigned short code, NSEventModifierFlags flags) {
-        return [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:flags timestamp:0 windowNumber:0
-                                 context:nil characters:typed charactersIgnoringModifiers:typed isARepeat:NO keyCode:code];
-    };
-    NSEvent *hanja = chord(@"\r", 36, NSEventModifierFlagOption);
-    NSEvent *keypadHanja = chord(@"\x03", 76, NSEventModifierFlagOption | NSEventModifierFlagNumericPad);
-    void (^typeHan)(void) = ^{
-        for (NSArray *stroke in @[@[@"g", @5], @[@"k", @40], @[@"s", @1]])
-            assert([controller handleEvent:letter(stroke[0], [stroke[1] unsignedShortValue], 0) client:client]);
-        assert([client.marked isEqual:@"한"]);
-    };
-    NSDictionary *(^currentView)(void) = ^NSDictionary *{ return [controller valueForKey:@"view"]; };
-    typeHan();
-    assert(!panel.isVisible && !MSIMECandidateListOpen(currentView()));
-    assert([controller handleEvent:hanja client:client]);
-    assert(MSIMECandidateListOpen(currentView()) && panel.isVisible);
-    assert([currentView()[@"candidates"][0][@"text"] isEqual:@"韓"] && [currentView()[@"candidates"][1][@"text"] isEqual:@"漢"]);
-    assert([client.marked isEqual:@"한"] && client.insertions.count == 0);
-    // Hanja rows take no pin, fixed position or removal, so a right click offers no menu for them.
-    assert([controller menuForCandidate:currentView()[@"candidates"][0]] == nil);
-    // The row draws the Hanja alone on its line and the 훈음 the Engine annotated it with on the small gloss line under it, never as the row's translation.
-    NSString *hanReading = currentView()[@"candidates"][0][@"annotation"];
-    assert([hanReading isKindOfClass:NSString.class] && hanReading.length);
-    MSIMECandidateButton *hanRow = nil;
-    for (NSView *view in MSIMECandidateControlsView(panel.contentView).subviews)
-        if ([view isKindOfClass:MSIMECandidateButton.class] && view.tag == 0) hanRow = (MSIMECandidateButton *)view;
-    assert(hanRow && [hanRow.title isEqual:@"1  韓"] && hanRow.annotation.length == 0 && hanRow.itemLayout.annotation.width == 0);
-    assert([hanRow.glossReading isEqual:hanReading] && hanRow.translation.length == 0 && hanRow.itemLayout.translation.width > 0);
-    assert(![hanRow.title containsString:hanReading] && [hanRow.toolTip containsString:hanReading]);
-    // Return chooses the highlighted Hanja instead of writing the syllable out and breaking the line.
-    assert([controller handleEvent:enter client:client]);
-    assert(client.insertions.count == 1 && [client.insertions[0] isEqual:@"韓"] && client.marked.length == 0 && !panel.isVisible);
-
-    // Right moves the highlight in the list, and a digit chooses from the page.
-    const BOOL savedVertical = prefs.vertical;
-    prefs.vertical = NO;
-    typeHan();
-    assert([controller handleEvent:keypadHanja client:client]);
-    assert(MSIMECandidateListOpen(currentView()));
-    assert([controller handleEvent:KeypadKey(124, @"\uF703", NSEventModifierFlagFunction | NSEventModifierFlagNumericPad, NO) client:client]);
-    assert([currentView()[@"candidates"][1][@"highlighted"] isEqual:@YES] && [client.marked isEqual:@"한"]);
-    assert([controller handleEvent:enter client:client]);
-    assert(client.insertions.count == 2 && [client.insertions[1] isEqual:@"漢"]);
-    typeHan();
-    assert([controller handleEvent:hanja client:client]);
-    assert([controller handleEvent:KeypadKey(19, @"2", 0, NO) client:client]);
-    assert(client.insertions.count == 3 && [client.insertions[2] isEqual:@"漢"] && client.marked.length == 0);
-
-    // 竖排列表也一样：汉字列表里没有光标，与 Windows 的 korean_hanja_key 相同，←↑ 移到上一个、→↓ 移到下一个，不翻页，音节保留。
-    prefs.vertical = YES;
-    typeHan();
-    assert([controller handleEvent:hanja client:client]);
-    assert([currentView()[@"page"] isEqual:@0]);
-    assert([controller handleEvent:KeypadKey(124, @"\uF703", NSEventModifierFlagFunction | NSEventModifierFlagNumericPad, NO) client:client]);
-    assert([currentView()[@"page"] isEqual:@0] && [currentView()[@"candidates"][1][@"highlighted"] isEqual:@YES] &&
-           [client.marked isEqual:@"한"] && client.insertions.count == 3);
-    assert([controller handleEvent:KeypadKey(123, @"\uF702", NSEventModifierFlagFunction | NSEventModifierFlagNumericPad, NO) client:client]);
-    assert([currentView()[@"candidates"][0][@"highlighted"] isEqual:@YES] && MSIMECandidateListOpen(currentView()));
-    assert([controller handleEvent:KeypadKey(125, @"\uF701", NSEventModifierFlagFunction | NSEventModifierFlagNumericPad, NO) client:client]);
-    assert([currentView()[@"candidates"][1][@"highlighted"] isEqual:@YES]);
-    prefs.vertical = savedVertical;
-
-    // Escape closes the list and keeps the syllable composing; the trigger reopens it, and a second press closes it again.
-    assert([controller handleEvent:escape client:client]);
-    assert(!MSIMECandidateListOpen(currentView()) && !panel.isVisible && [client.marked isEqual:@"한"] && client.insertions.count == 3);
-    assert([controller handleEvent:hanja client:client]);
-    assert(MSIMECandidateListOpen(currentView()));
-    assert([controller handleEvent:hanja client:client]);
-    assert(!MSIMECandidateListOpen(currentView()) && [client.marked isEqual:@"한"] && client.insertions.count == 3);
-
-    // The paging marks and the word-to-character pair are punctuation while the list is open: the Hangul is written with the mark, never a page turned or a Hanja picked.
-    assert([prefs navigationEnabled:@"comma_period"] && [prefs navigationEnabled:@"minus_equal"]);
-    [prefs setWordCharacterEnabled:YES keys:@"brackets"];
-    assert([controller handleEvent:hanja client:client]);
-    assert([controller handleEvent:KeypadKey(47, @".", 0, NO) client:client]);
-    assert(client.insertions.count == 4 && [client.insertions[3] isEqual:@"한."] && client.marked.length == 0);
-    typeHan();
-    assert([controller handleEvent:hanja client:client]);
-    assert([controller handleEvent:KeypadKey(27, @"-", 0, NO) client:client]);
-    assert(client.insertions.count == 5 && [client.insertions[4] isEqual:@"한-"]);
-    typeHan();
-    assert([controller handleEvent:hanja client:client]);
-    assert([controller handleEvent:KeypadKey(33, @"[", 0, NO) client:client]);
-    assert(client.insertions.count == 6 && [client.insertions[5] isEqual:@"한["] && !panel.isVisible);
-    [prefs setWordCharacterEnabled:NO keys:@"brackets"];
-
-    // A lone jamo has no Hanja. The chord is still swallowed while it composes, so the jamo is not written out with a line break after it; with nothing composing the chord is the application's.
-    assert([controller handleEvent:letter(@"r", 15, 0) client:client]);
-    assert([controller handleEvent:hanja client:client]);
-    assert([client.marked isEqual:@"ㄱ"] && client.insertions.count == 6 && !MSIMECandidateListOpen(currentView()));
-    assert([controller handleEvent:escape client:client]);
-    assert(client.marked.length == 0);
-    assert(![controller handleEvent:hanja client:client]);
-    assert(client.insertions.count == 6);
-    // The 훈음 is shown, not committable: with translations on, Ctrl+Enter and Option/Ctrl+digit write only a real translation, and a Hanja row has none here, so neither the 훈음 nor anything glued to it reaches the document.
-    const BOOL savedTranslations = prefs.candidateTranslations;
-    prefs.candidateTranslations = YES;
-    typeHan();
-    assert([controller handleEvent:hanja client:client]);
-    assert(MSIMEKoreanHanjaListOpen(currentView()));
-    assert([controller sensesForHighlightedCandidate].count == 0);
-    assert(![controller commitHighlightedGlossColumn:1 client:client] && ![controller commitHighlightedGlossColumn:2 client:client]);
-    assert(client.insertions.count == 6 && MSIMEKoreanHanjaListOpen(currentView()));
-    for (NSEvent *glossChord in @[chord(@"1", 18, NSEventModifierFlagOption), chord(@"1", 18, NSEventModifierFlagControl),
-                                  chord(@"\r", 36, NSEventModifierFlagControl)]) {
-        if (!MSIMEKoreanHanjaListOpen(currentView())) {
-            if (!client.marked.length) typeHan();
-            assert([controller handleEvent:hanja client:client]);
-        }
-        [controller handleEvent:glossChord client:client];
-        for (NSString *inserted in client.insertions) assert(![inserted containsString:hanReading]);
-    }
-    if (MSIMEKoreanHanjaListOpen(currentView())) assert([controller handleEvent:escape client:client]);
-    if (client.marked.length) assert([controller handleEvent:escape client:client]);
-    prefs.candidateTranslations = savedTranslations;
-    [prefs applySharedInputPreferences:@{@"tsf_preedit_style": @"raw"}];
-    assert([koreanSession closeWithError:&error] && !error);
-
-    // 藏文经真实引擎把威利转写（EWTS）组成藏文：组字区显示转换后的藏文，空格上屏时加音节点 ་，`/` 上屏时加垂符 །，回车只上屏藏文，三者都不再交给应用。
-    NSMutableDictionary *tibetanOptions = [options mutableCopy];
-    NSMutableDictionary *tibetanPreferences = [options[@"preferences"] mutableCopy];
-    tibetanPreferences[@"scheme"] = @"tibetan";
-    tibetanOptions[@"preferences"] = tibetanPreferences;
-    MSIMEClientSession *tibetanSession = [[MSIMEClientSession alloc] initWithOptions:tibetanOptions error:&error];
-    assert(tibetanSession && !error);
-    NSDictionary *tibetanView = [tibetanSession setFocused:YES error:&error][@"view"];
-    assert(tibetanView && !error && [tibetanView[@"scheme"] isEqual:@8]);
-    [controller setValue:tibetanSession forKey:@"session"];
-    [controller setValue:tibetanView forKey:@"view"];
-    // 与韩文一样没有候选窗，组字总是画在行内，即使预编辑显示偏好把它藏起来。
-    [prefs applySharedInputPreferences:@{@"tsf_preedit_style": @"empty"}];
-    [client.insertions removeAllObjects];
-    client.document = @"";
-    client.selection = NSMakeRange(0, 0);
-    NSEvent *tibetanSpace = chord(@" ", 49, 0);
-    NSEvent *tibetanSlash = chord(@"/", 44, 0);
-    void (^typeWylie)(NSArray *) = ^(NSArray *strokes) {
-        for (NSArray *stroke in strokes)
-            assert([controller handleEvent:chord(stroke[0], [stroke[1] unsignedShortValue], [stroke[2] unsignedIntegerValue]) client:client]);
-    };
-    typeWylie(@[@[@"b", @11, @0], @[@"k", @40, @0], @[@"r", @15, @0], @[@"a", @0, @0]]);
-    assert([client.marked isEqual:@"བཀྲ"] && client.insertions.count == 0 && !panel.isVisible);
-    assert([controller handleEvent:tibetanSpace client:client]);
-    assert(client.insertions.count == 1 && [client.insertions[0] isEqual:@"བཀྲ་"] && client.marked.length == 0);
-    typeWylie(@[@[@"s", @1, @0], @[@"h", @4, @0], @[@"i", @34, @0], @[@"s", @1, @0]]);
-    assert([client.marked isEqual:@"ཤིས"]);
-    assert([controller handleEvent:tibetanSlash client:client]);
-    assert(client.insertions.count == 2 && [client.insertions[1] isEqual:@"ཤིས།"] && client.marked.length == 0);
-    // 没有组字时 `/` 单独写出垂符，空格仍是应用的。
-    assert([controller handleEvent:tibetanSlash client:client]);
-    assert(client.insertions.count == 3 && [client.insertions[2] isEqual:@"།"]);
-    assert(![controller handleEvent:tibetanSpace client:client]);
-    assert(client.insertions.count == 3);
-    // 大写字母是另一个威利字母：Shift+T 是反写的 ཊ，不是临时英文或日文。叠加用的 `+` 也作为拼写送进引擎。
-    typeWylie(@[@[@"T", @17, @(NSEventModifierFlagShift)], @[@"a", @0, @0]]);
-    assert([client.marked isEqual:@"ཊ"]);
-    assert([controller handleEvent:enter client:client]);
-    assert(client.insertions.count == 4 && [client.insertions[3] isEqual:@"ཊ"] && client.marked.length == 0);
-    typeWylie(@[@[@"p", @35, @0], @[@"a", @0, @0], @[@"d", @2, @0], @[@"+", @24, @(NSEventModifierFlagShift)], @[@"m", @46, @0], @[@"a", @0, @0]]);
-    assert([client.marked isEqual:@"པདྨ"] && client.insertions.count == 4);
-    // 退格删一个威利按键；第一次 Esc 把组字退回威利原文，第二次丢弃，什么都不上屏。
-    assert([controller handleEvent:backspace client:client]);
-    assert([client.marked isEqual:@"པདྨ"] && client.insertions.count == 4);
-    assert([controller handleEvent:escape client:client]);
-    assert([client.marked isEqual:@"pad+m"] && client.insertions.count == 4);
-    assert([controller handleEvent:escape client:client]);
-    assert(client.marked.length == 0 && client.insertions.count == 4);
-    // 离开客户端时把组字上屏，而不是丢掉。
-    typeWylie(@[@[@"k", @40, @0], @[@"a", @0, @0]]);
-    [controller apply:[tibetanSession setFocused:NO error:&error]];
-    assert(!error && client.insertions.count == 5 && [client.insertions[4] isEqual:@"ཀ"] && client.marked.length == 0);
-    [prefs applySharedInputPreferences:@{@"tsf_preedit_style": @"raw"}];
-    assert([tibetanSession closeWithError:&error] && !error);
 
     MSIMERemoveTestPreferenceSuite(defaults, suite);
     assert([NSFileManager.defaultManager removeItemAtPath:root error:nil]);
@@ -11140,8 +10423,6 @@ static void TestNiuTransCandidateScheduling() {
     assert(!session.delivered.count);
     [controller cancelCustomTranslations];
     [controller setValue:client forKey:@"activeClient"];
-    session.localMode = @"temporary_japanese";
-    assert(![controller currentCustomTranslationRequest]);
     [[MSIMETranslationCache sharedCache] clear];
 }
 static void TestTencentCandidateScheduling() {
@@ -11186,7 +10467,7 @@ static void TestTencentCandidateScheduling() {
         controller.batches.lastObject.reply(online);
     }
     // A generation that moved over the same words is not a rejection: that page still shows what the reply answers (TestGlossSurvivesHighlightMove).
-    for (NSString *change in @[@"page", @"client", @"session", @"focus", @"japanese", @"disabled"]) {
+    for (NSString *change in @[@"page", @"client", @"session", @"focus", @"disabled"]) {
         [[MSIMETranslationCache sharedCache] clear];
         [controller cancelCandidateTranslations]; session.delivered = @[];
         [controller synchronizeCustomTranslations];
@@ -11196,7 +10477,6 @@ static void TestTencentCandidateScheduling() {
         if ([change isEqual:@"client"]) [controller setValue:[ShortcutClient new] forKey:@"activeClient"];
         if ([change isEqual:@"session"]) [controller setValue:[CustomTranslationSession new] forKey:@"session"];
         if ([change isEqual:@"focus"]) [controller setValue:@YES forKey:@"focusPending"];
-        if ([change isEqual:@"japanese"]) session.localMode = @"temporary_japanese";
         if ([change isEqual:@"disabled"]) session.enabled = NO;
         pending.reply(online); assert(session.delivered.count == 0);
         [controller cancelCandidateTranslations]; assert(pending.cancelled);
@@ -12007,7 +11287,7 @@ static void TestCustomTranslationController() {
     ControlledTranslationBatch *second = controller.batches.lastObject;
     assert([second.items[1][@"request"][@"body"][@"target_lang"] isEqual:@"DE"]);
     // Candidate identity, client, session, focus and mode guards all reject a callback even before the next synchronization cancels transport. A generation that moved over the same words is not among them: that page still shows what the reply answers (TestGlossSurvivesHighlightMove).
-    for (NSString *change in @[@"page", @"client", @"session", @"focus", @"japanese", @"disabled"]) {
+    for (NSString *change in @[@"page", @"client", @"session", @"focus", @"disabled"]) {
         // The rejected reply still reaches the cache, so clear it to make the next round ask again.
         [[MSIMETranslationCache sharedCache] clear];
         [controller cancelCandidateTranslations];
@@ -12018,7 +11298,6 @@ static void TestCustomTranslationController() {
         if ([change isEqual:@"client"]) [controller setValue:[ShortcutClient new] forKey:@"activeClient"];
         if ([change isEqual:@"session"]) [controller setValue:[CustomTranslationSession new] forKey:@"session"];
         if ([change isEqual:@"focus"]) [controller setValue:@YES forKey:@"focusPending"];
-        if ([change isEqual:@"japanese"]) session.localMode = @"temporary_japanese";
         if ([change isEqual:@"disabled"]) session.enabled = NO;
         batch.reply(online);
         assert(session.delivered.count == 0);
@@ -12686,11 +11965,7 @@ static void TestGlossModePolicy() {
     session.targetLanguage = @"en";
     session.scheme = 3;
     assert(![controller currentGlossRequest]);
-    for (NSNumber *scheme in @[@0, @1]) {
-        session.scheme = scheme.unsignedIntegerValue;
-        session.localMode = @"temporary_japanese";
-        assert(![controller currentGlossRequest]);
-    }
+    session.scheme = 0;
     session.localMode = @"none";
     assert([controller currentGlossRequest]);
     [controller synchronizeCandidateGloss];
@@ -12698,15 +11973,6 @@ static void TestGlossModePolicy() {
     // Requested settings take effect before the Engine applies its deferred snapshot.
     [controller applySharedToolbarPreferences:@{@"translation_target_language":@"fr"}];
     assert(![controller currentGlossRequest] && session.clears == 1);
-    dispatch_semaphore_signal(controller.released);
-    [(NSOperationQueue *)[controller valueForKey:@"glossQueue"] waitUntilAllOperationsAreFinished];
-    [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
-    assert(session.applications == 0);
-    [controller applySharedToolbarPreferences:@{@"translation_target_language":@"en"}];
-    assert([controller currentGlossRequest]);
-    [controller synchronizeCandidateGloss];
-    assert(dispatch_semaphore_wait(controller.started, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) == 0);
-    session.localMode = @"temporary_japanese";
     dispatch_semaphore_signal(controller.released);
     [(NSOperationQueue *)[controller valueForKey:@"glossQueue"] waitUntilAllOperationsAreFinished];
     [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.02]];
@@ -12939,23 +12205,21 @@ static void TestIdleSessionRecovery() {
     NSDictionary *snapshot = [MSIMEClientSession loadPreferencesInDirectory:root error:&error];
     assert(snapshot && !error);
     NSMutableDictionary *preferences = [snapshot[@"preferences"] mutableCopy];
-    preferences[@"scheme"] = @"wubi";
+    preferences[@"scheme"] = @"quanpin";
     preferences[@"learning"] = @NO;
-    preferences[@"wubi_mixed_pinyin"] = @NO;
     NSMutableDictionary *options = [@{@"api_version":@1, @"preferences":preferences} mutableCopy];
     for (NSString *name in @[@"resources", @"user_data", @"cache", @"dictionaries"]) {
         NSString *path = [root stringByAppendingPathComponent:name];
         assert([NSFileManager.defaultManager createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:nil]);
         options[name] = path;
     }
-    for (NSString *path in @[[options[@"resources"] stringByAppendingPathComponent:@"msime-wubi.db"],
+    for (NSString *path in @[[options[@"resources"] stringByAppendingPathComponent:@"msime-pinyin.db"],
                              [options[@"dictionaries"] stringByAppendingPathComponent:@"msime-pinyin.db"]]) {
         sqlite3 *database = nullptr;
         assert(sqlite3_open(path.fileSystemRepresentation, &database) == SQLITE_OK);
         assert(sqlite3_exec(database,
-            "CREATE TABLE wubi86(key TEXT,value TEXT,weight INTEGER);"
-            "CREATE TABLE wubi98(key TEXT,value TEXT,weight INTEGER);"
-            "INSERT INTO wubi86 VALUES('wq','你',10);", nullptr, nullptr, nullptr) == SQLITE_OK);
+            "CREATE TABLE tbl_1_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);"
+            "INSERT INTO tbl_1_n VALUES('ni','n','你',10);", nullptr, nullptr, nullptr) == SQLITE_OK);
         assert(sqlite3_close(database) == SQLITE_OK);
     }
     auto makeController = ^SessionRecoveryController * {
@@ -12976,8 +12240,8 @@ static void TestIdleSessionRecovery() {
     [active prepareSession];
     MSIMEClientSession *activeSession = sessionOf(active);
     assert(activeSession);
-    [activeSession typeASCII:'w' shift:NO error:&error];
-    [activeSession typeASCII:'q' shift:NO error:&error];
+    [activeSession typeASCII:'n' shift:NO error:&error];
+    [activeSession typeASCII:'i' shift:NO error:&error];
     assert(!error);
     SessionRecoveryController *english = makeController();
     [english prepareSession];
@@ -12994,9 +12258,9 @@ static void TestIdleSessionRecovery() {
             [controller prepareSession];
             MSIMEClientSession *session = sessionOf(controller);
             assert(session && controller.creations == 1);
-            [session typeASCII:'w' shift:NO error:&error];
-            NSDictionary *typed = [session typeASCII:'q' shift:NO error:&error];
-            assert(!error && [typed[@"view"][@"scheme"] isEqual:@2]);
+            [session typeASCII:'n' shift:NO error:&error];
+            NSDictionary *typed = [session typeASCII:'i' shift:NO error:&error];
+            assert(!error && [typed[@"view"][@"scheme"] isEqual:@0]);
             assert([typed[@"view"][@"candidates"][0][@"text"] isEqual:@"你"]);
             [controller apply:[session command:MSIME_CANCEL error:&error]];
             [controller deactivateServer:[controller valueForKey:@"activeClient"]];
@@ -13004,7 +12268,7 @@ static void TestIdleSessionRecovery() {
             for (SessionRecoveryController *retained in controllers) if (sessionOf(retained)) ++idle;
             assert(idle <= MSIMEIdleDictionarySessionLimit);
             assert(sessionOf(active) == activeSession);
-            assert([[activeSession viewWithError:&error][@"editing_text"] isEqual:@"wq"] && !error);
+            assert([[activeSession viewWithError:&error][@"editing_text"] isEqual:@"ni"] && !error);
         }
     }
     method_setImplementation(base, original);
@@ -13037,137 +12301,6 @@ static void TestIdleSessionRecovery() {
     assert(setrlimit(RLIMIT_NOFILE, &previous) == 0);
     TestSessionRecoveryNotice(options);
     assert([NSFileManager.defaultManager removeItemAtPath:root error:&error] && !error);
-}
-
-// 测试进程不是输入法 bundle，prepareSession 指给本进程 bundle 的码表回退目录在这里换成合成的随包资源；其余配置原样交给真实会话。
-@interface HelpcodeBundleController : SessionRecoveryController
-@property(copy) NSString *bundleResources;
-@property(strong) NSDictionary *requestedOptions;
-@end
-@implementation HelpcodeBundleController
-- (MSIMEClientSession *)createSessionWithOptions:(NSDictionary *)options error:(NSError **)error {
-    self.requestedOptions = options;
-    NSMutableDictionary *session = [options mutableCopy];
-    if ([options[@"helpcode_fallback_resources"] isEqual:NSBundle.mainBundle.resourcePath])
-        session[@"helpcode_fallback_resources"] = self.bundleResources;
-    return [super createSessionWithOptions:session error:error];
-}
-@end
-
-// #9421：双拼辅助码只在部分应用里失效，既没有辅助码注释，按辅助码也筛不掉候选。IMK 给每个文本客户端一个控制器，每个控制器在第一次需要时按当时的 runtime-options.json 建自己的会话，之后一直用它。设置应用启动时把配置刷到下载的词库代次，而那个代次只有锁文件列出的词库，没有 `helpcodes/`；正在运行的输入法里，之前打开过的应用还拿着旧代次的会话，辅助码照常，之后才打开的应用读到新代次，码表为空。这里用两个合成客户端重现这条时间线：两个会话都要显示并按辅助码筛选，后一个靠随包码表回退（#8939）。
-static void TestHelpcodeAfterDictionaryGenerationSwitch() {
-    NSString *root = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
-    NSFileManager *files = NSFileManager.defaultManager;
-    NSError *error = nil;
-    NSDictionary *snapshot = [MSIMEClientSession loadPreferencesInDirectory:root error:&error];
-    assert(snapshot && !error);
-    NSMutableDictionary *preferences = [snapshot[@"preferences"] mutableCopy];
-    preferences[@"scheme"] = @"shuangpin";
-    preferences[@"shuangpin_profile"] = @"xiaohe";
-    preferences[@"default_ime_mode"] = @"chinese";
-    preferences[@"learning"] = @NO;
-    preferences[@"cloud_candidates"] = @NO;
-    NSMutableDictionary *helpcode = [preferences[@"shuangpin_helpcode"] mutableCopy];
-    helpcode[@"enabled"] = @YES;
-    helpcode[@"schema"] = @"xiaohe";
-    helpcode[@"show_in_candidate_window"] = @YES;
-    preferences[@"shuangpin_helpcode"] = helpcode;
-    // 合成码表只收这两个字：「阳」词频高排在前，辅助码 m 把「杨」提到首位。
-    NSString *table = @"阳=rr\n杨=mu\n";
-    auto writeTable = ^(NSString *resources) {
-        NSString *directory = [resources stringByAppendingPathComponent:@"helpcodes"];
-        assert([files createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:nil]);
-        assert([table writeToFile:[directory stringByAppendingPathComponent:@"xiaohe_helpcode.txt"] atomically:YES
-                         encoding:NSUTF8StringEncoding error:nil]);
-    };
-    auto generation = ^NSDictionary *(NSString *name, BOOL helpcodes) {
-        NSMutableDictionary *options = [@{@"api_version": @1, @"preferences": preferences} mutableCopy];
-        for (NSString *key in @[@"user_data", @"cache"]) {
-            NSString *path = [root stringByAppendingPathComponent:key];
-            assert([files createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:nil]);
-            options[key] = path;
-        }
-        for (NSString *key in @[@"resources", @"dictionaries"]) {
-            NSString *path = [[root stringByAppendingPathComponent:name] stringByAppendingPathComponent:key];
-            assert([files createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:nil]);
-            options[key] = path;
-            sqlite3 *database = nullptr;
-            assert(sqlite3_open([path stringByAppendingPathComponent:@"msime-pinyin.db"].fileSystemRepresentation, &database) == SQLITE_OK);
-            assert(sqlite3_exec(database,
-                "CREATE TABLE tbl_1_y(key TEXT,jp TEXT,value TEXT,weight INTEGER);"
-                "INSERT INTO tbl_1_y VALUES('yang','y','阳',2000),('yang','y','杨',1000);"
-                "CREATE TABLE tbl_2_y(key TEXT,jp TEXT,value TEXT,weight INTEGER);"
-                "CREATE TABLE quick_parases(key TEXT,value TEXT,weight INTEGER);", nullptr, nullptr, nullptr) == SQLITE_OK);
-            assert(sqlite3_close(database) == SQLITE_OK);
-        }
-        if (helpcodes) writeTable(options[@"resources"]);
-        return options;
-    };
-    // 随包资源带码表；下载的代次和真实的一样只有词库。
-    NSDictionary *installed = generation(@"installed", YES);
-    NSDictionary *downloaded = generation(@"downloaded", NO);
-    NSString *bundle = [root stringByAppendingPathComponent:@"bundle"];
-    writeTable(bundle);
-
-    auto candidateTexts = ^NSArray<NSString *> *(NSDictionary *view) {
-        NSMutableArray<NSString *> *texts = [NSMutableArray array];
-        for (NSDictionary *candidate in view[@"candidates"]) [texts addObject:candidate[@"text"] ?: @""];
-        return texts;
-    };
-    auto assertHelpcodes = ^(HelpcodeBundleController *controller, const char *label) {
-        MSIMEClientSession *session = [controller valueForKey:@"session"];
-        assert(session);
-        NSError *typingError = nil;
-        [session typeASCII:'y' shift:NO error:&typingError];
-        NSDictionary *view = [session typeASCII:'h' shift:NO error:&typingError][@"view"];
-        assert(view && !typingError);
-        NSString *annotation = nil;
-        for (NSDictionary *candidate in view[@"candidates"])
-            if ([candidate[@"text"] isEqual:@"杨"]) annotation = candidate[@"annotation"];
-        if (![annotation.lowercaseString containsString:@"mu"])
-            fprintf(stderr, "helpcode %s: yh candidates=%s annotation=%s\n", label,
-                    [candidateTexts(view) componentsJoinedByString:@" "].UTF8String, annotation.UTF8String ?: "(none)");
-        assert([annotation.lowercaseString containsString:@"mu"]);
-        view = [session typeASCII:'m' shift:NO error:&typingError][@"view"];
-        assert(view && !typingError);
-        NSArray<NSString *> *texts = candidateTexts(view);
-        if (![texts.firstObject isEqual:@"杨"])
-            fprintf(stderr, "helpcode %s: yhm candidates=%s\n", label, [texts componentsJoinedByString:@" "].UTF8String);
-        assert([texts.firstObject isEqual:@"杨"]);
-        [controller apply:[session command:MSIME_CANCEL error:&typingError]];
-        assert(!typingError);
-    };
-    auto makeController = ^HelpcodeBundleController *(NSDictionary *options, NSString *application) {
-        HelpcodeBundleController *controller = [HelpcodeBundleController alloc];
-        controller.testOptions = options;
-        controller.bundleResources = bundle;
-        ApplicationShortcutClient *client = [ApplicationShortcutClient new];
-        client.bundleIdentifier = application;
-        client.document = @"";
-        client.caret = NSMakeRect(100, 100, 1, 16);
-        [controller setValue:client forKey:@"activeClient"];
-        [controller setValue:[[HiddenCandidatePanel alloc] init] forKey:@"panel"];
-        return controller;
-    };
-
-    // 词库更新之前就打开过的应用：会话建在随包代次上。
-    HelpcodeBundleController *earlier = makeController(installed, @"test.msime.synthetic.earlier");
-    [earlier prepareSession];
-    assertHelpcodes(earlier, "earlier");
-    // 设置应用把配置刷到下载的代次之后才打开的应用：会话读到的是没有码表的目录，同一进程里旧的会话不受影响。
-    HelpcodeBundleController *later = makeController(downloaded, @"test.msime.synthetic.later");
-    [later prepareSession];
-    assert([later.requestedOptions[@"resources"] isEqual:downloaded[@"resources"]]);
-    assert([later.requestedOptions[@"helpcode_fallback_resources"] isEqual:NSBundle.mainBundle.resourcePath]);
-    assertHelpcodes(later, "later");
-    assertHelpcodes(earlier, "earlier again");
-
-    for (HelpcodeBundleController *controller in @[earlier, later]) {
-        [controller releaseDictionarySession];
-        [controller setValue:nil forKey:@"activeClient"];
-    }
-    [MSIMEInputController releaseIdleDictionarySessionsKeeping:0];
-    assert([files removeItemAtPath:root error:&error] && !error);
 }
 
 // Every preference object built here without an explicit skins root reads msime::mac::DefaultSkinsRoot(), which is otherwise the user's real skins folder: an external skin installed there adds a card to the skin page and breaks the counts below. The whole run gets an empty folder of its own, removed when main returns.
@@ -13494,11 +12627,6 @@ int main(int argc, char **argv) {
         if (argc == 2 && std::string(argv[1]) == "--session-recovery") {
             TestSessionUnavailableIsReported();
             TestIdleSessionRecovery();
-            TestHelpcodeAfterDictionaryGenerationSwitch();
-            return 0;
-        }
-        if (argc == 2 && std::string(argv[1]) == "--helpcode-generation-switch") {
-            TestHelpcodeAfterDictionaryGenerationSwitch();
             return 0;
         }
         if (argc == 2 && std::string(argv[1]) == "--english-punctuation") {
@@ -13694,11 +12822,6 @@ int main(int argc, char **argv) {
             TestShiftCornerQuotesThroughRealSession();
             return 0;
         }
-        if (argc == 2 && std::string(argv[1]) == "--temporary-japanese-long-vowel") {
-            @autoreleasepool { TestTemporaryJapaneseLongVowelThroughRealSession(NO); }
-            @autoreleasepool { TestTemporaryJapaneseLongVowelThroughRealSession(YES); }
-            return 0;
-        }
         // 可重绑切换热键的重绑路径单独可跑：全量 suite 里皮肤颜色断言在无图形会话的机器上先于它中止。
         if (argc == 2 && std::string(argv[1]) == "--editable-shift") {
             TestEditableShiftController();
@@ -13707,7 +12830,6 @@ int main(int argc, char **argv) {
         if (argc == 2 && std::string(argv[1]) == "--toggle-hotkeys") {
             @autoreleasepool { TestCharacterSetShortcut(); }
             @autoreleasepool { TestInputStateHUDs(); }
-            @autoreleasepool { TestRealTrilingualCycle(); }
             TestToggleHotkeyRebinding();
             return 0;
         }
@@ -13772,7 +12894,6 @@ int main(int argc, char **argv) {
         NSDictionary *previousVoiceHoldKeys = MSIMEDisableVoiceHoldKeys(standardDefaults);
         @autoreleasepool { TestSessionUnavailableIsReported(); }
         @autoreleasepool { TestIdleSessionRecovery(); }
-        @autoreleasepool { TestHelpcodeAfterDictionaryGenerationSwitch(); }
         @autoreleasepool { TestCloudCandidateScheduling(); }
         @autoreleasepool { TestCloudCandidateRetryAfterRejectedResponse(); }
         @autoreleasepool { TestCloudCandidateEngineDelivery(); }
@@ -14339,6 +13460,8 @@ int main(int argc, char **argv) {
             assert(NSMaxX(status.frame) <= NSMinX(preview.frame) && NSMaxX(preview.frame) <= NSMinX(ornament.frame));
             assert(NSMaxX(ornament.frame) <= cardWidth);
             assert(NSMinY(rule.frame) >= NSMaxY(first.frame) && NSMaxY(rule.frame) <= NSMinY(preeditField.frame) + 1);
+            // 无论系统处于浅色还是深色模式，都显式固定面板外观为 Aqua 以匹配 resolvedSkinForDark:NO。
+            layoutPanel.appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
             layoutPanel.contentView.appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
             [controller refreshCandidateSkin];
             auto headerTokens = [appearance resolvedSkinForDark:NO].tokens;
@@ -14428,6 +13551,8 @@ int main(int argc, char **argv) {
             // The reading is the design's semibold accent run (dc.html L1325).
             assert([[preeditLabel.font.fontDescriptor objectForKey:NSFontTraitsAttribute][NSFontWeightTrait] doubleValue] > 0);
             const auto preeditTokens = [appearance resolvedSkinForDark:NO].tokens;
+            // 无论系统处于浅色还是深色模式，都显式固定面板外观为 Aqua 以匹配 resolvedSkinForDark:NO。
+            layoutPanel.appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
             layoutPanel.contentView.appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
             [controller refreshCandidateSkin];
             assert([preeditLabel.textColor isEqual:SkinColor(preeditTokens.accent)]);
@@ -14470,6 +13595,7 @@ int main(int argc, char **argv) {
                     if ([child.identifier isEqual:@"candidate-preedit"]) preeditLabel = (id)child;
                 assert(preeditLabel && [preeditLabel isKindOfClass:MSIMECandidatePreeditField.class]);
                 caretLabel = (id)preeditLabel;
+                layoutPanel.appearance = nil;
             }
             assert(NSContainsRect(layoutPanel.contentView.bounds, preeditLabel.frame));
             for (NSView *child in MSIMECandidateControlsView(layoutPanel.contentView).subviews)
@@ -14636,14 +13762,11 @@ int main(int argc, char **argv) {
         assert(layoutPanel.level == MSIMECandidateWindowLevel());
         if ([candidateMenuDelegate respondsToSelector:@selector(menuDidClose:)]) [candidateMenuDelegate menuDidClose:candidateMenu];
         assert(layoutPanel.level == MSIMECandidateWindowLevel());
-        assert(candidateMenu.numberOfItems == 3);
+        assert(candidateMenu.numberOfItems == 2);
         assert([[candidateMenu itemAtIndex:0].title isEqual:@"置顶"]);
-        assert([[candidateMenu itemAtIndex:1].title isEqual:@"固定排位"]);
-        assert([[candidateMenu itemAtIndex:2].title isEqual:@"删除"]);
-        assert([[candidateMenu itemAtIndex:2].keyEquivalent isEqual:@"2"]);
-        assert([candidateMenu itemAtIndex:2].keyEquivalentModifierMask == deleteModifiers);
-        NSMenu *positionMenu = [candidateMenu itemAtIndex:1].submenu;
-        assert(positionMenu.numberOfItems == 7 && [positionMenu itemAtIndex:5].separatorItem);
+        assert([[candidateMenu itemAtIndex:1].title isEqual:@"删除"]);
+        assert([[candidateMenu itemAtIndex:1].keyEquivalent isEqual:@"2"]);
+        assert([candidateMenu itemAtIndex:1].keyEquivalentModifierMask == deleteModifiers);
         // 置顶只记在 Engine 里。旧版本在 `MSIMEClientPinnedCandidates` 里另记一份、画的时候把置顶词挪到第一格，高亮却留在 Engine 的首选上；
         // 学习数据清除后两份对不上，打 you 时第二格的「又」一直亮着、空格上屏的也是它。留着的旧记录不能再改顺序或菜单。
         [NSUserDefaults.standardUserDefaults setObject:@{@"ce'shi": @[@"布局"]} forKey:@"MSIMEClientPinnedCandidates"];
@@ -14658,10 +13781,7 @@ int main(int argc, char **argv) {
         [controller renderCandidates];
         clickCandidate = (id)PageButton(layoutPanel.contentView, 1);
         candidateMenu = [clickCandidate menuForEvent:rightClick];
-        positionMenu = [candidateMenu itemAtIndex:1].submenu;
-        NSMutableArray *operations = [NSMutableArray arrayWithObjects:[candidateMenu itemAtIndex:0], [candidateMenu itemAtIndex:2], nil];
-        [operations addObjectsFromArray:[positionMenu.itemArray subarrayWithRange:NSMakeRange(0, 5)]];
-        [operations addObject:[positionMenu itemAtIndex:6]];
+        NSArray *operations = @[[candidateMenu itemAtIndex:0], [candidateMenu itemAtIndex:1]];
         for (NSMenuItem *operation in operations) {
             NSUInteger calls = session.maintenanceCalls;
             [NSApp sendAction:operation.action to:operation.target from:operation];
@@ -14674,14 +13794,14 @@ int main(int argc, char **argv) {
         // renderCandidates rebuilds the buttons, so everything captured from the previous panel is stale.
         clickCandidate = (id)PageButton(layoutPanel.contentView, 1);
         candidateMenu = [clickCandidate menuForEvent:rightClick];
-        assert(clickCandidate && candidateMenu.numberOfItems == 3);
+        assert(clickCandidate && candidateMenu.numberOfItems == 2);
         NSMenuItem *retainedOperation = [candidateMenu itemAtIndex:0];
         NSDictionary *validContext = retainedOperation.representedObject;
         NSUInteger maintenanceCalls = session.maintenanceCalls;
         // 被拒绝的菜单操作不派发，也不报告。
         const NSUInteger menuKeys = session.keys.count;
         const NSInteger validTag = retainedOperation.tag;
-        for (NSInteger unknownTag : {-1, 3, 10, 16}) {
+        for (NSInteger unknownTag : {-1, 2, 3, 10, 16}) {
             retainedOperation.tag = unknownTag;
             [controller candidateMenuAction:retainedOperation];
         }
@@ -14709,7 +13829,7 @@ int main(int argc, char **argv) {
         assert(session.maintenanceCalls == maintenanceCalls && session.keys.count == menuKeys);
         for (NSString *text in @[@"中", @"𠀀", @"测试"]) {
             NSMenu *menu = [controller menuForCandidate:@{@"id":clickCandidate.candidateID, @"text":text}];
-            assert(menu.numberOfItems == ([text isEqual:@"测试"] ? 3 : 2));
+            assert(menu.numberOfItems == ([text isEqual:@"测试"] ? 2 : 1));
         }
         NSDictionary *validClickID = clickCandidate.candidateID;
         NSUInteger selectedCalls = session.selectCalls;
@@ -15674,11 +14794,8 @@ int main(int argc, char **argv) {
         @autoreleasepool { TestApplicationInputModeRulesFollowSharedDocument(); }
         @autoreleasepool { TestApplicationInputModeRuleEditsKeepDocumentTable(); }
         @autoreleasepool { TestInputSourceModeReset(); }
-        @autoreleasepool { TestTemporaryJapaneseLongVowelThroughRealSession(NO); }
-        @autoreleasepool { TestTemporaryJapaneseLongVowelThroughRealSession(YES); }
         @autoreleasepool { TestRealSessionComposition(); }
         @autoreleasepool { TestEnglishOnlineCandidatesThroughRealSession(); }
-        @autoreleasepool { TestRealTrilingualCycle(); }
         @autoreleasepool { TestInitialLearningThroughRealKeys(YES, NO); }
         @autoreleasepool { TestInitialLearningThroughRealKeys(YES, YES); }
         @autoreleasepool { TestInitialLearningThroughRealKeys(NO, NO); }
@@ -15719,7 +14836,6 @@ int main(int argc, char **argv) {
         @autoreleasepool { TestCandidatePanelSingleOwner(); }
         @autoreleasepool { TestGlossArrivalRedrawsOnlyTheCard(appearance); }
         @autoreleasepool { TestNestedApplyKeepsTheNewerView(appearance); }
-        @autoreleasepool { TestJapaneseConversionKeys(appearance); }
         @autoreleasepool { TestGlossSensePage(appearance); }
         @autoreleasepool { TestGlossSenseTraditionalOutput(appearance); }
         @autoreleasepool { TestPinyinArrowCandidateNavigation(); }

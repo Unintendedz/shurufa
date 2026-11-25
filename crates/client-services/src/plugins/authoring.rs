@@ -232,7 +232,7 @@ pub fn save(root: &Path, pack: &AuthoredPack, replace: bool) -> Result<PluginSum
     } else {
         Existing::Refuse
     };
-    install_staged(root, false, existing, |staging, staging_directory| {
+    install_staged(root, existing, |staging, staging_directory| {
         let id = match &pack.id {
             Some(id) => id.clone(),
             None => generate_id(root, kind, random_bytes)?,

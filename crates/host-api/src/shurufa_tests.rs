@@ -75,7 +75,6 @@ fn bundled_input_learning_and_neural_model() {
     SESSIONS.with(|sessions| {
         let mut sessions = sessions.borrow_mut();
         let session = sessions.get_mut(&handle).unwrap();
-        assert!(session.runtime.has_reranker(), "随包神经模型必须实际加载");
         assert_eq!(session.statistics_enabled(), Some(false));
     });
     let view = type_keys(handle, "nihao");
@@ -235,7 +234,6 @@ fn removed_input_modes_stay_unreachable_after_legacy_preferences_and_updates() {
                 !session.options.mixed_emoji
                     && !session.options.mixed_kaomoji
                     && !session.options.mixed_symbols
-                    && !session.options.mixed_japanese
                     && !session.options.quick_phrase_candidates
             );
             assert!(!session.applied.smart_punctuation && !session.applied.word_character.enabled);
@@ -277,34 +275,6 @@ fn removed_input_modes_stay_unreachable_after_legacy_preferences_and_updates() {
         assert_eq!(quote["commit"], "（");
     }
     value(msime_client_destroy(handle));
-}
-
-#[test]
-fn embedded_shurufa_options_default_missing_helpcode_off() {
-    for supplied in [
-        None,
-        Some(json!({"schema":"ziranma","show_in_candidate_window":false})),
-        Some(json!({"enabled":true,"schema":"ziranma","show_in_candidate_window":false})),
-        Some(json!({"enabled":false,"schema":"ziranma","show_in_candidate_window":false})),
-    ] {
-        let mut document = json!({"api_version":1,"edition":"shurufa","resources":"/synthetic/resources",
-            "user_data":"/synthetic/user","cache":"/synthetic/cache","dictionaries":"/synthetic/dictionaries","preferences":Preferences::for_edition(Edition::by_id("shurufa").unwrap())});
-        if let Some(value) = &supplied {
-            document["preferences"]["quanpin_helpcode"] = value.clone();
-        } else {
-            document["preferences"]
-                .as_object_mut()
-                .unwrap()
-                .remove("quanpin_helpcode");
-        }
-        let options = HostOptions::from_document(document).unwrap();
-        let expected = supplied
-            .as_ref()
-            .and_then(|value| value.get("enabled"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        assert_eq!(options.preferences.quanpin_helpcode.enabled, expected);
-    }
 }
 
 #[test]
@@ -430,27 +400,9 @@ fn shurufa_english_autocomplete_gestures_and_helpcode_gate() {
     let cla = type_keys(handle, "Cla");
     assert_eq!(choose(handle, &cla, "Claude")["commit"], "Claude");
 
-    // 默认关闭全拼辅助码时 `niC` 走大写英文补全；手动开启全拼辅助码后 `niC` 归辅助码过滤。
+    // `niC` 走大写英文补全，不受辅助码分支干扰。
     let nic = type_keys(handle, "niC");
     assert_eq!(nic["candidates"][1]["text"], "niCe");
-    value(msime_client_command(handle, 3));
-
-    let mut enabled_helpcode = Preferences::for_edition(Edition::by_id("shurufa").unwrap());
-    enabled_helpcode.quanpin_helpcode.enabled = true;
-    let snapshot = json!({
-        "format_version": 1,
-        "revision": 1,
-        "preferences": enabled_helpcode,
-    })
-    .to_string();
-    // SAFETY: 合成偏好缓冲区在同步调用期间有效。
-    value(unsafe { msime_client_update_preferences(handle, snapshot.as_ptr(), snapshot.len()) });
-    let nic_helpcode = type_keys(handle, "niC");
-    assert!(!nic_helpcode["candidates"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|row| row["text"].as_str().unwrap().eq_ignore_ascii_case("nice")));
     value(msime_client_destroy(handle));
 }
 

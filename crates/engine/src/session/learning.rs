@@ -80,6 +80,7 @@ fn english_context_key(context: &str) -> String {
 }
 
 /// 只复制实际参与排名的行，避免先复制完整排序列表再筛选一遍。
+#[cfg(test)]
 fn clone_matching_rows(
     ordered: &[WordItem],
     mut matches: impl FnMut(&WordItem) -> bool,
@@ -128,8 +129,7 @@ impl InputSession {
 
     /// input_session.cpp:1274-1319; `index` is in ranking order.
     pub(super) fn learn_candidate(&mut self, index: usize) -> Option<String> {
-        // 五笔的临时拼音反查只是查编码：选中的拼音词不调词频、不记整句，免得一次查询改了拼音的排序。
-        if !self.learning_enabled || self.engine.wubi_pinyin_lookup_active() {
+        if !self.learning_enabled {
             return None;
         }
         let quick_phrase = self.learn_quick_phrase_order(index);
@@ -245,7 +245,7 @@ impl InputSession {
             {
                 let ordered = self.ranking_list();
                 if let Some(selected) = ordered.get(index) {
-                    if !Self::is_wubi_native_candidate(selected) && selected.scheme.is_pinyin() {
+                    if selected.scheme.is_pinyin() {
                         let request = self.engine.request();
                         let fallback_key = if request.normalized_segmentation.is_empty() {
                             request.segmentation.as_str()
@@ -319,9 +319,6 @@ impl InputSession {
         }
 
         let super_jianpin = self.local_mode == LocalInputMode::SuperJianpin;
-        // In a mixed wubi list the selected row's producer decides: a quanpin row is ranked, keyed and stored as pinyin, and only a row the wubi table answered is ranked under the code itself (overlays.md §3.3). The pinyin fallback reuses the context the fixed positions are written under, otherwise a pinned candidate would not be recognised here.
-        let wubi = Self::is_wubi_native_candidate(selected);
-        let pinyin_fallback = self.is_wubi() && !wubi;
         let request = self.engine.request();
         let mut context_key = if super_jianpin {
             jianpin_ranking_context(
@@ -329,28 +326,18 @@ impl InputSession {
                 self.scheme(),
                 self.shuangpin_profile(),
             )
-        } else if wubi {
-            request.raw_input.clone()
-        } else if pinyin_fallback {
-            self.position_context(false, false).into_owned()
         } else {
             request.normalized_segmentation.clone()
         };
         if !super_jianpin && context_key.is_empty() {
             context_key = self.engine.request().segmentation.clone();
         }
-        let wubi_row = wubi && !super_jianpin;
-        let entry_key = if wubi_row {
-            selected.pinyin.as_str()
-        } else if selected.canonical_pinyin.is_empty() {
+        let entry_key = if selected.canonical_pinyin.is_empty() {
             context_key.as_str()
         } else {
             selected.canonical_pinyin.as_str()
         };
-        // Shurufa 独立个人学习叠加层（Stage 4）：绝不改写主词库 `msime-pinyin.db` 静态权重；
-        // 显式手动置顶仅由调用方写 `pinned_candidates` 作为 L4 硬约束；
-        // 普通明确改选则追加一条带时间戳的事件至 `personal_selection_events` 并登记紧接退格回滚句柄。
-        if self.decoupled_personal_learning && !wubi_row && !super_jianpin {
+        if self.decoupled_personal_learning && !super_jianpin {
             if force_top || options.mode == FrequencyAdjustmentMode::Pin {
                 return None;
             }
@@ -381,31 +368,19 @@ impl InputSession {
                 Err(_) => return Some(diagnostics::FREQUENCY_NOT_PERSISTED.to_owned()),
             }
         }
-        let mixed_wubi = self.is_wubi();
-        let ranked_storage;
-        let ranked = if mixed_wubi {
-            ranked_storage = clone_matching_rows(ordered, |item| item.scheme == selected.scheme);
-            ranked_storage.as_slice()
-        } else {
-            ordered
-        };
         let main_db = self.paths.dictionary(assets::MAIN_DICTIONARY);
         let adjusted = adjust_candidate_ranking(&RankingRequest {
             main_db: &main_db,
             user_db,
             context_key: &context_key,
-            ordered: ranked,
+            ordered,
             entry_key,
             value: &selected.word,
             mode: options.mode,
             linear_step: options.linear_step,
             trigger_count: options.trigger_count,
             force_top,
-            kind: if wubi_row {
-                self.engine.wubi_input_options().profile.dictionary_kind()
-            } else {
-                PersonalDictionaryKind::Pinyin
-            },
+            kind: PersonalDictionaryKind::Pinyin,
         });
         match adjusted {
             Ok(changed) => {
@@ -457,14 +432,13 @@ impl InputSession {
         typo_diagnostic
     }
 
-    pub(super) fn can_learn_sentence_candidate(&self, selected: &WordItem) -> bool {
+    pub(super) fn can_learn_sentence_candidate(&self, _selected: &WordItem) -> bool {
         self.local_mode == LocalInputMode::None
             && !self.dedicated_english
             && self
                 .engine
                 .current_scheme_type()
                 .learns_into_main_dictionary()
-            && !Self::is_wubi_native_candidate(selected)
     }
 
     /// Providers return bare words, so the only reading to check an online row against is the typed one. A character absent from every single-character table cannot be checked and is accepted so rare words stay learnable (input_session_composition.cpp:538-560).
@@ -995,12 +969,11 @@ mod tests {
         }
     }
 
-    /// F5 and F6 (test_input_session.cpp:1174-1202): shuangpin learns under the canonical quanpin key, wubi under its code.
     #[test]
-    fn shuangpin_and_wubi_persist_their_picks() {
+    fn shuangpin_persists_its_picks() {
         let fixture = Fixture::new(
             &[("ni'hao", "你好", 200), ("ni'hao", "拟好", 100)],
-            &[("aaaa", "工", 200), ("aaaa", "或", 100)],
+            &[],
         );
         let options = frequency(FrequencyAdjustmentMode::Pin, 1, 1);
         {
@@ -1011,16 +984,9 @@ mod tests {
             });
             type_text(&mut session, "nihc");
             select_word(&mut session, "拟好");
-            session.switch_scheme(SchemeType::Wubi).unwrap();
-            type_text(&mut session, "aaaa");
-            select_word(&mut session, "或");
         }
         assert_eq!(
             fixture.journal_count("SELECT count(*) FROM user_dictionary_operations WHERE dictionary='pinyin' AND key='ni''hao' AND value='拟好'"),
-            1
-        );
-        assert_eq!(
-            fixture.journal_count("SELECT count(*) FROM user_dictionary_operations WHERE dictionary='wubi' AND key='aaaa' AND value='或'"),
             1
         );
         let mut session = fixture.session(|o| {
@@ -1029,9 +995,6 @@ mod tests {
         });
         type_text(&mut session, "nihc");
         assert_eq!(words(&session)[0], "拟好");
-        session.switch_scheme(SchemeType::Wubi).unwrap();
-        type_text(&mut session, "aaaa");
-        assert_eq!(words(&session)[0], "或");
     }
 
     #[test]
@@ -1048,7 +1011,6 @@ mod tests {
             let create = || {
                 fixture.session(|options| {
                     options.scheme = SchemeType::Shuangpin;
-                    options.helpcode = false;
                     options.fuzzy_pinyin.rules = crate::types::fuzzy_rule::N_L;
                     options.frequency = frequency(FrequencyAdjustmentMode::Promote, 1, 1);
                 })
@@ -1075,58 +1037,6 @@ mod tests {
                     "重建会话后 {spelling} 的选择退回"
                 );
             }
-        }
-    }
-
-    /// 发布布局：`msime-pinyin.db` 没有五笔表，码表单独在只读的 `msime-wubi.db` 里。准备出的代次把码表并回工作主词库，五笔选词学到的权重写得进去、下一次会话读得到，换一个代次（升级）时日志里的五笔行也能回放。
-    #[test]
-    fn wubi_learning_survives_the_split_dictionary_layout() {
-        let root = tempfile::tempdir().unwrap();
-        let resources = root.path().join("resources");
-        std::fs::create_dir_all(resources.join("helpcodes")).unwrap();
-        std::fs::write(resources.join("helpcodes/helpcode.txt"), "你=ab\n").unwrap();
-        Connection::open(resources.join(assets::MAIN_DICTIONARY))
-            .unwrap()
-            .execute_batch(
-                "CREATE TABLE tbl_1_n(key TEXT, jp TEXT, value TEXT, weight INTEGER);
-                 INSERT INTO tbl_1_n VALUES('ni','n','你',100);",
-            )
-            .unwrap();
-        Connection::open(resources.join(assets::WUBI_DICTIONARY))
-            .unwrap()
-            .execute_batch(
-                "CREATE TABLE wubi86(key TEXT NOT NULL, value TEXT NOT NULL, weight INTEGER NOT NULL DEFAULT 0, UNIQUE(key, value));
-                 CREATE TABLE wubi98(key TEXT NOT NULL, value TEXT NOT NULL, weight INTEGER NOT NULL DEFAULT 0, UNIQUE(key, value));
-                 INSERT INTO wubi86 VALUES('aaaa','工',200),('aaaa','或',100);",
-            )
-            .unwrap();
-        crate::dictionary::english::ensure_english_schema(
-            &resources.join(assets::ENGLISH_DICTIONARY),
-        )
-        .unwrap();
-        let user = root.path().join("user");
-        let cache = root.path().join("cache");
-        let open = |content_id: &str| {
-            let paths = crate::user_dictionary::generation::prepare_runtime_paths(
-                &resources, &user, &cache, content_id,
-            )
-            .unwrap();
-            let mut options = SessionOptions::new(paths);
-            options.frequency = frequency(FrequencyAdjustmentMode::Pin, 1, 1);
-            options.scheme = SchemeType::Wubi;
-            Session::new(options).unwrap()
-        };
-        {
-            let mut session = open("v1");
-            type_text(&mut session, "aaaa");
-            assert_eq!(words(&session)[..2], ["工", "或"]);
-            assert_eq!(select_word(&mut session, "或").diagnostic, None);
-        }
-        flush_all();
-        for content_id in ["v1", "v2"] {
-            let mut session = open(content_id);
-            type_text(&mut session, "aaaa");
-            assert_eq!(words(&session)[0], "或", "{content_id}");
         }
     }
 
@@ -1370,117 +1280,6 @@ mod tests {
         );
     }
 
-    /// 904bd0976 / 8d046e269: mixed Wubi asks quanpin for the same letters, and that request honours the refusal too, so a correction the user turned down by committing raw does not come back through the Wubi pinyin fallback.
-    #[test]
-    fn a_refused_correction_stays_refused_in_mixed_wubi() {
-        let fixture = Fixture::new(&[("shang", "上", 100), ("sha", "沙", 50)], &[]);
-        let types = autocorrect_type::TRANSPOSITION | autocorrect_type::NEIGHBOR;
-        let mixed_wubi = |o: &mut SessionOptions| {
-            o.scheme = SchemeType::Wubi;
-            o.wubi.mixed_pinyin = true;
-            o.autocorrect_types = types;
-        };
-        let offers_correction = |session: &Session| {
-            session
-                .snapshot()
-                .candidates
-                .iter()
-                .any(|item| !item.corrected_from.is_empty())
-        };
-
-        // Without a refusal the fallback offers the neighbor correction, otherwise the check below proves nothing.
-        let mut wubi = fixture.session(mixed_wubi);
-        type_text(&mut wubi, "shabg");
-        assert_eq!(wubi.snapshot().editing_text, "shabg");
-        assert!(
-            offers_correction(&wubi),
-            "mixed wubi did not offer the correction: {:?}",
-            words(&wubi)
-        );
-        cancel(&mut wubi);
-        drop(wubi);
-
-        // The refusal is learned where it can be: in quanpin, by committing the raw letters.
-        let mut quanpin = fixture.session(|o| o.autocorrect_types = types);
-        type_text(&mut quanpin, "shabg");
-        let raw = quanpin.command(crate::types::Command::CommitRaw);
-        assert_eq!(raw.commit.as_deref(), Some("shabg"));
-        assert_eq!(
-            fixture.journal_count(
-                "SELECT commits FROM pinyin_autocorrect_suppressions WHERE input='shabg'"
-            ),
-            1
-        );
-        drop(quanpin);
-
-        let mut wubi = fixture.session(mixed_wubi);
-        type_text(&mut wubi, "shabg");
-        assert_eq!(wubi.snapshot().editing_text, "shabg");
-        assert!(
-            !offers_correction(&wubi),
-            "the refused correction came back through mixed wubi: {:?}",
-            words(&wubi)
-        );
-    }
-
-    /// 904bd0976: a sentence a neural model picked has no dictionary row to re-rank, so selecting it stores the sentence as a user phrase like a lattice sentence. Needs the keyboard model from `MSIME_EVAL_RESOURCES`.
-    #[test]
-    fn a_neural_sentence_is_learned_as_a_sentence() {
-        let model = match crate::lattice::neural::test_model_path(assets::NEURAL_MODEL_KEYBOARD) {
-            Ok(model) => model,
-            Err(reason) => {
-                eprintln!("skipping a_neural_sentence_is_learned_as_a_sentence: {reason}");
-                return;
-            }
-        };
-        let fixture = Fixture::new(
-            &[
-                ("shu'ru", "输入", 20000),
-                ("fa", "法", 800000),
-                ("fa", "发", 900000),
-                ("fa", "罚", 100000),
-            ],
-            &[],
-        );
-        std::fs::copy(
-            &model,
-            fixture.paths.resource(assets::NEURAL_MODEL_KEYBOARD),
-        )
-        .unwrap();
-        Connection::open(fixture.paths.dictionary(assets::MAIN_DICTIONARY))
-            .unwrap()
-            .execute_batch("CREATE TABLE IF NOT EXISTS tbl_3_s(key TEXT, jp TEXT, value TEXT, weight INTEGER);")
-            .unwrap();
-        let mut session = fixture.session(|o| {
-            o.sentence_association.neural_keyboard = true;
-            o.sentence_association.show_next_on_duplicate = true;
-        });
-        type_text(&mut session, "shurufa");
-        let neural = session
-            .snapshot()
-            .candidates
-            .into_iter()
-            .find(|item| item.source == CandidateSource::NeuralKeyboard)
-            .unwrap_or_else(|| panic!("no neural row: {:?}", words(&session)));
-        let result = select_word(&mut session, &neural.word);
-        assert_eq!(result.commit.as_deref(), Some(neural.word.as_str()));
-        assert_eq!(result.diagnostic, None);
-        assert_eq!(
-            fixture.main_count(&format!(
-                "SELECT count(*) FROM tbl_3_s WHERE key='shu''ru''fa' AND value='{}'",
-                neural.word
-            )),
-            1
-        );
-        assert_eq!(
-            fixture.journal_count(&format!(
-                "SELECT user_inserted FROM user_dictionary_operations WHERE key='shu''ru''fa' AND value='{}'",
-                neural.word
-            )),
-            1
-        );
-    }
-
     /// test_online_input_session.cpp (personal-learning overlay): a selected cloud word is stored under the typed reading when every character can have it; a character known under other readings only is refused, one no table knows is accepted.
     #[test]
     fn online_words_are_learned_only_under_a_reading_they_can_have() {
@@ -1639,24 +1438,16 @@ mod tests {
     #[test]
     fn generated_rows_outside_pinyin_composition_are_not_stored() {
         let fixture = Fixture::new(&[("ni", "你", 100), ("hao", "好", 100)], &[]);
-        for mode in [
-            "temporary English",
-            "dedicated English",
-            "temporary Japanese",
-        ] {
+        for mode in ["temporary English", "dedicated English"] {
             let mut session = fixture.session(|_| {});
             match mode {
                 "temporary English" => {
                     assert!(session.character(b'Y', true).handled);
                     type_text(&mut session, "zzq");
                 }
-                "dedicated English" => {
+                _ => {
                     session.set_dedicated_english(true);
                     type_text(&mut session, "zzq");
-                }
-                _ => {
-                    assert!(session.character(b'R', true).handled);
-                    type_text(&mut session, "ka");
                 }
             }
             let (index, word) = sentence_row(&session)
@@ -1670,22 +1461,6 @@ mod tests {
             );
         }
         assert_eq!(fixture.main_count("SELECT count(*) FROM tbl_1_n"), 1);
-
-        // A cloud answer to Japanese `ka` is an online row, which the session otherwise stores under the typed reading.
-        let mut session = fixture.session(|o| o.scheme = SchemeType::JapaneseRomaji);
-        type_text(&mut session, "ka");
-        let query = session.online_query().expect("a Japanese cloud query");
-        assert!(session.apply_online_candidates(
-            &query,
-            &["蚊".to_owned()],
-            CandidateSource::CloudSuggestion
-        ));
-        let result = select_word(&mut session, "蚊");
-        assert_eq!(result.commit.as_deref(), Some("蚊"));
-        assert_eq!(
-            fixture.journal_count("SELECT count(*) FROM user_dictionary_operations"),
-            0
-        );
     }
 
     /// test_runtime_isolation.cpp:618-642: a pin the journal refuses is reported, and the list keeps its order.

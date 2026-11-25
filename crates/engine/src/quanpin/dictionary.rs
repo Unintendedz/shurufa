@@ -5,11 +5,9 @@ use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
-use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, RwLockReadGuard};
-use std::time::Duration;
+use std::sync::Arc;
 
-use crate::assets::{MAIN_DICTIONARY, NEURAL_MODEL_KEYBOARD, USER_JOURNAL};
+use crate::assets::{MAIN_DICTIONARY, USER_JOURNAL};
 use crate::cache::FifoCache;
 use crate::dictionary::pinyin::PinyinDatabase;
 use crate::dictionary::DictRow;
@@ -21,13 +19,12 @@ use crate::lattice::decode::{
     decode_pinned, decode_sentences, edge_log_prob, BigramMemo, PinnedSpan, SentenceNgramTables,
 };
 use crate::lattice::merge::{
-    decode_lattice, decode_lattice_borrowed, merge_decoded_borrowed_with_runner_ups,
-    merge_decoded_with_runner_ups, whole_sentence_insert_position, DecodedSentences,
+    decode_lattice, decode_lattice_borrowed, merge_decoded, merge_decoded_borrowed,
+    whole_sentence_insert_position, DecodedSentences,
 };
-use crate::lattice::neural::{
-    shared_sentence_model, NeuralReranker, CONTEXT_CHARACTERS, MAX_RERANK_PATHS,
-};
-use crate::lattice::personal::{PersonalNgram, PersonalTransition};
+use crate::lattice::octagram::{pick_collocation_homophone, CONTEXT_CHARACTERS};
+#[cfg(test)]
+use crate::lattice::personal::PersonalTransition;
 use crate::lattice::{SentencePath, TypoEdgeSource};
 use crate::paths::RuntimePaths;
 use crate::pinyin::autocorrect::{
@@ -50,7 +47,6 @@ use crate::pinyin::syllables::{
     has_only_complete_pinyin_segments, normalize_umlaut_aliases, sparse_pinyin_fallback_segments,
 };
 use crate::text::{count_han_chars, last_characters};
-use crate::time::Instant;
 use crate::types::{
     autocorrect_type, CandidateSource, FirstPageRows, FuzzyPinyinOptions, PersonalDictionaryKind,
     SentenceAssociationOptions, WordItem,
@@ -84,8 +80,6 @@ pub const LATTICE_SPAN_CACHE_CAPACITY: usize = 4096;
 pub const ROW_CACHE_CAPACITY: usize = 512;
 /// 按音节缓存的整句解码结果条数。九键每按一个数字要对二十条上下的切分各解一次整句，其中约三分之一是同一次刷新或上一个数字已经解过的音节串（同一条备选切分挂在好几条九键路径下）；一个长词打下来不同的音节串有两三百条。每条只存解码出的几条句子，内存很小。
 pub const SENTENCE_DECODE_CACHE_CAPACITY: usize = 512;
-/// `RowCacheBatch` 一段读事务最长持续的时间。词典的忙等待上限 `BUSY_TIMEOUT` 是 250 ms，这一段要远小于它，别的连接提交时才不会因为一次长刷新等到超时。
-const ROW_CACHE_BATCH_SPAN: Duration = Duration::from_millis(20);
 /// A single-letter query returns at most this many rows until `expand_initial_candidates`.
 pub const INITIAL_CANDIDATE_LIMIT: usize = 24;
 pub const SPARSE_FALLBACK_THRESHOLD: usize = 8;
@@ -141,12 +135,14 @@ struct CachedLatticeSpan {
 
 enum ColdRows {
     Transfer,
+    #[cfg(test)]
     Borrow,
 }
 
 enum ProjectedRows {
     Selected(Vec<WordItem>),
     /// 只供借用冷页使用，谓词已全部接受，尚未复制字段。
+    #[cfg(test)]
     All,
 }
 
@@ -160,6 +156,7 @@ impl ProjectedRows {
     fn selected(self) -> Vec<WordItem> {
         match self {
             Self::Selected(rows) => rows,
+            #[cfg(test)]
             Self::All => unreachable!("只有借用冷页可以延后复制"),
         }
     }
@@ -168,32 +165,6 @@ impl ProjectedRows {
 /// The reference answered a failed write with `ERROR_CODE` and no message; callers map any failure to their own diagnostic.
 const DICTIONARY_UNAVAILABLE: &str = "Pinyin dictionary is unavailable";
 const ENTRY_REJECTED: &str = "Pinyin does not spell the word one syllable per character";
-
-/// `QuanpinDictionary::row_cache_batch` 开的批，通过它调用词典的方法；丢弃时（包括 panic 展开时）提交读事务、恢复逐条对版本。
-pub struct RowCacheBatch<'a> {
-    dictionary: &'a mut QuanpinDictionary,
-}
-
-impl Deref for RowCacheBatch<'_> {
-    type Target = QuanpinDictionary;
-
-    fn deref(&self) -> &QuanpinDictionary {
-        self.dictionary
-    }
-}
-
-impl DerefMut for RowCacheBatch<'_> {
-    fn deref_mut(&mut self) -> &mut QuanpinDictionary {
-        self.dictionary
-    }
-}
-
-impl Drop for RowCacheBatch<'_> {
-    fn drop(&mut self) {
-        self.dictionary.row_cache_batch = None;
-        self.dictionary.database.end_read();
-    }
-}
 
 pub struct QuanpinDictionary {
     database: PinyinDatabase,
@@ -228,13 +199,10 @@ pub struct QuanpinDictionary {
     fuzzy_row_cache: FifoCache<u64, CachedFuzzyRows>,
     /// 上面四个行缓存填入时的 `PRAGMA data_version`。它们只存词典行，随其他缓存一起清空；此外每次真正计算一个查询前都对一次版本，别的连接写过词典就先清掉，所以命中的行永远和此刻直接查库一样，不会像 `cache` 那样等到下次 `reset_cache_if_database_changed` 才更新。
     row_cache_version: Option<i64>,
-    /// `RowCacheBatch` 存活期间为当前这段读事务开始的时刻：版本在这段开始时对过，段内的查询不再逐条对；一段超过 `ROW_CACHE_BATCH_SPAN` 就提交、重开并重新对版本。
-    row_cache_batch: Option<Instant>,
     /// 词网格解码查二元分的备忘，跨查询保留；表不变它就一直有效，见 `BigramMemo`。
     bigram_memo: RefCell<BigramMemo>,
-    /// 整句解码结果，键见 `sentence_decode_key`。解码只取决于音节、词典行、n 元表、个人模型和整句选项：词典行变了随行缓存清空，个人模型按条目记的版本核对，整句选项和纠错资料变了在各自的 setter 里清空。
+    /// 整句解码结果，键见 `sentence_decode_key`。
     sentence_decode_cache: FifoCache<String, CachedDecode>,
-    rerankers: Vec<NeuralReranker>,
     /// octagram `.gram` 语法模型；路径由 `set_sentence_association` 给定、经
     /// `GramDb::shared` 进程内共享，缺失或非法时为 `None` 退回无搭配打分。
     collocation_db: Option<Arc<crate::lattice::octagram::GramDb>>,
@@ -283,10 +251,8 @@ impl QuanpinDictionary {
             longer_row_cache: FifoCache::new(ROW_CACHE_CAPACITY),
             fuzzy_row_cache: FifoCache::new(ROW_CACHE_CAPACITY),
             row_cache_version: None,
-            row_cache_batch: None,
             bigram_memo: RefCell::default(),
             sentence_decode_cache: FifoCache::new(SENTENCE_DECODE_CACHE_CAPACITY),
-            rerankers: Vec::new(),
             collocation_db: None,
             sentence_alternatives: false,
             sentence_association: SentenceAssociationOptions::default(),
@@ -332,7 +298,8 @@ impl QuanpinDictionary {
         result
     }
 
-    /// 九键同步借用完整行筛选；只有核对失效后的系列热页允许提前排名。
+    /// 借用完整行筛选；只有核对失效后的系列热页允许提前排名。
+    #[cfg(test)]
     pub(crate) fn query_filtered_rows(
         &mut self,
         raw: &str,
@@ -400,31 +367,16 @@ impl QuanpinDictionary {
         })
     }
 
-    /// 个人上下文模型的只读视图（与同一份用户日志上的输入会话共用）。九键查一次简拼时取一次，按 `PersonalNgram::word_count` 把用户用过的简拼词排到前面（#6185）；拿着它时不要记录新的使用，记录要写锁。
-    pub fn personal_model(&self) -> RwLockReadGuard<'_, PersonalNgram> {
-        self.personal.model()
-    }
-
-    /// 把选中的词记进个人上下文模型，26 键也写进同一份。九键选词时调用（#6185）；只开放记录这一个写操作，不交出整个存储。
+    /// 把选中的词记进个人上下文模型。
+    #[cfg(test)]
     pub fn record_personal_use(&self, transitions: &[PersonalTransition]) -> Result<()> {
         self.personal.record(transitions)
     }
 
-    /// 简拼 `codes`（同样长度，一个字母一个音节）对应的词条，按权重从高到低最多 `limit` 行，见 `PinyinDatabase::query_jianpin_codes`。`pinyin` 和 `canonical_pinyin` 都是词条的全拼键，用户自己加的词（学习写进词库的整句、自造词）也在里面。
+    /// 简拼 `codes`（同样长度，一个字母一个音节）对应的词条，按权重从高到低最多 `limit` 行，见 `PinyinDatabase::query_jianpin_codes`。
+    #[cfg(test)]
     pub fn query_jianpin_codes(&self, codes: &[String], limit: usize) -> Vec<WordItem> {
         initial_items(self.database.query_jianpin_codes(codes, limit))
-    }
-
-    /// 每张首字母表各取前 `table_limit` 行、合起来不再截断的简拼查询，见 `PinyinDatabase::query_jianpin_codes_per_table`。
-    pub fn query_jianpin_codes_per_table(
-        &self,
-        codes: &[String],
-        table_limit: usize,
-    ) -> Vec<WordItem> {
-        initial_items(
-            self.database
-                .query_jianpin_codes_per_table(codes, table_limit),
-        )
     }
 
     /// 首字母的 24 行候选展开为全部行（QD:506-558），同时更新行缓存与产生该列表的查询槽。
@@ -594,24 +546,6 @@ impl QuanpinDictionary {
         self.database.han_char_exists(han)
     }
 
-    /// `keys`（以 `'` 连接的完整音节）各自最好那一行的权重；没有行的键不出现。滑行输入用它给一笔可能拼出的串排序。
-    pub fn best_weights(&self, keys: &[String]) -> HashMap<String, i64> {
-        self.database
-            .query_exact_keys_per_key(keys, 1)
-            .into_iter()
-            .filter_map(|(key, rows)| rows.first().map(|row| (key, row.weight)))
-            .collect()
-    }
-
-    /// `keys`（以 `'` 连接的完整音节）各自权重最高的 `per_key` 行的权重之和；没有行的键不出现。九宫格用它给每个音节估频度：只看最常用那一个字时，词库发版改动一个字的权重就能让两个音节的先后翻转。
-    pub fn top_weight_sums(&self, keys: &[String], per_key: usize) -> HashMap<String, i64> {
-        self.database
-            .query_exact_keys_per_key(keys, per_key)
-            .into_iter()
-            .map(|(key, rows)| (key, rows.iter().map(|row| row.weight.max(0)).sum()))
-            .collect()
-    }
-
     /// 整句改字的候选：读音恰为 `span`（完整音节）的词条，按权重从高到低，至多 `limit` 条。
     pub fn conversion_rows(&mut self, span: &[String], limit: usize) -> Vec<DictRow> {
         self.validate_row_caches();
@@ -672,7 +606,7 @@ impl QuanpinDictionary {
         self.series_cache.clear();
     }
 
-    /// Loads the keyboard sentence model from the resource bundle when its switch is on. The desktop model is not the engine's: only the runtime's settled reranker runs it. A change resets the caches (neural-association.patch:2667-2682), as shuangpin does, so a cached online row does not come back after the options are switched away and back.
+    /// 设置整句联想与 `.gram` 语法模型参数；变更时清空缓存。
     pub fn set_sentence_association(&mut self, options: SentenceAssociationOptions) {
         if self.sentence_association == options {
             return;
@@ -683,72 +617,43 @@ impl QuanpinDictionary {
         } else {
             crate::lattice::octagram::GramDb::shared(&options.collocation_model)
         };
-        self.sentence_association = options.clone();
-        self.rerankers.clear();
-        if options.neural_keyboard {
-            if let Some(model) = shared_sentence_model(&self.paths.resource(NEURAL_MODEL_KEYBOARD))
-            {
-                self.rerankers
-                    .push(NeuralReranker::new(CandidateSource::NeuralKeyboard, model));
-            }
-        }
+        self.sentence_association = options;
         self.reset_cache();
     }
 
-    /// Keeps the part of the committed text the rerankers read; while they run it is part of every series slot (`series_slot`).
+    /// Keeps the part of the committed text the collocation scorer reads; while active it is part of every series slot (`series_slot`).
     pub fn set_rescoring_context(&mut self, context: &str) {
-        // The models only ever see the last `CONTEXT_CHARACTERS`, so committed text beyond that window changes nothing.
         let trimmed = last_characters(context, CONTEXT_CHARACTERS);
         if self.rescoring_context != trimmed {
             self.rescoring_context = trimmed.to_string();
         }
     }
 
-    /// 是否已挂载逐键神经重排模型，供首组同音字典候选按前文重排。
+    /// 是否已挂载 `.gram` 搭配重排器，供首组同音字典候选按前文重排。
     pub fn has_dictionary_reranker(&self) -> bool {
-        self.rerankers
-            .iter()
-            .any(|reranker| reranker.source == CandidateSource::NeuralKeyboard)
+        self.collocation_db.is_some() && self.sentence_association.collocation_weight != 0.0
     }
 
-    /// 用已挂载的键盘神经模型与可选 `.gram` 语法搭配模型按 `context` 在多字同音词中选出应提至首位的下标。
+    /// 用可选 `.gram` 语法搭配模型按 `context` 在多字同音词中选出应提至首位的下标。
     pub fn pick_dictionary_homophone(
         &mut self,
         items: &[&WordItem],
         context: &str,
         effective_weights: Option<&[f64]>,
     ) -> Option<usize> {
-        let mut collocation_buf = [0.0f64; MAX_RERANK_PATHS];
-        let collocation_bonuses = crate::lattice::neural::homophone_collocation_bonuses(
+        pick_collocation_homophone(
             self.collocation_db.as_deref(),
             context,
             items,
             self.sentence_association.collocation_weight,
             &self.sentence_association.collocation_grammar,
-            &mut collocation_buf,
+            effective_weights,
         )
-        .map(|count| &collocation_buf[..count]);
-        let mut picked = None;
-        for reranker in self
-            .rerankers
-            .iter_mut()
-            .filter(|reranker| reranker.source == CandidateSource::NeuralKeyboard)
-        {
-            picked = reranker.pick_dictionary_homophone(
-                items,
-                context,
-                effective_weights,
-                collocation_bonuses,
-            );
-        }
-        picked
     }
 
-    /// 是否挂载了会读取上文语义的整句组件（逐键神经重排或非零权重的 `.gram` 搭配模型）。
+    /// 是否挂载了会读取上文语义的整句组件（非零权重的 `.gram` 搭配模型）。
     fn sentence_reads_context(&self) -> bool {
-        !self.rerankers.is_empty()
-            || (self.collocation_db.is_some()
-                && self.sentence_association.collocation_weight != 0.0)
+        self.has_dictionary_reranker()
     }
 
     /// The series cache slot of a resolution's key (overlays.md §1.6.2). The association switches decide which sentence rows a list carries, so they are always part of the slot. The reference bypassed the cache while a neural model ran, because its scores came from an asynchronous worker; scoring here is synchronous, so a reranked list is cached under the trimmed context it was scored with and a commit moves the next query to a fresh slot instead of clearing every list.
@@ -781,26 +686,8 @@ impl QuanpinDictionary {
         self.fuzzy_row_cache.clear();
     }
 
-    /// 九键一次刷新要连着查几十条切分。批开始时开一个读事务（见 `PinyinDatabase::begin_read`），在事务里对一次版本，之后到返回的 `RowCacheBatch` 被丢弃为止的查询都读同一份快照，行缓存也不再逐条对版本。词典是回滚日志模式，读事务拿着共享锁时别的连接提交不了，只能在 `BUSY_TIMEOUT` 内忙等，所以每段事务最多持续 `ROW_CACHE_BATCH_SPAN`，到时在下一次真正计算查询前提交、重开并重新对版本，别的连接写词典最多多等这一段。批在 `Drop` 里结束，查询中途 panic（宿主在 FFI 边界 `catch_unwind` 后继续运行）也不会把事务和共享锁留在连接上。
-    pub fn row_cache_batch(&mut self) -> RowCacheBatch<'_> {
-        self.row_cache_batch = None;
-        self.database.begin_read();
-        self.validate_row_caches();
-        self.row_cache_batch = Some(Instant::now());
-        RowCacheBatch { dictionary: self }
-    }
-
     /// 只读当前版本号，不改 `database_changed` 记下的那份，所以其他缓存何时重置和以前完全一样。读不到版本（词典没打开或读取失败）时每次都清空，等于不缓存。
     fn validate_row_caches(&mut self) {
-        if let Some(started) = self.row_cache_batch {
-            if started.elapsed() < ROW_CACHE_BATCH_SPAN {
-                return;
-            }
-            // 这一段读事务够长了，让别的连接有机会提交，再从新快照接着读。
-            self.database.end_read();
-            self.database.begin_read();
-            self.row_cache_batch = Some(Instant::now());
-        }
         let version = self.database.data_version();
         if version.is_none() || version != self.row_cache_version {
             self.clear_row_caches();
@@ -984,6 +871,7 @@ impl QuanpinDictionary {
                     project(Cow::Owned(result), false).into().selected(),
                 )
             }
+            #[cfg(test)]
             ColdRows::Borrow => {
                 match project(Cow::Borrowed(&result), false).into() {
                     ProjectedRows::All => (None, result),
@@ -1422,22 +1310,19 @@ impl QuanpinDictionary {
             self.collocation_db.is_some() && association.collocation_weight != 0.0;
         // 〔搭配〕行即解码最优路径：模型在且显示开关开时才出。
         let include_collocation_best = association.collocation_rerank && has_collocation;
-        if !association.word_lattice && self.rerankers.is_empty() && !include_collocation_best {
+        if !association.word_lattice && !include_collocation_best {
             return;
         }
         // Held for the whole merge: the options borrow the model.
         let personal = Arc::clone(&self.personal);
         let model = personal.model();
         let mut options = self.sentence_tables.options(self.sentence_alternatives);
-        if !self.rerankers.is_empty() {
-            options.nbest = options.nbest.max(MAX_RERANK_PATHS);
-        }
         options.include_lattice_best = association.word_lattice;
         options.include_collocation_best = include_collocation_best;
         options.show_next_on_duplicate = association.show_next_on_duplicate;
         options.personal = Some(&*model);
         options.bigram_memo = Some(&self.bigram_memo);
-        if !self.rerankers.is_empty() || has_collocation {
+        if has_collocation {
             options.preceding_context = crate::text::trailing_han_clause(&self.rescoring_context);
         }
         // 搭配项逐边叠加字级搭配分，与二元/三元在同一 Viterbi 里竞争；
@@ -1482,13 +1367,12 @@ impl QuanpinDictionary {
         let personal_version = personal.version();
         let decode_key =
             sentence_decode_key(segments, types, typo_eligible, options.preceding_context);
-        let mut runner_ups = runner_ups;
+        let _ = runner_ups;
         let cached = self
             .sentence_decode_cache
             .get_ref(&decode_key)
             .filter(|cached| cached.personal_version == personal_version);
-        let emit_two_syl_splits =
-            self.sentence_alternatives || !self.rerankers.is_empty() || include_collocation_best;
+        let emit_two_syl_splits = self.sentence_alternatives || include_collocation_best;
         let mut two_syl_split_pool: Vec<WordItem> = Vec::new();
         let mut two_syl_literal_best: Option<SentencePath> = None;
         let typo = if let Some(cached) = cached {
@@ -1504,16 +1388,7 @@ impl QuanpinDictionary {
                     );
                 }
             }
-            merge_decoded_borrowed_with_runner_ups(
-                result,
-                segments,
-                typed,
-                &options,
-                &mut self.rerankers,
-                &self.rescoring_context,
-                &cached.decoded,
-                runner_ups.as_deref_mut(),
-            )
+            merge_decoded_borrowed(result, segments, typed, &options, &cached.decoded)
         } else {
             let span_count = lattice_span_count(segments.len(), options.max_phrase_syllables);
             let decoded = if span_count <= LATTICE_SPAN_CACHE_CAPACITY {
@@ -1558,18 +1433,7 @@ impl QuanpinDictionary {
                     },
                 );
             }
-            decoded.and_then(|decoded| {
-                merge_decoded_with_runner_ups(
-                    result,
-                    segments,
-                    typed,
-                    &options,
-                    &mut self.rerankers,
-                    &self.rescoring_context,
-                    decoded,
-                    runner_ups,
-                )
-            })
+            decoded.and_then(|decoded| merge_decoded(result, segments, typed, &options, decoded))
         };
 
         // 双音节输入：确保高频 `1+1` 拆字组合（如 `个事`/`快寄`/`点气`/`才花`）紧随前 8 条词典同音词进入统一融合池，
@@ -1709,7 +1573,7 @@ impl QuanpinDictionary {
         let has_collocation =
             self.collocation_db.is_some() && association.collocation_weight != 0.0;
         let include_collocation_best = association.collocation_rerank && has_collocation;
-        if !association.word_lattice && self.rerankers.is_empty() && !include_collocation_best {
+        if !association.word_lattice && !include_collocation_best {
             return;
         }
         let personal = Arc::clone(&self.personal);
@@ -1721,7 +1585,7 @@ impl QuanpinDictionary {
         options.show_next_on_duplicate = association.show_next_on_duplicate;
         options.personal = Some(&*model);
         options.bigram_memo = Some(&self.bigram_memo);
-        if !self.rerankers.is_empty() || has_collocation {
+        if has_collocation {
             options.preceding_context = crate::text::trailing_han_clause(&self.rescoring_context);
         }
         let scorer;
@@ -2422,6 +2286,7 @@ fn matched_items(rows: impl IntoIterator<Item = DictRow>, matched_code: &str) ->
 }
 
 /// `tbl_1_<c>` 的行转成 `WordItem(key, value, weight, Database, key)`。
+#[cfg(test)]
 fn initial_items(rows: Vec<DictRow>) -> Vec<WordItem> {
     rows.into_iter()
         .map(|row| {

@@ -62,6 +62,53 @@ impl Default for GramConfig {
 
 /// `gram_encoding.cc` / `gram_db.cc` 的常量。
 pub const MAX_ENCODED_UNICODE: usize = 8;
+/// 上下文语义保留的最大字符窗口。
+pub const CONTEXT_CHARACTERS: usize = 64;
+/// 词网格与多字同音词参与上文搭配比较的路径上限。
+pub const MAX_RERANK_PATHS: usize = 12;
+
+/// 使用 `.gram` 语法搭配模型在多字同音词中挑选更契合 `context` 的候选下标。
+pub(crate) fn pick_collocation_homophone(
+    collocation_db: Option<&GramDb>,
+    context: &str,
+    items: &[&crate::types::WordItem],
+    collocation_weight: f64,
+    config: &GramConfig,
+    effective_weights: Option<&[f64]>,
+) -> Option<usize> {
+    let db = collocation_db?;
+    if collocation_weight == 0.0 || items.len() < 2 {
+        return None;
+    }
+    let clause = crate::text::trailing_han_clause(context);
+    if clause.is_empty() {
+        return None;
+    }
+    let count = items.len().min(MAX_RERANK_PATHS);
+    if count < 2 {
+        return None;
+    }
+    let mut best = 0usize;
+    let mut best_score = f64::NEG_INFINITY;
+    let mut leader_score = 0.0f64;
+    for (index, item) in items[..count].iter().enumerate() {
+        let raw_gram = db.query(clause, &item.word, true, config);
+        let bonus = collocation_weight * (raw_gram - config.non_collocation_penalty);
+        let weight = effective_weights
+            .and_then(|weights| weights.get(index).copied())
+            .unwrap_or(item.weight as f64);
+        let prior = if weight > 0.0 { weight.ln() } else { 0.0 };
+        let score = prior * 0.25 + bonus;
+        if index == 0 {
+            leader_score = score;
+        }
+        if score > best_score {
+            best_score = score;
+            best = index;
+        }
+    }
+    (best > 0 && best_score > leader_score + 0.15).then_some(best)
+}
 /// 单码点最长编码 6 字节（1 前缀 + 至多 5 个 7bit 组），8 码点栈缓冲上限 48 字节，实现查询零堆分配。
 const MAX_ENCODED_BYTES: usize = MAX_ENCODED_UNICODE * 6;
 const MAX_RESULTS: usize = 8;

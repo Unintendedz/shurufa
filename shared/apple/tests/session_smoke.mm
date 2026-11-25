@@ -87,8 +87,6 @@ int main() {
             options[name] = path;
         }
         NSError *error = nil;
-        assert(![MSIMEClientSession handwritingProviderRequest:(NSDictionary *)@[] error:&error] && error);
-        error = nil;
         assert([MSIMEClientSession emojiCatalogRequest:(NSDictionary *)@[]][@"error"]);
         MSIMEClientSession *session = [[MSIMEClientSession alloc] initWithOptions:options error:&error];
         assert(session && !error);
@@ -132,18 +130,11 @@ int main() {
         NSDictionary *invalidDictionary = [MSIMEClientSession dictionaryRequest:@{@"options": options, @"action": @{@"operation": @"unknown"}} error:&error];
         assert(!invalidDictionary && error);
         error = nil;
-        NSDictionary *invalidHandwriting = [MSIMEClientSession handwritingProviderRequest:@{@"language": @"zh-CN", @"socket_path": @"relative/provider", @"strokes": @[]} error:&error];
-        assert(!invalidHandwriting && error);
-        error = nil;
         assert(![session voiceProviderCancelSocket:(NSString *)@YES generation:1 error:&error] && error);
         error = nil;
         assert(![session voiceProviderStopSocket:(NSString *)@YES generation:1 error:&error] && error);
         error = nil;
         assert(![session applyVoiceText:(NSString *)@YES generation:1 error:&error] && error);
-        error = nil;
-        NSString *oversizedPath = [@"/tmp/" stringByPaddingToLength:4100 withString:@"x" startingAtIndex:0];
-        NSDictionary *oversizedHandwriting = [MSIMEClientSession handwritingProviderRequest:@{@"language": @"zh-CN", @"socket_path": oversizedPath, @"strokes": @[]} error:&error];
-        assert((!oversizedHandwriting && error));
         error = nil;
         assert(![MSIMEClientSession prepareHostWithResourcesDirectory:(NSString *)@YES stateRoot:root error:&error] && error);
         error = nil;

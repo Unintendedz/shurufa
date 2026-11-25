@@ -1031,7 +1031,7 @@ mod tests {
         assert!(streamed(&empty).is_empty());
     }
 
-    /// test_dictionary_state.cpp:129-147: a session opened on the staged generation reads its dictionaries and journal, so the fixed 拟蒿 leads and the deleted 你好 is gone; an empty stage offers the resource rows again.
+    /// 会话打开暂存代次时读取回放后的词库与选词计数，调权后的 `拟好` 排在首位，已删除的 `你好` 不再出现；空暂存则还原静态资源中的 `你好`。
     #[test]
     fn a_session_on_a_staged_generation_offers_its_candidates() {
         use crate::session::{Session, SessionOptions};
@@ -1054,7 +1054,7 @@ mod tests {
         let restored = words(stage(&resources, &root.path().join("restored"), records()).unwrap());
         assert_eq!(
             restored.first().map(String::as_str),
-            Some("拟蒿"),
+            Some("拟好"),
             "{restored:?}"
         );
         assert!(!restored.iter().any(|word| word == "你好"), "{restored:?}");

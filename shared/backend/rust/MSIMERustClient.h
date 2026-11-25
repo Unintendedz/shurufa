@@ -64,10 +64,10 @@ static inline msime_rust_client msime_rust_client_linked(void) {
       msime_client_ai_skin_cancel,
       msime_client_ai_skin_job,
       msime_client_cloud_sync,
-      msime_client_account_settings_export,
-      msime_client_account_settings_apply,
-      msime_client_account_ios_settings_export,
-      msime_client_account_ios_settings_apply,
+      0,
+      0,
+      0,
+      0,
   };
   return table;
 }

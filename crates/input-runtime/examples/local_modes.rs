@@ -165,28 +165,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "temporary English stayed on after committing"
     );
 
-    // 临时日语（R）: romaji, and the same return to Chinese afterwards.
-    let mut runtime = Runtime::new(Session::new(&options)?, 9)?;
-    runtime.focus(true)?;
-    shift(&mut runtime, b'R')?;
-    assert_eq!(runtime.view().local_mode, "temporary_japanese");
-    type_ascii(&mut runtime, "nihon")?;
-    let offered = candidates(&runtime);
-    assert!(
-        offered.iter().any(|text| text.chars().any(|character| {
-            ('\u{3040}'..='\u{30ff}').contains(&character)
-                || ('\u{4e00}'..='\u{9fff}').contains(&character)
-        })),
-        "temporary Japanese offered {offered:?} for nihon"
-    );
-    let committed = runtime.dispatch(Action::SelectHighlighted)?;
-    assert!(committed.commit.is_some());
-    assert_ne!(
-        runtime.view().local_mode,
-        "temporary_japanese",
-        "temporary Japanese stayed on after committing"
-    );
-
     // 快捷短语（K）: there is nothing to recall until the user has stored one, so this checks the
     // half that does not need a user dictionary - the mode opens and takes letters rather than
     // leaving them to be typed as a capital K and a word.

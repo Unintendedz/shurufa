@@ -88,18 +88,6 @@ fn pinyin_host(root: &std::path::Path) -> u64 {
     handle
 }
 
-fn korean_host(root: &std::path::Path) -> u64 {
-    let handle = test_host_preferences(
-        root,
-        Preferences {
-            scheme: InputScheme::Korean,
-            ..chinese_preferences()
-        },
-    );
-    assert_eq!(read(msime_client_focus(handle, true))["ok"], true);
-    handle
-}
-
 /// 一段轨迹里组字开始和结束的次数。
 fn starts_and_ends(trace: &[String]) -> (usize, usize) {
     (
@@ -136,7 +124,6 @@ fn golden_pinyin_host_with_phrase_preedit(
                    INSERT INTO tbl_1_h VALUES('hao','h','好',100);
                    CREATE TABLE tbl_2_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);
                    INSERT INTO tbl_2_n VALUES('ni''hao','nh','你好',1000),('ni''hao','nh','拟好',80);
-                   CREATE TABLE wubi86(key TEXT,value TEXT,weight INTEGER);
                    CREATE TABLE quick_parases(key TEXT,value TEXT,weight INTEGER);
                    CREATE INDEX idx_quick_parases_key_weight ON quick_parases(key,weight DESC);";
     for directory in [&resources, &dictionaries] {
@@ -237,49 +224,6 @@ fn both_punctuation_routes_pick_then_commit_with_the_mark_as_tail() {
     read(msime_client_destroy(handle));
 }
 
-#[test]
-fn a_korean_syllable_that_starts_the_next_commits_with_continues() {
-    let dir = tempfile::tempdir().unwrap();
-    let handle = korean_host(dir.path());
-    let trace = record(handle, 0);
-    for key in b"gks" {
-        letter(handle, *key);
-    }
-    trace.borrow_mut().clear();
-    let next = letter(handle, b'r');
-    assert_eq!(next["value"]["commit"], "한");
-    assert_eq!(
-        names(&trace),
-        [
-            "key",
-            "input",
-            "before_commit",
-            "commit{SchemeText,continues}",
-            "update"
-        ]
-    );
-    read(msime_client_destroy(handle));
-}
-
-#[test]
-fn escape_from_the_hanja_list_only_hides_the_candidates() {
-    let dir = tempfile::tempdir().unwrap();
-    let handle = korean_host(dir.path());
-    let trace = record(handle, 0);
-    for key in b"gks" {
-        letter(handle, *key);
-    }
-    trace.borrow_mut().clear();
-    msime_client_key(handle, 0);
-    read(msime_client_command(handle, 16));
-    assert_eq!(names(&trace), ["key", "input", "shown"]);
-    msime_client_key(handle, 0);
-    let cancelled = read(msime_client_command(handle, 3));
-    assert_eq!(cancelled["value"]["view"]["preedit"], "한");
-    assert_eq!(names(&trace), ["key", "input{Cancel}", "hidden{Cancel}"]);
-    read(msime_client_destroy(handle));
-}
-
 /// Windows 选词后对同一个键再发一次 MSIME_CANCEL：第二次派发属于同一轮，组字已经结束，只有 input。
 #[test]
 fn a_cancel_after_a_pick_in_the_same_turn_only_reports_its_input() {
@@ -345,42 +289,6 @@ fn focus_loss_ends_the_composition_before_focus_out_and_its_commit_is_silent() {
     assert_eq!(names(&trace), ["end{Focus}", "hidden{Focus}", "focus_out"]);
     read(msime_client_focus(handle, true));
     assert_eq!(names(&trace), ["focus_in"]);
-    read(msime_client_destroy(handle));
-
-    // 韩文失焦上屏开着的音节：只有 commit{FocusLoss}，没有 before_commit，也不画特效。
-    let dir = tempfile::tempdir().unwrap();
-    let mut preferences = Preferences {
-        scheme: InputScheme::Korean,
-        ..chinese_preferences()
-    };
-    preferences.plugins.effect_style = EffectStyle::Flash;
-    let handle = test_host_preferences(dir.path(), preferences);
-    read(msime_client_focus(handle, true));
-    let trace = record(handle, FEEDBACK);
-    // 前半段的拼音也要过按键音，先清掉。
-    CUES.with(|cues| cues.borrow_mut().clear());
-    for key in b"rk" {
-        letter(handle, *key);
-    }
-    trace.borrow_mut().clear();
-    let typed = CUES.with(|cues| std::mem::take(&mut *cues.borrow_mut()));
-    assert_eq!(typed.len(), 2, "each letter asked for its key sound");
-    let left = read(msime_client_focus(handle, false));
-    assert_eq!(left["value"]["commit"], "가");
-    assert!(
-        left["value"].get("feedback").is_none(),
-        "focus answers carry no feedback"
-    );
-    assert_eq!(
-        CUES.with(|cues| std::mem::take(&mut *cues.borrow_mut())),
-        [],
-        "a focus-loss commit asks for no commit sound"
-    );
-    let events = trace.borrow().clone();
-    assert_eq!(
-        events.iter().map(name).collect::<Vec<_>>(),
-        ["commit{FocusLoss}", "end{Focus}", "focus_out"]
-    );
     read(msime_client_destroy(handle));
 }
 
@@ -514,45 +422,6 @@ fn a_finish_on_focus_loss_commits_like_a_finish_but_silently() {
         }
     }
     assert_eq!(texts[0], texts[1], "both commit the same text");
-    read(msime_client_destroy(handle));
-}
-
-/// 命令 20 时高亮的是脚本插件的行：用户这一次没在看候选窗，写进文档的是他打的 `/uuid`，生命周期照旧记 `commit{FocusLoss}`；命令 9（按键结束）上屏高亮的插件行。
-#[cfg(any(
-    target_os = "macos",
-    target_os = "windows",
-    all(target_os = "linux", not(target_env = "ohos"))
-))]
-#[test]
-fn a_finish_on_focus_loss_commits_the_typed_command_over_a_plugin_row() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut preferences = chinese_preferences();
-    preferences.local_modes.command = true;
-    let handle = test_host_preferences(dir.path(), preferences);
-    assert_eq!(read(msime_client_focus(handle, true))["ok"], true);
-    msime_client_set_field_traits(handle, TRAIT_KNOWN);
-    let trace = record(handle, FEEDBACK);
-    attach_plugin_rows(handle, &["甲乙"]);
-    for (command, expected) in [(20, "/uuid"), (9, "甲乙")] {
-        for key in b"/uuid" {
-            letter(handle, *key);
-        }
-        trace.borrow_mut().clear();
-        let finished = read(msime_client_command(handle, command));
-        assert_eq!(finished["ok"], true, "{finished}");
-        assert_eq!(finished["value"]["commit"], expected, "command {command}");
-        assert_eq!(finished["value"]["view"]["local_mode"], "none");
-        let commits: Vec<String> = names(&trace)
-            .into_iter()
-            .filter(|name| name.starts_with("commit"))
-            .collect();
-        if command == 20 {
-            assert_eq!(commits, ["commit{FocusLoss}"]);
-        } else {
-            assert_eq!(commits.len(), 1);
-            assert_ne!(commits[0], "commit{FocusLoss}");
-        }
-    }
     read(msime_client_destroy(handle));
 }
 
@@ -844,7 +713,6 @@ fn opting_in_changes_no_byte_of_the_transition_json() {
             answers.push(raw(msime_client_character(handle, *key, false)));
         }
         answers.push(raw(msime_client_command(handle, 3)));
-        answers.push(raw(msime_client_rerank_settled(handle)));
         answers.push(raw(msime_client_focus(handle, false)));
         read(msime_client_destroy(handle));
         let session = format!("\"session\":{handle}");

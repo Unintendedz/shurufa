@@ -1,31 +1,16 @@
-//! The input engine: composition state, input schemes, dictionary queries, ranking and learning.
-//!
-//! This crate replaces the C++ MSIME-Engine that used to be fetched from `engine-lock.json` and patched by overlay scripts. It owns the input algorithms; `msime-input-runtime` keeps orchestrating hosts and does not duplicate any of it.
-//!
-//! Two public layers: `Session` and the functions beside it mirror the C++ `metasequoia::` API the golden fixtures were recorded against, and `host` is the flattened surface host-api and input-runtime call. The module map and who owns what is `.migration/spec/modules.md`.
+//! The input engine: composition state, Pinyin input schemes, dictionary queries, ranking and learning.
 
 pub mod assets;
-pub mod backend;
 mod cache;
-pub mod cantonese;
 pub mod diagnostics;
 mod dictionary;
 mod error;
 pub mod format;
-mod handwriting;
-mod helpcode;
 pub mod host;
 mod ime;
-mod japanese;
-mod korean;
-pub use korean::KoreanLayout;
-pub mod language_dictionary;
 mod lattice;
 mod local;
-pub mod multilingual;
 pub mod neural_v2;
-mod nine_key;
-mod nine_key_shuangpin;
 pub mod ordering;
 mod paths;
 mod pinyin;
@@ -35,30 +20,14 @@ mod session;
 mod shared_string;
 mod shuangpin;
 pub mod slot_allocator;
-pub mod stroke;
 mod text;
-mod tibetan;
 pub mod time;
 mod types;
 mod user_dictionary;
-pub mod vietnamese;
-#[cfg(all(target_family = "wasm", target_os = "unknown"))]
-pub mod web;
-mod wubi;
-pub mod zhuyin;
 
 pub use error::{EngineError, Result};
-#[cfg(not(target_os = "android"))]
-pub use handwriting::handwriting_recognize;
-pub use handwriting::order_handwriting_candidates;
-// 按需下载的 `.gram` 语法模型由宿主侧资源包管理，删除包时需要释放
-// `GramDb::shared` 缓存的内存映射，经这个窄出口暴露给 host-api。
-pub use lattice::neural::shared_sentence_model;
 pub use lattice::octagram;
-pub use nine_key::KeyGrid;
-pub use nine_key_shuangpin::NineKeyShuangpin;
 pub use paths::RuntimePaths;
-pub use pinyin::glide::{GlideKeyboard, GlidePoint};
 pub use punctuation::{BracketMarks, PunctuationMarks, QuoteMarks};
 pub use session::{Clock, Session, SessionOptions, SessionSnapshot};
 pub use types::{
@@ -87,7 +56,6 @@ pub use user_dictionary::state::{
     dictionary_state_revision, stage_dictionary_state, stream_dictionary_state,
     DictionaryStateRecord, DEFAULT_MAXIMUM_RECORDS,
 };
-pub use wubi::code::phrase_code as wubi_phrase_code;
 
 pub use local::command::{valid_plugin_argument, EXTENDED_ARGUMENT_SYMBOLS};
 pub use local::date_time::LocalDateTime;
@@ -106,21 +74,4 @@ pub fn flush_personal_learning() {
 /// Drop every cached journal, personal-context and local-mode connection. Call before deleting or replacing a data directory.
 pub fn close_cached_databases() {
     user_dictionary::journal::close_cached_journals()
-}
-
-/// Hands the engine the bytes of `msime-japanese.dat` for `path`, the location a Japanese session reads its model from (`RuntimePaths::resource(assets::JAPANESE_MODEL)` or `SessionOptions::japanese_dictionary`), so a host without a file system (the browser) can type Japanese. False, with nothing changed, when the bytes are not a valid model; a later call for the same path replaces the earlier one.
-pub fn preload_japanese_dictionary(path: &std::path::Path, bytes: Box<[u8]>) -> bool {
-    japanese::decoder::JapaneseDictionary::preload(path, bytes)
-}
-
-/// Forgets the model [`preload_japanese_dictionary`] put at `path`; sessions already using it keep it until they end.
-pub fn unload_japanese_dictionary(path: &std::path::Path) {
-    japanese::decoder::JapaneseDictionary::unload(path);
-}
-
-/// Releases the process-level Japanese model cache while sessions that still use a model keep it
-/// alive. Mobile hosts call this from their memory-pressure callback when there is no session
-/// handle to pass to `Session::reset_cache`.
-pub fn release_japanese_dictionary_cache() {
-    japanese::decoder::JapaneseDictionary::release_shared();
 }

@@ -431,11 +431,11 @@ mod tests {
             "japanese",
             "language-dictionaries",
             "handwriting",
-            "settled-model",
             "grammar-model-wanxiang",
             "grammar-model-baguwen",
             "grammar-model-baguwen-compact",
             "offline-glosses",
+            "pronunciations",
             "voice-runtime",
             "wubi",
         ];

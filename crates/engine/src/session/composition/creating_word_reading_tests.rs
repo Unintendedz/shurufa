@@ -30,20 +30,6 @@ fn original_update_creating_word_progress(
     let mut word = String::with_capacity(current_word.len() + selected_word.len());
     word.push_str(current_word);
     word.push_str(selected_word);
-    if transition.wubi_native {
-        // 五笔短语不由部分选择拼接：一个五笔码对应一个词。
-        return CreatingWordProgress {
-            pinyin: if current_pinyin.is_empty() {
-                transition.full_pure_pinyin.clone()
-            } else {
-                current_pinyin.to_owned()
-            },
-            preedit: word.clone(),
-            word,
-            completed: true,
-            can_store: false,
-        };
-    }
     let selected_canonical = original_normalize_canonical_pinyin_for_word(
         &transition.selected_canonical_pinyin,
         selected_word,
@@ -128,15 +114,12 @@ fn creating_word_progress_preserves_gaps_unicode_invalid_readings_and_wubi() {
         ("", "", "合", "", "", false, false),
         ("ni", "合", "", "", "", false, false),
         ("", "", "", "", "尾🦊", true, false),
-        ("", "", "合", "ni", "", true, true),
-        ("abcd", "合", "成", "hao", "", false, true),
     ] {
         let transition = SelectionTransition {
             selected_canonical_pinyin: selected.into(),
             full_pure_pinyin: "wxyz".into(),
             current_segmentation_with_cases: tail.into(),
             continues_composition: continuing,
-            wubi_native: wubi,
         };
         let (old, old_count) =
             count(|| original_update_creating_word_progress(prior, prior_word, word, &transition));
@@ -177,12 +160,10 @@ fn creating_word_progress_keeps_long_reading_validation_and_short_circuit_order(
             ("", "", "合", long.as_str(), true, false),
             (long.as_str(), "合", "成", "hao", false, false),
             ("h", "合", "成", long.as_str(), false, false),
-            ("", "", "合", long.as_str(), false, true),
         ] {
             let transition = SelectionTransition {
                 selected_canonical_pinyin: selected.into(),
                 continues_composition: continuing,
-                wubi_native: wubi,
                 ..SelectionTransition::default()
             };
             let (old, old_count) = count(|| {
@@ -231,14 +212,12 @@ fn cold_creating_word_progress_releases_validation_outputs_and_owns_returned_fie
         ("invalid", "ni", "合", "成", "h", false, false),
         ("unknown", "", "", "合成", "", false, false),
         ("long", "", "", "合", long.as_str(), false, false),
-        ("wubi", "", "", "合成", "ni'hao", false, true),
     ] {
         let transition = SelectionTransition {
             selected_canonical_pinyin: selected.into(),
             full_pure_pinyin: "abcd".into(),
             current_segmentation_with_cases: "ma".into(),
             continues_composition: continuing,
-            wubi_native: wubi,
         };
         let (old, old_heap) = measure(|| {
             original_update_creating_word_progress(prior, prior_word, word, &transition)

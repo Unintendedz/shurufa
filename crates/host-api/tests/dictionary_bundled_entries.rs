@@ -436,22 +436,3 @@ fn browse_lists_all_bundled_rows_without_changing_personal_list_semantics() {
     assert_eq!(second["entries"].as_array().unwrap().len(), 1);
     assert_eq!(second["has_more"], true);
 }
-
-#[test]
-fn browse_exposes_resources_and_refuses_them_in_personal_write_protocols() {
-    let fixture = Fixture::new();
-    for kind in ["japanese", "cantonese", "zhuyin", "stroke"] {
-        let page = fixture
-            .request(json!({"operation": "browse", "kind": kind, "offset": 0, "limit": 10}))
-            .unwrap();
-        assert_eq!(page["available"], false);
-        assert!(page["entries"].as_array().unwrap().is_empty());
-    }
-    let page = fixture.request(json!({"operation": "browse", "kind": "korean_hanja", "query": "한", "offset": 0, "limit": 1})).unwrap();
-    assert_eq!(page["available"], true);
-    assert_eq!(page["entries"][0]["source"], "bundled");
-    assert_eq!(page["entries"][0]["kind"], "korean_hanja");
-    let row = &page["entries"][0];
-    assert!(fixture.edit(row, Value::Null, "remove-resource").is_err());
-    assert!(fixture.request(json!({"operation": "import", "kind": "japanese", "format": "standard", "text": "日本\tにほん\t100", "request_id": "import-resource"})).is_err());
-}

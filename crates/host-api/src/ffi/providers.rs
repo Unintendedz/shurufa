@@ -43,7 +43,7 @@ pub extern "C" fn msime_client_online_query(handle: u64) -> *mut c_char {
                     msime_client_core::cloud::candidates::build_request(
                         &preferences.cloud_candidate_provider,
                         &query.query_text,
-                        query.scheme == msime_engine::SchemeType::JapaneseRomaji as u8,
+                        false,
                     )
                 };
                 if query.mode == msime_engine::OnlineInputMode::English {
@@ -728,78 +728,6 @@ pub unsafe extern "C" fn msime_client_translation_provider_request(
             .translate(query)
             .map(|items| json!({"translations": items}))
             .unwrap_or(Value::Null))
-    })
-}
-
-/// Query a user-owned Linux handwriting recognizer over a Unix socket.
-/// The request is a bounded JSON HandwritingQuery; the response is
-/// `{candidates:[...]}` or null when the recognizer is unavailable.
-///
-/// # Safety
-/// All pointers must reference readable buffers of the stated lengths for
-/// the duration of this call; the buffers are not retained.
-#[cfg(unix)]
-#[no_mangle]
-pub unsafe extern "C" fn msime_client_handwriting_provider_request(
-    query: *const u8,
-    query_length: usize,
-    socket_path: *const u8,
-    socket_length: usize,
-) -> *mut c_char {
-    response(|| {
-        if query.is_null()
-            || socket_path.is_null()
-            || query_length > 262_144
-            || socket_length > 4096
-        {
-            return Err("invalid handwriting provider buffer".into());
-        }
-        let query = serde_json::from_slice::<HandwritingQuery>(unsafe {
-            std::slice::from_raw_parts(query, query_length)
-        })
-        .map_err(|_| "invalid handwriting query document")?;
-        let path = super::parse_absolute_socket_path(unsafe {
-            std::slice::from_raw_parts(socket_path, socket_length)
-        })?;
-        Ok(UnixSocketProvider::new(path)
-            .handwriting(query)
-            .map(|candidates| json!({"candidates": candidates}))
-            .unwrap_or(Value::Null))
-    })
-}
-
-/// Run the Engine's optional offline handwriting recognizer against a trusted
-/// packaged model. The model path is supplied by the native host, never by a
-/// webview or remote provider.
-///
-/// # Safety
-/// The caller must provide non-null readable buffers of the stated lengths. The buffers are read
-/// only for the duration of this call and are never retained.
-#[cfg(unix)]
-#[no_mangle]
-pub unsafe extern "C" fn msime_client_handwriting_local_request(
-    query: *const u8,
-    query_length: usize,
-    model_path: *const u8,
-    model_length: usize,
-) -> *mut c_char {
-    response(|| {
-        if query.is_null() || model_path.is_null() || query_length > 262_144 || model_length > 4096
-        {
-            return Err("invalid local handwriting buffer".into());
-        }
-        let query = serde_json::from_slice::<HandwritingQuery>(unsafe {
-            std::slice::from_raw_parts(query, query_length)
-        })
-        .map_err(|_| "invalid handwriting query document")?;
-        let model =
-            std::str::from_utf8(unsafe { std::slice::from_raw_parts(model_path, model_length) })
-                .map_err(|_| "model path is not UTF-8")?;
-        if !std::path::Path::new(model).is_absolute() {
-            return Err("model path must be absolute".into());
-        }
-        let candidates = engine_handwriting_candidates(model, &query, 1.0, 1.0)?;
-        Ok(json!({"candidates": candidates}))
     })
 }
 

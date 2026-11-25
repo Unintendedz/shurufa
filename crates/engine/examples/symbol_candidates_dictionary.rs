@@ -70,7 +70,6 @@ fn options(resources: &str, root: &std::path::Path) -> msime_engine::Result<Engi
         root.join("cache").to_str().unwrap(),
         "symbol-candidates-probe",
     )?;
-    options.helpcode = false;
     options.learning = false;
     options.mixed_symbols = true;
     Ok(options)

@@ -1,4 +1,4 @@
-//! The candidate merge pipeline and candidate actions (core-session.md §7.2-§7.3): personal rerank, mixed rows, fixed positions (split per producer in mixed wubi), pin, removal and position fixing.
+//! 候选混排与手动干预（置顶到首位、删除词条）。
 
 use std::borrow::Cow;
 
@@ -6,10 +6,7 @@ use super::input::InputSession;
 use crate::assets;
 use crate::diagnostics;
 use crate::ime::personal_rerank::personal_context_rerank_order;
-use crate::ime::queries::{
-    keep_expressive_rows_off_the_lead, MixedJapaneseRow, MODE_ENGLISH_LIMIT,
-};
-use crate::ime::MixedJapaneseConversion;
+use crate::ime::queries::{keep_expressive_rows_off_the_lead, MODE_ENGLISH_LIMIT};
 use crate::local::date_time::{inline_date_time_keyword, insert_inline_date_time, LocalDateTime};
 use crate::local::jianpin::jianpin_ranking_context;
 use crate::pinyin::segment::{cut_pinyin_by_mode, join_segments, CutMode};
@@ -24,8 +21,7 @@ use crate::user_dictionary::overlay::{
     AppScope,
 };
 use crate::user_dictionary::positions::{
-    apply_fixed_positions_with_state, clear_fixed_position, is_pinned_candidate,
-    pinned_candidate_for, record_pinned_candidate, set_fixed_position,
+    is_pinned_candidate, pinned_candidate_for, record_pinned_candidate, rehome_online_candidates,
 };
 use crate::user_dictionary::ranking::candidate_dictionary_key;
 use crate::user_dictionary::removal::delete_dictionary_candidate;
@@ -73,12 +69,10 @@ pub(super) fn clone_candidate_rows(source: &[WordItem], destination: &mut Vec<Wo
 }
 
 impl InputSession {
-    /// 仅改显示或上屏副本，内部词条保留词库拼写供调频、置顶和删除定位。
     pub(super) fn apply_english_word_case(&self, source: CandidateSource, word: &mut String) {
         if source != CandidateSource::EnglishDictionary
             || self.local_mode != LocalInputMode::None
             || self.dedicated_english
-            || (self.has_active_helpcode() && !self.has_literal_input())
         {
             return;
         }
@@ -100,14 +94,11 @@ impl InputSession {
         }
     }
 
-    /// 前缀或引擎候选经过个人上下文重排，再混入英文、表情、颜文字并应用固定位置，最后按进行中的 Tab 笔画筛选收窄（`apply_stroke_filter`）。
     pub(super) fn update_mixed_candidates(&mut self) {
         self.merge_mixed_candidates();
-        self.apply_stroke_filter();
     }
 
     fn merge_mixed_candidates(&mut self) {
-        self.multilingual_conversion = None;
         if self.update_literal_candidates() {
             return;
         }
@@ -121,15 +112,12 @@ impl InputSession {
             clone_candidate_rows(&self.prefix_candidates, &mut decoded);
         } else {
             clone_candidate_rows(self.engine.candidates(), &mut decoded);
-            // 快捷短语的独立开关同时约束普通候选入口，联系人在最终混排后单独加入。五笔 14 键的组码不是用户打出的字母，不拿它去对快捷短语的码。光标后编辑不混入快捷短语：选中短语会结束整段组字。
             if self.quick_phrase_candidates
                 && !self.caret_edit.active
                 && self.mixed_candidates_enabled
                 && self.local_mode_options.quick_phrase
-                && !self.wubi_grid_composing()
             {
                 let code = self.engine.request().raw_input.clone();
-                // 调频开着时整组按学下来的槽位放；没有记录（或调频关掉）时落在首页尾部，普通候选不满一页时接在它们后面。
                 let slot = (self.quick_phrase_frequency
                     && self.frequency.mode != FrequencyAdjustmentMode::Disabled)
                     .then(|| {
@@ -149,8 +137,6 @@ impl InputSession {
         }
         self.personal_reranked = false;
         let mut overlay_leader_protected = false;
-        // Shurufa 独立个人学习叠加层（Stage 4）：在不修改静态权重的前提下，按 30 天衰减明确选择事件与
-        // 贝叶斯平滑先验重排同音词典行，并把 `pinned_candidates` 作为 L4 硬约束锁定在第 0 位。
         if self.decoupled_personal_learning
             && self.local_mode == LocalInputMode::None
             && !self.dedicated_english
@@ -168,10 +154,6 @@ impl InputSession {
             );
             overlay_leader_protected = outcome.leader_protected;
         }
-        // 日文整段转换只算一次：个人上下文重排生效时下面要混排两张表。
-        let japanese = self.mixed_japanese_conversion();
-        self.multilingual_conversion = self.query_multilingual();
-        // 提交链起点没有上下文，候选偏好由词频设置负责；若前文含有汉字且未命中个人转移，再用逐键神经模型重排首组字典候选。
         let reordered = match self.chain.previous.as_deref() {
             Some(previous) if self.personal_context_applies() => {
                 let journal = self.journal_path();
@@ -201,23 +183,21 @@ impl InputSession {
         };
         match reordered {
             Some(order) => {
-                // 先复制原始行到可复用的显示缓冲，再按索引原地重排，避免重新分配每个字符串。
                 clone_candidate_rows(&decoded, &mut reranked);
                 order.reorder(&mut reranked);
-                self.mixed_candidates = self.mixed_from(reranked, japanese.as_ref());
-                // 学习使用字典给出的顺序，因此另存未重排的混排列表。
-                self.ranking_candidates = Some(self.mixed_from(decoded, japanese.as_ref()));
+                self.mixed_candidates = self.mixed_from(reranked);
+                self.ranking_candidates = Some(self.mixed_from(decoded));
                 self.personal_reranked = true;
             }
             None => {
                 if let Some(promote) = self.contextual_dictionary_promote(&decoded) {
                     clone_candidate_rows(&decoded, &mut reranked);
                     reranked[..=promote].rotate_right(1);
-                    self.mixed_candidates = self.mixed_from(reranked, japanese.as_ref());
-                    self.ranking_candidates = Some(self.mixed_from(decoded, japanese.as_ref()));
+                    self.mixed_candidates = self.mixed_from(reranked);
+                    self.ranking_candidates = Some(self.mixed_from(decoded));
                     self.personal_reranked = true;
                 } else {
-                    self.mixed_candidates = self.mixed_from(decoded, japanese.as_ref());
+                    self.mixed_candidates = self.mixed_from(decoded);
                 }
             }
         }
@@ -236,7 +216,6 @@ impl InputSession {
                     if !row.source.is_dictionary() || !row.scheme.is_pinyin() {
                         return false;
                     }
-                    // 用调频写入的真实读音匹配，单码和双拼不能拿显示编码查日志。
                     let key = if row.canonical_pinyin.is_empty() {
                         Cow::Owned(candidate_dictionary_key(row, context))
                     } else {
@@ -252,13 +231,6 @@ impl InputSession {
                 }))
     }
 
-    /// 前文含汉字且挂有逐键神经模型时，在前段同音、同字长且未经手动置顶的系统词典候选中选出更贴合语境的首选下标。
-    ///
-    /// 普通自动调频只改词条权重、仍按 `ln(weight) + neural_nats` 参与语境竞争，避免一次偶发选词永久屏蔽前文纠偏；
-    /// 手动置顶（`pinned_candidates`）则锁定第 0 位不参与语境替换。
-    /// 只对完整音节、无模糊音或纠错偏移的多字精确词典命中生效，避免半截声母键（如 `huiy`）白跑模型；
-    /// 词库查询可能在同音双字词之间夹入更长的补全词组（如「登录」与「登陆」之间夹有「登录时间」），
-    /// 因此在前 32 行内跳过补全词收集最多 12 条同音候选评分，仅把胜出项旋至第 0 位。
     fn contextual_dictionary_promote(&mut self, decoded: &[WordItem]) -> Option<usize> {
         const HOMOPHONE_SCAN_WINDOW: usize = 32;
         if self.local_mode != LocalInputMode::None
@@ -266,7 +238,6 @@ impl InputSession {
             || self.prefix_active
             || self.caret_edit.active
             || self.has_literal_input()
-            || self.has_active_helpcode()
             || !self.engine.has_han_rescoring_context()
         {
             return None;
@@ -307,7 +278,6 @@ impl InputSession {
         let all_intact = pieces
             .iter()
             .all(|piece| crate::pinyin::syllables::is_intact(piece));
-        // 允许完整音节以及与字数严格对齐的纯简拼/混拼多字词参与语境同音消歧，仍拒绝半截单音节输入。
         let aligned_jianpin = characters >= 2
             && pieces.len() == characters
             && pieces.iter().all(|piece| {
@@ -318,8 +288,8 @@ impl InputSession {
             return None;
         }
         let scheme = first.scheme;
-        let mut refs = [first; crate::lattice::neural::MAX_RERANK_PATHS];
-        let mut indices = [0usize; crate::lattice::neural::MAX_RERANK_PATHS];
+        let mut refs = [first; crate::lattice::octagram::MAX_RERANK_PATHS];
+        let mut indices = [0usize; crate::lattice::octagram::MAX_RERANK_PATHS];
         let mut count = 1usize;
         for (index, item) in decoded
             .iter()
@@ -339,7 +309,7 @@ impl InputSession {
                 refs[count] = item;
                 indices[count] = index;
                 count += 1;
-                if count == crate::lattice::neural::MAX_RERANK_PATHS {
+                if count == crate::lattice::octagram::MAX_RERANK_PATHS {
                     break;
                 }
             }
@@ -352,8 +322,6 @@ impl InputSession {
         if is_pinned_candidate(journal, &context, &first.word) {
             return None;
         }
-        // Stage 4 独立个人学习不改写 `WordItem::weight`：若开启叠加层，这里把 30 天衰减选词次数
-        // 换算为等效贝叶斯先验权重再与前文竞争，避免中性前文把反复学成的常用词打回静态次席。
         let effective_weights = self.decoupled_personal_learning.then(|| {
             effective_bayesian_weights(journal, &context, &refs[..count], unix_now_seconds())
         });
@@ -366,7 +334,6 @@ impl InputSession {
         (best > 0).then_some(indices[best])
     }
 
-    /// The candidates learning ranks against: the list before the personal rerank.
     pub(super) fn ranking_list(&self) -> &[WordItem] {
         self.ranking_candidates
             .as_deref()
@@ -374,7 +341,6 @@ impl InputSession {
     }
 
     pub(super) fn update_local_candidates(&mut self) -> Option<String> {
-        // Only the date/time and command modes read the wall clock; the other modes would pay a local-offset lookup per key for nothing.
         let now = if matches!(
             self.local_mode,
             LocalInputMode::DateTime | LocalInputMode::Command
@@ -394,8 +360,6 @@ impl InputSession {
         let mut candidates = result.candidates;
         self.apply_candidate_positions(&mut candidates);
         self.local_candidates = candidates;
-        self.insert_cached_plugin_rows();
-        // After the positions, so the synthetic row is never moved.
         self.add_local_fallback_candidate();
         if self.local_mode == LocalInputMode::Url {
             self.add_url_completions();
@@ -408,25 +372,7 @@ impl InputSession {
         result.diagnostic
     }
 
-    /// 缓存的插件行还属于这份预编辑串时把它们放回列表前面，同文的后面那一行去掉；预编辑串已经变了就清掉缓存，下一次派发重新问插件。
-    fn insert_cached_plugin_rows(&mut self) {
-        let Some((preedit, rows)) = &self.plugin_rows else {
-            return;
-        };
-        if *preedit != self.local_preedit {
-            self.plugin_rows = None;
-            return;
-        }
-        if rows.is_empty() {
-            return;
-        }
-        self.local_candidates
-            .retain(|item| !rows.iter().any(|row| row.word == item.word));
-        self.local_candidates.splice(0..0, rows.iter().cloned());
-    }
-
     pub(super) fn add_local_fallback_candidate(&mut self) {
-        // An incomplete or unmatched special-mode input shows its raw text, prefix letter included, so Space commits it through the ordinary selection path (overlays.md §8.1).
         if self.local_candidates.is_empty() && !self.local_preedit.is_empty() {
             self.local_candidates.push(WordItem::new(
                 self.local_preedit.clone(),
@@ -452,7 +398,6 @@ impl InputSession {
         let mut candidates = std::mem::take(&mut self.dedicated_english_candidates);
         self.apply_candidate_positions(&mut candidates);
         if candidates.is_empty() {
-            // A word the dictionary does not know is still what the user is typing.
             candidates.push(WordItem::new(
                 "",
                 self.dedicated_english_preedit.clone(),
@@ -465,117 +410,12 @@ impl InputSession {
         self.dedicated_english_candidates = candidates;
     }
 
-    /// input_session_candidates.cpp:19-61 with the per-producer split of overlays.md §3.3.
     pub(super) fn apply_candidate_positions(&mut self, items: &mut Vec<WordItem>) {
-        if items.is_empty() {
-            return;
-        }
-        let regular = self.local_mode == LocalInputMode::None
-            && !self.dedicated_english
-            && !matches!(
-                self.scheme(),
-                SchemeType::JapaneseRomaji
-                    | SchemeType::Korean
-                    | SchemeType::Cantonese
-                    | SchemeType::Zhuyin
-                    | SchemeType::Stroke
-            );
-        let has_english = if !regular && self.local_mode != LocalInputMode::SuperJianpin {
-            if !items
-                .iter()
-                .any(|item| item.source == CandidateSource::EnglishDictionary)
-            {
-                return;
-            }
-            true
-        } else {
-            false
-        };
-        let journal = self.journal_path();
-        let journal_exists = journal.try_exists().unwrap_or(false);
-        if !journal_exists && !items.iter().any(|item| item.source.takes_online_seat()) {
-            return;
-        }
-        let include_missing = self.engine.request().raw_input.len() == 1;
-        let keep_dynamic = self.has_active_helpcode();
-        let engine = &self.engine;
-        if regular && self.is_wubi() {
-            // Each producer's rows are fixed within their own group and under their own context, and the groups keep the wubi-first order.
-            let mut pinyin_items = split_wubi_candidates(items);
-            if !items.is_empty() {
-                let context = self.position_context(false, true);
-                let mut finder =
-                    |key: &str, word: &str| engine.find_candidate(SchemeType::Wubi, key, word);
-                apply_fixed_positions_with_state(
-                    journal,
-                    context.as_ref(),
-                    items,
-                    include_missing,
-                    Some(&mut finder),
-                    keep_dynamic,
-                    journal_exists,
-                );
-            }
-            if !pinyin_items.is_empty() {
-                let context = self.position_context(false, false);
-                let mut finder =
-                    |key: &str, word: &str| engine.find_candidate(SchemeType::Quanpin, key, word);
-                apply_fixed_positions_with_state(
-                    journal,
-                    context.as_ref(),
-                    &mut pinyin_items,
-                    include_missing,
-                    Some(&mut finder),
-                    keep_dynamic,
-                    journal_exists,
-                );
-            }
-            items.append(&mut pinyin_items);
-        } else if regular {
-            let context = self.position_context(false, false);
-            let scheme = self.scheme();
-            let mut finder = |key: &str, word: &str| engine.find_candidate(scheme, key, word);
-            apply_fixed_positions_with_state(
-                journal,
-                context.as_ref(),
-                items,
-                include_missing,
-                Some(&mut finder),
-                keep_dynamic,
-                journal_exists,
-            );
-        } else if self.local_mode == LocalInputMode::SuperJianpin {
-            let context = self.position_context(false, false);
-            apply_fixed_positions_with_state(
-                journal,
-                context.as_ref(),
-                items,
-                false,
-                None,
-                false,
-                journal_exists,
-            );
-        }
-        if has_english
-            || items
-                .iter()
-                .any(|item| item.source == CandidateSource::EnglishDictionary)
-        {
-            let context = self.position_context(true, false);
-            apply_fixed_positions_with_state(
-                journal,
-                context.as_ref(),
-                items,
-                false,
-                None,
-                true,
-                journal_exists,
-            );
-        }
+        rehome_online_candidates(items, false);
     }
 
-    /// input_session_candidates.cpp:21-44.
-    pub(super) fn position_context(&self, english: bool, wubi: bool) -> Cow<'_, str> {
+    #[allow(dead_code)]
+    pub(super) fn position_context(&self, english: bool) -> Cow<'_, str> {
         let request = self.engine.request();
         if english {
             let input = if self.dedicated_english {
@@ -594,9 +434,6 @@ impl InputSession {
                 self.shuangpin_profile(),
             ));
         }
-        if wubi {
-            return Cow::Borrowed(&request.raw_input);
-        }
         let context: Cow<'_, str> = if request.normalized_input.is_empty() {
             self.pinyin_segmentation()
         } else {
@@ -605,7 +442,6 @@ impl InputSession {
         if request.raw_input.len() == 1 {
             return context;
         }
-        // Positions are stored under one canonical cut, so the same letters typed with or without apostrophes share them.
         let plain = if context.contains('\'') {
             Cow::Owned(plain_position_context(context.as_ref()))
         } else {
@@ -617,7 +453,6 @@ impl InputSession {
         }
     }
 
-    /// The pre-rerank index of a displayed candidate.
     pub(super) fn ranking_index(&self, displayed: usize) -> Option<usize> {
         let shown = self.candidates().get(displayed)?;
         let Some(ordered) = self.ranking_candidates.as_deref() else {
@@ -632,48 +467,7 @@ impl InputSession {
         Some(found.unwrap_or(displayed))
     }
 
-    /// 0 clears.
-    pub(super) fn set_candidate_position(&mut self, index: usize, position: i32) -> KeyResult {
-        // 改字的候选是光标处一段的替换，不是这串拼音的候选，不能固定、置顶或删除。
-        if self.conversion.is_some() || self.date_time_menu_page.is_some() {
-            return KeyResult::unhandled();
-        }
-        if !(0..=5).contains(&position) {
-            return KeyResult::unhandled();
-        }
-        let Some(selected) = self.candidates().get(index) else {
-            return KeyResult::unhandled();
-        };
-        if !self.is_editable_source(selected) {
-            return KeyResult::unhandled();
-        }
-        let english = selected.source == CandidateSource::EnglishDictionary;
-        let wubi = Self::is_wubi_native_candidate(selected)
-            && self.local_mode != LocalInputMode::SuperJianpin;
-        let context = self.position_context(english, wubi);
-        let key = if english || wubi || selected.canonical_pinyin.is_empty() {
-            &selected.pinyin
-        } else {
-            &selected.canonical_pinyin
-        };
-        if context.is_empty() || key.is_empty() {
-            return KeyResult::unhandled();
-        }
-        let journal = self.journal_path();
-        let written = if position == 0 {
-            clear_fixed_position(journal, context.as_ref(), key, &selected.word)
-        } else {
-            set_fixed_position(journal, context.as_ref(), key, &selected.word, position)
-        };
-        if written.is_err() {
-            return KeyResult::handled()
-                .with_diagnostic(Some(diagnostics::POSITION_NOT_PERSISTED.to_owned()));
-        }
-        KeyResult::handled().with_diagnostic(self.refresh_after_candidate_change())
-    }
-
     pub(super) fn pin_candidate(&mut self, index: usize) -> KeyResult {
-        // 「📅日期」页里的行按日期格式索引，pin 会落到真实列表里同下标的另一行。
         if self.conversion.is_some() || self.date_time_menu_page.is_some() {
             return KeyResult::unhandled();
         }
@@ -688,7 +482,6 @@ impl InputSession {
         }
         let selected_source = selected.source;
         let selected_word = selected.word.clone();
-        // Manual pinning is independent of the automatic learning preferences and never selects text.
         let pin = FrequencyAdjustmentOptions {
             mode: FrequencyAdjustmentMode::Pin,
             trigger_count: 1,
@@ -697,7 +490,6 @@ impl InputSession {
         if let Some(diagnostic) = self.adjust_candidate_frequency(index, pin, true) {
             return KeyResult::handled().with_diagnostic(Some(diagnostic));
         }
-        // Remembered so that the personal context rerank does not move the pinned word off the top it was pinned to.
         if selected_source != CandidateSource::EnglishDictionary
             && self.local_mode == LocalInputMode::None
             && !self.dedicated_english
@@ -723,22 +515,16 @@ impl InputSession {
             return KeyResult::unhandled();
         };
         let english = selected.source == CandidateSource::EnglishDictionary;
-        // A single character is protected: removing it would leave its reading unanswerable.
         if !self.is_editable_source(selected) || (!english && count_utf8_chars(&selected.word) <= 1)
         {
             return KeyResult::unhandled();
         }
-        let wubi = Self::is_wubi_native_candidate(selected)
-            && self.local_mode != LocalInputMode::SuperJianpin;
         let kind = if english {
             PersonalDictionaryKind::English
-        } else if wubi {
-            self.engine.wubi_input_options().profile.dictionary_kind()
         } else {
             PersonalDictionaryKind::Pinyin
         };
-        // A displayed pinyin row already carries its exact dictionary key; re-segmenting it could delete another pronunciation of the same word.
-        let key = if english || wubi {
+        let key = if english {
             &selected.pinyin
         } else {
             &selected.canonical_pinyin
@@ -760,7 +546,6 @@ impl InputSession {
         KeyResult::handled().with_diagnostic(self.refresh_after_candidate_change())
     }
 
-    /// Caches reset and the active view rebuilt after a dictionary edit (input_session.cpp:1221-1235).
     fn refresh_after_candidate_change(&mut self) -> Option<String> {
         self.reset_cache();
         if self.dedicated_english {
@@ -774,120 +559,10 @@ impl InputSession {
         None
     }
 
-    /// 日文混输的门槛里会话这一层的部分：选项开着，没有本地模式、专用英文、光标前缀解码和激活的辅助码。其余门槛（全拼或双拼、只有 a-z、整段是完整罗马字、至少两个假名、信号）见 `ImeSession::mixed_japanese_conversion`。光标前缀里选这一行会把光标后的输入一起扔掉（整段结束组字）；辅助码激活时输入里混着辅助码，那串字母不是罗马字。
-    fn mixed_japanese_conversion(&mut self) -> Option<MixedJapaneseConversion> {
-        if !self.japanese_mixing
-            || self.local_mode != LocalInputMode::None
-            || self.dedicated_english
-            || self.prefix_active
-            || self.caret_edit.active
-            || self.has_active_helpcode()
-        {
-            return None;
-        }
-        self.engine.mixed_japanese_conversion()
-    }
-
-    /// 日文混输要混进 `decoded` 的那一行。整段文字是转换结果，`pinyin` 是整段输入（选中即结束组字），`canonical_pinyin` 为空，权重 0。拼音拆不开时只看「认得」：认得才领先，只有精确词条、整句不认得时进优先位置（打错的拼音常常碰巧是某个词条的读音）。拼音拆得开时，打头的非英文行不是能结束整段组字的词典词（快照里 `answers_key` 用的同一个判定）才领先，否则进优先位置。
-    fn mixed_japanese_row(
-        &self,
-        decoded: &[WordItem],
-        conversion: &MixedJapaneseConversion,
-    ) -> MixedJapaneseRow {
-        let chinese_whole_word = decoded
-            .iter()
-            .find(|item| item.source != CandidateSource::EnglishDictionary)
-            .is_some_and(|item| {
-                item.source.is_dictionary() && self.selection_completes_composition(item)
-            });
-        let lead = if conversion.pinyin_incomplete {
-            conversion.known
-        } else {
-            !chinese_whole_word
-        };
-        let mut item = WordItem::new(
-            self.engine.request().raw_input.as_str(),
-            conversion.text.as_str(),
-            0,
-            CandidateSource::MixedJapanese,
-            "",
-        );
-        item.scheme = SchemeType::JapaneseRomaji;
-        MixedJapaneseRow { item, lead }
-    }
-
-    /// 只在全串普通全拼里查询连续多语言；其它编码和局部选择不能借用全串路径。
-    fn query_multilingual(&mut self) -> Option<crate::multilingual::Conversion> {
-        if !self.mixed_candidates_enabled
-            || self.scheme() != SchemeType::Quanpin
-            || self.local_mode != LocalInputMode::None
-            || self.dedicated_english
-            || self.prefix_active
-            || self.caret_edit.active
-            || self.has_active_helpcode()
-            || self.single_character_only
-        {
-            return None;
-        }
-        self.multilingual
-            .as_mut()?
-            .convert(&self.engine.request().raw_input)
-    }
-
-    /// 完整中文解释在前，混合路径作为备选；已有同文行保留自己的来源。
-    fn insert_multilingual_row(&self, items: &mut Vec<WordItem>) {
-        let Some(conversion) = &self.multilingual_conversion else {
-            return;
-        };
-        let text: String = conversion
-            .segments
-            .iter()
-            .map(|segment| segment.text.as_str())
-            .collect();
-        if items.iter().any(|row| row.word == text) {
-            return;
-        }
-        let position = if conversion.chinese_complete {
-            items
-                .iter()
-                .position(|row| {
-                    (row.source.is_dictionary() || row.source.is_generated_or_fallback())
-                        && self.selection_completes_composition(row)
-                })
-                .map_or(items.len(), |index| index + 1)
-        } else {
-            0
-        };
-        // 在已有固定槽位和联系人组之后插入，不把用户指定的位置向后挤一格。
-        let reserved = items
-            .iter()
-            .rposition(|row| row.fixed_position > 0 || row.source == CandidateSource::Contact)
-            .map_or(0, |index| index + 1);
-        items.insert(
-            position.max(reserved),
-            WordItem::new(
-                self.engine.request().raw_input.as_str(),
-                text,
-                0,
-                CandidateSource::Multilingual,
-                "",
-            ),
-        );
-    }
-
-    /// 对一份解码结果混排并应用固定位置。
-    fn mixed_from(
-        &mut self,
-        decoded: Vec<WordItem>,
-        japanese: Option<&MixedJapaneseConversion>,
-    ) -> Vec<WordItem> {
-        let japanese = japanese.map(|conversion| self.mixed_japanese_row(&decoded, conversion));
-        // 拼音拆不开时完全匹配的英文可以占首位，但有两种情况不行：光标前缀解码时选英文会扔掉光标后的输入（`commit_selection` 整段结束组字）；辅助码激活时大写的辅助码被转成小写拼进了查英文的输入，那串字母不是用户要的英文词。
-        let english_may_lead = !self.prefix_active && !self.has_active_helpcode();
-        // 光标后编辑里选中英文、emoji、颜文字、符号这些混排行会结束整段组字，扔掉光标前固定的那段或光标后剩下的拼写，所以一概不混入。
+    fn mixed_from(&mut self, decoded: Vec<WordItem>) -> Vec<WordItem> {
+        let english_may_lead = !self.prefix_active;
         let mixed_enabled = self.mixed_candidates_enabled && !self.caret_edit.active;
-        // 符号行要整段组字正好是符号的名称，条件和上面相同但语义不同：光标前缀解码时查的是光标前那段，辅助码激活时输入里混着辅助码字母，两种情况下整段都不是用户打的名称。
-        let symbols_allowed = !self.prefix_active && !self.has_active_helpcode();
+        let symbols_allowed = !self.prefix_active;
         let association_input = if self.prefix_active {
             self.prefix_query_input.as_str()
         } else {
@@ -904,13 +579,12 @@ impl InputSession {
             self.local_mode,
             english_may_lead,
             symbols_allowed,
-            japanese,
+            None,
             self.engine.request().first_page_rows.get(),
             mixed_enabled,
         );
         self.insert_inline_date_time(&mut mixed);
         self.apply_candidate_positions(&mut mixed);
-        // 云候选异步到达；先在它的固定席位放一个云图标，回包时原位替换，避免本地候选整体后移。
         if self.cloud_candidates_enabled
             && self
                 .online_query()
@@ -934,25 +608,19 @@ impl InputSession {
                 ),
             );
         }
-        // 放在固定位置之后：单字母输入时固定位置会补回列表里没有的词。
         if self.single_character_only && scheme.filters_to_single_characters() {
             mixed.retain(|item| !is_han_phrase(&item.word));
         }
-        // 本地模式不混排，列表里的 emoji、颜文字是模式自己查的，可以领头。
         if self.local_mode == LocalInputMode::None {
             keep_expressive_rows_off_the_lead(&mut mixed);
         }
-        // 放在最后：网址补全不参与固定位置，也不被挪开。光标后编辑里选中网址补全会进入网址模式，同样不加。
         if !self.caret_edit.active {
             self.insert_url_scheme_completions(&mut mixed);
         }
-        // 联系人优先级高于固定位置和云候选；两行相邻，不能让云占位插进姓名与组合文本之间。
-        // 光标前缀只解码局部，联系人选择却会结束整段组字，因此只在完整普通拼音组字中加入。
         if !self.prefix_active
             && !self.caret_edit.active
             && !self.dedicated_english
             && self.local_mode == LocalInputMode::None
-            && !self.has_active_helpcode()
             && !self.single_character_only
         {
             let input = match scheme {
@@ -966,11 +634,9 @@ impl InputSession {
                 self.queries.append_contact_candidates(&input, &mut mixed);
             }
         }
-        self.insert_multilingual_row(&mut mixed);
         mixed
     }
 
-    /// 全拼组字正好是 `riqi`、`sj` 这类关键词时，把当前日期、时间、星期或农历接在对应的词后面（#5952）。与日期时间模式（T 模式）是两个开关：这里只看 `date_time_inline`；光标前缀解码、只出单字、专用英文和本地模式里不加。
     fn insert_inline_date_time(&self, items: &mut Vec<WordItem>) {
         if !self.local_mode_options.date_time_inline
             || !self.mixed_candidates_enabled
@@ -1003,12 +669,7 @@ impl InputSession {
             || self.caret_edit.active
             || self.conversion.is_some()
             || !self.has_composition()
-        {
-            return None;
-        }
-        let scheme = self.scheme();
-        if !scheme.is_pinyin()
-            && !(scheme == SchemeType::Wubi && self.answered_by_pinyin_fallback())
+            || !self.scheme().is_pinyin()
         {
             return None;
         }
@@ -1039,8 +700,6 @@ impl InputSession {
             .map(|c| c.to_ascii_lowercase())
             .collect();
         let items = self.candidates();
-        // 检查当前字面键是否已存在未纠错的精确词典整词（如 `dan'fan -> 但凡/单反`），
-        // 存在时对同类错拼候选施加更严谨的物理信道门槛，防止偶发邻键/增删纠错反压高频真实字面词。
         let has_exact_literal_dict = !folded_raw.is_empty()
             && items.iter().take(8).any(|item| {
                 item.source.is_dictionary()
@@ -1066,8 +725,6 @@ impl InputSession {
                         .collect();
                     folded_from == folded_raw
                 };
-            // 备选零声母切分行完整覆盖全部原始输入字母且非长词续写时，同样属于合法等跨度竞争候选，
-            // 绝不因 `extra_syllables == 0` 被踢出神经池进而锁死在槽 0。
             let folded_pinyin_full = !folded_raw.is_empty() && {
                 let folded_py: String = item
                     .pinyin
@@ -1095,8 +752,6 @@ impl InputSession {
                     .filter(|piece| !piece.is_empty())
                     .count()
             };
-            // 等跨度判定：必须完整回答当前输入且不是超长续写词（避免长续写词如 `xingba -> 星巴克`
-            // 借 `folded_pinyin_full` 或纠错标记抢占首槽；备选切分须同时满足 `pinyin_syllables == word_chars`）。
             let span_ceiling = if corrected_full_span {
                 max_allowed_syllables.saturating_add(1)
             } else {
@@ -1114,7 +769,6 @@ impl InputSession {
             let stat_log_prob = if let Some(ev) = item.static_evidence() {
                 Some(ev.log_prob_milli_nats as f64 / 1000.0)
             } else if item.source.is_dictionary() {
-                // 3+ 字词典条目的占位权重 `100` 表示未测频，交由融合阶段按中性相对先验处理，不被误罚 `-16.97 nats`。
                 if word_chars >= 3 && item.weight == 100 {
                     None
                 } else {
@@ -1201,11 +855,6 @@ impl InputSession {
     }
 }
 
-/// 按物理键盘编辑形态与是否存在精确字面词典整词估算错拼候选的自然对数信道代价（nats）。
-/// - 无精确字面词典整词时（如 `xainzai`/`meiwentj`/`diannai`/`qinkuang`），保持高敏感度（`-2.4 ~ -2.8 nats`）积极救回；
-/// - 存在精确字面词典整词时：前后鼻音 `g`（`-3.4`）、相邻换位（`-3.6`）、连击重复键（`-3.8`）、漏键（`-4.4`）与邻键替换（`-4.6`）维持平衡灵敏度；
-///   而**删去用户显式敲入的非 `g`、非重复字母**（如 `xiongtai -> xingtai` 删 `o`、`jinchang -> jichang` 删 `n`）
-///   极少在用户已准确拼出合法词典词时发生，收紧至 `-7.0 nats`，要求强语境证据才允许覆写字面整词。
 fn typo_channel_log_penalty(
     folded_raw: &str,
     canonical_pinyin: &str,
@@ -1262,8 +911,6 @@ fn typo_channel_log_penalty(
     if !has_exact_literal_dict {
         return -2.8;
     }
-    // 存在精确字面整词且删去了用户已显式敲入的字母（`raw > corr`）：
-    // 若为紧邻重复键连击误触（如 `xingtaii -> xingtai`）保持 `-3.8`，否则为低概率删字编辑（`-7.0`）。
     if raw_bytes.len() > corr_bytes.len() {
         let is_repeated_slip = raw_bytes.len() == corr_bytes.len() + 1
             && (0..=corr_bytes.len()).any(|pos| {
@@ -1277,25 +924,9 @@ fn typo_channel_log_penalty(
     -4.4
 }
 
-fn split_wubi_candidates(items: &mut Vec<WordItem>) -> Vec<WordItem> {
-    let mut wubi_count = 0;
-    for index in 0..items.len() {
-        if InputSession::is_wubi_native_candidate(&items[index]) {
-            if index != wubi_count {
-                items[wubi_count..=index].rotate_right(1);
-            }
-            wubi_count += 1;
-        }
-    }
-    items.split_off(wubi_count)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        clone_candidate_rows, english_position_context, plain_position_context,
-        split_wubi_candidates,
-    };
+    use super::{clone_candidate_rows, english_position_context, plain_position_context};
     use crate::types::{CandidateSource, WordItem};
 
     #[test]
@@ -1327,69 +958,5 @@ mod tests {
 
         assert_eq!(destination, source);
         assert_eq!(allocations, 0);
-    }
-
-    #[test]
-    fn cloning_candidate_rows_replaces_metadata_and_handles_length_changes() {
-        let marked = WordItem {
-            pinyin: "ni'hao".into(),
-            canonical_pinyin: "li'hao".into(),
-            word: "合成词".into(),
-            weight: 42,
-            source: CandidateSource::Generated,
-            scheme: crate::types::SchemeType::Shuangpin,
-            fixed_position: 2,
-            fuzzy: true,
-            corrected_from: "lihao".into(),
-            sentence_association: true,
-            sentence_words: vec!["合".to_owned(), "成词".to_owned()],
-            keyboard_runner_up: true,
-            extra_syllables: 1,
-            keyboard_neural: Some((7, -1234)),
-        };
-        let plain = WordItem::new("ni", "你", 1, CandidateSource::Database, "ni");
-        let mut destination = vec![marked.clone(), marked.clone(), marked.clone()];
-        let source = vec![plain.clone(), marked];
-
-        clone_candidate_rows(&source, &mut destination);
-        assert_eq!(destination, source);
-
-        let larger = vec![plain; 4];
-        clone_candidate_rows(&larger, &mut destination);
-        assert_eq!(destination, larger);
-        clone_candidate_rows(&[], &mut destination);
-        assert!(destination.is_empty());
-    }
-
-    #[test]
-    fn wubi_partition_does_not_allocate_two_group_buffers() {
-        let mut rows = vec![
-            WordItem::new("aaaa", "甲", 1, CandidateSource::Database, ""),
-            WordItem::new("ni", "你", 2, CandidateSource::Database, ""),
-            WordItem::new("bbbb", "乙", 3, CandidateSource::Database, ""),
-            WordItem::new("hao", "好", 4, CandidateSource::Database, ""),
-        ];
-        rows[0].scheme = crate::types::SchemeType::Wubi;
-        rows[2].scheme = crate::types::SchemeType::Wubi;
-        let (pinyin, allocations) =
-            crate::ime::personal_rerank::allocations::count(|| split_wubi_candidates(&mut rows));
-
-        assert_eq!(
-            rows.iter()
-                .map(|item| item.word.as_str())
-                .collect::<Vec<_>>(),
-            ["甲", "乙"]
-        );
-        assert_eq!(
-            pinyin
-                .iter()
-                .map(|item| item.word.as_str())
-                .collect::<Vec<_>>(),
-            ["你", "好"]
-        );
-        assert!(
-            allocations <= 1,
-            "五笔混输分组为临时行缓冲分配了两次：{allocations}"
-        );
     }
 }
