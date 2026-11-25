@@ -4,6 +4,10 @@
 #include "../../../common/HostApiString.h"
 #include "msime_client.h"
 #include <cmath>
+#include <cerrno>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 NSString *const MSIMEVoiceArchiveDidChangeNotification = @"MSIMEVoiceArchiveDidChange";
 
@@ -11,6 +15,8 @@ namespace {
 // 钥匙串条目：只在本机、首次解锁后可读，不随 iCloud 钥匙串同步。换一台 Mac 是一把新密钥、一份空的历史。
 NSString *const KeychainService = @"dev.shurufa.voice-archive";
 NSString *const KeychainAccount = @"archive-key-v1";
+NSString *const UseKeychainDefaultsKey = @"MSIMEClientVoiceArchiveUseKeychain";
+NSString *const LocalKeyFileName = @".local-archive-key";
 constexpr NSUInteger KeyBytes = 32;
 
 NSDictionary *KeychainQuery() {
@@ -19,8 +25,8 @@ NSDictionary *KeychainQuery() {
              (__bridge id)kSecAttrAccount: KeychainAccount};
 }
 
-// 读出密钥；还没有时生成并写入。读失败但不是「没有」时返回 nil，绝不覆盖已有的密钥。
-NSData *LoadOrCreateKey() {
+// 从登录钥匙串读出密钥；还没有时生成并写入。读失败但不是「没有」时返回 nil，绝不覆盖已有的密钥。
+NSData *LoadOrCreateKeychainKey() {
     NSMutableDictionary *query = [KeychainQuery() mutableCopy];
     query[(__bridge id)kSecReturnData] = @YES;
     CFTypeRef result = nullptr;
@@ -37,6 +43,54 @@ NSData *LoadOrCreateKey() {
     item[(__bridge id)kSecAttrAccessible] = (__bridge id)kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly;
     item[(__bridge id)kSecAttrLabel] = @"Shurufa 语音存档密钥";
     return SecItemAdd((__bridge CFDictionaryRef)item, nullptr) == errSecSuccess ? key : nil;
+}
+
+// 从本机 0700 存档目录下的 0600 私密文件读出 32 字节密钥；不存在时原子生成，不访问登录钥匙串、避免重编弹窗。
+NSData *LoadOrCreateLocalKeyFile(NSString *directory) {
+    if (!directory.length) return nil;
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSDictionary *dirAttrs = @{NSFilePosixPermissions: @(0700)};
+    if (![fm createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:dirAttrs error:nil]) {
+        return nil;
+    }
+    NSString *keyPath = [directory stringByAppendingPathComponent:LocalKeyFileName];
+    const char *cpath = keyPath.fileSystemRepresentation;
+    // 先尝试只读打开已有密钥文件，拒绝符号链接。
+    int fd = open(cpath, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd >= 0) {
+        struct stat st{};
+        NSData *loaded = nil;
+        if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size == static_cast<off_t>(KeyBytes)) {
+            uint8_t buf[KeyBytes];
+            const ssize_t got = read(fd, buf, KeyBytes);
+            if (got == static_cast<ssize_t>(KeyBytes)) {
+                loaded = [NSData dataWithBytes:buf length:KeyBytes];
+            }
+        }
+        close(fd);
+        return loaded;
+    }
+    if (errno != ENOENT) return nil;
+    // 文件不存在：原子创建 0600 新密钥文件（O_EXCL 防并发覆盖）。
+    NSMutableData *key = [NSMutableData dataWithLength:KeyBytes];
+    if (SecRandomCopyBytes(kSecRandomDefault, KeyBytes, key.mutableBytes) != errSecSuccess) return nil;
+    fd = open(cpath, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    if (fd < 0) {
+        if (errno == EEXIST) return LoadOrCreateLocalKeyFile(directory);
+        return nil;
+    }
+    const ssize_t written = write(fd, key.bytes, KeyBytes);
+    const int synced = fsync(fd);
+    close(fd);
+    if (written != static_cast<ssize_t>(KeyBytes) || synced != 0) {
+        unlink(cpath);
+        return nil;
+    }
+    return key;
+}
+
+NSData *LoadOrCreateKey(NSString *directory, BOOL useKeychain) {
+    return useKeychain ? LoadOrCreateKeychainKey() : LoadOrCreateLocalKeyFile(directory);
 }
 
 NSString *ArchiveDirectory() {
@@ -84,21 +138,39 @@ void CollectBytes(const uint8_t *bytes, size_t length, void *context) {
     return archive;
 }
 
++ (BOOL)usesKeychainProtection {
+    return [NSUserDefaults.standardUserDefaults boolForKey:UseKeychainDefaultsKey];
+}
+
++ (void)setUsesKeychainProtection:(BOOL)enabled {
+    [NSUserDefaults.standardUserDefaults setBool:enabled forKey:UseKeychainDefaultsKey];
+    [NSUserDefaults.standardUserDefaults synchronize];
+}
+
 - (instancetype)init {
     if (!(self = [super init])) return nil;
     _queue = dispatch_queue_create("dev.shurufa.voice-archive", DISPATCH_QUEUE_SERIAL);
-    [self openIfNeeded];
+    // 延迟至首次录音或打开「听写历史」时再打开存档，避免输入法启动即触发钥匙串或磁盘访问。
     return self;
+}
+
+- (void)reloadArchiveKey {
+    @synchronized(self) {
+        _available = NO;
+    }
+    [self openIfNeeded];
+    [self postChange];
 }
 
 - (BOOL)isAvailable { return [self openIfNeeded]; }
 
-// 密钥第一次取不到（例如登录后钥匙串还没解锁）时，下次使用再试。
+// 密钥第一次取不到（例如开启钥匙串托管但尚未解锁）时，下次使用再试。
 - (BOOL)openIfNeeded {
     @synchronized(self) {
         if (_available) return YES;
         NSString *directory = ArchiveDirectory();
-        NSData *key = directory ? LoadOrCreateKey() : nil;
+        const BOOL useKeychain = [MSIMEVoiceArchive usesKeychainProtection];
+        NSData *key = directory ? LoadOrCreateKey(directory, useKeychain) : nil;
         if (!key) return NO;
         const char *path = directory.fileSystemRepresentation;
         _available = Call(msime_client_voice_archive_open(reinterpret_cast<const uint8_t *>(path), strlen(path),

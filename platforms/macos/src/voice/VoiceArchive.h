@@ -4,13 +4,19 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// 语音存档的宿主一侧：登录钥匙串里的 32 字节密钥、存档目录，以及对共享层 `msime_client_voice_archive_*` 的调用。
+/// 语音存档的宿主一侧：32 字节加密密钥（默认使用 0600 本机密钥文件以避免本机自签更新反复弹钥匙串密码；
+/// 可在「设置 → 听写历史」按需开启登录钥匙串托管）、存档目录，以及对共享层 `msime_client_voice_archive_*` 的调用。
 /// 存储格式、加密和保留期限都在 Rust（client-providers 的 voice::archive）；这里只负责取密钥、排队和转换类型。
 ///
 /// 音频追加与录音收尾在同一条串行队列上按顺序执行，采集回调只做入队。其余调用同步执行，可在任意线程。
-/// 钥匙串里还没有密钥时第一次使用就生成一把；钥匙串读失败（锁着、被拒）时不生成新密钥，存档保持关闭，免得旧记录再也解不开。
+/// 存档按需延迟打开，输入法进程启动时不主动访问钥匙串或磁盘。
 @interface MSIMEVoiceArchive : NSObject <MSIMEVoiceArchiving>
 + (instancetype)sharedArchive;
+/// 是否使用登录钥匙串托管语音存档密钥（默认 NO：使用 0600 本机密钥文件，避免重编后反复弹窗）。
++ (BOOL)usesKeychainProtection;
++ (void)setUsesKeychainProtection:(BOOL)enabled;
+/// 切换密钥托管方式后重新加载存档密钥并通知界面刷新。
+- (void)reloadArchiveKey;
 /// 存档能否使用；密钥或目录取不到时为 NO，录音照常进行，只是不存。
 @property(nonatomic, readonly, getter=isAvailable) BOOL available;
 /// 开始一条录音，返回它的 id；存档不可用时返回 nil。

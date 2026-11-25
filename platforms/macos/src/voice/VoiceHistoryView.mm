@@ -142,6 +142,7 @@ void Retranscribe(NSData *pcm, void (^completion)(NSString *_Nullable text, NSSt
 @implementation MSIMEVoiceHistoryView {
     NSStackView *_stack;
     NSPopUpButton *_recordingRetention, *_historyRetention;
+    NSButton *_keychainToggle;
     NSTextField *_retentionNotice;
     NSUInteger _limit;
     AVAudioPlayer *_player;
@@ -170,6 +171,9 @@ void Retranscribe(NSData *pcm, void (^completion)(NSString *_Nullable text, NSSt
     ]];
     _recordingRetention = [self popUpWithTitles:RecordingTitles() label:@"录音保留期限" action:@selector(retentionChanged:)];
     _historyRetention = [self popUpWithTitles:HistoryTitles() label:@"听写记录保留期限" action:@selector(retentionChanged:)];
+    _keychainToggle = [NSButton checkboxWithTitle:@"用登录钥匙串保护录音密钥"
+                                           target:self
+                                           action:@selector(keychainToggleChanged:)];
     _retentionNotice = MSIMEDetailLabel(@"");
     _retentionNotice.hidden = YES;
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(archiveChanged:)
@@ -207,14 +211,21 @@ void Retranscribe(NSData *pcm, void (^completion)(NSString *_Nullable text, NSSt
     }
     [_historyRetention selectItemAtIndex:index];
 
+    const BOOL useKeychain = [MSIMEVoiceArchive usesKeychainProtection];
+    _keychainToggle.state = useKeychain ? NSControlStateValueOn : NSControlStateValueOff;
+
     for (NSView *view in _stack.arrangedSubviews.copy) { [_stack removeArrangedSubview:view]; [view removeFromSuperview]; }
+    NSString *keyDesc = useKeychain
+        ? @"当前由系统登录钥匙串托管加密密钥（不随 iCloud 同步，本机自签重编后需解锁一次）。关闭后改用本机 0600 密钥文件，编译更新不再弹密码框。"
+        : @"当前使用本机 0600 私密密钥文件对录音和文字加密落盘，编译更新输入法不再弹钥匙串密码框。如需查看旧版钥匙串加密记录或改由钥匙串托管，可勾选上方开关。";
     NSBox *retention = MSIMECardWithViews(@[
         MSIMEPreferenceRow(@"录音保留", _recordingRetention),
         MSIMEPreferenceRow(@"听写记录保留", _historyRetention),
-        MSIMEDetailLabel(@"每次录音的音频和识别出的文字都加密保存在本机，密钥在登录钥匙串里，换一台 Mac 读不出来。录音到期只删音频，文字按「听写记录保留」另算。"),
+        _keychainToggle,
+        MSIMEDetailLabel(keyDesc),
         _retentionNotice,
     ], 0);
-    [self addRow:MSIMESectionLabel(@"保留期限")];
+    [self addRow:MSIMESectionLabel(@"保留期限与加密")];
     [self addRow:retention];
 
     MSIMEVoiceArchive *archive = [MSIMEVoiceArchive sharedArchive];
@@ -222,7 +233,9 @@ void Retranscribe(NSData *pcm, void (^completion)(NSString *_Nullable text, NSSt
     NSArray<NSDictionary *> *entries = [archive entriesWithUnreadableCount:&unreadable];
     [self addRow:MSIMESectionLabel(entries.count ? [NSString stringWithFormat:@"听写记录（%lu 条）", (unsigned long)entries.count] : @"听写记录")];
     if (!entries) {
-        [self addRow:MSIMEDetailLabel(@"读不到钥匙串里的存档密钥（钥匙串可能还没解锁），语音存档暂时关闭。")];
+        [self addRow:MSIMEDetailLabel(useKeychain
+            ? @"读不到钥匙串里的存档密钥（钥匙串可能还没解锁），语音存档暂时关闭。"
+            : @"未能打开本机语音存档目录或密钥文件，语音存档暂时关闭。")];
         return;
     }
     if (unreadable)
@@ -311,6 +324,13 @@ void Retranscribe(NSData *pcm, void (^completion)(NSString *_Nullable text, NSSt
 - (void)showMore:(id)sender {
     (void)sender;
     _limit += PageSize;
+    [self reloadHistory];
+}
+
+- (void)keychainToggleChanged:(NSButton *)sender {
+    const BOOL enabled = (sender.state == NSControlStateValueOn);
+    [MSIMEVoiceArchive setUsesKeychainProtection:enabled];
+    [[MSIMEVoiceArchive sharedArchive] reloadArchiveKey];
     [self reloadHistory];
 }
 

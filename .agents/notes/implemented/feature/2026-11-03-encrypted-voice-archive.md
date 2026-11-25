@@ -28,7 +28,9 @@ Status: implemented
 
 ### macOS 宿主
 
-- 密钥：登录钥匙串的通用密码条目 `dev.shurufa.voice-archive`，`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`，不随 iCloud 同步。第一次使用时没有就用 `SecRandomCopyBytes` 生成；读失败但不是「没有」（钥匙串锁着、被拒）时 must never 生成新密钥，存档保持关闭，下次再试，免得旧记录再也解不开。
+- 密钥与延迟初始化：默认不再在输入法进程启动时打开存档或访问登录钥匙串，延迟到首次录音或打开「听写历史」设置页时再按需初始化。密钥托管提供两档并由偏好 `MSIMEClientVoiceArchiveUseKeychain` 控制（默认关闭）：
+  - **默认本机私密密钥文件（`NO`）**：在 `0700` 存档目录 `voice-archive/` 下原子创建并读取 `0600` 的 32 字节密钥文件 `.local-archive-key`（`O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC` + `fsync`），继续以 XChaCha20-Poly1305 加密全部录音和文字，但完全不触发 `SecItemCopyMatching`/`SecItemAdd`，解决本机自签名证书（无 Team ID）每次编译更新后 Mach-O `CDHash` 变化导致系统弹出登录钥匙串密码框的问题。
+  - **可选登录钥匙串托管（`YES`）**：在「设置 → 听写历史」勾选「用登录钥匙串保护录音密钥」后切回原有通用密码条目 `dev.shurufa.voice-archive`（`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`，不随 iCloud 同步），兼容查看旧版钥匙串加密记录。读失败但不是「没有」（钥匙串锁着、被拒）时绝不生成新密钥，存档保持关闭、下次再试，免得旧记录再也解不开。
 - 采集：`MSIMEVoiceInputService startMicrophoneCapture` 是所有识别方式（TextStream、本地模型、豆包、HTTP 整句、系统语音）共用的那一个麦克风 tap，在这里另接一个 16 kHz 转换器，把每个缓冲送进 `MSIMEVoiceArchive` 的串行队列；停止采集时收尾。不到 1/4 秒的误触（`short_capture`，本来就不识别）连同记录一起删掉。外部 provider socket 自己采集，不经过这里，不存档。
 - 结果：`applyVoiceResult:` 是所有识别方式上屏的唯一入口，在这里追加文字；`reportVoiceFailure:` 追加失败原因，只记开麦之后才会发生的那几类（录音、识别、无语音、超时、会话）；三处用户取消（自定义快捷键的 Esc、按住说话的 Esc、浮层的取消按钮）记取消。都按服务的 `archiveRecordingID` 记，它在每次 `startWithSession:` 时清空、开麦时设上，开麦前的失败不会记到上一条上。
 - 存档经 `MSIMEVoiceArchiving` 协议交给 `MSIMEVoiceInputService.archive`，由输入法进程启动时设置。单元测试不设置，所以测试程序不碰钥匙串和磁盘；`VoiceArchive.mm`、`VoiceHistoryView.mm` 只编进输入法本体。
@@ -41,9 +43,11 @@ Status: implemented
 - 在 Objective-C 里用 CryptoKit/CommonCrypto 加密：少一层 FFI。但 CommonCrypto 没有公开的 AEAD，CryptoKit 只有 Swift 接口；仓库已有同一套 XChaCha20-Poly1305 和测试方式，格式放在 Rust 里也能直接用 cargo 测。
 - 密钥放进 iCloud 钥匙串，换 Mac 后历史还能读：需要带 Team ID 的签名和钥匙串访问组，本机自签名证书做不到。维护者接受换 Mac 后历史从空开始。
 
+- 始终强制由登录钥匙串托管密钥：在带 Apple Developer Team ID 的公证分发包上不会因更新弹窗，但本仓本机自签名证书没有 Team ID，每次重编都会改变二进制 `CDHash`、使钥匙串 ACL 失效并在启动输入法时强制弹密码框；维护者明确要求将其改为可选项，因此默认改用本机 `0600` 私密密钥文件并延迟初始化，保留开关以便需要钥匙串托管或读取旧记录时随时切换。
+
 ## Consequences
 
-收益：任何一次录音都能事后回放和重新听写，包括识别失败、超时和进程崩溃的那些；文字历史可查可复制；磁盘上只有密文，密钥只在本机钥匙串里；新 Mac 上构建安装后第一次录音就自动生成密钥，不需要配置。
+收益：任何一次录音都能事后回放和重新听写，包括识别失败、超时和进程崩溃的那些；文字历史可查可复制；磁盘上只有密文；本机默认走 `0600` 私密密钥文件且延迟到实际录音/查看历史才初始化，重编重装输入法零钥匙串密码弹窗，同时保留「用登录钥匙串保护录音密钥」开关供按需启用或兼容旧版钥匙串记录；新 Mac 上构建安装后第一次录音就自动生成密钥，不需要配置。
 
 代价：每分钟录音约 1.9 MB，默认 24 小时后删除；文字默认永久保留，长期会积累很多小文件。钥匙串里的密钥丢了（删掉条目、换机器）旧记录就解不开，列表只报「无法解密」的条数。外部 provider socket 和过短的录音不存档。重新听写不支持系统语音识别和外部 provider socket。
 
