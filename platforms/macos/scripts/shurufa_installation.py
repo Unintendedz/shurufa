@@ -33,11 +33,15 @@ def registered_paths(dump):
 
 
 def unregister(path):
+    dump = subprocess.check_output([LSREGISTER, "-dump"], text=True)
+    target = path.resolve()
+    if not any(existing.resolve() == target for existing in registered_paths(dump)):
+        return
     result = subprocess.run([LSREGISTER, "-u", str(path)], capture_output=True, text=True)
     if result.returncode:
         # 没登记过的 bundle 也返回失败；以注销后的登记表为准。
         dump = subprocess.check_output([LSREGISTER, "-dump"], text=True)
-        if path in registered_paths(dump):
+        if any(existing.resolve() == target for existing in registered_paths(dump)):
             raise RuntimeError(f"无法注销：{path}: {result.stderr}")
 
 
@@ -163,15 +167,26 @@ def verify(destination):
     paths = registered_paths(subprocess.check_output([LSREGISTER, "-dump"], text=True))
     if not installation_matches(paths, processes, destination):
         raise RuntimeError("安装后登记或进程不是唯一的安装版，请保留日志检查；没有切换当前输入源")
-    entries = enabled_input_source_entries(*(
-        plistlib.loads(subprocess.check_output(["defaults", "export", domain, "-"]))
-        for domain in ("com.apple.HIToolbox", "com.apple.inputsources")))
     info = plistlib.loads((destination / "Contents/Info.plist").read_bytes())
     declared = set(info["ComponentInputModeDict"]["tsInputModeListKey"])
+    # TISEnableInputSource 写入 cfprefsd 存在百毫秒级异步落盘，轮询最多 3 秒再判定缺失。
+    entries = []
+    for _ in range(30):
+        entries = enabled_input_source_entries(*(
+            plistlib.loads(subprocess.check_output(["defaults", "export", domain, "-"]))
+            for domain in ("com.apple.HIToolbox", "com.apple.inputsources")))
+        if input_source_preferences_match(entries, declared):
+            break
+        time.sleep(0.1)
     if not input_source_preferences_match(entries, declared):
         raise RuntimeError("TIS 登记可见但系统启用列表缺少有效的 Shurufa 输入源；刷新尚未通过验收")
+    live_enabled = subprocess.check_output(
+        [str(destination / "Contents/MacOS/Shurufa"), "--input-source-enabled"], text=True).strip()
+    if live_enabled != "true":
+        raise RuntimeError("Shurufa 父输入源未在实时 TIS 已启用列表中生效；刷新尚未通过验收")
     print(json.dumps({"registered_paths":[str(path) for path in paths],
         "processes":[{"pid":pid,"executable":str(path)} for pid,path in processes],
+        "live_tis_enabled": True,
         "enabled_input_sources":[entry for entry in entries if entry.get("Bundle ID") == IDENTIFIER]}, ensure_ascii=False))
 
 

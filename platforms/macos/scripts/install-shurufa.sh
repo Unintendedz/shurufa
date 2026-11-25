@@ -17,11 +17,16 @@ python3 "$root/platforms/macos/scripts/shurufa_installation.py" prepare "$destin
 if [[ -e "$destination" ]]; then
   backup="$HOME/Library/Application Support/Shurufa Installation Backups/$(date +%Y%m%d-%H%M%S)"
   mkdir -p "$backup"
-  mv "$destination" "$backup/Shurufa.app"
-  python3 "$root/platforms/macos/scripts/shurufa_installation.py" unregister "$backup/Shurufa.app"
-  python3 "$root/platforms/macos/scripts/shurufa_installation.py" preserve "$backup/Shurufa.app"
+  # 直接以非 .app 目录名做全量备份并改名 SavedContents，全程不把已安装的 Shurufa.app 移走、
+  # 也不对它执行 lsregister -u，避免 macOS 26/27 LaunchServices 收到注销事件而把 Shurufa 移出输入法菜单。
+  ditto "$destination" "$backup/Shurufa.bundle-backup"
+  mv "$backup/Shurufa.bundle-backup/Contents" "$backup/Shurufa.bundle-backup/SavedContents"
+  # 保留 ~/Library/Input Methods/Shurufa.app 路径与目录 inode 原地同步更新。
+  rsync -a --delete "$staging/Shurufa.app/" "$destination/"
+else
+  mv "$staging/Shurufa.app" "$destination"
 fi
-mv "$staging/Shurufa.app" "$destination"
+codesign --verify --deep --strict "$destination"
 lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 python3 "$root/platforms/macos/scripts/shurufa_installation.py" unregister "$source_bundle"
 "$lsregister" -f "$destination"
@@ -38,10 +43,14 @@ fi
 "$executable" --migrate-grammar-model
 "$executable" --migrate-inline-emoji
 set +e
-# 只登记新包，不停用再启用：macOS 27 上 TISEnableInputSource 对键盘输入模式返回 noErr 却不生效，
-# 先停用会让 Shurufa 从输入菜单消失，用户只能手动删掉再添加。已启用的模式按 bundle ID 记录，原地替换后照常可用。
+# 登记新包并确保父容器与至少一个有效模式在实时 TIS 已启用列表中在线（绝不停用、绝不抢切当前输入源）：
+# 若此前因系统升级或旧安装器导致父容器处于 disabled 状态，--ensure-input-source-enabled 会即时补齐，免去手动删加。
 "$executable" --register-input-source
 registration=$?
+if [[ "$registration" -eq 0 ]]; then
+  "$executable" --ensure-input-source-enabled
+  registration=$?
+fi
 "$executable" --input-source-registered
 listed=$?
 set -e

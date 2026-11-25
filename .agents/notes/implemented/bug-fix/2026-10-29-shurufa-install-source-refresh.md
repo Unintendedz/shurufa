@@ -10,9 +10,21 @@ Status: implemented
 
 ## Decision
 
-Shurufa 安装器在注销旧登记之前只读保存已启用模式，然后调用新的安装专用刷新命令：先停用旧模式再停用父来源、读回停用状态、登记新包、重新取得来源对象、先启用父来源，再恢复安装前仍被新包声明的模式。没有可恢复模式时启用主模式 Hans。已退役模式不恢复，新可选模式不擅自加入。普通启动与通用重新登记继续保留原语义。
+### 2026-11-25 更新：原地覆盖安装 + 实时 TIS 父输入源在线自愈（替代「移走再注销」路径）
 
-所有操作只通过 TIS 接口完成，不直接改写 HIToolbox plist，不调用选择输入源接口，不重启系统进程。API 返回 noErr 还必须读回启用和可选择属性；刷新失败不能被“注册表可枚举”掩盖。安装后另查 `AppleEnabledInputSources`，要求存在本 bundle 的有效父来源或已声明模式，拒绝旧 Roman 等无效模式条目。父来源是模式容器，正常情况下不可选择；验收的是其已启用以及实际模式可选择。
+在 macOS 27 实机复测中定位到「每次重编重装后必须到系统设置删除 Shurufa 再重新添加」的直接根因：
+
+1. `install-shurufa.sh` 先把已安装的 `~/Library/Input Methods/Shurufa.app` `mv` 到备份目录，再对那份唯一的已注册 bundle 执行 `lsregister -u`，导致 LaunchServices 发出注销事件，macOS（`TextInputMenuAgent`）随之把父输入源 `dev.shurufa.inputmethod.Shurufa` 置为 `enabled=false` 并从实时已启用列表 `TISCreateInputSourceList(nil, false)` 中移除；
+2. 随后的 `--register-input-source` 在 `includeAllInstalled=true` 下仍能看到子模式 `.Hans` 呈默认 `enabled=true`，于是判定 `previouslyInstalled == YES` 早返回，不再重新启用父容器；而原有的 `verify` 只查持久 plist 未查实时 TIS 父源，导致父源离线被漏检。
+
+为此将安装流程更新为两层根治：
+
+1. **全程保留安装路径与 inode 原地同步（`install-shurufa.sh`、`shurufa_installation.py`）**：直接用 `ditto` 备份到非 `.app` 目录 `Shurufa.bundle-backup` 并改名 `SavedContents`，再用 `rsync -a --delete` 原地同步新包内容到 `~/Library/Input Methods/Shurufa.app/` 并 `codesign --verify --deep --strict`。整个安装过程不再移走已安装的 `Shurufa.app`，也绝不对已安装副本执行 `lsregister -u`；`unregister()` 同步增加先查 `registered_paths` 仅在确实登记时才调 `lsregister -u` 的保护，避免对未登记的构建目录发出多余注销事件。
+2. **只补启用、永不停用的实时 TIS 自愈与双层验收（`input_method_main.mm`、`shurufa_installation.py`）**：新增 `--ensure-input-source-enabled`，在 `--register-input-source` 之后检查实时 `TISCreateInputSourceList(bundleFilter, false)`；仅当父容器 `dev.shurufa.inputmethod.Shurufa` 或全部有效模式缺失于实时已启用列表时，对父容器及当前已启用且在新包 `Info.plist` 声明范围内的模式（无则回落主模式 `.Hans`）调用 `TISEnableInputSource` 并发出 `AppleInstalled/EnabledInputSourcesChangedNotification` 通知（永不调用 `TISDisableInputSource`，永不抢切当前输入源）。`verify` 阶段同时轮询 `cfprefsd` 落盘（最长 3 秒，检查 `com.apple.HIToolbox` 与 `com.apple.inputsources`）并强制核验 `Shurufa --input-source-enabled == true`，确保父容器实时在线才算安装通过。
+
+### 早期基线决策（2026-10-29）
+
+早期曾引入 `--refresh-installed-input-sources` 的 disable/register/enable 刷新接口并保留其单测，但实测在 macOS 27 上先调 `TISDisableInputSource` 反而会令输入源掉出菜单，后续已改为保留在代码中的兼容入口、由安装脚本走不调用 `TISDisableInputSource` 的原地替换与在线自愈路径。
 
 保留既有 `mode_sync` 安全日志。用户已停止微信调查和事件采样，本批不增加为该调查准备的激活/停用日志，也不再启动事件监听。
 

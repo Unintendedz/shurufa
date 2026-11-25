@@ -110,6 +110,81 @@ int main(int argc, const char *argv[]) {
                 }, TISEnableInputSource);
             return status == noErr ? 0 : 1;
         }
+        if (argc == 2 && std::strcmp(argv[1], "--ensure-input-source-enabled") == 0) {
+            if (!MSIMEEditionIsShurufa()) return 1;
+            NSURL *bundleURL = NSBundle.mainBundle.bundleURL;
+            NSString *identifier = NSBundle.mainBundle.bundleIdentifier;
+            NSString *primaryMode = [identifier stringByAppendingString:@".Hans"];
+            NSString *modePrefix = [identifier stringByAppendingString:@"."];
+            const OSStatus regStatus = TISRegisterInputSource((__bridge CFURLRef)bundleURL);
+            if (regStatus != noErr) return 1;
+            // 检查实时已启用列表（includeAllInstalled = false）：若父容器与至少一个模式均已在线启用，不作任何改动。
+            NSDictionary *bundleFilter = @{(__bridge NSString *)kTISPropertyBundleID: identifier};
+            BOOL parentLive = NO;
+            BOOL modeLive = NO;
+            CFArrayRef liveList = TISCreateInputSourceList((__bridge CFDictionaryRef)bundleFilter, false);
+            if (liveList) {
+                for (CFIndex i = 0; i < CFArrayGetCount(liveList); ++i) {
+                    TISInputSourceRef src = (TISInputSourceRef)CFArrayGetValueAtIndex(liveList, i);
+                    void *prop = TISGetInputSourceProperty(src, kTISPropertyInputSourceID);
+                    if (!prop || CFGetTypeID(prop) != CFStringGetTypeID()) continue;
+                    NSString *sid = (__bridge NSString *)prop;
+                    if ([sid isEqualToString:identifier]) parentLive = YES;
+                    else if ([sid hasPrefix:modePrefix]) modeLive = YES;
+                }
+                CFRelease(liveList);
+            }
+            if (parentLive && modeLive) return 0;
+            // 仅在父容器被系统停用或尚无任何模式在线启用时补齐启用（永不调用 TISDisableInputSource，永不切换当前输入源）。
+            CFArrayRef installed = TISCreateInputSourceList((__bridge CFDictionaryRef)bundleFilter, true);
+            if (!installed || CFArrayGetCount(installed) == 0) {
+                if (installed) CFRelease(installed);
+                return 1;
+            }
+            NSDictionary *declaredDict = NSBundle.mainBundle.infoDictionary[@"ComponentInputModeDict"][@"tsInputModeListKey"];
+            NSSet<NSString *> *declaredModes = [declaredDict isKindOfClass:NSDictionary.class]
+                ? [NSSet setWithArray:declaredDict.allKeys] : [NSSet set];
+            TISInputSourceRef parentSource = nullptr;
+            TISInputSourceRef primarySource = nullptr;
+            NSMutableArray *enabledModes = [NSMutableArray array];
+            for (CFIndex i = 0; i < CFArrayGetCount(installed); ++i) {
+                TISInputSourceRef src = (TISInputSourceRef)CFArrayGetValueAtIndex(installed, i);
+                void *prop = TISGetInputSourceProperty(src, kTISPropertyInputSourceID);
+                if (!prop || CFGetTypeID(prop) != CFStringGetTypeID()) continue;
+                NSString *sid = (__bridge NSString *)prop;
+                if ([sid isEqualToString:identifier]) {
+                    parentSource = src;
+                } else if ([sid hasPrefix:modePrefix] && [declaredModes containsObject:sid]) {
+                    if ([sid isEqualToString:primaryMode]) primarySource = src;
+                    void *en = TISGetInputSourceProperty(src, kTISPropertyInputSourceIsEnabled);
+                    if (en && CFGetTypeID(en) == CFBooleanGetTypeID() && CFBooleanGetValue((CFBooleanRef)en)) {
+                        [enabledModes addObject:(__bridge id)src];
+                    }
+                }
+            }
+            if (!parentSource) {
+                CFRelease(installed);
+                return 1;
+            }
+            OSStatus status = TISEnableInputSource(parentSource);
+            if (status == noErr) {
+                if (enabledModes.count > 0) {
+                    for (id obj in enabledModes) {
+                        const OSStatus rc = TISEnableInputSource((__bridge TISInputSourceRef)obj);
+                        if (rc != noErr) status = rc;
+                    }
+                } else if (primarySource) {
+                    status = TISEnableInputSource(primarySource);
+                } else {
+                    status = fnfErr;
+                }
+            }
+            CFRelease(installed);
+            for (NSString *name in @[@"AppleInstalledInputSourcesChangedNotification", @"AppleEnabledInputSourcesChangedNotification"]) {
+                [NSDistributedNotificationCenter.defaultCenter postNotificationName:name object:nil userInfo:nil deliverImmediately:YES];
+            }
+            return status == noErr ? 0 : 1;
+        }
         if (MSIMEShouldRefreshInstalledInputSources(argc, argv)) {
             if (!MSIMEEditionIsShurufa()) return 1;
             NSDictionary *modes = NSBundle.mainBundle.infoDictionary[@"ComponentInputModeDict"][@"tsInputModeListKey"];

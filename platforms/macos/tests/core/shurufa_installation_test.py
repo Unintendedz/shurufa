@@ -4,6 +4,7 @@ import plistlib
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 spec = importlib.util.spec_from_file_location(
     "installation", Path(__file__).parents[2] / "scripts/shurufa_installation.py")
@@ -92,6 +93,13 @@ class InstallationTests(unittest.TestCase):
         ])
         self.assertEqual(installation.registered_paths(dump), [
             Path("/synthetic/Input Methods/Shurufa.app"), Path("/synthetic/build/Shurufa.app")])
+
+    def test_unregister_skips_lsregister_when_path_not_registered(self):
+        dump = "path: /synthetic/Input Methods/Shurufa.app (0x1234)\nidentifier: " + installation.IDENTIFIER
+        with mock.patch.object(installation.subprocess, "check_output", return_value=dump), \
+             mock.patch.object(installation.subprocess, "run") as run_mock:
+            installation.unregister(Path("/synthetic/unregistered/Shurufa.app"))
+            run_mock.assert_not_called()
 
     def test_backup_preserves_all_files_and_can_be_restored(self):
         with tempfile.TemporaryDirectory() as directory:
