@@ -763,7 +763,7 @@ mod tests {
             .filter(|edition| edition.features.tab_stroke_filter)
             .map(|edition| edition.id.as_str())
             .collect();
-        assert_eq!(offering, ["full", "shurufa"]);
+        assert_eq!(offering, ["full"]);
         for id in offering {
             let edition = Edition::by_id(id).unwrap();
             assert!(edition

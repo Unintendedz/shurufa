@@ -70,18 +70,10 @@ add_executable(desktop-settings-launcher-test tests/settings/DesktopSettingsLaun
 target_compile_options(desktop-settings-launcher-test PRIVATE -fobjc-arc -UNDEBUG -Wall -Wextra -Werror)
 target_link_libraries(desktop-settings-launcher-test PRIVATE "-framework AppKit")
 add_test(NAME desktop-settings-launcher COMMAND desktop-settings-launcher-test)
-add_executable(shared-keyboard-host-test ../../crates/host-macos/native/keyboard_test.mm)
-target_compile_options(shared-keyboard-host-test PRIVATE -fobjc-arc -UNDEBUG -Wall -Wextra -Werror)
-target_link_libraries(shared-keyboard-host-test PRIVATE "-framework AppKit" "-framework CoreGraphics")
-add_test(NAME shared-keyboard-host COMMAND shared-keyboard-host-test)
-add_executable(shared-uninstaller-test ../../crates/host-macos/native/uninstaller_test.mm ../../crates/host-macos/native/uninstaller.mm)
+add_executable(shared-uninstaller-test tests/core/UninstallerTest.mm src/core/Uninstaller.mm)
 target_compile_options(shared-uninstaller-test PRIVATE -fobjc-arc -UNDEBUG -Wall -Wextra -Werror)
 target_link_libraries(shared-uninstaller-test PRIVATE "-framework Foundation" "-framework Security")
 add_test(NAME shared-uninstaller COMMAND shared-uninstaller-test)
-add_executable(shared-file-picker-test ../../crates/host-macos/native/file_picker_test.mm ../../crates/host-macos/native/file_picker.mm)
-target_compile_options(shared-file-picker-test PRIVATE -fobjc-arc -UNDEBUG -Wall -Wextra -Werror)
-target_link_libraries(shared-file-picker-test PRIVATE "-framework AppKit" "-framework UniformTypeIdentifiers")
-add_test(NAME shared-file-picker COMMAND shared-file-picker-test)
 set(MSIME_HOST_LIBRARY "${CMAKE_CURRENT_SOURCE_DIR}/../../target/debug/libmsime_host_api.a" CACHE FILEPATH "Rust host static library for this architecture")
 if(NOT EXISTS "${MSIME_HOST_LIBRARY}")
   message(FATAL_ERROR "Build msime-host-api with Cargo first")
@@ -120,7 +112,7 @@ target_link_libraries(usage-reporting-termination-test PRIVATE apple-client)
 add_test(NAME usage-reporting-termination COMMAND usage-reporting-termination-test)
 set_tests_properties(usage-reporting-termination PROPERTIES TIMEOUT 60)
 # src/cloud 的 CloudClipboardClient、CloudClipboardWindowController、CloudDictionaryClient、CloudURLSession 是账号和云端改走 Rust（#8201）以前的 Objective-C 实现，输入法里已经没有代码引用它们，不再编进输入法；它们仍由下面的 cloud-clipboard-deletion、cloud-clipboard-selection、cloud-dictionary-client 三个测试目标编译，scripts/test-macos-cloud-query-encoding.py 和 test-macos-cloud-redirect-policy.py 也读它们的源码，所以文件留着，删不删由负责人定。同一批里没人引用的 CloudFileTransfer 和 src/core/Account{AuthClient,Keychain,SessionManager,WindowController} 已经删掉。
-add_executable(MSIMEClientInputMethod MACOSX_BUNDLE src/input/input_method_main.mm src/settings/PreferencesWindowController.mm src/core/SupportWindowController.mm src/voice/VoiceInputService.mm src/voice/VoiceWaveOverlay.mm src/voice/VoiceCuePlayer.mm src/voice/VoiceAudioMuter.mm src/voice/VoiceSettings.mm src/voice/VoiceProviderSettings.mm src/voice/VoiceArchive.mm src/voice/VoiceHistoryView.mm src/voice/TextStreamSupport.mm src/voice/OpenLessImport.mm src/input/InputController.mm src/input/InputModeHUDPanel.mm src/input/InputModeStatusItem.mm src/candidate/CandidateSkinAppearance.mm src/settings/AppearancePreferences.mm src/core/DiagnosticLog.cpp src/core/BoundedFileReader.mm src/candidate/CandidateSkin.cpp src/candidate/CandidateSkinPreviewView.mm src/candidate/SkinSettingsView.mm src/core/ChineseTextConversion.mm src/settings/ShuangpinKeymapPanel.mm src/input/InputSourceRegistration.mm src/core/FloatingToolbarPanel.mm src/core/UpdateController.mm src/dictionary/DictionaryWindowController.mm src/core/ClientDictionaryRuntime.mm src/dictionary/DictionaryInstaller.mm ../../crates/host-macos/native/uninstaller.mm)
+add_executable(MSIMEClientInputMethod MACOSX_BUNDLE src/input/input_method_main.mm src/settings/PreferencesWindowController.mm src/core/SupportWindowController.mm src/voice/VoiceInputService.mm src/voice/VoiceWaveOverlay.mm src/voice/VoiceCuePlayer.mm src/voice/VoiceAudioMuter.mm src/voice/VoiceSettings.mm src/voice/VoiceProviderSettings.mm src/voice/VoiceArchive.mm src/voice/VoiceHistoryView.mm src/voice/TextStreamSupport.mm src/voice/OpenLessImport.mm src/input/InputController.mm src/input/InputModeHUDPanel.mm src/input/InputModeStatusItem.mm src/candidate/CandidateSkinAppearance.mm src/settings/AppearancePreferences.mm src/core/DiagnosticLog.cpp src/core/BoundedFileReader.mm src/candidate/CandidateSkin.cpp src/candidate/CandidateSkinPreviewView.mm src/candidate/SkinSettingsView.mm src/core/ChineseTextConversion.mm src/settings/ShuangpinKeymapPanel.mm src/input/InputSourceRegistration.mm src/core/FloatingToolbarPanel.mm src/core/UpdateController.mm src/dictionary/DictionaryWindowController.mm src/core/ClientDictionaryRuntime.mm src/dictionary/DictionaryInstaller.mm src/core/Uninstaller.mm)
 target_sources(MSIMEClientInputMethod PRIVATE src/core/AISettingsWindow.mm src/core/ScreenKeyboardPanel.mm src/cloud/CloudCandidateRequest.mm src/core/CustomTranslationBatch.mm src/voice/VoicePCMBuffer.mm src/voice/HTTPVoiceRequest.mm)
 target_sources(MSIMEClientInputMethod PRIVATE src/voice/DoubaoVoiceRequest.mm src/voice/LocalVoiceRequest.mm src/voice/VoiceContextCapture.mm src/voice/LocalPolishServer.mm src/voice/VoicePolishClient.mm src/voice/VoicePipelineHelper.mm src/voice/VoiceEditTracker.mm src/voice/VoiceLearnedToast.mm src/voice/VoiceRecoveryToast.mm)
 target_link_libraries(MSIMEClientInputMethod PRIVATE "-framework Security")
@@ -300,22 +292,12 @@ configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/ewts-MIT.tx
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/MPL-2.0.txt" "${MSIME_LEGAL_DIRECTORY}/MPL-2.0.txt" COPYONLY)
 # The on-device speech runtime staged into Contents/Frameworks below. The upstream archive carries no license file, so the texts come from the copies the other desktops ship: sherpa-onnx's beside its vendored C header, ONNX Runtime's pinned under platforms/linux.
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../shared/voice/third_party/sherpa-onnx/LICENSE" "${MSIME_LEGAL_DIRECTORY}/sherpa-onnx-Apache-2.0.txt" COPYONLY)
-configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../linux/data/licenses/onnxruntime-MIT.txt" "${MSIME_LEGAL_DIRECTORY}/onnxruntime-MIT.txt" COPYONLY)
-configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../linux/data/licenses/onnxruntime-ThirdPartyNotices.txt" "${MSIME_LEGAL_DIRECTORY}/onnxruntime-ThirdPartyNotices.txt" COPYONLY)
-# cppcodec 编进输入法（shared/voice 的百炼请求用它做 Base64），MIT 要求随副本附带版权与许可声明。
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/onnxruntime-MIT.txt" "${MSIME_LEGAL_DIRECTORY}/onnxruntime-MIT.txt" COPYONLY)
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/onnxruntime-ThirdPartyNotices.txt" "${MSIME_LEGAL_DIRECTORY}/onnxruntime-ThirdPartyNotices.txt" COPYONLY)
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../shared/voice/third_party/cppcodec/LICENSE" "${MSIME_LEGAL_DIRECTORY}/cppcodec-MIT.txt" COPYONLY)
 file(GLOB MSIME_LEGAL_RESOURCES CONFIGURE_DEPENDS "${MSIME_LEGAL_DIRECTORY}/*")
 target_sources(MSIMEClientInputMethod PRIVATE ${MSIME_LEGAL_RESOURCES})
 set_source_files_properties(${MSIME_LEGAL_RESOURCES} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/Licenses")
-# 输入法独立安装后也能读取内置辅助码，不依赖旧配置或下载词库目录里是否含有这些表。
-set(MSIME_HELPCODE_RESOURCES "")
-foreach(MSIME_HELPCODE_FILE helpcode.txt zrm_helpcode_big_unique.txt shouyou2_0_helpcode.txt shouyouplus_helpcode.txt xiaohe_helpcode.txt jiajia_helpcode.txt wubi86_helpcode.txt)
-  list(APPEND MSIME_HELPCODE_RESOURCES "${CMAKE_CURRENT_SOURCE_DIR}/../../resources/helpcodes/${MSIME_HELPCODE_FILE}")
-endforeach()
-target_sources(MSIMEClientInputMethod PRIVATE ${MSIME_HELPCODE_RESOURCES})
-set_source_files_properties(${MSIME_HELPCODE_RESOURCES} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/helpcodes")
-# The Dock takes its label from the bundle's filename — not CFBundleDisplayName, CFBundleName or a
-# localized InfoPlist.strings, all of which it ignores here. Naming the product is the only lever.
 set_target_properties(MSIMEClientInputMethod PROPERTIES OUTPUT_NAME "${MSIME_INPUT_METHOD_NAME}")
 # The preferences window runs under NSApplicationActivationPolicyRegular, so the bundle appears in
 # the Dock and needs an icon; without CFBundleIconFile plus the file itself it shows the generic one.
@@ -344,8 +326,8 @@ target_sources(MSIMEClientInputMethod PRIVATE ${MSIME_MENU_ICON_RESOURCES})
 set_source_files_properties(${MSIME_MENU_ICON_RESOURCES} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
 # The voice start/end cues are the product's own, not system sounds. They are staged straight from the Windows installer's copy rather than adding another copy to the tree; VoiceCuePlayer looks them up in Resources/audios, mirroring the assets/audios layout Windows installs.
 set(MSIME_VOICE_CUE_RESOURCES
-  "${CMAKE_CURRENT_SOURCE_DIR}/../windows/installer/assets/audios/start.mp3"
-  "${CMAKE_CURRENT_SOURCE_DIR}/../windows/installer/assets/audios/end.mp3")
+  "${CMAKE_CURRENT_SOURCE_DIR}/resources/audios/start.mp3"
+  "${CMAKE_CURRENT_SOURCE_DIR}/resources/audios/end.mp3")
 target_sources(MSIMEClientInputMethod PRIVATE ${MSIME_VOICE_CUE_RESOURCES})
 set_source_files_properties(${MSIME_VOICE_CUE_RESOURCES} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/audios")
 # 内置音效包由 scripts/generate_sound_packs.py 合成，每个包一个文件夹，放在 Resources/sound-packs 下：输入法和设置页把这个目录作为内置包根目录告诉 client-services。放在 EngineResources 旁边而不是里面，因为那个目录必须恰好只装词库锁所固定的内容。
@@ -418,8 +400,8 @@ if(MSIME_EDITION STREQUAL "shurufa")
     OUTPUT_VARIABLE MSIME_LOCAL_VOICE_HELPER_NAME OUTPUT_STRIP_TRAILING_WHITESPACE
     COMMAND_ERROR_IS_FATAL ANY)
   set(MSIME_SHURUFA_RESOURCES "${CMAKE_CURRENT_SOURCE_DIR}/../../target/macos/EngineResources")
-  if(NOT EXISTS "${MSIME_SHURUFA_RESOURCES}/sentence-model.safetensors")
-    message(FATAL_ERROR "Stage the Shurufa dictionaries and neural model before configuring its bundle")
+  if(NOT EXISTS "${MSIME_SHURUFA_RESOURCES}/msime-pinyin.db")
+    message(FATAL_ERROR "Stage the Shurufa core dictionaries before configuring its bundle")
   endif()
   file(GLOB_RECURSE MSIME_SHURUFA_RESOURCE_FILES CONFIGURE_DEPENDS "${MSIME_SHURUFA_RESOURCES}/*")
   foreach(resource IN LISTS MSIME_SHURUFA_RESOURCE_FILES)
@@ -428,21 +410,6 @@ if(MSIME_EDITION STREQUAL "shurufa")
     target_sources(MSIMEClientInputMethod PRIVATE "${resource}")
     set_source_files_properties("${resource}" PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/EngineResources/${directory}")
   endforeach()
-  # Tab 笔画筛选（版本表 features.tab_stroke_filter）读 msime-stroke.db；prepare_host 在 EngineResources 旁边的 language-dictionaries 里找它，许可证随数据一起走。
-  set(MSIME_SHURUFA_LANGUAGES "${CMAKE_CURRENT_SOURCE_DIR}/../../target/macos/language-dictionaries")
-  if(NOT EXISTS "${MSIME_SHURUFA_LANGUAGES}/msime-stroke.db" OR NOT EXISTS "${MSIME_SHURUFA_LANGUAGES}/msime-rime_stroke_LICENSE.txt")
-    message(FATAL_ERROR "Stage msime-stroke.db and its licence (scripts/fetch_language_dictionaries.py, then stage-resources.sh) before configuring the Shurufa bundle")
-  endif()
-  file(GLOB MSIME_SHURUFA_LANGUAGE_FILES CONFIGURE_DEPENDS "${MSIME_SHURUFA_LANGUAGES}/*")
-  target_sources(MSIMEClientInputMethod PRIVATE ${MSIME_SHURUFA_LANGUAGE_FILES})
-  set_source_files_properties(${MSIME_SHURUFA_LANGUAGE_FILES} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/language-dictionaries")
-  # 「停顿后精排」（sentence_association.neural_desktop）的模型：host-api 的 settled_model_beside 在 EngineResources 旁边的 settled-model 里找它。
-  set(MSIME_SHURUFA_SETTLED_MODEL "${CMAKE_CURRENT_SOURCE_DIR}/../../target/macos/settled-model/sentence-model-desktop.safetensors")
-  if(NOT EXISTS "${MSIME_SHURUFA_SETTLED_MODEL}")
-    message(FATAL_ERROR "Stage the settled-rerank model (scripts/fetch_settled_model.py, then stage-resources.sh) before configuring the Shurufa bundle")
-  endif()
-  target_sources(MSIMEClientInputMethod PRIVATE "${MSIME_SHURUFA_SETTLED_MODEL}")
-  set_source_files_properties("${MSIME_SHURUFA_SETTLED_MODEL}" PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/settled-model")
 endif()
 # 本地流式识别（TextStream）：输入法 spawn Contents/Resources/textstream/shurufa-textstream，它在自身目录里找 worker；install-runtime.sh 随包，由设置窗口调用，把 Python 运行环境和模型装进用户的 Application Support。
 set(MSIME_TEXTSTREAM_FILES shurufa-textstream textstream_worker.py install-runtime.sh requirements.lock LICENSE-TextStream)
@@ -878,7 +845,7 @@ target_link_libraries(runtime-options-refresh-test PRIVATE apple-client "-framew
 add_test(NAME runtime-options-refresh COMMAND runtime-options-refresh-test)
 add_executable(typing-statistics-notification-test
     tests/core/TypingStatisticsNotificationTest.mm
-    ../../crates/host-macos/native/dictionary.mm)
+    src/core/DictionaryNotification.mm)
 target_compile_options(typing-statistics-notification-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(typing-statistics-notification-test PRIVATE "-framework Foundation")
 add_test(NAME typing-statistics-notification COMMAND typing-statistics-notification-test)
@@ -1273,10 +1240,6 @@ add_executable(candidate-panel-test tests/candidate/CandidatePanelTests.mm src/c
 target_compile_options(candidate-panel-test PRIVATE -fobjc-arc -Wall -Wextra -Werror)
 target_link_libraries(candidate-panel-test PRIVATE apple-client "-framework AppKit" "-framework InputMethodKit" "-framework QuartzCore" "-framework ImageIO")
 add_test(NAME candidate-panel COMMAND candidate-panel-test)
-# The shared gloss-sense rule (shared/input/GlossSenses.h) pinned case by case, and the Windows, Linux and macOS forwarders asked the same questions, because a sense that stops being offered on one host looks like a dictionary difference rather than a bug.
-add_executable(translation-senses-agreement-test tests/candidate/TranslationSensesAgreementTest.cpp)
-target_compile_options(translation-senses-agreement-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
-add_test(NAME translation-senses-agreement COMMAND translation-senses-agreement-test)
 # 候选释义的词性显示与单条释义两个开关，纯逻辑，不依赖窗口。
 add_executable(candidate-translation-display-test tests/core/CandidateTranslationDisplayTest.cpp)
 target_compile_options(candidate-translation-display-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
@@ -1331,11 +1294,6 @@ add_executable(candidate-pointer-menu-test tests/candidate/CandidatePointerMenuT
 target_compile_options(candidate-pointer-menu-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(candidate-pointer-menu-test PRIVATE "-framework AppKit")
 add_test(NAME candidate-pointer-menu COMMAND candidate-pointer-menu-test)
-
-add_executable(settings-glass-test tests/settings/SettingsGlassTest.mm)
-target_compile_options(settings-glass-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
-target_link_libraries(settings-glass-test PRIVATE "-framework AppKit" "-framework WebKit" "-framework IOKit")
-add_test(NAME settings-glass COMMAND settings-glass-test)
 # Where the candidate window goes: under the caret, flipped above it when there is no room, and
 # clamped into the display it is on - including one whose coordinates are negative.
 add_executable(candidate-placement-test tests/candidate/CandidatePlacementTest.mm)
@@ -1523,7 +1481,7 @@ add_test(NAME voice-audio-muter COMMAND voice-audio-muter-test)
 
 add_executable(voice-cue-player-test tests/voice/VoiceCuePlayerTest.mm src/voice/VoiceCuePlayer.mm)
 target_compile_options(voice-cue-player-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
-target_compile_definitions(voice-cue-player-test PRIVATE MSIME_VOICE_CUE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../windows/installer/assets/audios")
+target_compile_definitions(voice-cue-player-test PRIVATE MSIME_VOICE_CUE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/resources/audios")
 target_link_libraries(voice-cue-player-test PRIVATE "-framework AppKit" "-framework AVFoundation" "-framework CoreAudio")
 add_test(NAME voice-cue-player COMMAND voice-cue-player-test)
 # 播放会卡在无人应答的麦克风授权框上时，测试跑完加载断言后以 77 退出，CTest 记为跳过而不是挂到超时。

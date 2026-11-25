@@ -1,0 +1,11 @@
+{
+  "source_commit": "128a332cabc5fa42b1cf5f827033ad5697ff528b",
+  "artifacts": [
+    {
+      "name": "msime-pinyin.db",
+      "url": "https://github.com/metasequoiaime/msime-dictionary/releases/download/dict-v2.0.24/msime-pinyin.db",
+      "sha256": "7c672458e6068c22c07b33b146c5a07f4e734959abc3bddd2784fe18a7582a76",
+      "size": 73723904
+    }
+  ]
+}

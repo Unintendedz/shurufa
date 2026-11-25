@@ -1,8 +1,17 @@
 [workspace]
-members = ["crates/path-trust", "crates/client-base", "crates/client-core", "crates/client-providers", "crates/client-services", "crates/engine", "crates/engine-wasm", "crates/input-runtime", "crates/host-api", "crates/host-windows", "crates/host-macos", "crates/tauri-mobile-platform", "crates/ios-native-ffi", "crates/mcp-server", "crates/dict-builder", "crates/backend-engine", "crates/pack-tool", "crates/script-runtime", "crates/script-sdk", "crates/clipboard-relay", "apps/desktop/src-tauri"]
-# Everything except the desktop app: a bare `cargo test` should cover the
-# libraries, and msime-desktop needs a built frontend and a packaged platform
-# bundle before its build script will run.
+members = [
+    "crates/path-trust",
+    "crates/client-base",
+    "crates/client-core",
+    "crates/client-providers",
+    "crates/client-services",
+    "crates/engine",
+    "crates/input-runtime",
+    "crates/host-api",
+    "crates/dict-builder",
+    "crates/script-runtime",
+    "crates/script-sdk",
+]
 default-members = [
     "crates/path-trust",
     "crates/client-base",
@@ -10,14 +19,8 @@ default-members = [
     "crates/client-providers",
     "crates/client-services",
     "crates/engine",
-    "crates/engine-wasm",
     "crates/input-runtime",
     "crates/host-api",
-    "crates/host-windows",
-    "crates/host-macos",
-    "crates/tauri-mobile-platform",
-    "crates/ios-native-ffi",
-    "crates/mcp-server",
     "crates/script-runtime",
 ]
 resolver = "2"
@@ -27,7 +30,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.89"
 license = "GPL-3.0-only"
-repository = "https://github.com/metasequoiaime/msime"
+repository = "https://github.com/Unintendedz/shurufa"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -45,43 +48,17 @@ tokio = "1"
 rustix = "1.1"
 libc = "0.2"
 uuid = "1"
-tauri = "2"
 
-# Inherited by every member through `[lints] workspace = true`. `deny` rather
-# than `forbid` on purpose: the five FFI crates cannot honour an unoverridable
-# ban, and under `forbid` their only option was to inherit nothing at all - so
-# the policy covered four of nine members and every future lint added here
-# would have missed the same five. Each exemption is now a documented
-# `#![allow(unsafe_code)]` at the crate root instead of an absence.
 [workspace.lints.rust]
 unsafe_code = "deny"
 
-# Smallest dev build tree rather than fastest rebuild: the repo is developed through many parallel worktrees, each with its own target/, and together they fill the disk. No debug info (backtraces keep symbol names but lose file and line) and no incremental cache (about a fifth of target/debug per worktree; edits recompile the whole crate instead). Raise either locally when you need a debugger or faster iteration.
 [profile.dev]
 debug = 0
 incremental = false
 
-# 网页输入法的 wasm 构建（`scripts/build-web-engine.sh`）：体积优先。wasm 上 panic 只能终止实例，unwind 只会增加体积；模块在浏览器 Worker 里运行，宿主靠 `last_panic` 读出 panic 信息，所以 abort 不丢任何东西。
-[profile.wasm-release]
-inherits = "release"
-opt-level = "z"
-lto = "fat"
-codegen-units = 1
-panic = "abort"
-strip = true
-
-# 整句模型的整数点积在每个按键上运行，按 opt-level "z" 编译时 wasm 里的重排比原生慢约七倍，按键延迟 p95 贴着发布门槛；只把这个 crate 换成按速度优化，其余仍按体积优化。
-[profile.wasm-release.package.chinese-ime-lm]
-opt-level = 3
-
-# Local installs of an input method are dev builds (the macOS CMake default links target/debug), and two dependencies sit on the path of every keystroke: the sentence reranker runs on the main thread per key, and every view crosses the host ABI as JSON. Unoptimised, the reranker's integer dot products alone took most of the main thread while typing and stalled the candidate window for seconds. Optimising just these keeps workspace crates quick to rebuild.
-[profile.dev.package.chinese-ime-lm]
-opt-level = 3
-
 [profile.dev.package.serde_json]
 opt-level = 3
 
-# The key-sound mixer renders in the audio callback and decodes music as it plays, so an unoptimised build glitches audibly; kira's documentation asks for these. Local macOS installs are dev builds (above).
 [profile.dev.package.kira]
 opt-level = 3
 
@@ -103,31 +80,6 @@ opt-level = 3
 [profile.dev.package.symphonia-codec-vorbis]
 opt-level = 3
 
-# 脚本插件在按键路径上由 wasmi 解释执行（每个钩子都在会话线程上同步跑完），而本机安装的输入法是 dev 构建（见上）。不优化的解释器每条指令慢一个数量级以上，会把 fuel 预算对应的耗时推出按键延迟的预算；libm 也加上，解释器的浮点指令会调到它。只优化这几个包，工作区自己的 crate 照样编得快。
-[profile.dev.package.msime-script-runtime]
-opt-level = 3
-
-# wasmi 的解释器按条指令尾调用下一条的处理函数，靠 LLVM 把它们优化成跳转（构建脚本在 opt-level 2、3 时选这条路）。打开 debug-assertions 时处理函数里的断言让这一步失效，每执行一条指令栈就深一层：dev 构建里一个死循环的 `candidates` 钩子（125 000 fuel）要 2 到 4 MiB 的原生栈，Windows Server 工作线程默认只有 1 MiB。关掉断言后和 release 一样，256 KiB 的栈跑满任何一个钩子的配额，`tests::a_hook_running_out_of_fuel_fits_a_small_native_stack` 守着它。
-[profile.dev.package.wasmi]
-opt-level = 3
-debug-assertions = false
-
-[profile.dev.package.wasmi_core]
-opt-level = 3
-
-[profile.dev.package.wasmi_ir]
-opt-level = 3
-
-[profile.dev.package.wasmi_collections]
-opt-level = 3
-
-[profile.dev.package.wasmparser]
-opt-level = 3
-
-[profile.dev.package.libm]
-opt-level = 3
-
-# ewts 0.1.3（藏文方案的威利转换）在 `converter.rs:136` 用 `self.ind - 2` 回看，第二个辅音就是 `w` 这类可作下加字的字母时（`bw`、`yw`）`usize` 下溢。release 不检查溢出，回绕后 `get_con_at` 得到 `None`，退回独立的 wa（`བཝ`），这就是用户一直拿到的结果；检查溢出的构建则在这一键 panic。对这一个 crate 关掉检查，dev、release 和任何全局打开 overflow-checks 的构建都得到同一个结果。release 段同时打开 debug-assertions：cargo 只在两者取值不同时才显式传 `-C overflow-checks=off`，否则 `RUSTFLAGS=-Cdebug-assertions`（cargo-fuzz 就是这样构建的）会把溢出检查重新带回来；ewts 里没有 `debug_assert!`，打开它不改变任何行为。上游修复是 emgyrz/ewts-rs#1，上游发版后删掉这两段。fuzz/Cargo.toml 有同样的一段。
 [profile.dev.package.ewts]
 overflow-checks = false
 

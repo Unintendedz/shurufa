@@ -174,40 +174,6 @@ mod tests {
         );
     }
 
-    /// The fragment this repository actually ships, not a synthetic one.
-    ///
-    /// The tests above pin the rules; this one pins that the rules match the file. The fragment was
-    /// vendored from the reference, so a mismatch would mean the contract drifted from the markup -
-    /// and nothing else in this repository reads that file today, so nothing else would notice.
-    #[test]
-    #[cfg_attr(
-        target_os = "android",
-        ignore = "读主机仓库里的文件，设备上没有这份检出"
-    )]
-    fn the_vendored_fragment_renders_a_page_of_candidates() {
-        let fragment = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
-            "../../packages/ui/src/upstream/candidate-themes/vertical_candidate_window_dark.html",
-        );
-        let template = std::fs::read_to_string(&fragment)
-            .unwrap_or_else(|error| panic!("{}: {error}", fragment.display()));
-
-        let page = inflate_candidate_template(&template, "ni,你,拟,泥");
-        assert!(page.contains(r#"<div class="text">ni<span class="cursor"></span></div>"#));
-        for (number, candidate) in [("1", "你"), ("2", "拟"), ("3", "泥")] {
-            assert!(
-                page.contains(&format!(
-                    r#"<span class="cand-no">{number}</span><span class="cand-content">{candidate}</span>"#
-                )),
-                "candidate {number} is missing from the rendered page"
-            );
-        }
-        // Four fields means slots 4-9 are unused, so their rows are cut rather than left blank.
-        assert!(!page.contains(r#"<span class="cand-no">4</span>"#));
-        assert!(!page.contains("Anchor-->\n<div class=\"row-wrapper\">\n  <div class=\"row cand\">\n    <div class=\"text\"><span class=\"cand-no\">5</span>"));
-        // Nothing unfilled is left behind either.
-        assert!(!page.contains("{0}") && !page.contains("{4}"));
-    }
-
     #[test]
     fn scripts_are_inlined_only_when_both_tags_are_there() {
         let page = concat!(

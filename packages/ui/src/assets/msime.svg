@@ -1,6 +1,0 @@
-<!-- 几何取自 platforms/android/res/drawable/splash_mark.xml：面板、边框、一笔描边。 -->
-<svg width="110" height="110" viewBox="0 0 110 110" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <path d="M15 5H95V105H15V5Z" fill="#252525"/>
-  <path d="M15 5H95V105H15V5Z" stroke="#A8DF8E" stroke-width="5"/>
-  <path d="M74.7234 14L35.1501 29.1727L74.7234 40.5522L35.1501 59.518C72.562 65.84 107.728 71.024 33 95" stroke="#FFFFFF" stroke-width="8" stroke-linecap="round"/>
-</svg>

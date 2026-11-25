@@ -2903,55 +2903,6 @@ fn official_phrase_table(kind_parent: &Path, id: &str, text: &str) -> PathBuf {
     target_os = "android",
     ignore = "读主机仓库里的文件，设备上没有这份检出"
 )]
-fn official_packs_match_the_repository_lock() {
-    #[derive(serde::Deserialize)]
-    struct Lock {
-        format_version: u64,
-        packs: Vec<Entry>,
-    }
-    #[derive(serde::Deserialize)]
-    struct Entry {
-        kind: String,
-        id: String,
-    }
-    let lock: Lock =
-        serde_json::from_str(include_str!("../../../../plugins/official-packs.json")).unwrap();
-    assert_eq!(lock.format_version, 1);
-    let ids = |kind: &str| -> Vec<String> {
-        lock.packs
-            .iter()
-            .filter(|entry| entry.kind == kind)
-            .map(|entry| entry.id.clone())
-            .collect()
-    };
-    assert_eq!(ids("script"), BUILTIN_SCRIPT_PACKS);
-    assert_eq!(ids("phrase_table"), BUILTIN_PHRASE_TABLES);
-    assert_eq!(
-        lock.packs.len(),
-        BUILTIN_SCRIPT_PACKS.len() + BUILTIN_PHRASE_TABLES.len(),
-        "official-packs.json 只登记脚本插件和短语表"
-    );
-    for id in BUILTIN_PHRASE_TABLES {
-        assert!(
-            is_builtin(PluginKind::PhraseTable, id) && is_official(PluginKind::PhraseTable, id)
-        );
-    }
-    // 官方 id 和内置音效包、背景音乐包的 id 不重叠，也不是别的类型的保留 id。
-    for id in BUILTIN_SCRIPT_PACKS
-        .iter()
-        .chain(BUILTIN_PHRASE_TABLES.iter())
-    {
-        assert!(!BUILTIN_SOUND_PACKS.contains(id) && !BUILTIN_MUSIC_PACKS.contains(id));
-        assert!(!is_builtin(PluginKind::CommandTable, id));
-    }
-    assert!(!is_official(PluginKind::Sound, DEFAULT_SOUND_PACK));
-}
-
-#[test]
-#[cfg_attr(
-    target_os = "android",
-    ignore = "读主机仓库里的文件，设备上没有这份检出"
-)]
 fn official_phrase_tables_come_from_the_packs_directory_and_stay_off_until_enabled() {
     let root = tempdir().unwrap();
     let bundle = tempdir().unwrap();

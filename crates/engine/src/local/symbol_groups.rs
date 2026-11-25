@@ -17,8 +17,7 @@ use crate::types::{CandidateSource, WordItem};
 pub const SYMBOL_MODE_LIMIT: usize = 200;
 
 const TABLE: &str = include_str!("symbol_groups.tsv");
-const LATEX_TABLE: &str =
-    include_str!("../../../../plugins/phrase_table/latex-symbols/symbols.tsv");
+const LATEX_TABLE: &str = include_str!("latex_symbols.tsv");
 
 /// 表里的一行。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

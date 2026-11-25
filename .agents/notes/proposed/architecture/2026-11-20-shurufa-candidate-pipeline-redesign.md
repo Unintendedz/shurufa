@@ -60,7 +60,7 @@ Status: proposed
 
 ## Historical audit
 
-检索 `.agents/notes/` 后，本提案与以下既有决策存在重叠或取代关系（本篇处于 `proposed` 阶段，各阶段落地并转 `implemented` 时按阶段同步互链或取代）：
+检索 `.agents/notes/` 后，本提案与以下既有决策存在重叠或取代关系（本篇处于 `proposed` 阶段，各阶段落地并转 `implemented` 时按阶段同步互链或取代；后续进一步的单产品减法与三段单向纯管线收敛见 [Shurufa 纯 macOS 单产品减法与三段单向候选管线收敛](2026-11-25-shurufa-pure-macos-pipeline-convergence.md)）：
 
 - [短串神经重排引入长度感知静态先验护栏与首选防抖阈值](../../implemented/bug-fix/2026-11-18-static-prior-guardrail-and-promote-margin.md)：部分重叠，Stage 2/3 统一概率刻度与拟合单一打分器后将被取代。
 - [词网格动宾离合词拆插补边与三字短词悬殊次选首屏让位](../../implemented/bug-fix/2026-11-18-separable-vo-compounds-and-runner-up-gating.md)：部分重叠，Stage 1 `SlotAllocator` 与 Stage 2 概率解码落地后其补边与 `3.8 nat` 规则将被取代，36 例动宾集合转为永久回归用例。
