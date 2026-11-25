@@ -3693,8 +3693,12 @@ impl<E: InputEngine> Runtime<E> {
     }
 
     fn rerank(&mut self) -> bool {
+        // Tier 1 两阶段神经解码开启时，停用旧 4.5 MB 逐键字符模型，杜绝同步首帧与异步 0.6B 模型互相拉扯造成首槽抖动与快敲空格误上屏。
         // 整句改字的候选是光标处一段的替换，按读音长短排好，不参与整句的重排。光标后编辑的首选接着固定的那段，必须留在首位。
-        if !self.cached.conversion.is_empty() || self.cached.caret_edit_suffix {
+        if self.neural_v2_enabled
+            || !self.cached.conversion.is_empty()
+            || self.cached.caret_edit_suffix
+        {
             return false;
         }
         let promote = {

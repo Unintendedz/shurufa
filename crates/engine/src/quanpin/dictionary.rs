@@ -1597,11 +1597,6 @@ impl QuanpinDictionary {
                 } else {
                     1.0
                 };
-                let effective_lead = if exact_dict_leader {
-                    lead_margin + 1.5
-                } else {
-                    lead_margin
-                };
                 let folded = fold_reading(raw);
                 for edge in edges {
                     if edge.start != 0 || edge.end != 2 || edge.value == literal_best.sentence {
@@ -1615,7 +1610,9 @@ impl QuanpinDictionary {
                                     + options.collocation_edge_offset);
                         }
                     }
-                    let leads = score > literal_best.log_prob + effective_lead;
+                    // 首行已命中严格精确词典整词（如 `假设`、`兄台`、`奶子`）时，Tier 0 同步首帧绝不让纠错词提前篡夺第 0 槽，
+                    // 仅将其放入候选池前排（`competitive`）交由 Tier 1 神经模型结合完整语境裁决；无精确字面词时（如 `diannai`）照常救回首位。
+                    let leads = !exact_dict_leader && score > literal_best.log_prob + lead_margin;
                     let competitive = score >= literal_best.log_prob - 3.5;
                     if !leads && !competitive {
                         continue;
@@ -1649,12 +1646,7 @@ impl QuanpinDictionary {
             };
             if can_insert {
                 let exact_dict_leader = has_exact_literal_dict_leader(result, segments);
-                let lead_margin = if exact_dict_leader {
-                    options.typo_lead_margin + 1.5
-                } else {
-                    options.typo_lead_margin
-                };
-                let leads = typo.leads(lead_margin);
+                let leads = !exact_dict_leader && typo.leads(options.typo_lead_margin);
                 let mut at = if leads {
                     0
                 } else {

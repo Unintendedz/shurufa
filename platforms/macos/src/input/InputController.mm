@@ -112,6 +112,7 @@
 #import <IOKit/hid/IOHIDKeys.h>
 #import <IOKit/hid/IOHIDManager.h>
 #include <atomic>
+#include <cmath>
 #include <memory>
 #include <optional>
 #include <unordered_map>
@@ -4354,11 +4355,12 @@ static const NSTimeInterval kSettledRerankPoll = 1.0 / 60.0;
     const uint64_t dispatchedAtNs = _neuralDispatchedAtNs;
     __weak MSIMEInputController *weakSelf = self;
 
-    // 22 ms 无感延迟绘制窗口：若端侧 Metal 推理在 22 ms 内回包则取消定时器单次绘制（0% 闪烁）；
-    // 若超过 22 ms 则准时先绘出 Tier 0 候选，绝不拖慢视觉反馈。
+    // 35 ms 无感延迟绘制窗口（约 2 帧，行内预编辑已于 <2 ms 同步落盘）：
+    // - 35 ms 内回包（覆盖暖态及绝大多数冷预热 Stage A 推理）取消定时器单次直接绘出最终候选，0% 视觉跳变；
+    // - 超过 35 ms 先准时绘出当前候选，随后迟到回包因 `wasDeferred == NO` 强制锁定槽 0 不变、仅升级槽 1..，彻底消灭肉眼可见的首槽跳动。
     dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
     dispatch_source_set_timer(timer,
-                              dispatch_time(DISPATCH_TIME_NOW, static_cast<int64_t>(22ULL * NSEC_PER_MSEC)),
+                              dispatch_time(DISPATCH_TIME_NOW, static_cast<int64_t>(35ULL * NSEC_PER_MSEC)),
                               DISPATCH_TIME_FOREVER,
                               1ULL * NSEC_PER_MSEC);
     dispatch_source_set_event_handler(timer, ^{
@@ -4391,8 +4393,8 @@ static const NSTimeInterval kSettledRerankPoll = 1.0 / 60.0;
         const BOOL wasDeferred = controller->_neuralDeferredRenderPending;
         [controller cancelNeuralDeferredRender];
         const double elapsedMs = static_cast<double>(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - dispatchedAtNs) / 1e6;
-        // 超过 80 ms 迟到回包强制锁定槽 0，防止用户扫视确认首选后发生首槽跳动。
-        const BOOL lockSlot0 = (elapsedMs > 80.0);
+        // 一旦本代候选窗已实际绘出（`!wasDeferred`）或超过 50 ms，硬锁定槽 0 不跳动，仅更新第 2 槽及以后。
+        const BOOL lockSlot0 = !wasDeferred || (elapsedMs > 50.0);
         BOOL appliedMoved = NO;
         if (responseData.length > 0) {
             NSDictionary *applied = [session applyNeuralResponseData:responseData lockSlot0:lockSlot0 error:nil];
@@ -4867,7 +4869,31 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
 // 展示分页不改变 runtime 的固定分页协议；先同步真实高亮，后续空格、标点仍由引擎处理。
 // 只接管正在显示的这一行的翻页：候选窗收起后（上屏、取消）的翻页键照原样交给引擎，不能被上一行的分页吞掉；
 // 上屏后的联想翻页在 runtime 里会清掉联想，同样沿用原来的单次命令。
+/// 盲打高速连敲末字母后立即按空格上屏时，若当前代次的神经解码仍在 35 ms 延迟绘制窗内飞行，
+/// 有界等待剩余毫秒数（至多 35 ms）让已在跑的 Metal 结果先落位再提交，消除快敲空格漏掉语境首选的竞态。
+- (void)awaitInFlightNeuralDecodeBeforeCommit {
+    if (!_neuralDeferredRenderPending || _neuralInFlightGeneration == 0 || !_session) return;
+    if (![self neuralV2Active]) return;
+    if (![_view[@"generation"] isEqual:@(_neuralInFlightGeneration)]) return;
+    const double elapsedMs = static_cast<double>(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - _neuralDispatchedAtNs) / 1e6;
+    if (elapsedMs >= 35.0) return;
+    const uint32_t remMs = static_cast<uint32_t>(std::ceil(35.0 - elapsedMs));
+    const uint64_t targetGen = _neuralInFlightGeneration;
+    NSData *responseData = [[ShurufaNeuralClient sharedClient] waitForDecodeGeneration:targetGen timeoutMs:remMs];
+    if (responseData.length > 0 && [_view[@"generation"] isEqual:@(targetGen)]) {
+        [self cancelNeuralDeferredRender];
+        _neuralInFlightGeneration = 0;
+        NSDictionary *applied = [_session applyNeuralResponseData:responseData lockSlot0:NO error:nil];
+        if (MSIMEStrictBoolean(applied[@"moved"]) && [applied[@"view"] isKindOfClass:NSDictionary.class]) {
+            _view = applied[@"view"];
+        }
+    }
+}
+
 - (NSDictionary *)candidateCommand:(uint32_t)command {
+    if (command == MSIME_COMMIT_CANDIDATE) {
+        [self awaitInFlightNeuralDecodeBeforeCommit];
+    }
     if (_filteredFixedPages && !_expandedCandidates && _panel.isVisible &&
         !MSIMEStrictBoolean(_view[@"prediction"]) && (command == MSIME_NEXT_CANDIDATE || command == MSIME_PREVIOUS_CANDIDATE)) {
         const NSUInteger highlighted = MSIMEAdaptiveHighlightIndex(_adaptiveCandidates, _view);

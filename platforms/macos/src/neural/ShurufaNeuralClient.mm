@@ -15,9 +15,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <string>
 
 namespace {
@@ -191,6 +194,11 @@ int ConnectUnixSocket(NSString *socketPath) {
     NSUInteger _consecutiveFailures;
     double _backoffUntil;
     std::atomic<pid_t> _atomicPID;
+    std::atomic<bool> _atomicWarmed;
+    std::mutex _waitMutex;
+    std::condition_variable _waitCv;
+    uint64_t _completedDecodeGeneration;
+    NSData *_completedDecodeData;
     id _terminateObserver;
 }
 
@@ -217,6 +225,9 @@ int ConnectUnixSocket(NSString *socketPath) {
     _socketFd = -1;
     _socketPath = AllocatePrivateSocketPath(_config.socketPath, instanceTag);
     _atomicPID.store(0, std::memory_order_relaxed);
+    _atomicWarmed.store(false, std::memory_order_relaxed);
+    _completedDecodeGeneration = 0;
+    _completedDecodeData = nil;
 
     dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(
         DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0);
@@ -380,6 +391,26 @@ int ConnectUnixSocket(NSString *socketPath) {
     }
 }
 
+- (nullable NSData *)waitForDecodeGeneration:(uint64_t)generation
+                                   timeoutMs:(uint32_t)timeoutMs {
+    if (generation == 0 || timeoutMs == 0) return nil;
+    // 服务尚未暖机时绝不阻塞空格提交，直接 0 ms 返回交由 Tier 0 秒上屏。
+    if (!_atomicWarmed.load(std::memory_order_relaxed)) return nil;
+
+    const uint32_t boundedMs = std::min<uint32_t>(timeoutMs, 35U);
+    std::unique_lock<std::mutex> lk(_waitMutex);
+    const bool ready = _waitCv.wait_for(
+        lk,
+        std::chrono::milliseconds(boundedMs),
+        [&]() {
+            return _completedDecodeGeneration >= generation || !_atomicWarmed.load(std::memory_order_relaxed);
+        });
+    if (ready && _completedDecodeGeneration == generation) {
+        return _completedDecodeData;
+    }
+    return nil;
+}
+
 - (void)cancelPendingDecodeRequests {
     void (^cancelledCompletion)(NSData * _Nullable, uint64_t, double) = nil;
     uint64_t cancelledGen = 0;
@@ -447,6 +478,12 @@ int ConnectUnixSocket(NSString *socketPath) {
     _hasPendingPrefill = NO;
     os_unfair_lock_unlock(&_lock);
 
+    {
+        std::lock_guard<std::mutex> lk(_waitMutex);
+        _atomicWarmed.store(false, std::memory_order_relaxed);
+    }
+    _waitCv.notify_all();
+
     if (cancelledCompletion) {
         dispatch_async(dispatch_get_main_queue(), ^{
             cancelledCompletion(nil, cancelledGen, 0.0);
@@ -489,7 +526,12 @@ int ConnectUnixSocket(NSString *socketPath) {
         _task = nil;
     }
     _atomicPID.store(0, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lk(_waitMutex);
+        _atomicWarmed.store(false, std::memory_order_relaxed);
+    }
     _serviceWarmed = NO;
+    _waitCv.notify_all();
     if (_socketPath.length) {
         ::unlink(_socketPath.fileSystemRepresentation);
     }
@@ -514,7 +556,9 @@ int ConnectUnixSocket(NSString *socketPath) {
         os_log_error(NeuralClientLog(), "neural_service_crashed status=%d", _task.terminationStatus);
         _task = nil;
         _atomicPID.store(0, std::memory_order_relaxed);
+        _atomicWarmed.store(false, std::memory_order_relaxed);
         _serviceWarmed = NO;
+        _waitCv.notify_all();
         [self recordFailureAndBackoffOnIOQueue];
     }
 }
@@ -553,7 +597,9 @@ int ConnectUnixSocket(NSString *socketPath) {
     if (_task && !_task.running) {
         _task = nil;
         _atomicPID.store(0, std::memory_order_relaxed);
+        _atomicWarmed.store(false, std::memory_order_relaxed);
         _serviceWarmed = NO;
+        _waitCv.notify_all();
         [self recordFailureAndBackoffOnIOQueue];
     }
 
@@ -600,6 +646,7 @@ int ConnectUnixSocket(NSString *socketPath) {
         _task = task;
         _serviceStartedAt = now;
         _serviceWarmed = NO;
+        _atomicWarmed.store(false, std::memory_order_relaxed);
         _atomicPID.store(task.processIdentifier, std::memory_order_relaxed);
         os_log_info(NeuralClientLog(), "neural_service_spawned pid=%d", task.processIdentifier);
     }
@@ -677,6 +724,7 @@ int ConnectUnixSocket(NSString *socketPath) {
                                     respHeader.request_id == reqId;
                     if (ok) {
                         _serviceWarmed = YES;
+                        _atomicWarmed.store(true, std::memory_order_relaxed);
                         if ((respHeader.flags & kFlagOk) != 0 && !respPayload.empty()) {
                             responseData = [NSData dataWithBytes:respPayload.data() length:respPayload.size()];
                         }
@@ -684,6 +732,14 @@ int ConnectUnixSocket(NSString *socketPath) {
                         [self handleTransportFailureOnIOQueue];
                     }
                 }
+                {
+                    std::lock_guard<std::mutex> lk(_waitMutex);
+                    if (decodeGen >= _completedDecodeGeneration) {
+                        _completedDecodeGeneration = decodeGen;
+                        _completedDecodeData = responseData;
+                    }
+                }
+                _waitCv.notify_all();
                 const double elapsedMs = static_cast<double>(MonotonicNowNs() - enqueuedNs) / 1e6;
                 dispatch_async(dispatch_get_main_queue(), ^{
                     decodeCompletion(responseData, decodeGen, elapsedMs);
@@ -704,6 +760,7 @@ int ConnectUnixSocket(NSString *socketPath) {
                                     respHeader.request_id == reqId;
                     if (ok) {
                         _serviceWarmed = YES;
+                        _atomicWarmed.store(true, std::memory_order_relaxed);
                     } else {
                         [self handleTransportFailureOnIOQueue];
                     }

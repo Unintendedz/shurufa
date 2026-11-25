@@ -433,17 +433,26 @@ fn row_answers_key(scheme: u8, row: OrderRow<'_>) -> bool {
         && (corrections_may_lead(scheme) || !row.corrected)
 }
 
-/// 首行已是未纠错整句读法时，后排带 `corrected` 的整句读法是词网格附带的音节纠错句（`typo_lead_margin = INFINITY`），
-/// 不参与模型重排抢占字面整句席位；切分层整体纠错（首行本身带 `corrected`）或词典行居首的场景不受影响。
+/// 首行已是未纠错的全键整句读法或未纠错的全键词典整词（如 `假设`、`奶子`、`兄台`）时，
+/// 后排带 `corrected` 的词网格生成行（如 `建设*`、`孩子*`、`形态*`）属于推测性音节纠错候选，
+/// 不参与无信道惩罚的旧模型重排抢占字面首槽；切分层整体纠错（首行本身带 `corrected`）或词典纠错行不受影响。
 fn speculative_typo_sentence(leader: OrderRow<'_>, row: OrderRow<'_>) -> bool {
     !leader.corrected
-        && SENTENCE_READING_SOURCES.contains(&leader.source)
+        && (SENTENCE_READING_SOURCES.contains(&leader.source)
+            || (DICTIONARY_SOURCES.contains(&leader.source) && leader.answers_key))
         && row.corrected
         && SENTENCE_READING_SOURCES.contains(&row.source)
 }
 
 fn any_corrected_key<'a, R: OrderRowSource<'a> + ?Sized>(scheme: u8, rows: &'a R) -> bool {
-    corrections_may_lead(scheme) && (0..rows.len()).any(|index| rows.get(index).corrected)
+    if !corrections_may_lead(scheme) || rows.is_empty() {
+        return false;
+    }
+    let leader = rows.get(0);
+    (0..rows.len()).any(|index| {
+        let row = rows.get(index);
+        row.corrected && !speculative_typo_sentence(leader, row)
+    })
 }
 
 /// 判断 `rerank_pick` 是否需要运行模型，提前拒绝时宿主无需把停顿模型移出会话线程。
@@ -2261,5 +2270,28 @@ mod tests {
             runner_up_order(0, &ScoredOrderRows::new(&oov_rows, &oov_scores)),
             None
         );
+    }
+
+    #[test]
+    fn rerank_preserves_trusted_dictionary_leader_over_speculative_typo_sentence() {
+        let mut speculative_typo = row("建设", LATTICE_SOURCE);
+        speculative_typo.corrected = true;
+        let rows = [row("假设", 0), speculative_typo, row("架设", 0)];
+        let mut reranker = Reranker::new(std::sync::Arc::new(favouring_model(
+            &['假', '建', '架', '设'],
+            &['建', '设'],
+        )));
+        // 首行是未纠错的全键词典命中「假设」，后排带 `corrected` 的 `LATTICE_SOURCE` 行「建设*」属于推测性音节纠错候选：
+        // 不得撤销词典首选豁免，也不得参与无信道惩罚的旧字符模型重排抢占第 0 位。
+        assert!(!rerank_needs_model(0, false, &rows));
+        assert_eq!(rerank_pick(&mut reranker, "", 0, false, &rows), None);
+
+        // 若首行自身已是纠错行（如无字面词时的整串纠错），模型比较照常开放。
+        let mut corrected_leader = row("建设", LATTICE_SOURCE);
+        corrected_leader.corrected = true;
+        let mut corrected_alt = row("假设", LATTICE_SOURCE);
+        corrected_alt.corrected = true;
+        let corrected_rows = [corrected_leader, corrected_alt];
+        assert!(rerank_needs_model(0, false, &corrected_rows));
     }
 }

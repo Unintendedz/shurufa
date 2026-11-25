@@ -333,3 +333,23 @@ fn settled_lock_leader_locks_slot_zero_and_freezes_after_navigation() {
     assert!(runtime.begin_settled_rerank().is_none());
     assert!(!runtime.rerank_settled());
 }
+
+#[test]
+fn neural_v2_disables_legacy_keystroke_and_settled_rerankers() {
+    let mut runtime = lattice_runtime();
+    runtime.set_reranker(Some(Reranker::new(std::sync::Arc::new(favouring_model(
+        &['甲', '乙'],
+        &['乙'],
+    )))));
+    runtime.set_neural_v2_enabled(true);
+    // 开启 Tier 1 神经解码后，同步逐键旧模型与停顿旧模型均停用，防止首帧与 0.6B 模型来回翻转槽 0。
+    type_key(&mut runtime);
+    assert_eq!(runtime.cached.candidates, ["甲", "乙"]);
+    assert!(runtime.begin_settled_rerank().is_none());
+    assert!(!runtime.rerank_settled());
+
+    // 关闭 Tier 1 神经解码（无模型回退模式）时，旧逐键重排照常工作。
+    runtime.set_neural_v2_enabled(false);
+    type_key(&mut runtime);
+    assert_eq!(runtime.cached.candidates, ["乙", "甲"]);
+}

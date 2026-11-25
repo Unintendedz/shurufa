@@ -56,6 +56,11 @@ NS_ASSUME_NONNULL_BEGIN
                                     uint64_t generation,
                                     double elapsedMs))completion;
 
+/// 当用户在极短时间内紧接按下空格提交首选时，有界等待（至多 `timeoutMs` 毫秒）已在后台 IO 队列飞行的 `generation` 解码完成；
+/// 仅在服务已暖机时等待（冷启动 0 ms 立即返回 nil），无主队列依赖、零死锁风险。
+- (nullable NSData *)waitForDecodeGeneration:(uint64_t)generation
+                                   timeoutMs:(uint32_t)timeoutMs;
+
 /// 取消当前尚未发出的排队解码请求（例如上屏、取消组字或失焦时调用）。
 - (void)cancelPendingDecodeRequests;
 

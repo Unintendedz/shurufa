@@ -27,7 +27,7 @@ Status: implemented
 ### 2. 任意句长 A* DAG 前端、简全混拼与物理键盘错拼信道（`crates/engine/src/pinyin/`、`quanpin/`）
 
 - **任意句长 A* 隔音切分与长句边界词法剪枝**：`pinyin/graph.rs` 实现任意句长 A* K-best 音节切分器，配合 `-0.60 nats`/额外零声母边界的真实信道代价；`quanpin/dictionary.rs` 对 5+ 音节长句按变化边界词典实测权重筛取 Top-4 备选切分并复用 `lattice_span_cache`，兼具长句召回与 10–15× 耗时收敛。
-- **物理键盘概率错拼信道**：`pinyin/typos.rs`、`pinyin/autocorrect.rs` 与 `quanpin/typo_edges.rs` 统一建模 QWERTY 物理邻键、跨音节换位、缺失后鼻音 `g`、二合一键位换位与两字母非法尾恢复，按 `CHANNEL_*_PENALTY` 在词网格内与字面路径平等竞争，并在原位升级严格前缀未纠错行。
+- **物理键盘概率错拼信道**：`pinyin/typos.rs`、`pinyin/autocorrect.rs`、`quanpin/typo_edges.rs` 与 `quanpin/dictionary.rs` 统一建模 QWERTY 物理邻键、跨音节换位、缺失后鼻音 `g`、二合一键位换位与两字母非法尾恢复，按 `CHANNEL_*_PENALTY` 在词网格内与字面路径平等竞争，并在原位升级严格前缀未纠错行；当首行已命中未纠错精确字面词典整词（`exact_dict_leader == true`，如 `jiashe -> 假设`、`xiongtai -> 兄台`、`naizi -> 奶子`）时，Tier 0 同步首帧禁止推测性音节纠错行直接抢占第 0 槽（同时 `ordering.rs::speculative_typo_sentence` 保护未纠错词典首选不被推测性纠错行撤销豁免），仅将其保留在 Top-16 竞争池内交由 Tier 1 结合完整语境裁决，无精确字面整词的非词错拼（如 `diannai -> 电脑*`、`jintina -> 今天*`）则在 Tier 0 首帧照常救回首位。
 - **简全混拼统一解码与纠错/简拼概率竞争**：`quanpin/dictionary.rs` 为简全混拼与 4+ 音节纯简拼启用统一多字词约束的词网格整句解码；当整串纠错与合法多音节字面简拼并存（如 `shj`、`shh`、`zhw`、`xigz`、`zenmy`）时，`merge_literal_jianpin_with_corrected` 按统一自然对数信道概率比较双方领跑词，保证双方前排均进入 Top-16 池交由 Tier 1 裁决，避免高频简拼词被数百条单字纠错行淹没。
 
 ### 3. 纯 Rust 统一概率融合协议与代次编排（`crates/engine/src/neural_v2.rs`、`session/candidates.rs`、`crates/input-runtime/src/runtime.rs`、`crates/host-api/src/ffi/neural.rs`）
@@ -56,7 +56,7 @@ Status: implemented
   - **Stage B（信息论惊奇度门控 + 局部窗口与有语境简混拼受限束搜索）**：
     - 全拼路径：仅当 Tier 0 最佳候选平均每字对数概率 `< -4.75` 且最差单步惊奇度 `< -9.8`（或单步 `< -12.5`，或 4+ 音节均值 `< -5.5`）时，在可编辑异常子窗口上以 `beam_width <= 4`、`per_span_keep = max(beam_width * 3, 10)` 执行全拼音节前缀约束束搜索，并回填原始上文精确重算整句联合概率。
     - 有语境 4–8 音节简/混拼路径（`!is_complete && !context.is_empty() && 4 <= n <= 8`）：启动时同步构建 1–4 汉字首字母倒排索引 `initial_to_tokens` 与每 token 完整音节组合表 `token_syllable_combos`（`< 5 ms`）。当 Tier 0 无语境静态词网格组合落入低自然度区间（`best_avg_char_lp < -4.8`）时触发受限束搜索（6–8 音节束宽收敛至 `3` 以守住 `< 80 ms` 锁槽预算），在 `decode_constrained_locked` 中按跨度自动切换全拼精确表 / 纯单字母首字母表 / 混拼及翘舌前缀过滤三模态，且 `UniqueBeam` 与 Tier 0 非词典拼接共用一致的 `non_lexical_split_penalty`，使上下文依赖的长简拼组合（如「现在是北京时间上午」+ `jdssf` → `#1 九点三十分 / #2 九点四十分`、`sdssf` → `#1 十点三十分`、`jdsf` → `#1 九点十分`）在零词级规则下稳居首位，同时 3 音节简/混拼（如 `quegx`、`bdb`）继续由 Tier 0 完整词典查表 + Stage A 高速处理，零额外束开销。
-- **非阻塞交互与隐私保护（`InputController.mm`）**：按键路径 `< 3 ms` 完全非阻塞；启动 22 ms 延迟绘制窗吸收常态推理，超 80 ms 自动锁槽 0；空闲 50 ms 后预热上文 KV-Cache；检测到 `secureEventInputActive`（密码框）时严格停用预热与推理；启用 Tier 1 v2 后关闭旧 25 MB `settledRerank` 避免双重重排。
+- **非阻塞交互、零首槽抖动与快敲空格同步收口（`InputController.mm`、`ShurufaNeuralClient.mm`、`runtime.rs`）**：按键路径 `< 3 ms` 完全非阻塞（行内预编辑 `< 2 ms` 同步上屏）；启用 Tier 1 v2 后同时停用旧 4.5 MB 同步逐键重排（`Runtime::rerank`）与旧 25 MB 停顿重排（`settledRerank`），消除新旧两代模型在 `t = 0 ms` 与 `t = 25 ms` 之间来回翻转首选（如敲 `jiashe` 首帧被旧模型顶成「建设*」再翻回「假设」）；启动 35 ms 无感延迟绘制窗（约 2 帧，吸收暖态 `10–20 ms` 与冷预热 `22–34 ms` Stage A 推理单次出屏），一旦该代候选面板已实际绘出（`!wasDeferred`）或超过 50 ms 即硬锁定槽 0 不变、仅升级槽 1..，做到已绘制候选 `0%` 肉眼首槽跳动；当用户在暖机状态下敲完末字母 35 ms 内立即敲空格提交时，通过 `waitForDecodeGeneration:timeoutMs:` 有界等待剩余毫秒数让在飞推理先落位再上屏（冷机未预热时 `0 ms` 立即返回绝不阻塞）；空闲 50 ms 后预热上文 KV-Cache；检测到 `secureEventInputActive`（密码框）时严格停用预热与推理。
 
 ### 5. 防劫持个人学习闭环（`crates/engine/src/user_dictionary/{journal,overlay}.rs`、`session/{input,learning,candidates}.rs`）
 

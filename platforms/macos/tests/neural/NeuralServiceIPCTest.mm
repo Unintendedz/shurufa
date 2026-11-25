@@ -64,6 +64,8 @@ int main(int argc, const char *argv[]) {
             cfg.listenToApplicationTermination = NO;
             ShurufaNeuralClient *client = [[ShurufaNeuralClient alloc] initWithConfiguration:cfg];
             assert(client.isAvailable);
+            // 未暖机前同步等待必须立即返回 nil，绝不阻塞按键/空格主线程。
+            assert([client waitForDecodeGeneration:1 timeoutMs:35] == nil);
 
             __block NSDictionary *healthInfo = nil;
             __block BOOL healthDone = NO;
@@ -101,6 +103,23 @@ int main(int argc, const char *argv[]) {
             assert([parsed[@"ok"] isEqual:@YES]);
             assert([parsed[@"generation"] isEqual:@7]);
             assert([parsed[@"candidate_scores"] count] == 2);
+
+            // 2b. 暖机状态下快敲空格同步等待在飞请求（不泵主循环，由 `_ioQueue` 条件变量唤醒）。
+            const char *fastSpaceUTF8 =
+                "{\"generation\":10,\"context\":\"\","
+                "\"candidates\":[{\"index\":0,\"text\":\"假设\"},"
+                "{\"index\":1,\"text\":\"建设\"}]}";
+            NSData *fastSpaceData = [NSData dataWithBytes:fastSpaceUTF8 length:std::strlen(fastSpaceUTF8)];
+            [client decodeRequestData:fastSpaceData generation:10 completion:^(NSData *resp, uint64_t gen, double ms) {
+                (void)resp;
+                (void)gen;
+                (void)ms;
+            }];
+            NSData *awaitedResp = [client waitForDecodeGeneration:10 timeoutMs:35];
+            assert(awaitedResp.length > 0);
+            NSDictionary *awaitedParsed = [NSJSONSerialization JSONObjectWithData:awaitedResp options:0 error:nil];
+            assert([awaitedParsed[@"ok"] isEqual:@YES]);
+            assert([awaitedParsed[@"generation"] isEqual:@10]);
 
             // 3. 模拟后台服务意外崩溃（SIGKILL）：首次请求优雅 fail-open（不崩溃、不卡死），退避期后自动自愈重启。
             ::kill(firstPID, SIGKILL);
