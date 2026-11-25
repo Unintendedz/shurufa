@@ -24,8 +24,10 @@ Status: implemented
 
 ### 2. 30 天半衰期贝叶斯平滑叠加与 L4 硬置顶（`crates/engine/src/user_dictionary/overlay.rs`）
 
-- 对开头连续匹配完整 `entry_key` 的同音词典行，按 30 天半衰期计算有效明确选择次数 $n_{\text{user}}(w) = \sum 2^{-\Delta t / (30\text{d})}$，与静态概率分布 $P_{\text{static}}(w)$ 计算贝叶斯平滑后验：
-  $$P_{\text{post}}(w) \propto \alpha \cdot P_{\text{static}}(w) + n_{\text{user}}(w), \quad \alpha = 3.0$$
+- 对开头连续匹配完整 `entry_key` 的同音词典行，按 30 天半衰期计算有效明确选择次数 $n_{\text{user}}(w) = \sum 2^{-\Delta t / (30\text{d})}$，配合 5 秒内退格删光的 24 小时半衰期负反馈 $n_{\text{neg}}(w)$，采用**有界乘性阻尼贝叶斯平滑后验**（严格非负、永不出现负后验）：
+  $$n_{\text{eff}}(w) = \max\!\bigl(0,\; n_{\text{user}}(w) - 1.5\,n_{\text{neg}}(w)\bigr), \quad r_{\text{neg}}(w) = \operatorname{clamp}\!\Bigl(n_{\text{neg}}(w) - \frac{n_{\text{user}}(w)}{1.5},\; 0,\; 2\Bigr)$$
+  $$P_{\text{post}}(w) \propto \alpha \cdot P_{\text{static}}(w) \cdot 2^{-r_{\text{neg}}(w)} + n_{\text{eff}}(w), \quad \alpha = 3.0$$
+  采用乘性阻尼（单次退格静态先验折半、至多折至 $1/4$）而非无界线性减法（$\alpha P_{\text{static}} - 1.5 n_{\text{neg}}$），彻底避免单次 5 秒内退格把 $P_{\text{static}} < 0.5$ 的常用单字（如 `hua` 下的 `化`/`画`/`华`）后验压成负数，从而被甩到上百个零权重生僻扩展汉字之后并掉出首页与 Tier 1 Top-16 神经窗口。
 - **区分首屏召回与竞争首位**：
   - 只有当 $n_{\text{user}}(w) \ge 1.8$（至少 2 次近期明确选择）且后验超过静态榜首时，候选才允许竞争第 1 槽（对占比 ~90% 的超高频核心词如「一个」，先验质量约 `2.70`，自然需要 3 次明确选择才反超；单次误选永远不会击穿核心词，天然取代 `200k / 8×` 硬编码护城河）；
   - 首次明确选择埋在多页之后的冷门专名（$n_{\text{user}} = 1.0$），因跨全部未选词的静态先验总质量为 $\alpha = 3.0$，至多只有 2 个静态占比超 1/3 的词能排在它前面，从而自然将其召回到**首屏第 2–4 位**；

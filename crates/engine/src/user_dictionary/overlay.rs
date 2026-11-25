@@ -617,7 +617,14 @@ pub fn apply_personal_overlay_scoped(
         let p_rel = item.weight.max(1) as f64 / leader_weight;
         let n_user = counts.get(item.word.as_str()).copied().unwrap_or(0.0);
         let neg = negative.get(item.word.as_str()).copied().unwrap_or(0.0);
-        posteriors.push(BAYESIAN_PRIOR_ALPHA * p_rel + n_user - NEGATIVE_FEEDBACK_WEIGHT * neg);
+        // 退格负反馈采用“先抵消用户正向增量、余量对静态先验做有界乘性阻尼”的贝叶斯更新：
+        // - 误选冷门词后退格，正向计数归零立刻回落后排；
+        // - 误退格常用高频字/词（如 `hua -> 化/画/华`）时后验严格保持正值，仅温和下调有限顺位，
+        //   绝不跌为负值而被甩到上百个零权生僻字之后，也绝不会被踢出 Tier 1 神经窗口。
+        let eff_user = (n_user - NEGATIVE_FEEDBACK_WEIGHT * neg).max(0.0);
+        let residual_neg = (neg - n_user / NEGATIVE_FEEDBACK_WEIGHT).clamp(0.0, 2.0);
+        let damped_prior = BAYESIAN_PRIOR_ALPHA * p_rel * 0.5_f64.powf(residual_neg);
+        posteriors.push(damped_prior + eff_user);
         user_counts.push(n_user);
         neg_strengths.push(neg);
     }
@@ -1402,5 +1409,52 @@ mod tests {
         }
 
         assert_eq!(executed, 50, "必须完整执行全部 50 组防劫持回放场景");
+    }
+
+    #[test]
+    fn backspace_negative_feedback_never_banishes_common_single_chars_behind_rare_glyphs() {
+        let dir = Dir::new();
+        let journal = dir.journal();
+        let now = 1_750_000_000i64;
+        for ch in ["画", "化", "华"] {
+            assert!(record_backspace_rollback_feedback(
+                &journal,
+                None,
+                "hua",
+                ch,
+                AppScope::General,
+                now,
+                now + 2,
+            )
+            .unwrap());
+        }
+        let mut list = vec![
+            item("hua", "花", 3_746_417),
+            item("hua", "话", 3_745_917),
+            item("hua", "画", 1_054_361),
+            item("hua", "化", 951_401),
+            item("hua", "华", 800_451),
+            item("hua", "划", 385_366),
+            item("hua", "滑", 156_890),
+            item("hua", "哗", 68_257),
+            item("hua", "桦", 13_149),
+            item("hua", "㓰", 0),
+            item("hua", "㕦", 0),
+            item("hua", "㕲", 0),
+        ];
+        apply_personal_overlay_scoped(
+            &journal,
+            "hua",
+            None,
+            AppScope::General,
+            &mut list,
+            now + 10,
+        );
+        let pos = |w: &str| list.iter().position(|it| it.word == w).unwrap();
+        // 即使刚退格过 `画`/`化`/`华`，三者仍必须稳居 `滑`/`哗`/`桦` 及零权生僻字之前，绝不掉出首页与 Top-16 神经窗口。
+        assert!(pos("画") < pos("滑"));
+        assert!(pos("化") < pos("滑"));
+        assert!(pos("华") < pos("滑"));
+        assert!(pos("化") < pos("㓰"));
     }
 }
