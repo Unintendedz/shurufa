@@ -48,9 +48,6 @@ int main() {
             [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
         }
         assert(completions == 1);
-        NSError *discardError = nil;
-        assert(![MSIMEClientSession discardSnapshotHandle:UINT64_MAX error:&discardError]);
-        assert(discardError != nil);
         assert([NSFileManager.defaultManager removeItemAtURL:fixture error:nil]);
     }
     return 0;

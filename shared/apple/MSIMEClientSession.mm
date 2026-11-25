@@ -5,7 +5,6 @@
 
 static NSString *const MSIMEClientErrorDomain = @"app.msime.client.host";
 static __weak MSIMEClientSession *gActiveSession;
-NSNotificationName const MSIMEClientSessionDidReplaceSnapshotNotification = @"MSIMEClientSessionDidReplaceSnapshotNotification";
 
 static void setError(NSError **error, NSString *message) {
     if (error) *error = [NSError errorWithDomain:MSIMEClientErrorDomain code:1 userInfo:@{NSLocalizedDescriptionKey: message}];
@@ -44,22 +43,6 @@ static void MSIMENeuralWakeupCallback(void *opaque, uint64_t session, uint64_t g
         MSIMEClientSession *target = [gNeuralSessions objectForKey:@(session)];
         [target handleNeuralWakeupForGeneration:generation];
     });
-}
-
-struct SnapshotReaderContext { MSIMESnapshotNextRecord block; };
-static intptr_t SnapshotNext(void *opaque, uint8_t *buffer, size_t capacity) {
-    @autoreleasepool {
-        auto *context = static_cast<SnapshotReaderContext *>(opaque);
-        NSError *failure = nil;
-        NSDictionary *record = context->block(&failure);
-        if (failure) return -1;
-        if (!record) return 0;
-        NSError *serializationError = nil;
-        NSData *data = [NSJSONSerialization dataWithJSONObject:record options:0 error:&serializationError];
-        if (serializationError || !data || data.length == 0 || data.length > capacity) return -1;
-        memcpy(buffer, data.bytes, data.length);
-        return static_cast<intptr_t>(data.length);
-    }
 }
 
 static id decodeValue(char *response, NSError **error) {
@@ -525,132 +508,6 @@ static void MSIMEInvokeAnnounce(void *context) {
     NSDictionary *result = decode(msime_client_emoji_catalog_request(
         static_cast<const uint8_t *>(query.bytes), query.length,
         static_cast<const uint8_t *>(path.bytes), path.length), &error);
-    return result ?: @{ @"error": error ?: [NSError errorWithDomain:MSIMEClientErrorDomain code:1 userInfo:nil] };
-}
-+ (NSString *)snapshotVersionForOptions:(NSDictionary<NSString *, id> *)options error:(NSError **)error {
-    if (![NSJSONSerialization isValidJSONObject:options]) { setError(error, @"本地词库版本参数无效"); return nil; }
-    NSData *data = [NSJSONSerialization dataWithJSONObject:options options:0 error:error];
-    if (!data || data.length > 65536) { setError(error, @"本地词库版本参数过大"); return nil; }
-    NSDictionary *value = decode(msime_client_snapshot_version(static_cast<const uint8_t *>(data.bytes), data.length), error);
-    NSString *version = value[@"version"];
-    if (![version isKindOfClass:NSString.class] || version.length != 64) { setError(error, @"本地词库版本响应无效"); return nil; }
-    return version;
-}
-+ (NSDictionary *)snapshotVersion:(NSDictionary<NSString *, id> *)options {
-    NSError *error = nil;
-    NSString *value = [self snapshotVersionForOptions:options error:&error];
-    return value ? @{ @"version": value } : @{ @"error": error ?: [NSError errorWithDomain:MSIMEClientErrorDomain code:1 userInfo:nil] };
-}
-+ (BOOL)discardSnapshotHandle:(uint64_t)handle error:(NSError **)error {
-    if (!handle) { setError(error, @"本地词库准备句柄无效"); return NO; }
-    return decode(msime_client_snapshot_discard(handle), error) != nil;
-}
-+ (NSDictionary *)discardSnapshot:(NSDictionary<NSString *, id> *)parameters {
-    NSError *error = nil;
-    if (![parameters isKindOfClass:NSDictionary.class]) {
-        setError(&error, @"本地词库准备参数无效");
-        return @{ @"error": error };
-    }
-    uint64_t handle = 0;
-    if (!parseUInt64(parameters[@"handle"], @"本地词库准备句柄", &handle, &error) || !handle) {
-        if (!handle && !error) setError(&error, @"本地词库准备句柄无效");
-        return @{ @"error": error ?: [NSError errorWithDomain:MSIMEClientErrorDomain code:1 userInfo:nil] };
-    }
-    BOOL discarded = [self discardSnapshotHandle:handle error:&error];
-    return discarded ? @{ @"discarded": @YES } : @{ @"error": error ?: [NSError errorWithDomain:MSIMEClientErrorDomain code:1 userInfo:nil] };
-}
-+ (BOOL)applySnapshotHandle:(uint64_t)handle expectedVersion:(NSString *)version error:(NSError **)error {
-    if (![NSThread isMainThread] || !handle || ![version isKindOfClass:NSString.class] || version.length != 64) { setError(error, @"本地词库应用参数无效"); return NO; }
-    MSIMEClientSession *session = gActiveSession;
-    uint64_t old = session ? session->_handle : 0;
-    if (!session || !old) { setError(error, @"输入会话不可用"); return NO; }
-    NSDictionary *ready = [self snapshotActivationReady];
-    if (![ready[@"ready"] isEqual:@YES]) { setError(error, @"请先完成正在输入的内容，再应用本地词库"); return NO; }
-    NSDictionary *optionsCopy = [session->_hostOptions copy];
-    [gNeuralSessions removeObjectForKey:@(old)];
-    msime_client_string_free(msime_client_destroy(old));
-    session->_handle = 0;
-    session->_neuralV2Enabled = NO;
-    NSData *data = [version dataUsingEncoding:NSUTF8StringEncoding];
-    NSDictionary *result = decode(msime_client_snapshot_activate(handle, static_cast<const uint8_t *>(data.bytes), data.length), error);
-    if (!result) {
-        NSData *restore = [NSJSONSerialization dataWithJSONObject:optionsCopy options:0 error:nil];
-        NSDictionary *view = decode(msime_client_create(static_cast<const uint8_t *>(restore.bytes), restore.length), nil);
-        uint64_t restoredHandle = 0;
-        if (parseUInt64(view[@"session"], @"恢复会话句柄", &restoredHandle, nil) && restoredHandle != 0) {
-            session->_handle = restoredHandle;
-            [session restoreLiveModes:nil];
-            // Recovery creates a fresh session too; the host must clear the
-            // destroyed composition and restore focus even though activation failed.
-            [[NSNotificationCenter defaultCenter] postNotificationName:MSIMEClientSessionDidReplaceSnapshotNotification object:session];
-        }
-        return NO;
-    }
-    NSData *options = [NSJSONSerialization dataWithJSONObject:optionsCopy options:0 error:error];
-    if (!options) return NO;
-    NSDictionary *view = decode(msime_client_create(static_cast<const uint8_t *>(options.bytes), options.length), error);
-    if (!view) return NO;
-    uint64_t newHandle = 0;
-    if (!parseUInt64(view[@"session"], @"输入会话句柄", &newHandle, error) || newHandle == 0) {
-        if (newHandle == 0 && error && !*error) setError(error, @"输入会话句柄无效");
-        return NO;
-    }
-    session->_handle = newHandle;
-    if (session->_handle != 0) {
-        [session restoreLiveModes:error];
-        [[NSNotificationCenter defaultCenter] postNotificationName:MSIMEClientSessionDidReplaceSnapshotNotification object:session];
-    }
-    return session->_handle != 0;
-}
-+ (NSDictionary *)applySnapshot:(NSDictionary<NSString *, id> *)parameters {
-    NSError *error = nil;
-    if (![parameters isKindOfClass:NSDictionary.class]) {
-        setError(&error, @"本地词库准备参数无效");
-        return @{ @"error": error };
-    }
-    uint64_t handle = 0;
-    if (!parseUInt64(parameters[@"handle"], @"本地词库准备句柄", &handle, &error) || !handle) {
-        if (!handle && !error) setError(&error, @"本地词库准备句柄无效");
-        return @{ @"error": error ?: [NSError errorWithDomain:MSIMEClientErrorDomain code:1 userInfo:nil] };
-    }
-    BOOL ok = [self applySnapshotHandle:handle expectedVersion:parameters[@"expectedVersion"] error:&error];
-    return ok ? @{ @"activated": @YES } : @{ @"error": error ?: [NSError errorWithDomain:MSIMEClientErrorDomain code:1 userInfo:nil] };
-}
-+ (NSDictionary *)activeHostOptions { return gActiveSession ? [gActiveSession.hostOptions copy] : @{@"error" : [NSError errorWithDomain:MSIMEClientErrorDomain code:503 userInfo:nil]}; }
-+ (NSDictionary *)snapshotActivationReady {
-    if (![NSThread isMainThread]) return @{ @"error" : [NSError errorWithDomain:MSIMEClientErrorDomain code:400 userInfo:nil] };
-    MSIMEClientSession *session = gActiveSession;
-    if (!session || !session->_handle) return @{ @"ready" : @NO };
-    NSDictionary *view = [session viewWithError:nil];
-    if (!view) return @{ @"ready" : @NO };
-    NSString *editing = [view[@"editing_text"] isKindOfClass:NSString.class] ? view[@"editing_text"] : @"";
-    NSString *preedit = [view[@"preedit"] isKindOfClass:NSString.class] ? view[@"preedit"] : @"";
-    NSArray *candidates = [view[@"candidates"] isKindOfClass:NSArray.class] ? view[@"candidates"] : @[];
-    return @{ @"ready" : @(editing.length == 0 && preedit.length == 0 && candidates.count == 0) };
-}
-+ (NSDictionary *)prepareSnapshotRequest:(NSDictionary<NSString *, id> *)request
-                               nextRecord:(MSIMESnapshotNextRecord)nextRecord
-                                    error:(NSError **)error {
-    if (![NSJSONSerialization isValidJSONObject:request] || !nextRecord) {
-        setError(error, @"本地词库快照参数无效"); return nil;
-    }
-    NSData *data = [NSJSONSerialization dataWithJSONObject:request options:0 error:error];
-    if (!data || data.length > 65536) { setError(error, @"本地词库快照参数过大"); return nil; }
-    SnapshotReaderContext context{[nextRecord copy]};
-    NSDictionary *result = decode(msime_client_snapshot_prepare(static_cast<const uint8_t *>(data.bytes), data.length,
-                                                                 SnapshotNext, &context), error);
-    context.block = nil;
-    return result;
-}
-+ (NSDictionary *)prepareSnapshot:(NSDictionary<NSString *, id> *)parameters {
-    NSError *error = nil;
-    if (![parameters isKindOfClass:NSDictionary.class]) {
-        setError(&error, @"本地词库快照参数无效");
-        return @{ @"error": error };
-    }
-    NSDictionary *request = parameters[@"request"];
-    MSIMESnapshotNextRecord next = parameters[@"nextRecord"];
-    NSDictionary *result = [self prepareSnapshotRequest:request nextRecord:next error:&error];
     return result ?: @{ @"error": error ?: [NSError errorWithDomain:MSIMEClientErrorDomain code:1 userInfo:nil] };
 }
 + (NSDictionary *)prepareHostWithResourcesDirectory:(NSString *)resourcesDirectory stateRoot:(NSString *)stateRoot error:(NSError **)error {

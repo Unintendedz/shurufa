@@ -8,7 +8,6 @@
 
 pub mod authoring;
 pub mod command_table;
-pub mod community;
 pub mod effect_pack;
 mod failure;
 mod import;
@@ -17,7 +16,6 @@ pub mod music_pack;
 pub mod phrase_table;
 pub mod sound_pack;
 pub mod symbol_set;
-pub mod wordbook_pack;
 
 pub use failure::{remove_named, PluginFailure};
 pub use import::{import, validate, validate_with, ReservedIds};
@@ -87,20 +85,17 @@ pub enum PluginKind {
     Effect,
     /// K 模式的短语：编码和文本，全部写在清单里。
     PhraseTable,
-    /// 单词本：一个 `.tsv` 数据文件，作为一本词书出现在背单词里。
-    Wordbook,
     /// 符号集：追加到符号面板的符号组和颜文字组，全部写在清单里。
     SymbolSet,
 }
 
 impl PluginKind {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 6] = [
         Self::Sound,
         Self::Music,
         Self::CommandTable,
         Self::Effect,
         Self::PhraseTable,
-        Self::Wordbook,
         Self::SymbolSet,
     ];
 
@@ -112,7 +107,6 @@ impl PluginKind {
             Self::CommandTable => "command_table",
             Self::Effect => "effect",
             Self::PhraseTable => "phrase_table",
-            Self::Wordbook => "wordbook",
             Self::SymbolSet => "symbol_set",
         }
     }
@@ -122,7 +116,7 @@ impl PluginKind {
     }
 }
 
-const _: () = assert!(PluginKind::ALL.len() == 7);
+const _: () = assert!(PluginKind::ALL.len() == 6);
 
 /// `id` 是不是安装包随带的 `kind` 类包：音效包和背景音乐包，以及官方短语表。保留的 id 导入的包不能用它，载入时永远从内置目录读。特效包没有内置的：样式本身在宿主里，`effect_style` 不靠包就能选。
 pub fn is_builtin(kind: PluginKind, id: &str) -> bool {
@@ -130,10 +124,7 @@ pub fn is_builtin(kind: PluginKind, id: &str) -> bool {
         PluginKind::Sound => BUILTIN_SOUND_PACKS.contains(&id),
         PluginKind::Music => BUILTIN_MUSIC_PACKS.contains(&id),
         PluginKind::PhraseTable => BUILTIN_PHRASE_TABLES.contains(&id),
-        PluginKind::CommandTable
-        | PluginKind::Effect
-        | PluginKind::Wordbook
-        | PluginKind::SymbolSet => false,
+        PluginKind::CommandTable | PluginKind::Effect | PluginKind::SymbolSet => false,
     }
 }
 
@@ -227,7 +218,6 @@ impl PluginSummary {
             PluginContent::CommandTable(_) => PluginKind::CommandTable,
             PluginContent::Effect(_) => PluginKind::Effect,
             PluginContent::PhraseTable(_) => PluginKind::PhraseTable,
-            PluginContent::Wordbook(_) => PluginKind::Wordbook,
             PluginContent::SymbolSet(_) => PluginKind::SymbolSet,
         }
     }
@@ -241,7 +231,6 @@ pub enum PluginContent {
     CommandTable(command_table::CommandTable),
     Effect(effect_pack::EffectPack),
     PhraseTable(phrase_table::PhraseTable),
-    Wordbook(wordbook_pack::WordbookPack),
     SymbolSet(symbol_set::SymbolSet),
 }
 
@@ -587,7 +576,6 @@ fn load_directory_with(directory: &Path, data_files: DataFiles) -> Result<Plugin
         PluginKind::CommandTable => &command_table::MANIFEST_KEYS,
         PluginKind::Effect => &effect_pack::MANIFEST_KEYS,
         PluginKind::PhraseTable => &phrase_table::MANIFEST_KEYS,
-        PluginKind::Wordbook => &wordbook_pack::MANIFEST_KEYS,
         PluginKind::SymbolSet => &symbol_set::MANIFEST_KEYS,
     };
     if let Some(key) = table
@@ -596,7 +584,7 @@ fn load_directory_with(directory: &Path, data_files: DataFiles) -> Result<Plugin
     {
         return Err(format!("plugin.toml 里有未知的键 {key}"));
     }
-    let mut data: Vec<DataFile> = Vec::with_capacity(data_file_capacity(kind));
+    let data: Vec<DataFile> = Vec::with_capacity(data_file_capacity(kind));
     let (content, audio, limits) = match kind {
         PluginKind::Sound => {
             let pack = sound_pack::parse(table)?;
@@ -628,33 +616,9 @@ fn load_directory_with(directory: &Path, data_files: DataFiles) -> Result<Plugin
             Vec::new(),
             AudioLimits::NONE,
         ),
-        PluginKind::Wordbook => {
-            wordbook_pack::check_identity(&id, &name)?;
-            let file = wordbook_pack::parse(table)?;
-            data.push(DataFile {
-                name: file.clone(),
-                max_bytes: wordbook_pack::MAX_FILE_BYTES,
-                extension: wordbook_pack::FILE_EXTENSION,
-            });
-            (
-                PluginContent::Wordbook(wordbook_pack::WordbookPack {
-                    file,
-                    word_count: 0,
-                    first_words: Vec::new(),
-                }),
-                Vec::new(),
-                AudioLimits::NONE,
-            )
-        }
     };
     check_files(directory, &files, &audio, limits, &data)?;
-    let content = match content {
-        content if data_files == DataFiles::Unread => content,
-        PluginContent::Wordbook(pack) => {
-            PluginContent::Wordbook(wordbook_pack::read(directory, &pack.file)?)
-        }
-        other => other,
-    };
+    let _ = data_files;
     Ok(PluginSummary {
         id,
         name,
@@ -668,12 +632,8 @@ fn load_directory_with(directory: &Path, data_files: DataFiles) -> Result<Plugin
     })
 }
 
-fn data_file_capacity(kind: PluginKind) -> usize {
-    if matches!(kind, PluginKind::Wordbook) {
-        1
-    } else {
-        0
-    }
+fn data_file_capacity(_kind: PluginKind) -> usize {
+    0
 }
 
 /// Bounds on the audio files of one kind.
@@ -760,6 +720,7 @@ pub(crate) fn valid_file_name(name: &str) -> bool {
 
 /// 数据文件按行切开：整个文件必须是 UTF-8（开头可以有 BOM），按 `\n` 分行，每行去掉一个行尾的 `\r`；其余位置的 `\r` 和别的控制字符一样留给各类型的行规则拒绝。
 /// 先校验整个文件的编码，再按需产生从 1 开始的行号和借用行内容。
+#[cfg(test)]
 pub(crate) fn data_lines<'a>(
     bytes: &'a [u8],
     name: &str,

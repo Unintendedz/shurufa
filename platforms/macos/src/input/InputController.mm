@@ -46,14 +46,9 @@
 #include <time.h>
 #import "../voice/VoiceFailureMessages.h"
 #import "../core/SupportWindowController.h"
-#import "../backend/account/BackendAccountEntry.h"
-#import "../backend/core/BackendSelectionObservation.h"
 #include "../core/ToolTextReturn.h"
 #include "../core/ToolApplicationActivation.h"
 #include "../core/AXPrecedingContext.h"
-#include "../settings/PreferenceSaveState.h"
-#include "../settings/PreferenceLoadState.h"
-#include "../settings/PreferenceSnapshotMerge.h"
 #import "../candidate/CandidateChrome.h"
 #import "../candidate/CandidatePointerMenu.h"
 #import "../candidate/CandidatePager.h"
@@ -115,17 +110,6 @@
 #include <memory>
 #include <optional>
 #include <unordered_map>
-
-// Implemented by the Swift backend dylib loaded by input_method_main.mm. The account provider
-// keeps credentials and transport on the Swift side; this process receives only bounded glosses.
-extern "C" void MSIMEFetchAccountCandidateGlosses(const char *wordsJSON, const char *primaryCode,
-                                                    const char *secondaryCode, unsigned long long generation)
-    __attribute__((weak_import));
-extern "C" void MSIMECancelAccountCandidateGlosses(void) __attribute__((weak_import));
-extern "C" void MSIMEEnsureAnonymousAccount(void) __attribute__((weak_import));
-extern "C" unsigned long long MSIMEBackendAccountTranslationMarker(void) __attribute__((weak_import));
-// Apple's on-device translation, also in the Swift backend. Null when the backend was built by a toolchain older than the macOS 26 SDK.
-extern "C" void MSIMEFetchOnDeviceCandidateGlosses(const char *wordsJSON, const char *targetsJSON) __attribute__((weak_import));
 
 static BOOL MSIMEStrictBoolean(id value);
 
@@ -758,62 +742,7 @@ static NSArray<NSString *> *MSIMETranslationTargets(NSDictionary *query) {
     return targets.count ? [targets copy] : @[];
 }
 
-// Account glosses live in the process-wide translation cache, not on the controller. IMKit builds one
-// controller per text input client - a dozen or more over a session - so the instance that fetched a gloss
-// is usually not the one composing next time. Kept per instance, the answers scatter into controllers that
-// are no longer composing and every new text field starts from nothing, which is what "it shows up the
-// second time but not the first" actually is: the second time happened to land on the same instance.
-//
-// The key is login marker, language and word, so sharing is safe while the
-// account remains the same and a settings-app login switch cannot reuse old
-// glosses. Four elements and a leading scope of its own, so it cannot collide
-// with the five-element identities the user's own translator uses.
-static unsigned long long MSIMECurrentAccountTranslationMarker(void) {
-    return MSIMEBackendAccountTranslationMarker == nullptr ? 0 : MSIMEBackendAccountTranslationMarker();
-}
-
-static NSArray<NSString *> *MSIMEAccountGlossIdentity(NSString *target, NSString *text) {
-    return @[@"account", @(MSIMECurrentAccountTranslationMarker()).stringValue, target ?: @"", text ?: @""];
-}
-
-static NSString *MSIMEAccountGlossCached(NSString *target, NSString *text) {
-    id value = [[MSIMETranslationCache sharedCache] valueForIdentity:MSIMEAccountGlossIdentity(target, text)];
-    return [value isKindOfClass:NSString.class] ? value : nil;
-}
-
-// A word is known once the account answered it, with a gloss or with nothing (a negative entry that lapses after eight minutes), and a known word is not asked about again.
-static BOOL MSIMEAccountGlossKnown(NSString *target, NSString *text) {
-    return [[MSIMETranslationCache sharedCache] valueForIdentity:MSIMEAccountGlossIdentity(target, text)] != nil;
-}
-
-// On-device glosses share the process-wide cache for the same reason as account ones, under a scope of their own. A word the model had nothing useful for is cached as an empty answer, so it is not asked about again on the next keystroke.
-static NSArray<NSString *> *MSIMEOnDeviceGlossIdentity(NSString *target, NSString *text) {
-    return @[@"on-device", target ?: @"", text ?: @""];
-}
-
-// Which candidates the account gloss endpoint may be asked about. Only Chinese ones: a model has nothing
-// to say about "cun", "123", "OpenAI", a punctuation candidate or an emoji, and asking spends the account's
-// bounded quota to put noise under candidates that should carry no gloss - a pinyin buffer candidate also
-// hands the user's raw keystrokes to a remote service. The shared query answers this per candidate so every
-// host applies the same rule.
-//
-// This is the gloss path only. The user's own translator (custom, Tencent TMT, NiuTrans) keeps seeing
-// English candidates, because there the direction is detected per candidate and English to Chinese is a
-// translation someone asked for. The offline dictionary is not filtered either - it answers for English and
-// never leaves the machine.
-static NSArray<NSDictionary *> *MSIMEOnlineGlossCandidates(NSDictionary *query) {
-    NSArray *raw = [query[@"candidates"] isKindOfClass:NSArray.class] ? query[@"candidates"] : @[];
-    NSMutableArray<NSDictionary *> *candidates = [NSMutableArray arrayWithCapacity:raw.count];
-    for (NSDictionary *candidate in raw) {
-        if (![candidate isKindOfClass:NSDictionary.class] ||
-            ![candidate[@"text"] isKindOfClass:NSString.class] ||
-            !MSIMEStrictBoolean(candidate[@"online_gloss"])) continue;
-        [candidates addObject:candidate];
-    }
-    return [candidates copy];
-}
-
-// 翻译查询列出的候选文字。候选词翻译范围是「仅当前高亮」时共享查询的 candidates 只有高亮的那一个，翻译服务、系统翻译、账号释义和只为候选词翻译查的离线词典都只为它工作，所以按视图组请求时只留这些文字。查询没列 candidates（替身会话）时为 nil，不限制。
+// 翻译查询列出的候选文字。候选词翻译范围是「仅当前高亮」时共享查询的 candidates 只有高亮的那一个，翻译服务和离线词典都只为它工作，所以按视图组请求时只留这些文字。查询没列 candidates（替身会话）时为 nil，不限制。
 static NSSet<NSString *> *MSIMEQueryCandidateTexts(NSDictionary *query) {
     id raw = [query isKindOfClass:NSDictionary.class] ? query[@"candidates"] : nil;
     if (![raw isKindOfClass:NSArray.class]) return nil;
@@ -1629,9 +1558,7 @@ static constexpr uint64_t MSIMESessionRecoveryNoticeInterval = 60 * NSEC_PER_SEC
 - (void)observeGlobalVoiceShortcutEvent:(NSEvent *)event;
 @end
 
-// 只在主线程记录最后实际提交账号等待页的控制器，不延长输入框的生命周期。
-static __weak MSIMEInputController *MSIMEAccountGlossQueueOwner;
-// 当前持有焦点客户端的控制器。每个控制器都观察同一份外观设置，改动由最先注册的那个保存，而它往往是早已失去焦点的控制器；所以保存之后，要把文档载入会话的是这一个。
+// 当前持有焦点客户端的控制器。由 `MSIMEAppearancePreferences` 统一落盘写入 `config.json`，控制器在收到持久化通知或聚焦刷新时只读重新加载。
 static __weak MSIMEInputController *MSIMEFocusedController;
 // 录音跨焦点持有原控制器，异步识别仍属于同一代次；最终投递另取当前焦点。
 static MSIMEInputController *MSIMEVoiceRecordingOwner;
@@ -1766,7 +1693,9 @@ static NSImage *MSIMECandidateLogoImage() {
     MSIMEFloatingToolbarPanel *_toolbar;
     NSString *_preferencesDirectory;
     NSTimer *_preferencesTimer;
-    MSIMEPreferenceLoadState _preferenceLoadState;
+    uint64_t _preferenceLoadGeneration;
+    BOOL _preferenceLoadInFlight;
+    uint64_t _appliedPreferenceRevision;
     MSIMEAppearancePreferences *_appearance;
     BOOL _wubiCodeHintEnabled;
     msime::input::EnglishPunctuationState _englishPunctuation;
@@ -1958,18 +1887,8 @@ static NSImage *MSIMECandidateLogoImage() {
     NSDictionary *_niuTransConfig;
     NSDictionary *_aiTranslationConfig;
     NSArray<NSDictionary *> *_customResults;
-    NSString *_accountGlossSignature;
-    NSDictionary *_accountGlossRequest;
-    NSArray<NSDictionary *> *_accountGlossResults;
-    uint64_t _accountGlossMarker;
-    uint64_t _accountGlossEpoch;
-    // The account is asked only once typing has been idle for 500 ms, as Windows' cloud worker waits kIdleDelay after the latest job (cloud_translation.cpp): each keystroke replaces the pending request instead of sending one.
-    NSTimer *_accountGlossTimer;
     // The view generation the held translation results were last applied to. The session drops its translations whenever the generation moves, and a page whose words did not change does not change any request either, so this is what tells synchronizeCandidateServices to put them back.
     NSNumber *_translationAppliedGeneration;
-    // Each word this controller sent to the account for an English gloss, mapped to the preferences directory of the page that sent it: every controller hears every reply, so only the one that asked saves it, and the reply often lands after that page has moved on.
-    NSMutableDictionary<NSString *, NSString *> *_accountEnglishQueries;
-    NSDictionary *_onDeviceGlossRequest;
     // Candidate services all inspect the same Engine state during one render pass. Cache each
     // snapshot lazily for that pass; applyTranslations invalidates it before changing the state.
     BOOL _serviceSnapshotActive;
@@ -1977,8 +1896,6 @@ static NSImage *MSIMECandidateLogoImage() {
     BOOL _serviceSnapshotViewLoaded;
     NSDictionary *_serviceSnapshotQuery;
     NSDictionary *_serviceSnapshotView;
-    // Each English word this controller sent to the on-device model, queued with the English gloss requests of the pages that sent it: the same word can be requested again before an older reply lands, and each request carries the Engine source and directory persisting needs.
-    NSMutableDictionary<NSString *, NSMutableArray<NSDictionary *> *> *_onDeviceEnglishQueries;
     uint64_t _customEpoch;
     MSIMECustomTranslationBatch *_aiBatch;
     NSTimer *_aiTimer;
@@ -2099,7 +2016,7 @@ static NSImage *MSIMECandidateLogoImage() {
     NSString *bundle = [(id)client respondsToSelector:@selector(bundleIdentifier)]
         ? [(id)client bundleIdentifier] : nil;
     if (msime::mac::IsTerminalBundleIdentifier(bundle)) return;
-    const BOOL neuralEnabled = _session && _session.neuralV2Enabled;
+    const BOOL neuralEnabled = _session && [_session respondsToSelector:@selector(neuralV2Enabled)] && _session.neuralV2Enabled;
     const NSUInteger maxContextUnits = neuralEnabled ? 512 : 96;
     const BOOL wantFollowing = neuralEnabled && [_session respondsToSelector:@selector(setFollowingContext:error:)];
     const NSUInteger maxFollowingUnits = wantFollowing ? 32 : 0;
@@ -2440,12 +2357,6 @@ static const char *MSIMESmartPunctuationScalarClass(uint32_t scalar) {
     [self cancelTargetGloss];
     [self cancelCustomTranslations];
     [self cancelAITranslations];
-    // The account gloss arrived after this method did and was never added to it. Its request outlived
-    // deactivation, so a controller whose client had gone away still answered every gloss broadcast -
-    // IMKit keeps a controller per text input client, so that is a dozen of them merging results and
-    // pushing them into sessions nobody is composing in. Its siblings are all cancelled here; so is it.
-    [self stopAccountGloss];
-    [self cancelOnDeviceGloss];
     // A later session can reuse the same generation number, and nothing is held now to re-apply anyway.
     _translationAppliedGeneration = nil;
 }
@@ -3125,9 +3036,8 @@ BOOL MSIMEInputControllerHasUnfinishedInput(void) {
         (niuTrans ? @"niutrans" : custom ? @"custom_translation" : tencent ? @"tencent_tmt" : @"ai_assistant"):config, @"candidates":[candidates copy],
         @"directory":_preferencesDirectory ?: @""};
 }
-// Each offline dictionary answers a single target language, so the rows are merged per candidate in the user's target order. The English gloss and any account gloss fill the targets they cover; otherwise whichever source answered a candidate first would hide the other target rows. On-device translation comes last and fills only what every dictionary left empty: it translates the word without context, which a dictionary entry does not.
-- (NSArray<NSDictionary *> *)offlineGlossResults:(NSDictionary *)targetGloss english:(NSArray<NSDictionary *> *)english
-                                        onDevice:(NSDictionary *)onDevice {
+// 目标语言离线词典分别回答单一语言，合并时保留英文释义并按目标语言顺序排列。
+- (NSArray<NSDictionary *> *)offlineGlossResults:(NSDictionary *)targetGloss english:(NSArray<NSDictionary *> *)english {
     NSMutableDictionary<NSString *, NSMutableDictionary<NSString *, NSString *> *> *values = [NSMutableDictionary dictionary];
     void (^fill)(id, NSString *, id) = ^(id text, NSString *target, id value) {
         if (![text isKindOfClass:NSString.class] || ![value isKindOfClass:NSString.class] || ![(NSString *)value length]) return;
@@ -3140,26 +3050,10 @@ BOOL MSIMEInputControllerHasUnfinishedInput(void) {
         (void)stop;
         for (NSString *target in byTarget) fill(text, target, byTarget[target]);
     }];
-    const BOOL account = _accountGlossResults && [_accountGlossRequest isEqual:[self currentAccountGlossRequest]];
-    if (account) {
-        NSArray *accountTargets = _accountGlossRequest[@"target_languages"];
-        for (NSDictionary *entry in _accountGlossResults) {
-            if (![entry[@"translation"] isKindOfClass:NSString.class]) continue;
-            NSArray *lines = [entry[@"translation"] componentsSeparatedByString:@"\n"];
-            for (NSUInteger index = 0; index < MIN(lines.count, accountTargets.count); ++index)
-                fill(entry[@"text"], accountTargets[index], lines[index]);
-        }
-    }
-    for (NSDictionary *candidate in onDevice[@"candidates"])
-        for (NSString *target in onDevice[@"target_languages"])
-            fill(candidate[@"text"], target, [[MSIMETranslationCache sharedCache] valueForIdentity:MSIMEOnDeviceGlossIdentity(target, candidate[@"text"])]);
-    // 没有目标语言词典时，页面顺序取自英文释义、系统翻译请求和水杉账号的回复，三者合起来覆盖了这里所有能带释义的候选。
     NSMutableArray *texts = [NSMutableArray array];
     for (NSDictionary *candidate in targetGloss ? _targetGlossRequest[@"candidates"] : @[]) [texts addObject:candidate[@"text"]];
     for (NSDictionary *entry in english) if (![texts containsObject:entry[@"text"]]) [texts addObject:entry[@"text"]];
-    for (NSDictionary *candidate in onDevice[@"candidates"]) if (![texts containsObject:candidate[@"text"]]) [texts addObject:candidate[@"text"]];
-    if (account) for (NSDictionary *entry in _accountGlossResults) if (![texts containsObject:entry[@"text"]]) [texts addObject:entry[@"text"]];
-    NSArray *targets = (targetGloss ? _targetGlossRequest : onDevice ?: (account ? _accountGlossRequest : nil))[@"target_languages"];
+    NSArray *targets = (targetGloss ? _targetGlossRequest : nil)[@"target_languages"];
     NSMutableArray *results = [NSMutableArray array];
     for (NSString *text in texts) {
         NSString *translation = MSIMEJoinedTranslations(values[text], targets);
@@ -3210,24 +3104,9 @@ BOOL MSIMEInputControllerHasUnfinishedInput(void) {
     BOOL glossCurrent = _glossResults && [_glossRequest isEqual:[self currentGlossRequest]];
     NSDictionary *targetGloss = _targetGlossResults.count && [_targetGlossRequest isEqual:[self currentTargetGlossRequest]]
         ? _targetGlossResults : nil;
-    NSDictionary *onDevice = _onDeviceGlossRequest && [_onDeviceGlossRequest isEqual:[self currentOnDeviceGlossRequest]]
-        ? _onDeviceGlossRequest : nil;
-    BOOL accountCurrent = _accountGlossResults && [_accountGlossRequest isEqual:[self currentAccountGlossRequest]];
     if (customCurrent && _customResults.count) [results addObjectsFromArray:_customResults];
-    // 水杉账号一次回复所有目标语言，所以同一个词的英文词典释义必须按语言逐行合并，不能代替整条结果：它排在前面时，曾经把账号回复的第二语言那一行整个挡掉。
-    else if (targetGloss || onDevice || (glossCurrent && accountCurrent))
-        [results addObjectsFromArray:[self offlineGlossResults:targetGloss english:glossCurrent ? _glossResults : nil onDevice:onDevice]];
+    else if (targetGloss) [results addObjectsFromArray:[self offlineGlossResults:targetGloss english:glossCurrent ? _glossResults : nil]];
     else if (glossCurrent) [results addObjectsFromArray:_glossResults];
-    if (accountCurrent) {
-        NSMutableSet *existing = [NSMutableSet setWithArray:[results valueForKey:@"text"] ?: @[]];
-        for (NSDictionary *entry in _accountGlossResults) {
-            NSString *text = entry[@"text"];
-            if ([text isKindOfClass:NSString.class] && ![existing containsObject:text]) {
-                [results addObject:entry];
-                [existing addObject:text];
-            }
-        }
-    }
     // 上面这些是候选词翻译，只交查询列出的候选（「仅当前高亮」时离线词典为 gloss_query 查了整页）。gloss_query 的离线释义整页都有，每条标 gloss：会话把它画在每一行，高亮行还没有候选词翻译时也画它。
     NSDictionary *query = [self serviceSnapshotQuery];
     NSSet<NSString *> *requested = MSIMEQueryCandidateTexts(query);
@@ -3282,324 +3161,6 @@ BOOL MSIMEInputControllerHasUnfinishedInput(void) {
     return YES;
 }
 
-// The backend keeps one account request in flight and one page waiting, shared by every controller. Only the timer is this controller's, so when it stops asking the account (turned off, a service of the user's own took over, or the field was left) the waiting page is dropped too; otherwise it would go out when the request in flight finishes, after the user opted out.
-- (void)stopAccountGloss {
-    [self cancelAccountGloss];
-    [self cancelQueuedAccountGlosses];
-}
-
-- (void)cancelQueuedAccountGlosses {
-    // 迟到的控制器不能删除别人的等待页；当前焦点退出时仍须清理尚未交接的旧页。
-    if (MSIMEAccountGlossQueueOwner != self && MSIMEFocusedController != self) return;
-    MSIMEAccountGlossQueueOwner = nil;
-    // 未加载后端 dylib 时，weak_import 入口为空。
-    if (MSIMECancelAccountCandidateGlosses != nullptr) MSIMECancelAccountCandidateGlosses();
-}
-
-- (void)cancelAccountGloss {
-    ++_accountGlossEpoch;
-    [_accountGlossTimer invalidate];
-    _accountGlossTimer = nil;
-    _accountGlossRequest = nil;
-    _accountGlossResults = nil;
-    _accountGlossSignature = nil;
-    _accountGlossMarker = 0;
-}
-
-- (NSDictionary *)currentAccountGlossRequest {
-    if (!_activeClient || !_session || _focusPending || _appearance.englishMode || !_appearance.candidateTranslations)
-        return nil;
-    NSDictionary *query = [self serviceSnapshotQuery];
-    if (![query isKindOfClass:NSDictionary.class] || !query[@"generation"] ||
-        ![query[@"target_languages"] isKindOfClass:NSArray.class]) return nil;
-    // The account endpoint (api.msime.app) is used only when the user explicitly chose it in settings. The shared core already folds in candidate_translations and the precedence of the user's own services, so this flag is the whole decision.
-    if (!MSIMEStrictBoolean(query[@"translation_account"])) return nil;
-    NSArray *candidates = MSIMEOnlineGlossCandidates(query);
-    return candidates.count
-        ? @{ @"target_languages": query[@"target_languages"], @"candidates": candidates } : nil;
-}
-
-- (NSArray<NSDictionary *> *)accountGlossResultsForRequest:(NSDictionary *)request {
-    NSMutableArray *results = [NSMutableArray array];
-    for (NSDictionary *candidate in request[@"candidates"]) {
-        NSString *text = candidate[@"text"];
-        if (![text isKindOfClass:NSString.class]) continue;
-        NSMutableArray *values = [NSMutableArray array];
-        for (NSString *target in request[@"target_languages"]) {
-            [values addObject:MSIMEAccountGlossCached(target, text) ?: @""];
-        }
-        BOOL hasValue = NO;
-        for (NSString *value in values) if (value.length) { hasValue = YES; break; }
-        if (hasValue) [results addObject:@{ @"text": text, @"translation": [values componentsJoinedByString:@"\n"] }];
-    }
-    return results;
-}
-
-- (void)synchronizeAccountGloss:(NSDictionary *)request {
-    if (!request) { [self stopAccountGloss]; return; }
-    const uint64_t marker = MSIMECurrentAccountTranslationMarker();
-    if ([_accountGlossRequest isEqual:request] && _accountGlossMarker == marker) return;
-    // The local dictionaries answer first and the account is asked only for what they left empty, as Windows hands only the misses to RequestMisses (event_listener.cpp ApplyCandidateTranslations). Each dictionary's completion calls back here, so waiting costs one local read rather than a request.
-    NSDictionary *gloss = [self currentGlossRequest];
-    if (gloss && (![_glossRequest isEqual:gloss] || !_glossResults)) return;
-    NSDictionary *targetGloss = [self currentTargetGlossRequest];
-    if (targetGloss && (![_targetGlossRequest isEqual:targetGloss] || !_targetGlossResults)) return;
-    NSMutableSet<NSString *> *englishAnswered = [NSMutableSet set];
-    for (NSDictionary *entry in gloss ? _glossResults : @[])
-        if ([entry[@"text"] isKindOfClass:NSString.class] && [entry[@"translation"] isKindOfClass:NSString.class] &&
-            [entry[@"translation"] length]) [englishAnswered addObject:entry[@"text"]];
-    NSDictionary *targetAnswered = targetGloss ? _targetGlossResults : nil;
-    [self cancelAccountGloss];
-    _accountGlossRequest = [request copy];
-    _accountGlossMarker = marker;
-    NSArray *targets = request[@"target_languages"];
-    NSMutableArray *pending = [NSMutableArray array];
-    // Words whose English row the local dictionaries left empty. Only their English replies are saved to the learned glossary: a word that went out for another target's missing row already has a packaged English gloss, and a learned entry overrides the packaged one, so saving the account's reply would replace the curated gloss for good.
-    NSMutableSet<NSString *> *englishPending = [NSMutableSet set];
-    NSMutableString *signature = [NSMutableString string];
-    for (NSString *target in targets) {
-        for (NSDictionary *candidate in request[@"candidates"]) {
-            NSString *text = candidate[@"text"];
-            if (![target isKindOfClass:NSString.class] || ![text isKindOfClass:NSString.class]) continue;
-            [signature appendFormat:@"|%@|%@", target, text];
-            // The request carries one word list for every target, so a word goes out while any target still lacks a local answer.
-            BOOL answered = [target isEqualToString:@"en"] ? [englishAnswered containsObject:text]
-                : [targetAnswered[text][target] isKindOfClass:NSString.class] && [targetAnswered[text][target] length];
-            if (answered || MSIMEAccountGlossKnown(target, text)) continue;
-            [pending addObject:text];
-            if ([target isEqualToString:@"en"]) [englishPending addObject:text];
-        }
-    }
-    _accountGlossResults = [self accountGlossResultsForRequest:request];
-    [self applyCandidateTranslationResults];
-    if (!pending.count || [_accountGlossSignature isEqualToString:signature]) return;
-    _accountGlossSignature = [signature copy];
-    NSMutableArray *unique = [NSMutableArray array];
-    for (NSString *text in pending) if (![unique containsObject:text]) [unique addObject:text];
-    NSString *primary = targets.firstObject ?: @"";
-    NSString *secondary = targets.count > 1 ? targets[1] : @"";
-    // Cached answers were applied above without waiting; only the network request waits for the idle delay. A newer page cancels this timer through cancelAccountGloss, so the fire-time checks only guard a timer that was already running its block.
-    uint64_t epoch = _accountGlossEpoch;
-    uint64_t requestMarker = marker;
-    MSIMEClientSession *session = _session;
-    id client = _activeClient;
-    NSDictionary *pendingRequest = _accountGlossRequest;
-    __weak MSIMEInputController *weakSelf = self;
-    _accountGlossTimer = [self customTranslationTimerWithBlock:^(NSTimer *timer) {
-        MSIMEInputController *owner = weakSelf;
-        if (!owner || owner->_accountGlossEpoch != epoch || owner->_accountGlossTimer != timer) return;
-        [timer invalidate]; owner->_accountGlossTimer = nil;
-        if (owner->_session != session || owner->_activeClient != client ||
-            MSIMECurrentAccountTranslationMarker() != requestMarker ||
-            ![[owner currentAccountGlossRequest] isEqual:pendingRequest]) {
-            // Nothing went out, so the same page synced again later must ask rather than match this request and return early.
-            owner->_accountGlossRequest = nil;
-            owner->_accountGlossSignature = nil;
-            owner->_accountGlossMarker = 0;
-            return;
-        }
-        // Recorded when the words actually go out, so a request the user typed past never marks its words as this controller's to save.
-        if (englishPending.count && owner->_preferencesDirectory.isAbsolutePath) {
-            // Words a newer page displaced never reply, so the map is bounded rather than drained.
-            if (!owner->_accountEnglishQueries || owner->_accountEnglishQueries.count > 64)
-                owner->_accountEnglishQueries = [NSMutableDictionary dictionary];
-            for (NSString *text in englishPending) owner->_accountEnglishQueries[text] = [owner->_preferencesDirectory copy];
-        }
-        // The request carries no generation, so the one on screen when the words go out is passed along; nothing compares it since replies are cached by word.
-        NSDictionary *query = [owner->_session translationQueryWithError:nil];
-        uint64_t generation = 0;
-        if (MSIMEStrictUnsignedInteger(query[@"generation"], &generation))
-            [owner fetchAccountGlosses:unique primary:primary secondary:secondary generation:generation];
-    }];
-}
-
-- (void)fetchAccountGlosses:(NSArray<NSString *> *)words primary:(NSString *)primary secondary:(NSString *)secondary
-                 generation:(uint64_t)generation {
-    // IMK 的旧输入框可能尚未收到失焦回调，迟到的计时器不能替换当前输入框的等待页。
-    if (MSIMEFocusedController != self) return;
-    // weak_import: the Swift backend supplies this, and a process without the dylib binds it to null. Calling through that is a jump to address zero, which is what the settings window's three call sites have always guarded against and these two did not.
-    if (MSIMEFetchAccountCandidateGlosses == nullptr) return;
-    NSData *payload = [NSJSONSerialization dataWithJSONObject:words options:0 error:nil];
-    if (!payload) return;
-    MSIMEAccountGlossQueueOwner = self;
-    MSIMEFetchAccountCandidateGlosses([[NSString alloc] initWithData:payload encoding:NSUTF8StringEncoding].UTF8String,
-                                      primary.UTF8String, secondary.UTF8String, generation);
-}
-
-- (void)accountCandidateTranslationsDidArrive:(NSNotification *)notification {
-    NSDictionary *info = notification.userInfo;
-    if (![info isKindOfClass:NSDictionary.class]) return;
-    NSString *target = info[@"target"];
-    NSDictionary *values = info[@"translations"];
-    uint64_t marker = 0;
-    if (![target isKindOfClass:NSString.class] || ![values isKindOfClass:NSDictionary.class] ||
-        !MSIMEStrictUnsignedInteger(info[@"marker"], &marker) ||
-        marker != MSIMECurrentAccountTranslationMarker()) return;
-    // Persisted before any check on the current page, as Windows persists every fetch that completes: a reply for a page the user typed past, or a candidate already committed, would otherwise never reach the glossary.
-    if ([target isEqualToString:@"en"]) [self persistAccountGlosses:values];
-    // Cached before any check on the current page, as Windows caches every completed fetch before its staleness check (cloud_translation.cpp): the key is language and word, not generation, so an answer for a page the user typed past is still right when they back up or type the word again. Every controller hears the reply, and writing the same answer twice is harmless.
-    MSIMETranslationCache *cache = [MSIMETranslationCache sharedCache];
-    for (NSString *text in values) {
-        NSString *value = values[text];
-        if (![text isKindOfClass:NSString.class] || ![value isKindOfClass:NSString.class]) continue;
-        NSArray *identity = MSIMEAccountGlossIdentity(target, text);
-        // An empty answer is remembered as a negative entry so the word is not asked about again for eight minutes, but it must not evict a gloss another reply already supplied for the same word.
-        if (value.length) [cache rememberTranslation:value identity:identity];
-        else if (![[cache valueForIdentity:identity] isKindOfClass:NSString.class]) [cache rememberTranslation:nil identity:identity];
-    }
-    // Only a controller still showing the page it asked about redraws. Its results are rebuilt from the cache, which now holds this reply, so a late reply for a word the current page still shows is used rather than dropped.
-    if (![_accountGlossRequest isKindOfClass:NSDictionary.class] || ![_accountGlossRequest isEqual:[self currentAccountGlossRequest]]) return;
-    // A late reply usually answers words this page does not show, and then there is nothing to redraw.
-    NSArray *results = [self accountGlossResultsForRequest:_accountGlossRequest];
-    if ([results isEqual:_accountGlossResults]) return;
-    _accountGlossResults = results;
-    [self applyCandidateTranslationResults];
-}
-
-// Windows saves every English gloss it fetches to the user glossary the moment it arrives (cloud_translation.cpp PersistGloss), so the offline lookup answers that word from then on, across restarts. Account glosses used to wait for the commit, which never saved anything: the account query rows carry no Engine source, so the custom translation plan rejected them. The learned glossary needs no source, only the direction, which is always Chinese to English here because the account is only asked about Chinese candidates; it checks eligibility and formats the gloss itself.
-- (void)persistAccountGlosses:(NSDictionary *)values {
-    NSMutableDictionary<NSString *, NSMutableArray *> *batches = [NSMutableDictionary dictionary];
-    for (NSString *text in values) {
-        NSString *directory = [text isKindOfClass:NSString.class] ? _accountEnglishQueries[text] : nil;
-        if (!directory) continue;
-        [_accountEnglishQueries removeObjectForKey:text];
-        NSString *value = values[text];
-        // The store rejects a whole batch over one word longer than 40 characters or one oversized gloss, so those are left out here rather than taking their neighbours down with them.
-        if (![value isKindOfClass:NSString.class] || !value.length || [value lengthOfBytesUsingEncoding:NSUTF8StringEncoding] > 4096 ||
-            [text lengthOfBytesUsingEncoding:NSUTF32StringEncoding] > 40 * 4) continue;
-        if (!batches[directory]) batches[directory] = [NSMutableArray array];
-        [batches[directory] addObject:@{@"text":text, @"direction":@"chinese_to_english", @"translation":value}];
-    }
-    for (NSString *directory in batches) {
-        NSArray *items = batches[directory];
-        // The store takes at most nine items per request.
-        for (NSUInteger start = 0; start < items.count; start += 9) {
-            NSDictionary *request = @{@"directory":directory, @"generation":@0, @"target_language":@"en", @"action":@"remember",
-                @"items":[items subarrayWithRange:NSMakeRange(start, MIN((NSUInteger)9, items.count - start))]};
-            dispatch_async([MSIMEInputController learnedTranslationQueue], ^{
-                [MSIMEClientSession learnedTranslationRequest:request error:nil];
-            });
-        }
-    }
-}
-
-- (void)cancelOnDeviceGloss {
-    _onDeviceGlossRequest = nil;
-}
-
-// Apple's on-device models fill the rows the offline dictionaries leave empty, for users who translate without a service of their own. A service the user configured, or the MSIME account, answers every candidate itself, so this stays idle then. Only Chinese candidates are asked about, by the same per-candidate answer the account path uses.
-- (NSDictionary *)currentOnDeviceGlossRequest {
-    if (!_activeClient || !_session || _focusPending || _appearance.englishMode || !_appearance.candidateTranslations ||
-        (_glossEnabled && !_glossEnabled.boolValue)) return nil;
-    NSDictionary *query = [self serviceSnapshotQuery];
-    if (![query isKindOfClass:NSDictionary.class] || !query[@"generation"] || MSIMEStrictBoolean(query[@"translation_account"])) return nil;
-    for (NSString *service in @[@"niutrans", @"custom_translation", @"tencent_tmt"]) {
-        NSDictionary *config = query[service];
-        if ([config isKindOfClass:NSDictionary.class] && MSIMEStrictBoolean(config[@"enabled"])) return nil;
-    }
-    NSArray *targets = MSIMETranslationTargets(query);
-    if (!targets.count || (_glossTargetLanguages && ![_glossTargetLanguages isEqual:targets])) return nil;
-    NSDictionary *view = [self serviceSnapshotView];
-    // Korean Hanja rows are translated like Chinese ones; their 훈음 is drawn whatever comes back. Japanese, including temporary Japanese composition, is still left out.
-    if (!MSIMEViewShowsGlosses(view) || ![view[@"generation"] isEqual:query[@"generation"]]) return nil;
-    NSMutableArray *candidates = [NSMutableArray array];
-    for (NSDictionary *candidate in MSIMEOnlineGlossCandidates(query)) [candidates addObject:@{@"text":candidate[@"text"]}];
-    return candidates.count ? @{@"target_languages":targets, @"candidates":[candidates copy]} : nil;
-}
-
-- (void)fetchOnDeviceGlosses:(NSArray<NSString *> *)words targets:(NSArray<NSString *> *)targets {
-    // 旧输入框的离线词典回调可能晚于焦点交接，不能覆盖当前输入框的系统翻译等待页。
-    if (MSIMEFocusedController != self) return;
-    if (MSIMEFetchOnDeviceCandidateGlosses == nullptr) return;
-    NSData *wordsJSON = [NSJSONSerialization dataWithJSONObject:words options:0 error:nil];
-    NSData *targetsJSON = [NSJSONSerialization dataWithJSONObject:targets options:0 error:nil];
-    if (!wordsJSON || !targetsJSON) return;
-    MSIMEFetchOnDeviceCandidateGlosses([[NSString alloc] initWithData:wordsJSON encoding:NSUTF8StringEncoding].UTF8String,
-                                       [[NSString alloc] initWithData:targetsJSON encoding:NSUTF8StringEncoding].UTF8String);
-}
-
-- (void)synchronizeOnDeviceGloss {
-    NSDictionary *request = [self currentOnDeviceGlossRequest];
-    if (!request) { [self cancelOnDeviceGloss]; return; }
-    if ([_onDeviceGlossRequest isEqual:request]) return;
-    // The on-device model spends about half a second on each word, one word at a time, so a word the packaged English dictionary already answers is not worth its place in that line. The dictionary lookup takes milliseconds; wait for it, as the user's own services do, and its completion comes back here.
-    NSDictionary *gloss = [self currentGlossRequest];
-    if (gloss && (![_glossRequest isEqual:gloss] || !_glossResults)) return;
-    NSMutableSet<NSString *> *dictionaryAnswered = [NSMutableSet set];
-    for (NSDictionary *result in gloss ? _glossResults : @[])
-        if ([result[@"text"] isKindOfClass:NSString.class] && [result[@"translation"] isKindOfClass:NSString.class] &&
-            [result[@"translation"] length])
-            [dictionaryAnswered addObject:result[@"text"]];
-    // The same holds for the other targets' offline dictionaries, as Windows hands the slow path only what the local dictionaries missed (event_listener.cpp ApplyCandidateTranslations); their completion comes back here too.
-    NSDictionary *targetGloss = [self currentTargetGlossRequest];
-    if (targetGloss && (![_targetGlossRequest isEqual:targetGloss] || !_targetGlossResults)) return;
-    NSDictionary *targetAnswered = targetGloss ? _targetGlossResults : nil;
-    _onDeviceGlossRequest = request;
-    [self applyCandidateTranslationResults];
-    // Only what no earlier page or dictionary already answered, per target, in page order so the first candidate is translated first. The backend works one word at a time and a newer page takes over after the word in flight, so typing does not queue up stale work.
-    for (NSString *target in request[@"target_languages"]) {
-        NSMutableArray<NSString *> *words = [NSMutableArray array];
-        for (NSDictionary *candidate in request[@"candidates"]) {
-            NSString *text = candidate[@"text"];
-            if ([target isEqualToString:@"en"] && [dictionaryAnswered containsObject:text]) continue;
-            if ([targetAnswered[text][target] isKindOfClass:NSString.class] && [targetAnswered[text][target] length]) continue;
-            if ([[MSIMETranslationCache sharedCache] valueForIdentity:MSIMEOnDeviceGlossIdentity(target, text)]) continue;
-            if (![words containsObject:text]) [words addObject:text];
-        }
-        // The backend takes at most 32 words, more than any page shows.
-        if (words.count > 32) [words removeObjectsInRange:NSMakeRange(32, words.count - 32)];
-        if (!words.count) continue;
-        if ([target isEqualToString:@"en"] && gloss) {
-            // Words a newer page displaced from the backend's queue never reply, so the map is bounded rather than drained.
-            if (!_onDeviceEnglishQueries) _onDeviceEnglishQueries = [NSMutableDictionary dictionary];
-            NSUInteger pendingQueries = 0;
-            for (NSArray *queries in _onDeviceEnglishQueries.allValues) pendingQueries += queries.count;
-            if (pendingQueries > 64) _onDeviceEnglishQueries = [NSMutableDictionary dictionary];
-            for (NSString *word in words) {
-                NSMutableArray *queries = _onDeviceEnglishQueries[word];
-                if (!queries) { queries = [NSMutableArray array]; _onDeviceEnglishQueries[word] = queries; }
-                [queries addObject:[gloss copy]];
-            }
-        }
-        [self fetchOnDeviceGlosses:words targets:@[target]];
-    }
-}
-
-- (void)onDeviceCandidateTranslationsDidArrive:(NSNotification *)notification {
-    NSString *target = notification.userInfo[@"target"];
-    NSDictionary *values = notification.userInfo[@"translations"];
-    if (![target isKindOfClass:NSString.class] || ![values isKindOfClass:NSDictionary.class]) return;
-    // Formatted before it is cached, shown or saved, as Windows formats every fetched gloss first (translation_gloss.cpp FormatGloss): the model can answer over several lines, and a newline kept in the gloss starts a row of its own that pushes the next target's gloss out of place. A gloss that formats to nothing, or to the word itself, is kept as an empty answer so the word is not asked about again.
-    NSMutableDictionary<NSString *, NSString *> *formatted = [NSMutableDictionary dictionary];
-    for (NSString *text in values) {
-        NSString *value = values[text];
-        if (![text isKindOfClass:NSString.class] || ![value isKindOfClass:NSString.class]) continue;
-        NSString *gloss = [MSIMEClientSession formatTranslationGloss:value error:nil];
-        if (!gloss || [gloss isEqualToString:[text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet]]) gloss = @"";
-        formatted[text] = gloss;
-        [[MSIMETranslationCache sharedCache] rememberTranslation:gloss identity:MSIMEOnDeviceGlossIdentity(target, text)];
-    }
-    values = formatted;
-    // Persisted whether or not the page is still on screen, as Windows persists every fetch that completes: a reply for a page the user typed past would otherwise sit in the process cache, never be asked for again, and never reach the glossary.
-    if ([target isEqualToString:@"en"]) [self persistOnDeviceGlosses:values];
-    // Every controller hears the reply; only one still composing the page it asked about merges it.
-    if (!_onDeviceGlossRequest || ![_onDeviceGlossRequest isEqual:[self currentOnDeviceGlossRequest]]) return;
-    [self applyCandidateTranslationResults];
-}
-
-// Windows saves every English gloss it fetches to the user glossary the moment it arrives (cloud_translation.cpp PersistGloss), so the offline lookup answers that word from then on, across restarts. On-device glosses get the same treatment: the model spends about half a second per word, one at a time, and the process cache it otherwise lives in is gone when the input method restarts. Only English, because the learned glossary is the English one, and only words this controller asked about, since every controller hears every reply; each is written with the gloss request of the page that asked, which carries the source the plan needs.
-- (void)persistOnDeviceGlosses:(NSDictionary *)values {
-    for (NSString *text in values) {
-        NSMutableArray *queries = [text isKindOfClass:NSString.class] ? _onDeviceEnglishQueries[text] : nil;
-        NSDictionary *query = queries.firstObject;
-        if (!query) continue;
-        [queries removeObjectAtIndex:0];
-        if (!queries.count) [_onDeviceEnglishQueries removeObjectForKey:text];
-        NSString *value = values[text];
-        if ([value isKindOfClass:NSString.class] && value.length)
-            [self persistFetchedTranslations:@[@{@"text":text, @"translation":value}] forQuery:query];
-    }
-}
 - (MSIMECustomTranslationBatch *)customBatchForItems:(NSArray<NSDictionary *> *)items completion:(void (^)(NSArray<NSDictionary *> *))completion {
     return [[MSIMECustomTranslationBatch alloc] initWithItems:items configuration:NSURLSessionConfiguration.ephemeralSessionConfiguration completion:completion];
 }
@@ -3622,10 +3183,8 @@ BOOL MSIMEInputControllerHasUnfinishedInput(void) {
     NSDictionary *query = [self currentCustomTranslationRequest];
     if (!query) {
         [self detachCustomTranslations];
-        [self synchronizeAccountGloss:[self currentAccountGlossRequest]];
         return;
     }
-    [self stopAccountGloss];
     if ([_customQuery isEqual:query]) return;
     [self detachCustomTranslations];
     // `/fy` translates one English sentence into the query's own target, Chinese, which the candidate target list does not name and the candidate plan refuses; it is its own plan item and is neither read from nor written to the gloss cache.
@@ -3919,9 +3478,6 @@ BOOL MSIMEInputControllerHasUnfinishedInput(void) {
                 ![[current currentGlossRequest] isEqual:request] || (result && ![result[@"generation"] isEqual:generation])) return;
             current->_glossResults = [translations copy];
             [current applyCandidateTranslationResults];
-            // On-device translation and the account request wait for the dictionary so they can skip what the dictionary answered.
-            [current synchronizeOnDeviceGloss];
-            [current synchronizeAccountGloss:[current currentAccountGlossRequest]];
         });
     }];
 }
@@ -4007,9 +3563,6 @@ BOOL MSIMEInputControllerHasUnfinishedInput(void) {
                 ![[current currentTargetGlossRequest] isEqual:request]) return;
             current->_targetGlossResults = [values copy];
             [current applyCandidateTranslationResults];
-            // On-device translation and the account request wait for this dictionary so they can skip what it answered.
-            [current synchronizeOnDeviceGloss];
-            [current synchronizeAccountGloss:[current currentAccountGlossRequest]];
         });
     }];
 }
@@ -4035,7 +3588,7 @@ BOOL MSIMEInputControllerHasUnfinishedInput(void) {
 /// Shurufa v2 Tier 1 非阻塞端侧神经解码状态判定（安全密码框、英文模式与缺失模型时严格关闭）。
 /// 根据当前版本与宿主会话配置纯 Rust 端侧神经服务；不可用时零副作用回退纯 Tier 0。
 - (void)configureNeuralForSession {
-    if (!_session) return;
+    if (!_session || ![_session respondsToSelector:@selector(configureNeuralServiceWithOptions:updateHandler:error:)]) return;
     if (!MSIMEEditionIsShurufa()) {
         [_session configureNeuralServiceWithOptions:@{@"enabled": @NO} updateHandler:nil error:nil];
         return;
@@ -4140,11 +3693,10 @@ BOOL MSIMEInputControllerHasUnfinishedInput(void) {
     _fixedBadgeString = MSIMECandidateBadgeString(msime::mac::candidate_fixed_badge(_fixedBadgeEnabled, _fixedBadgeStyle.UTF8String ?: ""));
     _appearance = [MSIMEAppearancePreferences sharedPreferences];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(appearanceChanged:) name:MSIMEAppearanceDidChangeNotification object:_appearance];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(appearanceDidPersist:) name:MSIMEAppearanceDidPersistNotification object:_appearance];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(translationPreferencesSaved:) name:MSIMETranslationPreferencesDidSaveNotification object:_appearance];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(appearanceChanged:) name:MSIMEVoiceSettingsDidChangeNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(voiceProviderSettingsChanged:) name:MSIMEVoiceProviderSettingsDidChangeNotification object:nil];
-    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(accountCandidateTranslationsDidArrive:) name:@"MSIMEBackendCandidateTranslationsDidArrive" object:nil];
-    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(onDeviceCandidateTranslationsDidArrive:) name:@"MSIMEBackendOnDeviceTranslationsDidArrive" object:nil];
     [NSDistributedNotificationCenter.defaultCenter addObserver:self
         selector:@selector(typingStatisticsEnabledChanged:)
         name:MSIMETypingStatisticsEnabledChangedNotification object:nil
@@ -4258,9 +3810,9 @@ BOOL MSIMEInputControllerHasUnfinishedInput(void) {
     }
     return _candidateAnchorValid ? _candidateAnchorCaret : reported;
 }
-- (void)voiceProviderSettingsChanged:(NSNotification *)notification { (void)notification; _preferenceLoadState.reset(); _voicePermissionToken = nil; _voiceHoldShortcut.reset(); _configuredVoiceShortcut.reset(); [self cancelLiveVoiceInput]; [self cancelDoubaoVoiceInput]; [self cancelHTTPVoiceInput]; if (_voiceService.active) [_voiceService cancelWithError:nil]; [_voiceOverlay dismissFailure]; [self persistAppearancePreferences]; MSIMERefreshVoiceShortcutTap(); }
+- (void)voiceProviderSettingsChanged:(NSNotification *)notification { (void)notification; [self resetPreferenceLoadState]; _voicePermissionToken = nil; _voiceHoldShortcut.reset(); _configuredVoiceShortcut.reset(); [self cancelLiveVoiceInput]; [self cancelDoubaoVoiceInput]; [self cancelHTTPVoiceInput]; if (_voiceService.active) [_voiceService cancelWithError:nil]; [_voiceOverlay dismissFailure]; MSIMERefreshVoiceShortcutTap(); }
 - (void)translationPreferencesSaved:(NSNotification *)notification {
-    _preferenceLoadState.reset();
+    [self resetPreferenceLoadState];
     [self applySharedToolbarPreferences:notification.userInfo];
     _view = [_session viewWithError:nil] ?: _view;
     [self refreshFloatingToolbarState];
@@ -4304,9 +3856,10 @@ BOOL MSIMEInputControllerHasUnfinishedInput(void) {
         traditionalChineseOutputEnabled:_appearance.traditionalOutput];
 }
 - (void)appearanceChanged:(NSNotification *)notification {
+    (void)notification;
     _expandedViewportHeight = 0;
     _expandedGridGeometry.reset();
-    _preferenceLoadState.reset(); // Local edits invalidate older disk reads.
+    [self resetPreferenceLoadState]; // 本机改动使更早之前的磁盘读取失效。
     if (!_appearance.cloudCandidatesEnabled) [self cancelCloudCandidates];
     if (_appearance) _glossEnabled = @(_appearance.candidateTranslations);
     if (_appearance && !_appearance.candidateTranslations) {
@@ -4339,82 +3892,29 @@ BOOL MSIMEInputControllerHasUnfinishedInput(void) {
     if (_activeClient) [self syncSystemInputModeForClient:_activeClient];
     // 原生设置窗口在输入法进程里，点它的开关时焦点在这个窗口上，没有控制器持有客户端，上面的同步和之后的重新载入都走不到：关上时由每个控制器直接隐藏状态项；打开则等下一次获得焦点时由 activateServer: 的同步按当前模式放上，没有客户端的控制器说不准该显示哪个方案。
     else if (_appearance && !_appearance.inputModeStatusItem) [self presentInputModeStatusItem:nil];
-    // Every Shift tap lands here. Saving then wrote this process's whole view of the settings over the shared document once per mode switch, so a controller that had not yet reloaded an edit made elsewhere put the old value back, and two writers that disagreed traded the document on every tap.
-    if (![notification.userInfo[MSIMEAppearanceInputModeOnlyKey] isEqual:@YES]) [self persistAppearancePreferences];
 }
-// One save in flight for the whole process. IMK keeps a controller per text input client and every one of them observes the same shared appearance, so one change asks each of them to save the same document; with a save state per controller they each ran a load and a compare-and-swap save under the exclusive preferences lock, fsync included, at the same time. What they save is the shared appearance, whichever controller asks, so one save and at most one queued behind it cover them all.
-static MSIMEPreferenceSaveState MSIMESharedPreferenceSaveState;
-// The controller behind the queued save, which runs it when the one in flight finishes, whether or not the controller that started that one is still alive.
-static __weak MSIMEInputController *MSIMEQueuedPreferenceSaver;
-// 方案只能经由共享偏好文档到达 Engine，而外观改动触发的保存在主线程之外进行，所以从 한 切到 中 之后紧接着敲的键仍按韩文组字，未完成的音节又会把新方案一直挡到它结束。因此切换时在这里、在下一个按键之前于主线程写入文档，并把写入的内容原样交给持有焦点的会话。切换方案前已经结束了组字，会话处于空闲状态，会立即应用新方案。外观改动另外触发的那次保存会再写一遍相同的偏好，会话视为没有变化。Fcitx5 切换方案时同样等待保存完成；这里保存失败时，切换交由那次后台保存完成。
+- (void)appearanceDidPersist:(NSNotification *)notification {
+    (void)notification;
+    if (_activeClient && _preferencesDirectory) [self reloadPreferences];
+}
+- (void)resetPreferenceLoadState {
+    ++_preferenceLoadGeneration;
+    _preferenceLoadInFlight = NO;
+    _appliedPreferenceRevision = 0;
+}
+// 方案只能经由共享偏好文档到达 Engine：切换时在主线程经单一写入方 `MSIMEAppearancePreferences` 落盘 `config.json`，并把写入后的快照原样交给持有焦点的会话。
 - (void)applyPreferencesToSessionNow {
     if (!_session || !_activeClient || !_preferencesDirectory || !_appearance) return;
-    NSDictionary *overrides = [_appearance sharedPreferencesByMerging:@{}];
-    NSDictionary *saved = nil;
-    // 后台保存可能在中间抢先占用 revision；第二次尝试会像那次保存一样，在它写入的内容上合并。
-    for (int attempt = 0; attempt < 2 && !saved; ++attempt) {
-        NSDictionary *snapshot = [MSIMEClientSession loadPreferencesInDirectory:_preferencesDirectory error:nil];
-        NSDictionary *preferences = snapshot ? MSIMEMergePreferenceSnapshot(snapshot[@"preferences"], overrides) : nil;
-        if (!preferences) break;
-        id revision = snapshot[@"revision"] ?: @0;
-        uint64_t revisionValue = 0;
-        if (snapshot[@"revision"] && !MSIMEStrictUnsignedInteger(revision, &revisionValue)) break;
-        saved = [MSIMEClientSession savePreferencesInDirectory:_preferencesDirectory expectedRevision:revisionValue
-                                                     snapshot:@{ @"format_version": @1, @"revision": revision, @"preferences": preferences } error:nil];
-    }
+    NSDictionary *saved = [_appearance persistPreferencesToDirectory:_preferencesDirectory error:nil];
     if (![saved isKindOfClass:NSDictionary.class]) { msime_macos_diagnostic_write("preferences_save_failed"); return; }
-    // 走载入路径，这样 revision 会记为已应用，仍在进行的读取会被丢弃，而不是覆盖到它上面。
-    _preferenceLoadState.reset();
-    if (!_preferenceLoadState.begin()) return;
-    [self completePreferenceLoad:saved error:nil generation:_preferenceLoadState.generation session:_session client:_activeClient];
+    [self resetPreferenceLoadState];
+    _preferenceLoadInFlight = YES;
+    [self completePreferenceLoad:saved error:nil generation:_preferenceLoadGeneration session:_session client:_activeClient];
 }
 - (void)persistAppearancePreferences {
-    if (!_preferencesDirectory) return;
-    if (!MSIMESharedPreferenceSaveState.request()) { MSIMEQueuedPreferenceSaver = self; return; }
-    NSString *directory = [_preferencesDirectory copy];
-    // Capture all host-owned fields together on the main thread. Both CAS
-    // attempts use this same snapshot; later changes schedule a fresh save.
-    NSDictionary *overrides = [_appearance sharedPreferencesByMerging:@{}];
-    __weak MSIMEInputController *weakSelf = self;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        NSError *loadError = nil;
-        NSDictionary *snapshot = [MSIMEClientSession loadPreferencesInDirectory:directory error:&loadError];
-        NSDictionary *preferences = snapshot ? MSIMEMergePreferenceSnapshot(snapshot[@"preferences"], overrides) : nil;
-        uint64_t revision = 0;
-        if (snapshot[@"revision"] && !MSIMEStrictUnsignedInteger(snapshot[@"revision"], &revision)) preferences = nil;
-        NSError *saveError = nil;
-        NSDictionary *saved = nil;
-        if (preferences) {
-            saved = [MSIMEClientSession savePreferencesInDirectory:directory expectedRevision:revision snapshot:@{ @"format_version": @1, @"revision": @(revision), @"preferences": preferences } error:&saveError];
-        }
-        if (!saved && snapshot) {
-            NSError *retryLoadError = nil;
-            NSDictionary *latest = [MSIMEClientSession loadPreferencesInDirectory:directory error:&retryLoadError];
-            NSDictionary *latestPreferences = latest ? MSIMEMergePreferenceSnapshot(latest[@"preferences"], overrides) : nil;
-            if (latestPreferences) {
-                saveError = nil;
-                uint64_t latestRevision = 0;
-                if (latest[@"revision"] && !MSIMEStrictUnsignedInteger(latest[@"revision"], &latestRevision)) latestPreferences = nil;
-                if (latestPreferences) saved = [MSIMEClientSession savePreferencesInDirectory:directory expectedRevision:latestRevision snapshot:@{ @"format_version": @1, @"revision": latest[@"revision"] ?: @0, @"preferences": latestPreferences } error:&saveError];
-            }
-        }
-        dispatch_async(dispatch_get_main_queue(), ^{
-            const bool again = MSIMESharedPreferenceSaveState.finish();
-            MSIMEInputController *controller = weakSelf;
-            if (!saved || saveError) msime_macos_diagnostic_write("preferences_save_failed");
-            else {
-                if (controller) [controller reloadPreferences];
-                // 从 한 切到 中 是一次方案切换，只能通过这份文档到达 Engine。如果等持有焦点的控制器每秒一次的轮询，期间敲的键仍按韩文组字，正在组的音节又会把新方案挡到它结束，于是菜单栏已经显示 中，用户打出来的却还是韩文。
-                MSIMEInputController *focused = MSIMEFocusedController;
-                if (focused && focused != controller) [focused reloadPreferences];
-            }
-            if (again) {
-                MSIMEInputController *next = MSIMEQueuedPreferenceSaver ?: controller;
-                MSIMEQueuedPreferenceSaver = nil;
-                [next persistAppearancePreferences];
-            }
-        });
-    });
+    if (!_preferencesDirectory || !_appearance) return;
+    [_appearance setTranslationPreferencesDirectory:_preferencesDirectory];
+    [_appearance schedulePersistPreferences];
 }
 - (void)syncPageSize {
     if (!_session) return;
@@ -4890,11 +4390,7 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
 }
 - (void)showAccount:(id)sender {
     (void)sender;
-    // The shared settings page owns the account surface, the same as every other entry in this menu. The
-    // bundled SwiftUI window stays as the fallback for a host without the desktop application, which is
-    // what it was before this route existed - it was simply being opened first.
     MSIMEOpenDesktopRoute(@"settings:account", NSWorkspace.sharedWorkspace, ^{
-        if (MSIMEOpenBackendAccount(NSClassFromString(@"MSIMEBackendAccountWindow"))) return;
         NSAlert *alert = [[NSAlert alloc] init];
         alert.messageText = @"账号窗口暂不可用";
         alert.informativeText = @"请重新启动输入法；若仍无法打开，请检查安装是否完整。";
@@ -4912,46 +4408,26 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
         [self showSharedTextTool:@"cloud-clipboard" options:[self runtimeOptions] bridge:nil];
         return;
     }
-    // 打开设置应用的完成回调在 NSWorkspace 的并发队列上执行并释放，这里的块随它一起被持有：只捕获弱引用，控制器的最后一次释放才不会落在那条队列上（见 reloadPreferences）。
     __weak MSIMEInputController *weakSelf = self;
     MSIMEOpenDesktopCloudClipboard(MSIMERuntimeOptionsPath(), NSWorkspace.sharedWorkspace, ^{
-        if (!MSIMEOpenBackendClipboard(NSClassFromString(@"MSIMEBackendAccountWindow"))) [weakSelf showAccount:sender];
+        [weakSelf showAccount:sender];
     });
 }
 - (void)showCloudDictionary:(id)sender {
     if (MSIMEEditionIsShurufa()) return;
     (void)sender;
-    // 只捕获弱引用，理由同 showCloudClipboard:。
     __weak MSIMEInputController *weakSelf = self;
     MSIMEOpenDesktopCloudDictionary(MSIMERuntimeOptionsPath(), NSWorkspace.sharedWorkspace, ^{ [weakSelf showAccount:nil]; });
 }
 - (void)showHandwriting:(id)sender {
     (void)sender;
     if (!MSIMEEditionOffersHandwriting()) return;
-    Class bridge = NSClassFromString(@"MSIMEBackendWindowBridge");
-    id shared = [bridge respondsToSelector:@selector(shared)] ? [bridge performSelector:@selector(shared)] : nil;
-    if (![shared respondsToSelector:@selector(showHandwritingWithSelectionAttempt:)]) { [self showAccount:nil]; return; }
-    if (!_activeClient) {
-        MSIMEOpenDesktopRoute(@"handwriting", NSWorkspace.sharedWorkspace, ^{ [shared performSelector:@selector(showHandwriting)]; });
-        return;
-    }
-    [self showSharedTextTool:@"handwriting" options:[self runtimeOptions] bridge:shared];
+    [self showAccount:nil];
 }
 - (void)showEmoji:(id)sender {
     if (MSIMEEditionIsShurufa()) return;
     (void)sender;
-    Class bridge = NSClassFromString(@"MSIMEBackendWindowBridge");
-    id shared = [bridge respondsToSelector:@selector(shared)] ? [bridge performSelector:@selector(shared)] : nil;
-    NSDictionary *options = [self runtimeOptions];
-    // The shared Tauri/Swift surface is the normal path, but the input source
-    // can be alive before that bridge is loaded (or while the desktop bundle
-    // is being repaired). Keep the macOS character viewer as a useful,
-    // platform-native fallback instead of silently dropping the menu action.
-    if (![shared respondsToSelector:@selector(showEmojiWithOptions:selectionAttempt:)]) {
-        [self showSystemCharacterPalette];
-        return;
-    }
-    [self showSharedTextTool:@"emoji" options:options bridge:shared];
+    [self showSystemCharacterPalette];
 }
 - (void)showVoicePanel {
     NSString *providerSocket = MSIMEVoiceProviderSocket();
@@ -5102,12 +4578,15 @@ static NSUInteger MSIMEAdaptiveHighlightIndex(NSArray<NSDictionary *> *entries, 
         [inputSession stop];
         MSIMEInputController *controller = weakSelf;
         if (!controller || controller->_emojiReturn.generation != token) return;
-        if ([route isEqualToString:@"cloud-clipboard"]) {
+        if ([route isEqualToString:@"cloud-clipboard"] || [route isEqualToString:@"handwriting"]) {
             controller->_emojiReturn.discard(token);
-            if (!MSIMEOpenBackendClipboard(NSClassFromString(@"MSIMEBackendAccountWindow"))) [controller showAccount:nil];
-        } else if ([route isEqualToString:@"handwriting"])
-            [shared performSelector:@selector(showHandwritingWithSelectionAttempt:) withObject:selection];
-        else [shared performSelector:@selector(showEmojiWithOptions:selectionAttempt:) withObject:options withObject:selection];
+            [controller showAccount:nil];
+        } else {
+            controller->_emojiReturn.discard(token);
+            [controller showSystemCharacterPalette];
+        }
+        (void)shared;
+        (void)options;
     };
     if (!inputSession) { fallback(); return; }
     if ([route isEqualToString:@"cloud-clipboard"]) {
@@ -6988,7 +6467,7 @@ static constexpr NSUInteger MSIMEIdleDictionarySessionLimit = 4;
     [self cancelCloudCandidates];
     [self resetModifierTap];
     [self abandonCapsLockTap];
-    _preferenceLoadState.reset();
+    [self resetPreferenceLoadState];
     if (_activeClient) {
         if (![self commitManagedEnglishRaw]) return;
         // 关闭活动会话时按失焦上屏处理，不出声不画。
@@ -7050,9 +6529,7 @@ static constexpr NSUInteger MSIMEIdleDictionarySessionLimit = 4;
     [_toolbar activateForDelegate:self visible:_appearance.floatingToolbarEnabled];
     _activeClient = sender;
     MSIMEFocusedController = self;
-    _preferenceLoadState.reset();
-    [[NSNotificationCenter defaultCenter] removeObserver:self name:MSIMEClientSessionDidReplaceSnapshotNotification object:nil];
-    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(snapshotSessionReplaced:) name:MSIMEClientSessionDidReplaceSnapshotNotification object:nil];
+    [self resetPreferenceLoadState];
     [self refreshFloatingToolbarState];
     [self ensureAppearance];
     _focusPending = _appearance.englishMode;
@@ -7178,35 +6655,10 @@ static NSString *const MSIMECloudConsentMessage =
         completion(NO);
         return;
     }
-    Class bridge = NSClassFromString(@"MSIMEBackendWindowBridge");
-    id shared = [bridge respondsToSelector:@selector(shared)] ? [bridge performSelector:@selector(shared)] : nil;
-    if ([shared respondsToSelector:@selector(showEmojiDeliveryFailure)])
-        [shared performSelector:@selector(showEmojiDeliveryFailure)];
 }
 
-// 背景音乐在本进程某个控制器是当前输入法时播放。IMK 不保证上一个客户端的 deactivateServer: 先于下一个的 activateServer:，所以只有最后让音乐响起的控制器能停它。生命周期核心按会话记着真正的所有者，这里只决定哪个控制器在偏好更新、会话新建或重建之后重新报告激活。声明在 snapshotSessionReplaced: 和 prepareSession 之前，它们也读它。
+// 背景音乐在本进程某个控制器是当前输入法时播放。IMK 不保证上一个客户端的 deactivateServer: 先于下一个的 activateServer:，所以只有最后让音乐响起的控制器能停它。生命周期核心按会话记着真正的所有者，这里只决定哪个控制器在偏好更新、会话新建或重建之后重新报告激活。声明在 prepareSession 之前，它们也读它。
 static __weak MSIMEInputController *MSIMEMusicOwner;
-
-- (void)snapshotSessionReplaced:(NSNotification *)notification {
-    if (notification.object != _session) return;
-    [self resetCandidateAnchor];
-    [self cancelCandidateTranslations];
-    [self cancelCloudCandidates];
-    [self resetModifierTap];
-    [self abandonCapsLockTap];
-    _requestedPageSize = 0;
-    _preferenceLoadState.reset();
-    _focusPending = YES;
-    if (_activeClient) {
-        MSIMEApplyTransition(@{@"view": @{@"editing_text": @"", @"preedit": @"", @"caret_position": @0}}, (id<MSIMETextClient>)_activeClient);
-    }
-    _view = [_session viewWithError:nil] ?: @{};
-    // 旧会话销毁时核心已经关掉了它的音乐；包装层把生命周期位和字段属性恢复到了新会话上，激活状态由音乐跟随的控制器在这里重新报告。
-    if (MSIMEMusicOwner == self) [self claimBackgroundMusic];
-    [self refreshFloatingToolbarState];
-    [self hideCandidatePanel:"session_replaced"];
-    [_keymapPanel orderOut:nil];
-}
 
 - (NSDictionary *)runtimeOptions { return MSIMELoadRuntimeOptions(); }
 
@@ -7356,8 +6808,6 @@ static NSString *MSIMESessionUnavailableReason(NSDictionary *options, NSError *e
 }
 
 - (void)prepareSession {
-    // The device's anonymous MSIME account is registered the first time the input method activates, so a new install has one before any feature asks for it. It runs once per process and returns at once when a signed-in or anonymous session is already saved; only the random identity is sent, never input.
-    if (!MSIMEEditionIsShurufa() && MSIMEEnsureAnonymousAccount != nullptr) MSIMEEnsureAnonymousAccount();
     BOOL reopened = NO;
     BOOL created = NO;
     if (!_session) {
@@ -7478,7 +6928,8 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
 
 - (void)completePreferenceLoad:(NSDictionary *)snapshot error:(NSError *)error generation:(uint64_t)generation
                        session:(MSIMEClientSession *)session client:(id)client {
-    if (!_preferenceLoadState.finish(generation)) return;
+    if (generation != _preferenceLoadGeneration || !_preferenceLoadInFlight) return;
+    _preferenceLoadInFlight = NO;
     if (!snapshot || error) {
         msime_macos_diagnostic_write("preferences_load_failed");
         return;
@@ -7490,7 +6941,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     // is always applied.
     uint64_t revision = 0;
     if (snapshot[@"revision"] && !MSIMEStrictUnsignedInteger(snapshot[@"revision"], &revision)) { msime_macos_diagnostic_write("preferences_load_failed"); return; }
-    if (!_preferenceLoadState.needsApply(revision)) return;
+    if (revision != 0 && revision == _appliedPreferenceRevision) return;
     NSDictionary *preferences = snapshot[@"preferences"];
     // 更新通道与会话无关，读到新的偏好就交给 Sparkle：下一次检查按它取 appcast，通道变了时重排检查周期（UpdateController.mm）。没有 feed 的构建不创建更新控制器。
     if ([preferences isKindOfClass:NSDictionary.class] && MSIMEUpdateHostUsesSparkle(NSBundle.mainBundle))
@@ -7509,7 +6960,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     NSDictionary *result = [session updatePreferencesSnapshot:snapshot error:&updateError];
     // Failed loads/updates retain the existing window appearance and runtime.
     if (result && !updateError) {
-        _preferenceLoadState.applied(revision);
+        _appliedPreferenceRevision = revision;
         if (inputPreferences) [_appearance applySharedInputPreferences:inputPreferences];
         [self applySharedToolbarPreferences:snapshot[@"preferences"]];
         // After the preferences, which the session's resolved effect refines with the selected pack.
@@ -7546,8 +6997,9 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
 }
 
 - (void)reloadPreferences {
-    if (!_activeClient || !_preferencesDirectory || MSIMESharedPreferenceSaveState.saving || !_preferenceLoadState.begin()) return;
-    const uint64_t generation = _preferenceLoadState.generation;
+    if (!_activeClient || !_preferencesDirectory || _preferenceLoadInFlight) return;
+    _preferenceLoadInFlight = YES;
+    const uint64_t generation = _preferenceLoadGeneration;
     MSIMEClientSession *session = _session;
     id client = _activeClient;
     NSString *directory = [_preferencesDirectory copy];
@@ -7714,12 +7166,6 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     [_appearance applySharedToolbarPreferences:preferences];
     [_appearance applySharedLocalModes:preferences[@"local_modes"]];
     [self refreshFloatingToolbarState];
-    Class bridge = NSClassFromString(@"MSIMEBackendWindowBridge");
-    id shared = [bridge respondsToSelector:@selector(shared)] ? [bridge performSelector:@selector(shared)] : nil;
-    if ([shared respondsToSelector:@selector(applyEmojiPreferences:)])
-        [shared performSelector:@selector(applyEmojiPreferences:) withObject:preferences];
-    if ([shared respondsToSelector:@selector(applyHandwritingPreferences:)])
-        [shared performSelector:@selector(applyHandwritingPreferences:) withObject:preferences];
     [[MSIMEScreenKeyboardPanel sharedPanel] applyThemePreferences:preferences];
     // 全局主题随文档其余部分一起到达，所以工具栏除了在激活时，在这里也取由它解析出的调色板。自带明暗的主题像钉住候选窗一样钉住工具栏的明暗。工具栏和中英文提示在 macOS 上没有单独的明暗设置，只看 `theme`，所以钉住的就是它。
     NSDictionary *toolbarThemePreferences = preferences;
@@ -7782,7 +7228,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     [self discardExpandedCandidates];
     [self resetModifierTap];
     [self abandonCapsLockTap];
-    _preferenceLoadState.reset();
+    [self resetPreferenceLoadState];
     // A focus-out is the reference's ClientSuspended, which never changes floating-toolbar visibility: the toolbar keeps this controller as its owner and stays on screen until the next activateServer: hands it on or the user selects another input source.
     [_keymapPanel orderOut:nil];
     [_preferencesTimer invalidate];
@@ -8371,7 +7817,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         [self cancelCloudCandidates];
         [self resetCandidateAnchor];
         [self resetModifierTap];
-        _preferenceLoadState.reset();
+        [self resetPreferenceLoadState];
         [self flushPendingPairedClosing];
         _pairedPunctuation.clear();
         [self resetSmartPunctuationState];
@@ -8452,7 +7898,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
             (NSEventModifierFlagShift | NSEventModifierFlagControl | NSEventModifierFlagOption | NSEventModifierFlagCommand);
         const unichar ch = event.characters.length == 1 ? [event.characters characterAtIndex:0] : 0;
         const BOOL keepsProvisional = (mods == 0) && ((ch >= 'a' && ch <= 'z') || ch == ' ' || ch == '\r' || ch == '\n');
-        if (!keepsProvisional) {
+        if (!keepsProvisional && [_session respondsToSelector:@selector(flushProvisionalNeuralWithError:)]) {
             NSDictionary *flushed = [_session flushProvisionalNeuralWithError:nil];
             if (MSIMEStrictBoolean(flushed[@"flushed"]) && [flushed[@"view"] isKindOfClass:NSDictionary.class]) {
                 _view = flushed[@"view"];
@@ -9538,7 +8984,7 @@ static NSRange MSIMEVoiceReplacementRangeForClient(id client, BOOL replaceSelect
     // Every refresh clears the session's translations and moves its generation, even when the page shows the same words, and the requests below no longer change with the generation, so none of them would put the glosses back. Re-apply what is held once per generation instead, as Windows re-applies its cached glosses on every redraw (event_listener.cpp ApplyCandidateTranslations); the successful apply comes back here with the generation recorded.
     NSNumber *generation = _view[@"generation"];
     if ([generation isKindOfClass:NSNumber.class] && ![generation isEqual:_translationAppliedGeneration] &&
-        (_glossResults.count || _targetGlossResults.count || _customResults.count || _accountGlossResults.count || _onDeviceGlossRequest)) {
+        (_glossResults.count || _targetGlossResults.count || _customResults.count)) {
         // Recorded before the attempt, so a refused apply falls through to the synchronization below rather than retrying.
         _translationAppliedGeneration = generation;
         if ([self applyCandidateTranslationResults]) return;
@@ -9554,8 +9000,6 @@ static NSRange MSIMEVoiceReplacementRangeForClient(id client, BOOL replaceSelect
     [self synchronizeCloudCandidates];
     [self synchronizeCandidateGloss];
     [self synchronizeTargetGloss];
-    [self synchronizeOnDeviceGloss];
-    [self synchronizeAccountGloss:[self currentAccountGlossRequest]];
     [self synchronizeCustomTranslations];
     [self synchronizeAITranslations];
     [self synchronizePronunciation];

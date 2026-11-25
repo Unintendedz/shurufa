@@ -1,15 +1,11 @@
 [package]
 name = "msime-client-services"
-description = "Client side of the backend services and user content: account, community, telemetry, notices, update check, diagnostics, the self-hosted clipboard relay, skins, plugins, dictionaries, vocabulary, common phrases and typing statistics."
+description = "Client side of local user services and content: diagnostics, skins, plugins, dictionaries, and typing statistics."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-
-[features]
-# 让依赖本 crate 的测试把账号客户端连到本机回环上的假服务端（`BackendAccountClient::loopback_with_agent`），只在它们的 dev-dependencies 里打开，正常产品构建不启用。
-test-support = []
 
 [dependencies]
 msime-client-base = { path = "../client-base" }
@@ -23,39 +19,26 @@ tempfile.workspace = true
 unicode-general-category.workspace = true
 unicode-segmentation.workspace = true
 sha2.workspace = true
-# 脚本插件的随机数（`plugins::script_commands`）直接取自系统的 `getrandom`，与 client-core 的云剪贴板加密用的是同一份。
+# 插件编辑器自动生成包标识使用的系统随机数（`plugins::authoring`）。
 getrandom = "0.4"
 hex = "0.4"
 base64 = "0.23"
 uuid = { workspace = true, features = ["serde", "v4"] }
-# `formatting` for the strftime placeholders a command-table pack's templates are checked against, the same the Engine expands them with. `parsing` 用来按 RFC 3339 读服务端和崩溃记录里的时间：诊断上传把崩溃记录的 `at` 解析后重新格式化成服务端认的形状，「我的设备」和 AI 皮肤任务的时间也按它校验。不引入新的 crate。
+# `formatting` 用于指令表插件的 strftime 占位符校验，`diagnostics` 也用 `time::OffsetDateTime` 格式化时间。
 time = { workspace = true, features = ["formatting", "parsing"] }
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls", "system-proxy"] }
-# 云剪贴板的 WebDAV 后端读 PROPFIND 的多状态响应（`clipboard_webdav`）。维护者同意引入；锁文件里已经有这一版（plist 用的）。只用基础的事件读取，不开 serde 特性。
-quick-xml = "0.42"
-# Plugin packs picked as a .zip archive. Only the flate2 deflate backend: stored and deflated members are what every archiver writes, and flate2 is already here.
+# 支持从本地 .zip 压缩包导入插件包并写入诊断归档。
 zip = { version = "9.0", default-features = false, features = ["deflate-flate2"] }
-# Notice bodies are simple Markdown; HarmonyOS's RichText gets HTML rendered here (raw HTML escaped, unsafe links dropped). Only the HTML writer: the default `getopts` feature is for the crate's command-line binary.
-pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
-# 社区包完整解码 PNG/JPEG/APNG/GIF/WebP，保留动画且限制帧数与像素预算；预览仍只接受 PNG/JPEG。与本地扫描共用已有解码特性，不新增依赖。
+# 皮肤包资源解码与动图帧校验。
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
-# `image` 固定用宽松模式解码 JPEG，截断的 JPEG 也能“解码成功”，所以 JPEG 直接用严格模式的 `zune-jpeg` 解码。版本和特性与 `image` 依赖的那份相同，不引入新的 crate。
 zune-jpeg = "0.5.15"
-# 皮肤图片可以是 APNG（装饰图的帧动画）。`image` 不公开 `acTL` 里的帧数，读帧数和逐帧解码校验直接用它底下的 `png`。版本与 `image` 依赖的那份相同，不引入新的 crate。
 png = "0.18.1"
 
 [dev-dependencies]
 msime-client-base = { path = "../client-base", features = ["test-support"] }
 msime-path-trust = { path = "../path-trust", features = ["test-support"] }
-# 皮肤社区包的测试往 PNG 里插填充块时用它算块的 CRC（`skin::candidate_community` 的测试）。
-flate2 = "1"
 
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true, features = ["fs", "process"] }
-
-# 皮肤同步的测试用 `libc::O_NONBLOCK` 打开 FIFO 的写端（`skin::candidate_sync` 的测试）。
-[target.'cfg(unix)'.dev-dependencies]
-libc.workspace = true
 
 [lints]
 workspace = true

@@ -9,7 +9,6 @@
 #import "../settings/RuntimeOptionsRefresh.h"
 #import "../settings/AppearancePreferences.h"
 #import "../core/FloatingToolbarPanel.h"
-#import "../core/UsageReporting.h"
 #import "../core/UpdateController.h"
 #import "MSIMEClientSession.h"
 #import "../candidate/CandidateSkin.h"
@@ -20,10 +19,8 @@
 #import "../core/InstalledHost.h"
 #import "../settings/ShurufaPreferenceMigration.h"
 #include "msime_client.h"
-#include "MSIMERustClient.h"
 #include <cstdio>
 #include <cstring>
-#include <dlfcn.h>
 
 static bool MSIMEShouldShowPreferences(int argc, const char *argv[]) {
     for (int index = 1; index < argc; ++index) {
@@ -276,21 +273,31 @@ int main(int argc, const char *argv[]) {
             break;
         }
         MSIMEConfigureMovableState();
-        NSString *swiftBackend = [NSBundle.mainBundle.privateFrameworksPath stringByAppendingPathComponent:@"MSIMEBackend.dylib"];
-        if (swiftBackend.length > 0) {
-            void *backend = dlopen(swiftBackend.fileSystemRepresentation, RTLD_NOW | RTLD_GLOBAL);
-            if (backend == nullptr) return 1;
-            // 后端 dylib 不链接 Rust 库，账号、云端业务和云剪贴板的端到端加密驱动都经这张带版本号的函数表交给它（shared/backend/rust/MSIMERustClient.h）；输入法和独立设置窗口都要先做这一步。dylib 不收这张表时它的每个 Rust 入口都报 rust_client_unavailable，这里只记一条日志。
-            using MSIMEInstallRustClient = bool (*)(const msime_rust_client *);
-            const msime_rust_client table = msime_rust_client_linked();
-            auto install = reinterpret_cast<MSIMEInstallRustClient>(dlsym(backend, "MSIMEInstallRustClient"));
-            if (!MSIMEEditionIsShurufa() && (install == nullptr || !install(&table)))
-                NSLog(@"MSIME backend did not accept the Rust client table");
+        // 首次启动时触发单一 `config.json` 读取与幂等迁移，并将已设置过的 `NSUserDefaults` 迁入。
+        NSDictionary *startupOptions = MSIMELoadRuntimeOptions();
+        id startupPreferences = startupOptions[@"preferences_directory"];
+        NSString *startupDirectory = [startupPreferences isKindOfClass:NSString.class] && [startupPreferences isAbsolutePath]
+            ? (NSString *)startupPreferences
+            : MSIMEDefaultClientStateDirectory(NSFileManager.defaultManager).path;
+        if (startupDirectory.length > 0 && startupDirectory.isAbsolutePath) {
+            NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+            auto loadPrefs = ^NSDictionary *{ return [MSIMEClientSession loadPreferencesInDirectory:startupDirectory error:nil]; };
+            auto savePrefs = ^NSDictionary *(uint64_t revision, NSDictionary *snapshot) {
+                return [MSIMEClientSession savePreferencesInDirectory:startupDirectory expectedRevision:revision snapshot:snapshot error:nil];
+            };
+            MSIMEMigrateShurufaCapsLock(defaults, loadPrefs, savePrefs);
+            MSIMEMigrateShurufaVoiceShortcut(defaults, loadPrefs, savePrefs);
+            MSIMEMigrateShurufaVoicePresentation(defaults, loadPrefs, savePrefs);
+            MSIMEMigrateShurufaGrammarModel(defaults, loadPrefs, savePrefs);
+            MSIMEMigrateShurufaInlineEmoji(defaults, loadPrefs, savePrefs);
+            [MSIMEClientSession loadPreferencesInDirectory:startupDirectory error:nil];
         }
         // 独立设置窗口也要检查模式是否已加入输入法列表，所以在进入该分支前初始化探针。
         MSIMEInputModeEnabledProbe = MSIMEInputSourceIsEnabled;
         if (MSIMEShouldShowPreferences(argc, argv)) {
             [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+            if (startupDirectory.length > 0 && startupDirectory.isAbsolutePath)
+                [[MSIMEAppearancePreferences sharedPreferences] setTranslationPreferencesDirectory:startupDirectory];
             id closeObserver = [[NSNotificationCenter defaultCenter]
                 addObserverForName:MSIMEStandalonePreferencesDidCloseNotification
                             object:nil
@@ -304,11 +311,6 @@ int main(int argc, const char *argv[]) {
             [[NSNotificationCenter defaultCenter] removeObserver:closeObserver];
             return 0;
         }
-        // One input method process is one usage session; the standalone preferences window above is not.
-        NSDictionary *reportingOptions = MSIMELoadRuntimeOptions();
-        id reportingPreferences = reportingOptions[@"preferences_directory"];
-        if (!MSIMEEditionIsShurufa())
-            MSIMEUsageReportingStart([reportingPreferences isKindOfClass:NSString.class] && [reportingPreferences isAbsolutePath] ? reportingPreferences : nil);
         // Recover a prior crashed capture before accepting new IMK sessions.
         // A running owner holds the journal lock, so this cannot undo its mute.
         [[[MSIMEVoiceAudioMuter alloc] init] restore];
@@ -348,8 +350,8 @@ int main(int argc, const char *argv[]) {
         // 带 feed 的发布包在这里启动 Sparkle，它才会按 SUScheduledCheckInterval 在后台检查和下载；没有 feed 的构建不创建更新控制器，「检查更新…」用到时再建。
         // 先在后台队列读出偏好里的更新通道（update_channel），回到主线程再带着它创建控制器：Sparkle 启动后安排的第一次检查就取用户所选通道的 appcast，读偏好文件也不占用处理按键的主线程。偏好读不出来时按稳定版。之后的通道变化由 InputController 读偏好时交给控制器。
         if (MSIMEUpdateHostUsesSparkle(NSBundle.mainBundle)) {
-            NSString *updatePreferences = [reportingPreferences isKindOfClass:NSString.class] && [reportingPreferences isAbsolutePath]
-                ? [reportingPreferences copy] : nil;
+            NSString *updatePreferences = [startupPreferences isKindOfClass:NSString.class] && [startupPreferences isAbsolutePath]
+                ? [startupPreferences copy] : nil;
             dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
                 id channel = nil;
                 if (updatePreferences) {
@@ -371,15 +373,8 @@ int main(int argc, const char *argv[]) {
                 });
             });
         }
-        Class bridge = NSClassFromString(@"MSIMEBackendWindowBridge");
-        id shared = [bridge respondsToSelector:@selector(shared)] ? [bridge performSelector:@selector(shared)] : nil;
-        if (!MSIMEEditionIsShurufa() && [shared respondsToSelector:@selector(startClipboardCaptureWithOptions:)]) {
-            [shared performSelector:@selector(startClipboardCaptureWithOptions:) withObject:MSIMELoadRuntimeOptions() ?: @{}];
-        }
         [NSApp run];
-        if ([shared respondsToSelector:@selector(stopClipboardCapture)]) [shared performSelector:@selector(stopClipboardCapture)];
         [sourceMonitor stop];
-        if (!MSIMEEditionIsShurufa()) MSIMEUsageReportingStop();
         msime_client_release_process_cache();
         (void)server;
     }

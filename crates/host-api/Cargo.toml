@@ -39,8 +39,6 @@ symphonia = { version = "0.6.1", default-features = false, features = ["wav", "p
 
 [dev-dependencies]
 msime-path-trust = { path = "../path-trust", features = ["test-support"] }
-# 账号测试把目录模式的客户端连到本机假服务端，核对发出去的 User-Agent（`ffi::account::client_agent_tests`）。
-msime-client-services = { path = "../client-services", features = ["test-support"] }
 rusqlite.workspace = true
 
 [lints]

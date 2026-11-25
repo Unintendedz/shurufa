@@ -171,57 +171,17 @@ void MSIMEOpenDesktopCloudClipboard(NSString *optionsPath, NSWorkspace *workspac
 }
 
 void MSIMEOpenDesktopCloudDictionary(NSString *optionsPath, NSWorkspace *workspace, dispatch_block_t fallback) {
-    Class bridge = NSClassFromString(@"MSIMEBackendCloudDictionaryProvider");
-    if (![bridge respondsToSelector:@selector(prepareWithCompletion:)]) {
-        os_log(MSIMEUILog(), "desktop_route_fallback route=cloud-dictionary reason=backend_bridge_missing");
-        fallback();
-        return;
-    }
-    [(Class<MSIMEDesktopCloudClipboardPreparing>)bridge prepareWithCompletion:^(id<MSIMEDesktopCloudClipboardProvider> provider) {
-        if (!provider) {
-            os_log(MSIMEUILog(), "desktop_route_fallback route=cloud-dictionary reason=no_provider");
-            fallback();
-            return;
-        }
-        MSIMEDesktopCloudClipboardSession *session = [[MSIMEDesktopCloudClipboardSession alloc] initWithProvider:provider dictionary:YES];
-        if (!session) {
-            os_log(MSIMEUILog(), "desktop_route_fallback route=cloud-dictionary reason=session_failed");
-            fallback();
-            return;
-        }
-        MSIMEOpenDesktopRouteWithContext(@"cloud-dictionary", optionsPath, session.launchEnvironment, workspace,
-            ^(NSRunningApplication *application) { [session authorizePID:application.processIdentifier stillValid:^BOOL { return !application.terminated; }]; },
-            ^{ [session stop]; fallback(); });
-    }];
+    (void)optionsPath;
+    (void)workspace;
+    os_log(MSIMEUILog(), "desktop_route_fallback route=cloud-dictionary reason=backend_removed");
+    if (fallback) fallback();
 }
 
 void MSIMEOpenDesktopCloudClipboardWithInput(NSString *optionsPath, NSWorkspace *workspace,
     MSIMEDesktopInputSession *inputSession, dispatch_block_t fallback) {
-    Class bridge = NSClassFromString(@"MSIMEBackendCloudClipboardProvider");
-    if (![bridge respondsToSelector:@selector(prepareWithCompletion:)]) {
-        os_log(MSIMEUILog(), "desktop_route_fallback route=cloud-clipboard reason=backend_bridge_missing");
-        fallback();
-        return;
-    }
-    [(Class<MSIMEDesktopCloudClipboardPreparing>)bridge prepareWithCompletion:^(id<MSIMEDesktopCloudClipboardProvider> provider) {
-        if (!provider) {
-            os_log(MSIMEUILog(), "desktop_route_fallback route=cloud-clipboard reason=no_provider");
-            fallback();
-            return;
-        }
-        MSIMEDesktopCloudClipboardSession *session = [[MSIMEDesktopCloudClipboardSession alloc] initWithProvider:provider];
-        if (!session) {
-            os_log(MSIMEUILog(), "desktop_route_fallback route=cloud-clipboard reason=session_failed");
-            fallback();
-            return;
-        }
-        NSMutableDictionary *environment = [session.launchEnvironment mutableCopy];
-        if (inputSession) [environment addEntriesFromDictionary:inputSession.launchEnvironment];
-        MSIMEOpenDesktopRouteWithContext(@"cloud-clipboard", optionsPath, environment, workspace,
-            ^(NSRunningApplication *application) {
-                [session authorizePID:application.processIdentifier stillValid:^BOOL { return !application.terminated; }];
-                [inputSession authorizePID:application.processIdentifier stillValid:^BOOL { return !application.terminated; }];
-            },
-            ^{ [session stop]; fallback(); });
-    }];
+    (void)optionsPath;
+    (void)workspace;
+    (void)inputSession;
+    os_log(MSIMEUILog(), "desktop_route_fallback route=cloud-clipboard reason=backend_removed");
+    if (fallback) fallback();
 }

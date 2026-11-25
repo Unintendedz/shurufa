@@ -2,8 +2,6 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-typedef NSDictionary *_Nullable (^MSIMESnapshotNextRecord)(NSError *_Nullable *error);
-
 /// Foundation adapter for macOS input controllers and iOS keyboard extensions.
 /// Construct and use on the main thread. No Tauri process is required.
 @interface MSIMEClientSession : NSObject
@@ -11,7 +9,6 @@ typedef NSDictionary *_Nullable (^MSIMESnapshotNextRecord)(NSError *_Nullable *e
 + (nullable NSDictionary *)crossCommitSpacingRequest:(NSDictionary *)request;
 typedef void (^MSIMEVoiceProviderUpdate)(NSString *text, BOOL final);
 typedef void (^MSIMEVoiceProviderPhase)(NSUInteger phase);
-FOUNDATION_EXPORT NSNotificationName const MSIMEClientSessionDidReplaceSnapshotNotification;
 /// The validated creation options, copied for native maintenance UI; never mutable by callers.
 @property(nonatomic, readonly) NSDictionary<NSString *, id> *hostOptions;
 - (nullable instancetype)initWithOptions:(NSDictionary<NSString *, id> *)options error:(NSError **)error;
@@ -203,29 +200,6 @@ FOUNDATION_EXPORT NSNotificationName const MSIMEClientSessionDidReplaceSnapshotN
 + (NSDictionary<NSString *, id> *)clipboardCaptureEnabledRequest:(NSString *)directory;
 + (NSDictionary<NSString *, id> *)removeClipboardHistoryRequest:(NSDictionary<NSString *, id> *)request;
 + (NSDictionary<NSString *, id> *)captureClipboardHistoryRequest:(NSDictionary<NSString *, id> *)request;
-/// Return the current local dictionary version without exposing dictionary text.
-+ (nullable NSString *)snapshotVersionForOptions:(NSDictionary<NSString *, id> *)options error:(NSError **)error;
-/// Dynamic Swift-backend form; returns {version} or {error}.
-+ (NSDictionary<NSString *, id> *)snapshotVersion:(NSDictionary<NSString *, id> *)options;
-/// Discard a process-owned, unpublished preparation handle.
-+ (BOOL)discardSnapshotHandle:(uint64_t)handle error:(NSError **)error;
-/// Dynamic Swift-backend form; returns {discarded} or {error}.
-+ (NSDictionary<NSString *, id> *)discardSnapshot:(NSDictionary<NSString *, id> *)parameters;
-/// Atomically publish and recreate the active session; must be called on main thread while idle.
-+ (BOOL)applySnapshotHandle:(uint64_t)handle expectedVersion:(NSString *)version error:(NSError **)error;
-/// Dynamic Swift-backend form; parameters contains handle and expectedVersion.
-+ (NSDictionary<NSString *, id> *)applySnapshot:(NSDictionary<NSString *, id> *)parameters;
-/// Current validated host options for the live input session, or an error dictionary.
-+ (nullable NSDictionary<NSString *, id> *)activeHostOptions;
-/// Return whether the active session is idle enough for dictionary activation.
-/// The check is main-thread-only and never finishes a user's composition.
-+ (NSDictionary<NSString *, id> *)snapshotActivationReady;
-/// Prepare a bounded, checksummed record stream synchronously; invoke off-main-thread.
-+ (nullable NSDictionary<NSString *, id> *)prepareSnapshotRequest:(NSDictionary<NSString *, id> *)request
-                                                       nextRecord:(MSIMESnapshotNextRecord)nextRecord
-                                                            error:(NSError **)error;
-/// Dynamic Swift-backend form; parameters contains request and nextRecord.
-+ (NSDictionary<NSString *, id> *)prepareSnapshot:(NSDictionary<NSString *, id> *)parameters;
 /// Prepare isolated Engine working data; call off the main thread and before creating sessions.
 + (nullable NSDictionary<NSString *, id> *)prepareHostWithResourcesDirectory:(NSString *)resourcesDirectory stateRoot:(NSString *)stateRoot error:(NSError **)error;
 + (nullable NSDictionary<NSString *, id> *)savePreferencesInDirectory:(NSString *)directory expectedRevision:(uint64_t)revision snapshot:(NSDictionary<NSString *, id> *)snapshot error:(NSError **)error;

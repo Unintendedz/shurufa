@@ -1,7 +1,7 @@
 #import "VoiceInputService.h"
 #import "VoicePCMBuffer.h"
 #import "VoiceCaptureDevice.h"
-#import "../backend/voice/BackendSpeechAnalyzer.h"
+#import "BackendSpeechAnalyzer.h"
 #include "VoiceAudioPreprocess.h"
 #include "../../../../shared/voice/CaptureDuration.h"
 #include "../../../../shared/voice/LocalAsr.h"

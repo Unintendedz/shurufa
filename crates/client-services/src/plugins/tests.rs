@@ -3,7 +3,6 @@
 use super::command_table::CommandRow;
 use super::sound_pack::{SequenceAdvance, SoundMode};
 use super::*;
-use crate::vocabulary::wordbook;
 use std::io::Write;
 use tempfile::tempdir;
 
@@ -1512,10 +1511,19 @@ fn kinds_are_a_closed_set() {
     for kind in PluginKind::ALL {
         assert_eq!(PluginKind::parse(kind.as_str()), Some(kind));
     }
-    for other in ["", "wasm", "dylib", "Sound", "command-table", "script", "helpcode"] {
+    for other in [
+        "",
+        "wasm",
+        "dylib",
+        "Sound",
+        "command-table",
+        "script",
+        "helpcode",
+        "wordbook",
+    ] {
         assert_eq!(PluginKind::parse(other), None);
     }
-    assert_eq!(PluginKind::ALL.len(), 7);
+    assert_eq!(PluginKind::ALL.len(), 6);
 }
 
 #[test]
@@ -1990,68 +1998,6 @@ const FIXTURE_REFUSALS: &[(&str, &str)] = &[
         "symbol_set-with-data-file",
         "symbols.tsv 没有在 plugin.toml 里用到",
     ),
-    (
-        "wordbook-control-in-meaning",
-        "words.tsv 第 1 行的单词或释义为空，或者某一列太长、含有控制字符",
-    ),
-    (
-        "wordbook-duplicate-word",
-        "words.tsv 里「cache」出现了不止一次",
-    ),
-    ("wordbook-empty-file", "words.tsv 为空或太大"),
-    (
-        "wordbook-empty-meaning",
-        "words.tsv 第 1 行的单词或释义为空，或者某一列太长、含有控制字符",
-    ),
-    (
-        "wordbook-empty-meaning-three-columns",
-        "words.tsv 第 1 行的单词或释义为空，或者某一列太长、含有控制字符",
-    ),
-    (
-        "wordbook-empty-word",
-        "words.tsv 第 1 行的单词或释义为空，或者某一列太长、含有控制字符",
-    ),
-    ("wordbook-four-columns", "words.tsv 第 1 行必须是「单词"),
-    (
-        "wordbook-id-too-long",
-        "单词本的 id 只能由小写字母、数字和 - 组成，首尾不能是 -，且不超过 59 个字符",
-    ),
-    (
-        "wordbook-id-trailing-dash",
-        "单词本的 id 只能由小写字母、数字和 - 组成，首尾不能是 -，且不超过 59 个字符",
-    ),
-    (
-        "wordbook-id-with-dot",
-        "单词本的 id 只能由小写字母、数字和 - 组成，首尾不能是 -，且不超过 59 个字符",
-    ),
-    (
-        "wordbook-id-with-underscore",
-        "单词本的 id 只能由小写字母、数字和 - 组成，首尾不能是 -，且不超过 59 个字符",
-    ),
-    ("wordbook-invalid-utf8", "words.tsv 不是 UTF-8 编码"),
-    (
-        "wordbook-lone-cr",
-        "words.tsv 第 1 行的单词或释义为空，或者某一列太长、含有控制字符",
-    ),
-    (
-        "wordbook-long-meaning",
-        "words.tsv 第 1 行的单词或释义为空，或者某一列太长、含有控制字符",
-    ),
-    (
-        "wordbook-long-phonetic",
-        "words.tsv 第 1 行的单词或释义为空，或者某一列太长、含有控制字符",
-    ),
-    (
-        "wordbook-long-word",
-        "words.tsv 第 1 行的单词或释义为空，或者某一列太长、含有控制字符",
-    ),
-    ("wordbook-missing-file", "缺少数据文件 words.tsv"),
-    ("wordbook-name-too-long", "单词本的 name 不能超过 64 个字符"),
-    ("wordbook-one-column", "words.tsv 第 1 行必须是「单词"),
-    ("wordbook-only-comments", "words.tsv 里没有任何单词"),
-    ("wordbook-txt-extension", "words.txt 的扩展名必须是 .tsv"),
-    ("wordbook-unknown-key", "wordbook 里有未知的键 format"),
-    ("wordbook-wrong-extension", "words.csv 的扩展名必须是 .tsv"),
 ];
 
 /// `group` 下的 fixture，按名字排序。
@@ -2206,7 +2152,6 @@ fn phrase_tables_hold_bounded_rows_and_merge_in_priority_order() {
 
 #[test]
 fn data_file_capacity_matches_the_only_file_backed_plugin_kinds() {
-    assert_eq!(data_file_capacity(PluginKind::Wordbook), 1);
     for kind in [
         PluginKind::Sound,
         PluginKind::Music,
@@ -2217,154 +2162,6 @@ fn data_file_capacity_matches_the_only_file_backed_plugin_kinds() {
     ] {
         assert_eq!(data_file_capacity(kind), 0, "{kind:?}");
     }
-}
-
-fn installed_wordbook(root: &Path, id: &str, words: &[u8]) {
-    let pack = kind_directory(root, PluginKind::Wordbook).join(id);
-    fs::create_dir_all(&pack).unwrap();
-    fs::write(
-        pack.join(MANIFEST_FILE),
-        format!("schema_version = 1\nkind = 'wordbook'\nid = '{id}'\nname = '词汇'\nversion = '1'\nlicense = 'CC0-1.0'\n[wordbook]\nfile = 'words.tsv'\n"),
-    )
-    .unwrap();
-    fs::write(pack.join("words.tsv"), words).unwrap();
-}
-
-#[test]
-fn wordbooks_are_bounded_and_load_as_books() {
-    let root = tempdir().unwrap();
-    let words = |count: usize| {
-        (0..count)
-            .map(|index| format!("w{index}\tn. 词{index}\n"))
-            .collect::<String>()
-            .into_bytes()
-    };
-    installed_wordbook(root.path(), "full", &words(20_000));
-    installed_wordbook(root.path(), "over", &words(20_001));
-    let full = load_package(
-        root.path(),
-        BuiltinDirs::default(),
-        PluginKind::Wordbook,
-        "full",
-    )
-    .unwrap();
-    let json = serde_json::to_value(&full).unwrap();
-    assert_eq!(json["kind"], "wordbook");
-    assert_eq!(json["word_count"], 20_000);
-    assert_eq!(
-        json["first_words"],
-        serde_json::json!(["w0", "w1", "w2", "w3", "w4"])
-    );
-    assert_eq!(
-        reason(root.path(), PluginKind::Wordbook, "over"),
-        "words.tsv 的单词数超过 20000"
-    );
-
-    // 4 MiB 以内可以，多一个字节就不行。
-    let mut large = b"#".to_vec();
-    large.resize(wordbook_pack::MAX_FILE_BYTES as usize - 8, b'x');
-    large.extend_from_slice(b"\nab\tn. c");
-    assert_eq!(large.len() as u64, wordbook_pack::MAX_FILE_BYTES);
-    installed_wordbook(root.path(), "large", &large);
-    assert!(load_package(
-        root.path(),
-        BuiltinDirs::default(),
-        PluginKind::Wordbook,
-        "large"
-    )
-    .is_ok());
-    large.push(b'\n');
-    installed_wordbook(root.path(), "larger", &large);
-    assert_eq!(
-        reason(root.path(), PluginKind::Wordbook, "larger"),
-        "words.tsv 为空或太大"
-    );
-
-    let book = wordbook_pack::load_book(root.path(), "pack-full").unwrap();
-    assert_eq!(book.id, "pack-full");
-    assert!(book.is_valid());
-    assert!(wordbook_pack::load_book(root.path(), "pack-missing").is_none());
-    assert!(wordbook_pack::load_book(root.path(), "full").is_none());
-    // `load_book` 只解析一遍词表，但 `load_package` 拒绝的包它同样拒绝。
-    assert!(wordbook_pack::load_book(root.path(), "pack-over").is_none());
-    assert!(wordbook_pack::load_book(root.path(), "pack-larger").is_none());
-    installed_wordbook(root.path(), "twice", b"a\tn. x\na\tn. y\n");
-    assert!(wordbook_pack::load_book(root.path(), "pack-twice").is_none());
-}
-
-#[test]
-fn wordbook_preview_keeps_only_its_small_result_buffer() {
-    for count in [1, 4, 5, 6, wordbook::MAX_ENTRIES] {
-        let directory = tempdir().unwrap();
-        let words: String = (0..count)
-            .rev()
-            .map(|index| format!("synthetic-{index:05}\tmeaning\n"))
-            .collect();
-        fs::write(directory.path().join("words.tsv"), words).unwrap();
-        let pack = wordbook_pack::read(directory.path(), "words.tsv").unwrap();
-        let expected: Vec<_> = (0..count)
-            .rev()
-            .take(wordbook_pack::PREVIEW_WORDS)
-            .map(|index| format!("synthetic-{index:05}"))
-            .collect();
-        assert_eq!(pack.word_count, count);
-        assert_eq!(pack.first_words, expected);
-        assert!(
-            pack.first_words.capacity() <= wordbook_pack::PREVIEW_WORDS,
-            "预览保留了整本词书的缓冲：{}",
-            pack.first_words.capacity()
-        );
-    }
-}
-
-#[test]
-fn wordbook_parser_preserves_column_boundaries() {
-    let entries = wordbook_pack::parse_words(
-        "two\t 释义 \nthree\t/θriː/\t三\nempty\t\t空音标\n".as_bytes(),
-        "words.tsv",
-    )
-    .unwrap();
-    assert_eq!(entries[0].word, "two");
-    assert_eq!(entries[0].phonetic, "");
-    assert_eq!(entries[0].meaning, " 释义 ");
-    assert_eq!(entries[1].phonetic, "/θriː/");
-    assert_eq!(entries[1].meaning, "三");
-    assert_eq!(entries[2].phonetic, "");
-    assert_eq!(entries[2].meaning, "空音标");
-
-    for line in [
-        "single",
-        "word\tphonetic\tmeaning\textra",
-        "word\t\tmeaning\t",
-    ] {
-        let error = wordbook_pack::parse_words(line.as_bytes(), "words.tsv").unwrap_err();
-        assert_eq!(
-            error,
-            "words.tsv 第 1 行必须是「单词\\t释义」或「单词\\t音标\\t释义」"
-        );
-    }
-    for line in ["word\t", "word\tphonetic\t", "\tmeaning"] {
-        let error = wordbook_pack::parse_words(line.as_bytes(), "words.tsv").unwrap_err();
-        assert!(error.contains("单词或释义为空"));
-    }
-}
-
-#[test]
-fn wordbook_parser_reserves_capacity_from_input_size() {
-    let input = b"synthetic\tmeaning\n";
-    let entries = wordbook_pack::parse_words(input, "words.tsv").unwrap();
-    assert_eq!(entries.len(), 1);
-    assert_eq!(
-        entries.capacity(),
-        (input.len().saturating_add(1) / 4).min(wordbook::MAX_ENTRIES)
-    );
-
-    let full: String = (0..wordbook::MAX_ENTRIES)
-        .map(|index| format!("synthetic-{index:05}\tmeaning\n"))
-        .collect();
-    let entries = wordbook_pack::parse_words(full.as_bytes(), "words.tsv").unwrap();
-    assert_eq!(entries.len(), wordbook::MAX_ENTRIES);
-    assert_eq!(entries.capacity(), wordbook::MAX_ENTRIES);
 }
 
 #[test]

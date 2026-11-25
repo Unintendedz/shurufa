@@ -11,27 +11,24 @@ use std::path::Path;
 
 use super::import::{install_staged, write_member, Existing};
 use super::{
-    is_builtin, is_notice, kind_directory, list_files, load_package_unread, read_file,
-    wordbook_pack, BuiltinDirs, PluginContent, PluginError, PluginKind, PluginSummary,
-    MANIFEST_FILE, MAX_MANIFEST_BYTES, MAX_NOTICE_BYTES,
+    is_builtin, is_notice, kind_directory, list_files, load_package_unread, read_file, BuiltinDirs,
+    PluginContent, PluginError, PluginKind, PluginSummary, MANIFEST_FILE, MAX_MANIFEST_BYTES,
+    MAX_NOTICE_BYTES,
 };
 use crate::skin::catalog::safe_id;
 
-/// 编辑器生成的 id 的前缀，后面跟 8 位小写十六进制随机数。它同时满足单词本更严的 id 规则（小写字母、数字和 `-`，不超过 59 个字符）。
+/// 编辑器生成的 id 的前缀，后面跟 8 位小写十六进制随机数。
 pub const GENERATED_ID_PREFIX: &str = "my-";
-/// 编辑器写出的单词本词表文件名。
-pub const WORDS_FILE: &str = "words.tsv";
 /// 生成 id 时最多试几次；插件目录里同类型的包远少于 2^32 个，撞上一次都罕见。
 const MAX_ID_ATTEMPTS: usize = 32;
 
-/// 编辑器能写的四种类型。
+/// 编辑器能写的三种类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthoredKind {
     PhraseTable,
     CommandTable,
     SymbolSet,
-    Wordbook,
 }
 
 impl AuthoredKind {
@@ -40,7 +37,6 @@ impl AuthoredKind {
             Self::PhraseTable => PluginKind::PhraseTable,
             Self::CommandTable => PluginKind::CommandTable,
             Self::SymbolSet => PluginKind::SymbolSet,
-            Self::Wordbook => PluginKind::Wordbook,
         }
     }
 
@@ -49,7 +45,6 @@ impl AuthoredKind {
             PluginKind::PhraseTable => Some(Self::PhraseTable),
             PluginKind::CommandTable => Some(Self::CommandTable),
             PluginKind::SymbolSet => Some(Self::SymbolSet),
-            PluginKind::Wordbook => Some(Self::Wordbook),
             _ => None,
         }
     }
@@ -60,7 +55,6 @@ impl AuthoredKind {
             Self::PhraseTable => "phrases",
             Self::CommandTable => "commands",
             Self::SymbolSet => "groups",
-            Self::Wordbook => "words",
         }
     }
 }
@@ -94,17 +88,6 @@ pub struct AuthoredGroup {
     pub items: Vec<String>,
 }
 
-/// 单词本的一个单词。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AuthoredWord {
-    pub word: String,
-    /// 为空时这一行只写两列。
-    #[serde(default)]
-    pub phonetic: Option<String>,
-    pub gloss: String,
-}
-
 /// 编辑器里的一个包：清单的通用字段，加上与 `kind` 对应的那一个内容字段。`id` 为 null 表示新建、由 [`save`] 生成；`author`、`description` 为 null 或全是空白时不写进清单。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -125,8 +108,6 @@ pub struct AuthoredPack {
     pub commands: Option<Vec<AuthoredCommand>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub groups: Option<Vec<AuthoredGroup>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub words: Option<Vec<AuthoredWord>>,
 }
 
 /// 用户插件目录里 `kind` 类的包 `id`，读成编辑器的结构。内置和官方包、编辑器不支持的类型、没装或载入不了的包都是 `plugin_not_editable`，说明写明是哪一种。
@@ -154,7 +135,6 @@ pub fn load(root: &Path, kind: &str, id: &str) -> Result<AuthoredPack, PluginErr
         phrases: None,
         commands: None,
         groups: None,
-        words: None,
     };
     match summary.content {
         PluginContent::PhraseTable(table) => {
@@ -191,20 +171,6 @@ pub fn load(root: &Path, kind: &str, id: &str) -> Result<AuthoredPack, PluginErr
                         title: group.title,
                         keywords: (!group.keywords.is_empty()).then_some(group.keywords),
                         items: group.items,
-                    })
-                    .collect(),
-            );
-        }
-        PluginContent::Wordbook(book) => {
-            let entries = wordbook_pack::read_entries(&summary.directory, &book.file)
-                .map_err(PluginError::NotEditable)?;
-            pack.words = Some(
-                entries
-                    .into_iter()
-                    .map(|entry| AuthoredWord {
-                        word: entry.word,
-                        phonetic: (!entry.phonetic.is_empty()).then_some(entry.phonetic),
-                        gloss: entry.meaning,
                     })
                     .collect(),
             );
@@ -259,7 +225,6 @@ fn check_shape(pack: &AuthoredPack) -> Result<(), PluginError> {
         ("phrases", pack.phrases.is_some()),
         ("commands", pack.commands.is_some()),
         ("groups", pack.groups.is_some()),
-        ("words", pack.words.is_some()),
     ];
     let expected = pack.kind.content_field();
     if present
@@ -325,8 +290,6 @@ struct Manifest<'a> {
     commands: Option<&'a [AuthoredCommand]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     groups: Option<Vec<ManifestGroup<'a>>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    wordbook: Option<ManifestWordbook>,
 }
 
 #[derive(Serialize)]
@@ -338,12 +301,7 @@ struct ManifestGroup<'a> {
     items: &'a [String],
 }
 
-#[derive(Serialize)]
-struct ManifestWordbook {
-    file: &'static str,
-}
-
-/// 包里要写的文件：`plugin.toml`，单词本另有 `words.tsv`。
+/// 包里要写的文件：`plugin.toml`。
 fn render(pack: &AuthoredPack, id: &str) -> Result<Vec<(&'static str, Vec<u8>)>, PluginError> {
     let manifest = Manifest {
         schema_version: 1,
@@ -367,10 +325,6 @@ fn render(pack: &AuthoredPack, id: &str) -> Result<Vec<(&'static str, Vec<u8>)>,
                 })
                 .collect()
         }),
-        wordbook: pack
-            .words
-            .as_ref()
-            .map(|_| ManifestWordbook { file: WORDS_FILE }),
     };
     let text = toml::to_string(&manifest)
         .map_err(|error| PluginError::Invalid(format!("plugin.toml 无法生成：{error}")))?;
@@ -381,46 +335,7 @@ fn render(pack: &AuthoredPack, id: &str) -> Result<Vec<(&'static str, Vec<u8>)>,
             MAX_MANIFEST_BYTES / 1024
         )));
     }
-    let mut files = vec![(MANIFEST_FILE, text.into_bytes())];
-    if let Some(words) = &pack.words {
-        files.push((WORDS_FILE, render_words(words)?));
-    }
-    Ok(files)
-}
-
-/// 单词本的 TSV：一行一个单词，没有音标时两列。列里的制表符和换行会把一个单词拆成别的行，`#` 开头的单词会被读成注释，这两种在写出之前就拒绝。一个单词都没有时只写一行注释，由词表校验报「没有任何单词」。
-fn render_words(words: &[AuthoredWord]) -> Result<Vec<u8>, PluginError> {
-    if words.is_empty() {
-        return Ok(b"# empty\n".to_vec());
-    }
-    let mut text = String::new();
-    for (index, entry) in words.iter().enumerate() {
-        let number = index + 1;
-        let phonetic = entry.phonetic.as_deref().unwrap_or_default();
-        if [entry.word.as_str(), phonetic, entry.gloss.as_str()]
-            .iter()
-            .any(|column| column.contains(['\t', '\n', '\r']))
-        {
-            return Err(PluginError::Invalid(format!(
-                "第 {number} 个单词含有制表符或换行"
-            )));
-        }
-        if entry.word.starts_with('#') {
-            return Err(PluginError::Invalid(format!(
-                "第 {number} 个单词「{}」不能以 # 开头",
-                entry.word
-            )));
-        }
-        text.push_str(&entry.word);
-        text.push('\t');
-        if !phonetic.is_empty() {
-            text.push_str(phonetic);
-            text.push('\t');
-        }
-        text.push_str(&entry.gloss);
-        text.push('\n');
-    }
-    Ok(text.into_bytes())
+    Ok(vec![(MANIFEST_FILE, text.into_bytes())])
 }
 
 /// 已安装的同 id 包里的说明文件，原样复制进暂存目录。原包读不了或不是普通文件夹时什么都不带：要换掉的正是它。
@@ -477,7 +392,6 @@ mod tests {
             phrases: None,
             commands: None,
             groups: None,
-            words: None,
         }
     }
 
@@ -528,24 +442,6 @@ mod tests {
         }
     }
 
-    fn words() -> AuthoredPack {
-        AuthoredPack {
-            words: Some(vec![
-                AuthoredWord {
-                    word: "apple".into(),
-                    phonetic: Some("/ˈæp.əl/".into()),
-                    gloss: "n. 苹果".into(),
-                },
-                AuthoredWord {
-                    word: "banana".into(),
-                    phonetic: None,
-                    gloss: "n. 香蕉".into(),
-                },
-            ]),
-            ..base(AuthoredKind::Wordbook)
-        }
-    }
-
     fn generated(id: &str) -> bool {
         id.len() == GENERATED_ID_PREFIX.len() + 8
             && id.starts_with(GENERATED_ID_PREFIX)
@@ -556,7 +452,7 @@ mod tests {
 
     #[test]
     fn each_kind_saves_loads_and_saves_again_to_the_same_manifest() {
-        for pack in [phrases(), commands(), symbols(), words()] {
+        for pack in [phrases(), commands(), symbols()] {
             let root = tempdir().unwrap();
             let kind = pack.kind.plugin_kind();
             let saved = save(root.path(), &pack, false).unwrap();
@@ -585,24 +481,6 @@ mod tests {
                 .collect();
             assert!(leftovers.is_empty());
         }
-    }
-
-    #[test]
-    fn the_summary_is_the_one_import_reports() {
-        let root = tempdir().unwrap();
-        let saved = save(root.path(), &words(), false).unwrap();
-        let PluginContent::Wordbook(book) = &saved.content else {
-            panic!("not a wordbook");
-        };
-        assert_eq!(book.file, WORDS_FILE);
-        assert_eq!(book.word_count, 2);
-        assert_eq!(book.first_words, ["apple", "banana"]);
-        assert_eq!(
-            fs::read_to_string(saved.directory.join(WORDS_FILE)).unwrap(),
-            "apple\t/ˈæp.əl/\tn. 苹果\nbanana\tn. 香蕉\n"
-        );
-        let listed = super::super::scan(root.path(), BuiltinDirs::default());
-        assert_eq!(listed.packages, [saved]);
     }
 
     #[test]
@@ -727,17 +605,6 @@ mod tests {
             ..phrases()
         };
         assert_eq!(invalid(&bad_license), "license 必须是 SPDX 许可证表达式");
-        // 单词本的 id 规则比一般插件严：下划线在别的类型里可以，在这里不行。
-        let underscored = AuthoredPack {
-            id: Some("my_words".into()),
-            ..words()
-        };
-        assert!(invalid(&underscored).starts_with("单词本的 id 只能由"));
-        let empty_book = AuthoredPack {
-            words: Some(Vec::new()),
-            ..words()
-        };
-        assert_eq!(invalid(&empty_book), "words.tsv 里没有任何单词");
         assert_eq!(
             invalid(&AuthoredPack {
                 id: Some("../escape".into()),
@@ -752,30 +619,6 @@ mod tests {
     }
 
     #[test]
-    fn words_a_tsv_line_cannot_hold_are_refused_before_writing() {
-        let root = tempdir().unwrap();
-        let with = |word: &str, gloss: &str| AuthoredPack {
-            words: Some(vec![AuthoredWord {
-                word: word.into(),
-                phonetic: None,
-                gloss: gloss.into(),
-            }]),
-            ..words()
-        };
-        // 不拦的话，这一个单词会变成两个合规的单词。
-        for pack in [with("foo", "bar\nbaz\tqux"), with("a\tb", "x")] {
-            assert!(matches!(
-                save(root.path(), &pack, false),
-                Err(PluginError::Invalid(reason)) if reason == "第 1 个单词含有制表符或换行"
-            ));
-        }
-        assert!(matches!(
-            save(root.path(), &with("#tag", "x"), false),
-            Err(PluginError::Invalid(reason)) if reason == "第 1 个单词「#tag」不能以 # 开头"
-        ));
-    }
-
-    #[test]
     fn the_request_names_exactly_its_own_content() {
         let root = tempdir().unwrap();
         let none = base(AuthoredKind::PhraseTable);
@@ -784,7 +627,7 @@ mod tests {
             ..phrases()
         };
         let wrong = AuthoredPack {
-            kind: AuthoredKind::Wordbook,
+            kind: AuthoredKind::CommandTable,
             ..phrases()
         };
         for pack in [none, both, wrong] {
@@ -857,25 +700,9 @@ mod tests {
     #[test]
     fn the_wire_shape_round_trips_through_json() {
         let root = tempdir().unwrap();
-        let saved = save(root.path(), &words(), false).unwrap();
-        let loaded = load(root.path(), "wordbook", &saved.id).unwrap();
+        let saved = save(root.path(), &symbols(), false).unwrap();
+        let loaded = load(root.path(), "symbol_set", &saved.id).unwrap();
         let json = serde_json::to_value(&loaded).unwrap();
-        assert_eq!(
-            json,
-            serde_json::json!({
-                "kind": "wordbook",
-                "id": saved.id,
-                "name": "合成插件",
-                "version": "1.0.0",
-                "license": "CC0-1.0",
-                "author": "合成作者",
-                "description": "一句合成的介绍",
-                "words": [
-                    {"word": "apple", "phonetic": "/ˈæp.əl/", "gloss": "n. 苹果"},
-                    {"word": "banana", "phonetic": null, "gloss": "n. 香蕉"}
-                ]
-            })
-        );
         assert_eq!(
             serde_json::from_value::<AuthoredPack>(json).unwrap(),
             loaded

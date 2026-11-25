@@ -301,7 +301,7 @@ fn only_the_most_recent_lines_are_kept() {
 #[test]
 fn a_telemetry_crash_directory_is_read_as_crash_logs() {
     let directory = tempfile::tempdir().unwrap();
-    let crashes = directory.path().join(crate::telemetry::CRASH_DIRECTORY);
+    let crashes = directory.path().join("telemetry-crashes");
     std::fs::create_dir(&crashes).unwrap();
     std::fs::write(
         crashes.join("0b8f5d3e-1d2c-4b7a-9a43-5f1c2e3d4a5b.crash"),

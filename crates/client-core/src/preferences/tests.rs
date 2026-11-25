@@ -504,7 +504,7 @@ fn preference_store_rejects_a_symlinked_directory_without_writing_through_it() {
     let result = PreferencesStore::new(&directory).load();
 
     assert!(matches!(result, Err(PreferencesError::Io(_))));
-    assert!(!target.path().join("preferences.lock").exists());
+    assert!(!target.path().join("config.lock").exists());
 }
 
 #[cfg(unix)]
@@ -512,8 +512,8 @@ fn preference_store_rejects_a_symlinked_directory_without_writing_through_it() {
 fn preference_store_rejects_a_symlinked_document() {
     let directory = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
-    let path = directory.path().join("preferences.json");
-    let outside_path = outside.path().join("preferences.json");
+    let path = directory.path().join("config.json");
+    let outside_path = outside.path().join("config.json");
     std::fs::write(&outside_path, br#"{"formatVersion":1}"#).unwrap();
     std::os::unix::fs::symlink(&outside_path, &path).unwrap();
 
@@ -980,7 +980,7 @@ fn voice_commit_mode_defaults_for_legacy_documents() {
 #[test]
 fn oversized_preference_documents_are_rejected_before_loading() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("preferences.json");
+    let path = directory.path().join("config.json");
     std::fs::File::create(&path)
         .unwrap()
         .set_len(MAX_DOCUMENT_BYTES + 1)
@@ -1024,7 +1024,7 @@ fn ai_assistant_without_a_provider_key_loads_with_the_default_provider() {
     .unwrap();
     document["preferences"]["ai_assistant"] = serde_json::json!({ "enabled": true });
     std::fs::write(
-        directory.path().join("preferences.json"),
+        directory.path().join("config.json"),
         serde_json::to_vec(&document).unwrap(),
     )
     .unwrap();
@@ -1629,7 +1629,7 @@ fn candidate_translations_keep_legacy_and_explicit_choices() {
         .remove("candidate_translations");
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(
-        directory.path().join("preferences.json"),
+        directory.path().join("config.json"),
         serde_json::to_vec(&legacy).unwrap(),
     )
     .unwrap();
@@ -6286,7 +6286,7 @@ fn corrupt_backups(directory: &Path) -> Vec<PathBuf> {
         .filter(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("preferences.json.corrupt-"))
+                .is_some_and(|name| name.starts_with("config.json.corrupt-"))
         })
         .collect();
     backups.sort();
@@ -6309,7 +6309,7 @@ fn recover_backs_up_truncated_json_and_writes_defaults() {
     let directory = tempfile::tempdir().unwrap();
     let store = PreferencesStore::new(directory.path());
     let damaged = br#"{"format_version":1,"revision":4,"preferences":{"scheme":"#;
-    fs::write(directory.path().join("preferences.json"), damaged).unwrap();
+    fs::write(directory.path().join("config.json"), damaged).unwrap();
     assert!(matches!(store.load(), Err(PreferencesError::Json(_))));
 
     let (snapshot, backup, salvaged) = expect_recovered(store.recover().unwrap());
@@ -6317,7 +6317,7 @@ fn recover_backs_up_truncated_json_and_writes_defaults() {
     assert_eq!(fs::read(&backup).unwrap(), damaged);
     assert_eq!(backup.parent().unwrap(), directory.path());
     let name = backup.file_name().unwrap().to_str().unwrap();
-    let stamp = name.strip_prefix("preferences.json.corrupt-").unwrap();
+    let stamp = name.strip_prefix("config.json.corrupt-").unwrap();
     assert_eq!(stamp.len(), 15);
     assert_eq!(stamp.as_bytes()[8], b'-');
     assert!(stamp
@@ -6338,7 +6338,7 @@ fn recover_backs_up_truncated_json_and_writes_defaults() {
 fn recover_treats_an_empty_document_as_damaged() {
     let directory = tempfile::tempdir().unwrap();
     let store = PreferencesStore::new(directory.path());
-    fs::write(directory.path().join("preferences.json"), b"").unwrap();
+    fs::write(directory.path().join("config.json"), b"").unwrap();
     let (snapshot, backup, salvaged) = expect_recovered(store.recover_malformed().unwrap());
     assert!(!salvaged);
     assert!(fs::read(backup).unwrap().is_empty());
@@ -6362,7 +6362,7 @@ fn recover_drops_only_the_unknown_and_ill_typed_fields() {
     document["preferences"]["from_a_newer_build"] = serde_json::json!(true);
     document["preferences"]["learning"] = serde_json::json!("yes");
     fs::write(
-        directory.path().join("preferences.json"),
+        directory.path().join("config.json"),
         serde_json::to_vec(&document).unwrap(),
     )
     .unwrap();
@@ -6392,7 +6392,7 @@ fn recover_keeps_a_credential_beside_a_bad_sibling() {
     document["preferences"]["custom_translation"]["enabled"] = serde_json::json!("sometimes");
     document["preferences"]["tencent_tmt"]["region"] = serde_json::json!("not a region!");
     fs::write(
-        directory.path().join("preferences.json"),
+        directory.path().join("config.json"),
         serde_json::to_vec(&document).unwrap(),
     )
     .unwrap();
@@ -6429,7 +6429,7 @@ fn recover_handles_a_future_format_but_malformed_scope_leaves_it() {
     let mut document = serde_json::to_value(&saved).unwrap();
     document["format_version"] = serde_json::json!(2);
     let bytes = serde_json::to_vec(&document).unwrap();
-    let path = directory.path().join("preferences.json");
+    let path = directory.path().join("config.json");
     fs::write(&path, &bytes).unwrap();
 
     // The automatic path refuses a well-formed document from a newer build.
@@ -6456,21 +6456,21 @@ fn recover_is_not_needed_for_valid_missing_or_repaired_documents() {
         store.recover().unwrap(),
         RecoveryOutcome::NotNeeded(PreferencesSnapshot::default())
     );
-    assert!(!directory.path().join("preferences.json").exists());
+    assert!(!directory.path().join("config.json").exists());
 
     let saved = store.save(0, Preferences::default()).unwrap();
-    let before = fs::read(directory.path().join("preferences.json")).unwrap();
+    let before = fs::read(directory.path().join("config.json")).unwrap();
     assert_eq!(
         store.recover().unwrap(),
         RecoveryOutcome::NotNeeded(saved.clone())
     );
     assert_eq!(
-        fs::read(directory.path().join("preferences.json")).unwrap(),
+        fs::read(directory.path().join("config.json")).unwrap(),
         before
     );
     assert!(corrupt_backups(directory.path()).is_empty());
 
-    fs::write(directory.path().join("preferences.json"), b"{").unwrap();
+    fs::write(directory.path().join("config.json"), b"{").unwrap();
     let (repaired, _, _) = expect_recovered(store.recover().unwrap());
     assert_eq!(
         store.recover().unwrap(),
@@ -6502,7 +6502,7 @@ fn recover_suffixes_a_backup_name_that_is_taken() {
     );
 
     // 完整恢复保留既有备份和本次损坏内容。
-    let path = directory.path().join("preferences.json");
+    let path = directory.path().join("config.json");
     fs::write(&path, b"damaged").unwrap();
     let (_, backup, _) = expect_recovered(store.recover().unwrap());
     assert_eq!(fs::read(backup).unwrap(), b"damaged");
@@ -6515,7 +6515,7 @@ fn recover_leaves_the_original_when_the_backup_cannot_be_written() {
     use std::os::unix::fs::PermissionsExt;
     let directory = tempfile::tempdir().unwrap();
     let store = PreferencesStore::new(directory.path());
-    let path = directory.path().join("preferences.json");
+    let path = directory.path().join("config.json");
     fs::write(&path, b"{\"format_version\":").unwrap();
     // Create the lock file while the directory is still writable.
     assert!(store.load().is_err());
@@ -6633,7 +6633,7 @@ fn saving_unchanged_preferences_keeps_the_revision_and_the_file() {
     // The first save creates the document even though it holds only defaults.
     let created = store.save(0, Preferences::default()).unwrap();
     assert_eq!(created.revision, 1);
-    let path = directory.path().join("preferences.json");
+    let path = directory.path().join("config.json");
     let written = std::fs::metadata(&path).unwrap().modified().unwrap();
 
     let again = store.save(1, Preferences::default()).unwrap();
@@ -6985,7 +6985,7 @@ fn wubi_edition_restores_and_recovers_to_its_own_defaults() {
     let directory = tempfile::tempdir().unwrap();
     let store = PreferencesStore::for_edition(directory.path(), wubi);
     fs::write(
-        directory.path().join("preferences.json"),
+        directory.path().join("config.json"),
         br#"{"format_version":1,"revision":4,"preferences":{"scheme":"#,
     )
     .unwrap();
@@ -6995,7 +6995,7 @@ fn wubi_edition_restores_and_recovers_to_its_own_defaults() {
 
     // 能挽救的设置照常保留，没有的设置取五笔版的默认值。
     fs::write(
-        directory.path().join("preferences.json"),
+        directory.path().join("config.json"),
         br#"{"format_version":1,"revision":9,"preferences":{"candidate_page_size":6,"unknown_field":1}}"#,
     )
     .unwrap();
@@ -7031,7 +7031,7 @@ fn a_store_built_from_a_directory_follows_the_recorded_edition() {
         PreferencesSnapshot::for_edition(wubi)
     );
     fs::write(
-        directory.path().join("preferences.json"),
+        directory.path().join("config.json"),
         br#"{"format_version":1,"revision":4,"preferences":{"scheme":"#,
     )
     .unwrap();
@@ -7791,7 +7791,7 @@ fn finished_scope_releases_inherited_lock() {
     crate::file_lock::testing::assert_finished_scope_releases_lock(
         held,
         inherited,
-        &root.path().join("preferences.lock"),
+        &root.path().join("config.lock"),
     );
 }
 
@@ -8432,7 +8432,7 @@ fn shurufa_missing_helpcode_uses_edition_default_without_overwriting_explicit_va
                 }
             }
             fs::write(
-                directory.path().join("preferences.json"),
+                directory.path().join("config.json"),
                 serde_json::to_vec(&document).unwrap(),
             )
             .unwrap();
@@ -8534,7 +8534,7 @@ fn local_voice_polish_fields_freeze_non_shurufa_defaults_and_validate() {
     ));
 }
 
-/// 存量 Shurufa 用户的旧 `preferences.json` 缺少 `polish_context_aware` / `polish_enable_selection_rewrite` 时，
+/// 存量 Shurufa 用户的旧 `config.json` 缺少 `polish_context_aware` / `polish_enable_selection_rewrite` 时，
 /// 读取阶段应回填为 `true`；显式保存的 `false` 必须原样保留，非 Shurufa 版本缺键仍为 `false`。
 #[test]
 fn shurufa_missing_local_voice_polish_flags_backfill_without_overwriting_explicit_values() {
@@ -8586,4 +8586,87 @@ fn shurufa_missing_local_voice_polish_flags_backfill_without_overwriting_explici
             );
         }
     }
+}
+
+/// 仅有旧 `preferences.json` 时，首次 `load` 自动将其幂等迁移至 `config.json`（保留未知字段、保留原 `preferences.json` 不删）。
+#[test]
+fn load_migrates_legacy_preferences_json_non_destructively_to_config_json() {
+    let directory = tempfile::tempdir().unwrap();
+    let legacy_path = directory.path().join("preferences.json");
+    let config_path = directory.path().join("config.json");
+    let mut legacy_prefs = serde_json::to_value(Preferences::default()).unwrap();
+    let prefs_obj = legacy_prefs.as_object_mut().unwrap();
+    prefs_obj.insert("scheme".into(), serde_json::json!("shuangpin"));
+    prefs_obj.insert("candidate_page_size".into(), serde_json::json!(7));
+    prefs_obj["voice_input"]
+        .as_object_mut()
+        .unwrap()
+        .insert("hotkey_mode".into(), serde_json::json!("toggle"));
+    prefs_obj["voice_input"]
+        .as_object_mut()
+        .unwrap()
+        .insert("future_voice_flag".into(), serde_json::json!(42));
+    prefs_obj.insert("future_top_level".into(), serde_json::json!("keep-me"));
+    let legacy_doc = serde_json::json!({
+        "format_version": 1,
+        "revision": 7,
+        "preferences": legacy_prefs,
+    });
+    let legacy_bytes = serde_json::to_vec_pretty(&legacy_doc).unwrap();
+    fs::write(&legacy_path, &legacy_bytes).unwrap();
+
+    let store = PreferencesStore::new(directory.path());
+    let loaded = store.load().unwrap();
+    assert_eq!(loaded.revision, 7);
+    assert_eq!(loaded.preferences.scheme, InputScheme::Shuangpin);
+    assert_eq!(loaded.preferences.candidate_page_size, 7);
+
+    // `config.json` 已落盘且原 `preferences.json` 原封不动保留。
+    assert!(config_path.is_file());
+    assert_eq!(fs::read(&legacy_path).unwrap(), legacy_bytes);
+
+    let config_doc: serde_json::Value =
+        serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+    assert_eq!(config_doc["revision"], 7);
+    assert_eq!(config_doc["preferences"]["future_top_level"], "keep-me");
+    assert_eq!(
+        config_doc["preferences"]["voice_input"]["future_voice_flag"],
+        42
+    );
+}
+
+/// 一旦 `config.json` 存在并更新，后续 `load` 严格只读 `config.json`，不被旧 `preferences.json` 覆盖（幂等）。
+#[test]
+fn load_prefers_config_json_idempotently_when_both_files_exist() {
+    let directory = tempfile::tempdir().unwrap();
+    let legacy_path = directory.path().join("preferences.json");
+    let config_path = directory.path().join("config.json");
+
+    let mut legacy = Preferences::default();
+    legacy.candidate_page_size = 5;
+    fs::write(
+        &legacy_path,
+        serde_json::to_vec(&serde_json::json!({
+            "format_version": 1,
+            "revision": 3,
+            "preferences": legacy,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let store = PreferencesStore::new(directory.path());
+    let first = store.load().unwrap();
+    assert_eq!(first.preferences.candidate_page_size, 5);
+
+    let mut updated = first.preferences.clone();
+    updated.candidate_page_size = 9;
+    let saved = store.save(first.revision, updated).unwrap();
+    assert_eq!(saved.revision, 4);
+    assert!(config_path.is_file());
+
+    // 即使旧 preferences.json 内容仍是 candidate_page_size=5，再次 load 也只认 config.json。
+    let reloaded = store.load().unwrap();
+    assert_eq!(reloaded.revision, 4);
+    assert_eq!(reloaded.preferences.candidate_page_size, 9);
 }

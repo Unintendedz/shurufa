@@ -80,20 +80,6 @@ pub(crate) fn selected_resources(
     Some((directory, selection.desktop))
 }
 
-pub(crate) fn specification_for_options(
-    options: &HostOptions,
-) -> Result<ResourceSet, Box<dyn std::error::Error>> {
-    let baseline = options.edition().resource_set()?;
-    if let Some(state) = options.preferences_directory.as_deref() {
-        if let Some(set) =
-            updates::set_for_directory(Path::new(state), &baseline, Path::new(&options.resources))
-        {
-            return Ok(set);
-        }
-    }
-    Ok(baseline)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

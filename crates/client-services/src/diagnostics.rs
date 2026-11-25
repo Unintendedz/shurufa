@@ -29,6 +29,11 @@ pub const MAX_CRASH_MESSAGE_BYTES: usize = 2 * 1024;
 pub const MAX_CRASH_STACK_BYTES: usize = 16 * 1024;
 /// 单行的字节上限；更长的行直接丢弃。
 const MAX_LINE_BYTES: usize = 32 * 1024;
+const CRASH_EXTENSION: &str = "crash";
+const MAX_CRASH_RECORD_BYTES: u64 = 64 * 1024;
+const MAX_MESSAGE_CHARS: usize = 1000;
+const MAX_STACK_CHARS: usize = 16_000;
+const MAX_STACK_BYTES: usize = 12 * 1024;
 
 /// 诊断包固定事件种类；输入失败类别仅供本地导出，云端上传器另按服务契约过滤。
 pub const EVENT_KINDS: [&str; 46] = [
@@ -308,7 +313,7 @@ fn read_crash_directory(directory: &Path) -> Result<Section, DiagnosticsError> {
         if !entry.file_type().is_file()
             || !name
                 .to_bytes()
-                .ends_with(format!(".{}", crate::telemetry::CRASH_EXTENSION).as_bytes())
+                .ends_with(format!(".{CRASH_EXTENSION}").as_bytes())
         {
             continue;
         }
@@ -392,7 +397,7 @@ fn crash_file_record(path: &Path, modified: std::time::SystemTime) -> Option<Val
 
 fn crash_file_record_file(file: std::fs::File, modified: std::time::SystemTime) -> Option<Value> {
     let mut bytes = Vec::new();
-    file.take(crate::telemetry::MAX_CRASH_RECORD_BYTES)
+    file.take(MAX_CRASH_RECORD_BYTES)
         .read_to_end(&mut bytes)
         .ok()?;
     let text = String::from_utf8_lossy(&bytes);
@@ -557,7 +562,7 @@ pub fn crash_record(line: &[u8]) -> Option<Value> {
 
 /// 崩溃记录清洗后的样子：`message` 只留异常类型，`stack` 里栈帧原样保留、说明行只留异常类型，路径都只留文件名。
 fn sanitized_crash(at: &str, message: &str, stack: &str) -> Option<Value> {
-    let message = crate::telemetry::clean_message(exception_type(message.lines().next()?));
+    let message = clean_message(exception_type(message.lines().next()?));
     let stack: Vec<String> = stack
         .lines()
         .map(|line| {
@@ -574,7 +579,7 @@ fn sanitized_crash(at: &str, message: &str, stack: &str) -> Option<Value> {
             }
         })
         .collect();
-    let stack = crate::telemetry::clean_stack(&stack.join("\n"));
+    let stack = clean_stack(&stack.join("\n"));
     let mut record = Map::new();
     record.insert("at".into(), at.into());
     record.insert("message".into(), message.into());
@@ -704,8 +709,120 @@ fn write_zip_contents(
     writer.finish().map_err(std::io::Error::other)
 }
 
-/// 把诊断包的 `sections` 按服务端规则重建并上传成 MCP 日志快照。
-pub mod upload;
+fn clean_text(value: &str) -> String {
+    value
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .chars()
+        .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
+        .collect()
+}
+
+fn clean_message(value: &str) -> String {
+    let cleaned = clean_text(value);
+    let stripped: Vec<String> = cleaned.lines().map(strip_directories).collect();
+    let joined = stripped.join("\n");
+    joined.trim().chars().take(MAX_MESSAGE_CHARS).collect()
+}
+
+fn clean_stack(value: &str) -> String {
+    let cleaned = clean_text(value);
+    let mut stack = String::new();
+    let mut characters = 0;
+    for line in cleaned.lines().map(strip_directories) {
+        let line = line.trim_end();
+        if line.is_empty() {
+            continue;
+        }
+        let separator = usize::from(!stack.is_empty());
+        let line_characters = line.chars().count();
+        if stack.len() + separator + line.len() > MAX_STACK_BYTES
+            || characters + separator + line_characters > MAX_STACK_CHARS
+        {
+            if stack.is_empty() {
+                for character in line.chars() {
+                    if stack.len() + character.len_utf8() > MAX_STACK_BYTES
+                        || characters + 1 > MAX_STACK_CHARS
+                    {
+                        break;
+                    }
+                    stack.push(character);
+                    characters += 1;
+                }
+            }
+            break;
+        }
+        if separator > 0 {
+            stack.push('\n');
+            characters += 1;
+        }
+        stack.push_str(line);
+        characters += line_characters;
+    }
+    stack
+}
+
+fn strip_directories(line: &str) -> String {
+    let characters: Vec<char> = line.chars().collect();
+    let starts: Vec<usize> = (0..characters.len())
+        .filter(|&index| path_starts_at(&characters, index))
+        .collect();
+    if starts.is_empty() {
+        return line.to_owned();
+    }
+    let mut removed = vec![false; characters.len()];
+    for (position, &start) in starts.iter().enumerate() {
+        let end = starts
+            .get(position + 1)
+            .copied()
+            .unwrap_or(characters.len());
+        if let Some(last) = (start..end)
+            .rev()
+            .find(|&index| is_separator(characters[index]))
+        {
+            for flag in &mut removed[start..=last] {
+                *flag = true;
+            }
+        }
+    }
+    characters
+        .iter()
+        .zip(removed)
+        .filter(|(_, removed)| !removed)
+        .map(|(character, _)| *character)
+        .collect()
+}
+
+fn is_separator(character: char) -> bool {
+    matches!(character, '/' | '\\')
+}
+
+fn path_starts_at(characters: &[char], index: usize) -> bool {
+    let previous = index.checked_sub(1).map(|before| characters[before]);
+    // 冒号后只有紧跟路径分隔符才视为路径起点，盘符（例如 C:\）从字母起算。
+    if previous == Some(':') {
+        return is_separator(characters[index])
+            && !(index >= 2
+                && characters[index - 2].is_ascii_alphabetic()
+                && path_starts_at(characters, index - 2));
+    }
+    let at_boundary = previous.is_none_or(|before| {
+        before.is_whitespace()
+            || matches!(before, '(' | '[' | '{' | '<' | '\'' | '"' | '=' | ',' | ';')
+    });
+    if !at_boundary {
+        return false;
+    }
+    let next = |offset: usize| characters.get(index + offset).copied();
+    match characters[index] {
+        '/' | '\\' => true,
+        '~' => next(1).is_some_and(is_separator),
+        letter if letter.is_ascii_alphabetic() => {
+            next(1) == Some(':') && next(2).is_some_and(is_separator)
+        }
+        _ => false,
+    }
+}
 
 #[cfg(test)]
 mod tests;

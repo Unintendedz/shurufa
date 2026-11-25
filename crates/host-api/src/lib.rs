@@ -17,9 +17,6 @@ use msime_client_services::dictionary::access::DictionaryAccess;
 /// 按用户的设置打一串键看候选，给 `msime-mcp candidates` 用。
 pub mod candidate_preview;
 pub mod clipboard_history;
-pub mod cloud_clipboard;
-pub mod cloud_dictionary;
-pub mod mcp_clients;
 pub mod settings_dictionary;
 pub mod system_fonts;
 use msime_client_core::preferences::{
@@ -66,15 +63,9 @@ use std::time::Instant;
 #[cfg(unix)]
 use std::ffi::c_void;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-/// `msime_client_account` 在 #8201 新增的操作。
-mod account_ops;
 mod bounded_file;
 mod chinese_english_spacing;
-/// 多分类自动云同步的驱动；C 入口在 `ffi::cloud_sync`。与 `cloud_dictionary` 一样和 C 入口模块同名，所以公开，免得遮住 `ffi` 的同名模块。
-pub mod cloud_sync;
 mod dictionary;
-/// 「我的词条」经 WebDAV 网盘同步的宿主入口，见 `msime_client_dictionary_sync`。
-mod dictionary_webdav;
 // The exports live in `ffi`, but Rust consumers - this crate's own tests and
 // examples, and anything linking the rlib - have always reached them at the
 // crate root. Re-exported so moving the file changes no caller.
@@ -89,21 +80,6 @@ pub(crate) const HOST_OPTIONS_DOCUMENT_LIMIT: usize = PREFERENCES_DOCUMENT_LIMIT
 /// Largest dictionary-management request: one HostOptions document plus the
 /// bounded personal-dictionary import payload and a small amount of framing.
 pub(crate) const DICTIONARY_REQUEST_LIMIT: usize = HOST_OPTIONS_DOCUMENT_LIMIT + 1_200_000;
-
-pub(crate) fn valid_sha256(value: &str) -> bool {
-    msime_client_core::is_ascii_hex(value, 64)
-}
-
-pub(crate) fn valid_uuid_string(value: &str) -> bool {
-    value.len() == 36
-        && value.bytes().enumerate().all(|(index, byte)| {
-            if matches!(index, 8 | 13 | 18 | 23) {
-                byte == b'-'
-            } else {
-                byte.is_ascii_hexdigit()
-            }
-        })
-}
 
 mod ffi;
 pub use ffi::*;
@@ -161,18 +137,12 @@ pub use dictionary::{
 };
 mod diagnostics;
 pub use diagnostics::{msime_client_set_diagnostic_sink, DiagnosticSink};
-mod dictionary_snapshot;
 mod dictionary_updates;
 mod key_sound;
 // 生命周期核心；`pub` 是为了让集成测试（零分配断言）直接调用纯推导函数。
 pub mod lifecycle;
 mod plugin_tables;
 mod voice_capture;
-pub use dictionary_snapshot::{
-    inspect_snapshot_json, msime_client_snapshot_discard, msime_client_snapshot_inspect,
-    msime_client_snapshot_prepare, msime_client_snapshot_queue, msime_client_snapshot_restore,
-    msime_client_snapshot_version, snapshot_queue_json,
-};
 
 /// Capture endpoint identities paired with labels. Neither belongs in logs.
 pub fn voice_capture_devices() -> Vec<(String, String)> {
@@ -1339,10 +1309,6 @@ struct HostOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     translation_provider_socket: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    cloud_dictionary_provider_socket: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    cloud_clipboard_provider_socket: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     voice_provider_socket: Option<String>,
     /// Absolute path to the bundle's built-in sound packs (`resources/sound-packs` in the repository), for a host whose bundle does not put them in `sound-packs` beside `resources`, the directory used when this is absent. Installed packs, command tables and the `@` name list are read from `plugins` under `preferences_directory`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1388,14 +1354,17 @@ impl HostOptions {
         self.edition.unwrap_or_else(Edition::full)
     }
 
-    /// 解析 HostOptions 文档。其中的 `preferences` 是准备运行时配置那一刻的副本，升级时被原样带下去（`refresh_options_file`）。#2830 退役 `autocorrect` 时，带着它的副本曾让会话、快照和词库请求全部被拒，macOS 每个按键都像在英文模式下一样直接交给应用；偏好结构现在不拒绝不认识的键，新增或退役一个键不会再让副本读不了，但取值的类型或格式变化仍会。副本被拒时，改用 `preferences_directory` 下实时的 preferences.json——设置界面会保持它最新并负责修复，宿主在会话打开后本来也会应用它。副本能解析时照原样使用。
+    /// 解析 HostOptions 文档。其中的 `preferences` 是准备运行时配置那一刻的副本，升级时被原样带下去（`refresh_options_file`）。#2830 退役 `autocorrect` 时，带着它的副本曾让会话、快照和词库请求全部被拒，macOS 每个按键都像在英文模式下一样直接交给应用；偏好结构现在不拒绝不认识的键，新增或退役一个键不会再让副本读不了，但取值的类型或格式变化仍会。副本被拒时，改用 `preferences_directory` 下实时的 config.json（或尚未迁移的 preferences.json）——设置界面会保持它最新并负责修复，宿主在会话打开后本来也会应用它。副本能解析时照原样使用。
     pub(crate) fn from_document(mut document: Value) -> Option<Self> {
         if let Ok(options) = Self::deserialize(&document) {
             return Some(options);
         }
         let directory = std::path::PathBuf::from(document.get("preferences_directory")?.as_str()?);
         // load() 会创建传入的目录；从没在那里写过偏好的宿主没有可替代的内容。
-        if !directory.is_absolute() || !directory.join("preferences.json").is_file() {
+        if !directory.is_absolute()
+            || (!directory.join("config.json").is_file()
+                && !directory.join("preferences.json").is_file())
+        {
             return None;
         }
         let snapshot = PreferencesStore::new(&directory).load().ok()?;
@@ -1835,8 +1804,6 @@ fn prepare_shipped_host_configuration(
         clipboard_history_path: None,
         online_provider_socket: None,
         translation_provider_socket: None,
-        cloud_dictionary_provider_socket: None,
-        cloud_clipboard_provider_socket: None,
         voice_provider_socket: None,
         sound_packs: None,
         plugin_packs: None,

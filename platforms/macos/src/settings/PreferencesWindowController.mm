@@ -4,6 +4,7 @@
 #import "../candidate/CandidateSkinAppearance.h"
 #import "../cloud/CloudAppearanceSettings.h"
 #import "../core/WindowPresentation.h"
+#import "RuntimeOptions.h"
 
 static NSString *const MSIMESchemeKey = @"MetasequoiaImeScheme";
 static NSString *const MSIMEShuangpinSchemaKey = @"MetasequoiaImeShuangpinSchema";
@@ -62,6 +63,9 @@ NSNotificationName const MSIMEStandalonePreferencesDidCloseNotification =
 }
 - (void)showAndActivateForStandaloneLaunch {
     _standaloneLaunch = YES;
+    id directory = MSIMELoadRuntimeOptions()[@"preferences_directory"];
+    if ([directory isKindOfClass:NSString.class] && [directory isAbsolutePath])
+        [[MSIMEAppearancePreferences sharedPreferences] setTranslationPreferencesDirectory:directory];
     [self presentAndActivate];
 }
 - (void)windowWillClose:(NSNotification *)notification {

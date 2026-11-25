@@ -5203,7 +5203,7 @@ impl PreferencesStore {
         }
     }
 
-    /// The directory holding `preferences.json`, its lock and any `preferences.json.corrupt-*` backups `recover` wrote.
+    /// The directory holding `config.json` (or legacy `preferences.json` before migration), its lock and any `config.json.corrupt-*` backups `recover` wrote.
     pub fn directory(&self) -> &Path {
         &self.directory
     }
@@ -5215,7 +5215,7 @@ impl PreferencesStore {
                 "preferences directory is not a real directory",
             )));
         }
-        let lock = crate::file_lock::open_lock_file(self.directory.join("preferences.lock"))?;
+        let lock = crate::file_lock::open_lock_file(self.directory.join("config.lock"))?;
         Ok(lock)
     }
 
@@ -5226,6 +5226,10 @@ impl PreferencesStore {
     }
 
     fn path(&self) -> PathBuf {
+        self.directory.join("config.json")
+    }
+
+    fn legacy_path(&self) -> PathBuf {
         self.directory.join("preferences.json")
     }
 
@@ -5239,12 +5243,19 @@ impl PreferencesStore {
         &self,
     ) -> Result<(PreferencesSnapshot, Vec<UnknownPreferenceField>), PreferencesError> {
         let path = self.path();
-        let metadata = match std::fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
+        let (source_path, metadata, migrated_from_legacy) = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => (path, metadata, false),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let snapshot = self.missing_document();
-                crate::network::install(&snapshot.preferences.network);
-                return Ok((snapshot, Vec::new()));
+                let legacy_path = self.legacy_path();
+                match std::fs::symlink_metadata(&legacy_path) {
+                    Ok(metadata) => (legacy_path, metadata, true),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        let snapshot = self.missing_document();
+                        crate::network::install(&snapshot.preferences.network);
+                        return Ok((snapshot, Vec::new()));
+                    }
+                    Err(error) => return Err(error.into()),
+                }
             }
             Err(error) => return Err(error.into()),
         };
@@ -5255,7 +5266,7 @@ impl PreferencesStore {
             )));
         }
         let bytes = crate::bounded_io::read_bounded_file(
-            crate::storage::open_private_file_in(&path)?,
+            crate::storage::open_private_file_in(&source_path)?,
             MAX_DOCUMENT_BYTES,
             || PreferencesError::DocumentTooLarge,
         )?;
@@ -5306,6 +5317,18 @@ impl PreferencesStore {
         snapshot
             .preferences
             .settle_smart_punctuation_default(SMART_PUNCTUATION_WAS_OFF_BY_DEFAULT);
+        if migrated_from_legacy {
+            // 首次将旧 `preferences.json` 幂等迁移至单一 `config.json`（保留原文件不删除）。
+            let mut migrated = serde_json::to_value(&snapshot)?;
+            if let Some(preferences) = migrated.get_mut("preferences") {
+                restore_unknown_fields(preferences, &unknown);
+            }
+            atomic_write(
+                &self.directory,
+                &self.path(),
+                &serde_json::to_vec_pretty(&migrated)?,
+            )?;
+        }
         // 读到哪份文档就按哪份文档的代理设置发请求：设置窗口和输入宿主都可能建 HTTP 客户端，
         // 每个进程自己那份 `network::current` 由它读到的最近一版偏好决定（见 `crate::network`）。
         crate::network::install(&snapshot.preferences.network);
@@ -5457,7 +5480,7 @@ impl PreferencesStore {
 
     /// Replace a document that `load` rejects, keeping what can be kept.
     ///
-    /// This is the counterpart of the source's `SyncConfigWithInstalledTemplate` repair of a config.toml that does not parse. The damaged bytes are first copied verbatim to `preferences.json.corrupt-YYYYMMDD-HHMMSS` (UTC) beside the document; if that copy cannot be written nothing else happens, so the original is never lost. Then every top-level setting the current schema accepts is carried over one at a time onto the defaults, and a section that fails as a whole (a wrong-typed sibling next to a service key, say) is retried field by field, so credentials survive the way `ReapplyRealCredentials` keeps real API tokens. Whatever still does not fit takes its default.
+    /// This is the counterpart of the source's `SyncConfigWithInstalledTemplate` repair of a config.toml that does not parse. The damaged bytes are first copied verbatim to `config.json.corrupt-YYYYMMDD-HHMMSS` (UTC) beside the document; if that copy cannot be written nothing else happens, so the original is never lost. Then every top-level setting the current schema accepts is carried over one at a time onto the defaults, and a section that fails as a whole (a wrong-typed sibling next to a service key, say) is retried field by field, so credentials survive the way `ReapplyRealCredentials` keeps real API tokens. Whatever still does not fit takes its default.
     ///
     /// A missing or already loadable document is `NotNeeded` and nothing is written, so calling this twice, or racing another writer that already repaired the file, is harmless. Storage failures are returned unchanged and never lead to a rewrite. There is no compare-and-swap: the caller has no valid revision to offer, and the lock plus the re-check that the document is still unreadable cover the race.
     pub fn recover(&self) -> Result<RecoveryOutcome, PreferencesError> {
@@ -5476,8 +5499,12 @@ impl PreferencesStore {
             Err(PreferencesError::Io(error)) => return Err(PreferencesError::Io(error)),
             Err(failure) => failure,
         };
+        let source_path = match std::fs::symlink_metadata(self.path()) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => self.legacy_path(),
+            _ => self.path(),
+        };
         let bytes = crate::bounded_io::read_bounded_file(
-            crate::storage::open_private_file_in(&self.path())?,
+            crate::storage::open_private_file_in(&source_path)?,
             MAX_DOCUMENT_BYTES,
             || PreferencesError::DocumentTooLarge,
         )?;
@@ -5531,7 +5558,7 @@ impl PreferencesStore {
         now: time::OffsetDateTime,
     ) -> Result<PathBuf, PreferencesError> {
         let stem = format!(
-            "preferences.json.corrupt-{:04}{:02}{:02}-{:02}{:02}{:02}",
+            "config.json.corrupt-{:04}{:02}{:02}-{:02}{:02}{:02}",
             now.year(),
             u8::from(now.month()),
             now.day(),

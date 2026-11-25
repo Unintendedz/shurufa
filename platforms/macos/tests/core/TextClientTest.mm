@@ -196,30 +196,11 @@ static void TestEngineMaintenance() {
     translated = [session applyTranslations:gloss[@"translations"] generation:translationGeneration error:&error];
     assert(!error && [translated[@"applied"] isEqual:@NO]);
     assert([[session setCharacterWidthFull:NO error:&error][@"character_width"] isEqual:@"Halfwidth"]);
-    for (NSNumber *enabled in @[@YES, @NO, @YES]) {
-        assert([session setEnglishMode:enabled.boolValue error:&error] && !error);
-        __block NSUInteger replacements = 0;
-        id observer = [NSNotificationCenter.defaultCenter addObserverForName:MSIMEClientSessionDidReplaceSnapshotNotification object:session queue:nil usingBlock:^(NSNotification *notification) {
-            assert(notification.object == session);
-            // Mode restoration must precede the notification consumed by the IMK host.
-            assert([[session viewWithError:nil][@"dedicated_english"] isEqual:enabled]);
-            ++replacements;
-        }];
-        NSError *activationError = nil;
-        NSString *version = [@"" stringByPaddingToLength:64 withString:@"0" startingAtIndex:0];
-        assert(![MSIMEClientSession applySnapshotHandle:UINT64_MAX expectedVersion:version error:&activationError]);
-        assert(activationError && replacements == 1);
-        [NSNotificationCenter.defaultCenter removeObserver:observer];
-        NSDictionary *restored = [session viewWithError:&error];
-        assert(restored && !error && [restored[@"dedicated_english"] isEqual:enabled]);
-        assert([session setFocused:YES error:&error]);
-        if (enabled.boolValue) {
-            assert([session typeASCII:'h' shift:NO error:&error]);
-            NSDictionary *typed = [session typeASCII:'e' shift:NO error:&error];
-            assert([typed[@"view"][@"candidates"][0][@"text"] isEqual:@"hello"]);
-            assert([[session command:MSIME_COMMIT_CANDIDATE error:&error][@"commit"] isEqual:@"hello"]);
-        }
-    }
+    assert([session setEnglishMode:YES error:&error] && !error);
+    assert([session typeASCII:'h' shift:NO error:&error]);
+    NSDictionary *typedEnglish = [session typeASCII:'e' shift:NO error:&error];
+    assert([typedEnglish[@"view"][@"candidates"][0][@"text"] isEqual:@"hello"]);
+    assert([[session command:MSIME_COMMIT_CANDIDATE error:&error][@"commit"] isEqual:@"hello"]);
     englishView = [session setDedicatedEnglishEnabled:NO error:&error];
     assert(!error && [englishView[@"dedicated_english"] isEqual:@NO]);
     // 空闲时真正的 Apple 桥和 Engine 会话在半角、全角、再半角时输出不同人民币码位；组字中保留原文。
@@ -377,15 +358,6 @@ static void TestEnginePreedit(FakeTextClient *client) {
     options[@"preferences"] = startupPreferences;
     MSIMEClientSession *session = [[MSIMEClientSession alloc] initWithOptions:options error:&error];
     assert(session && !error && [session setFocused:YES error:&error]);
-    startupPreferences[@"scheme"] = @"quanpin";
-    startupPreferences[@"shuangpin_profile"] = @"xiaohe";
-    NSError *startupRecoveryError = nil;
-    NSString *syntheticVersion = [@"" stringByPaddingToLength:64 withString:@"0" startingAtIndex:0];
-    assert(![MSIMEClientSession applySnapshotHandle:UINT64_MAX expectedVersion:syntheticVersion error:&startupRecoveryError]);
-    assert(startupRecoveryError);
-    NSDictionary *startupRecovered = [session viewWithError:&error];
-    assert(startupRecovered && !error && [startupRecovered[@"scheme"] isEqual:@1] && [startupRecovered[@"shuangpin_profile"] isEqual:@"microsoft"]);
-    assert([session setFocused:YES error:&error]);
     NSDictionary *shared = [MSIMEClientSession loadPreferencesInDirectory:root error:&error];
     assert(shared && !error);
     NSUInteger revision = 0;
@@ -411,7 +383,7 @@ static void TestEnginePreedit(FakeTextClient *client) {
         assert([client.markedString isEqual:typed[@"view"][@"preedit"]]);
         assert([session setChinesePunctuationEnabled:YES error:&error] && !error);
         preferences[@"shuangpin_preedit_uses_raw"] = @(!raw.boolValue);
-        assert([[MSIMEClientSession activeHostOptions][@"preferences"][@"shuangpin_preedit_uses_raw"] isEqual:raw]);
+        assert([session.hostOptions[@"preferences"][@"shuangpin_preedit_uses_raw"] isEqual:raw]);
         NSDictionary *pending = @{@"format_version": @1, @"revision": @(++revision), @"preferences": preferences};
         NSDictionary *deferred = [session updatePreferencesSnapshot:pending error:&error];
         assert([deferred[@"deferred"] isEqual:@YES] && !error);
@@ -432,51 +404,16 @@ static void TestEnginePreedit(FakeTextClient *client) {
     }
     NSError *staleError = nil;
     assert((![session updatePreferencesSnapshot:@{@"format_version": @1, @"revision": @0, @"preferences": shared[@"preferences"]} error:&staleError]));
-    assert(staleError && [[MSIMEClientSession activeHostOptions][@"preferences"][@"shuangpin_preedit_uses_raw"] isEqual:@NO]);
-    assert([session typeASCII:'b' shift:NO error:&error]);
-    __block NSUInteger replacements = 0;
-    id observer = [NSNotificationCenter.defaultCenter addObserverForName:MSIMEClientSessionDidReplaceSnapshotNotification object:session queue:nil usingBlock:^(NSNotification *note) {
-        assert(note.object == session && NSThread.isMainThread);
-        ++replacements;
-    }];
-    NSString *version = [@"" stringByPaddingToLength:64 withString:@"0" startingAtIndex:0];
-    // Activation is refused outright while a composition is live, before anything is destroyed. That guard
-    // arrived after the recovery assertion below and this caller was never updated, which is why the run
-    // aborted here: the recovery path cannot be reached from a composing session at all any more.
-    NSError *composingError = nil;
-    assert(![MSIMEClientSession applySnapshotHandle:UINT64_MAX expectedVersion:version error:&composingError]);
-    assert(composingError && replacements == 0);
-    // Refused means untouched, not half-applied: the composition the user is still typing survives.
-    assert([[session viewWithError:&error][@"editing_text"] isEqual:@"b"] && !error);
-
-    // With the composition finished the guard opens, and a nonexistent prepared handle forces activation
-    // failure after destruction - exercising actual host recovery rather than a mocked notification.
-    MSIMEApplyTransition([session command:MSIME_CANCEL error:&error], client);
-    assert(!error);
-    NSError *activationError = nil;
-    assert(![MSIMEClientSession applySnapshotHandle:UINT64_MAX expectedVersion:version error:&activationError]);
-    assert(activationError && replacements == 1);
-    NSDictionary *recovered = [session viewWithError:&error];
-    assert(recovered && !error && [recovered[@"editing_text"] length] == 0);
-    assert([session setFocused:YES error:&error]);
-    NSDictionary *afterRecovery = [session typeASCII:'b' shift:NO error:&error];
-    assert(afterRecovery && !error && [afterRecovery[@"view"][@"editing_text"] isEqual:@"b"]);
-    MSIMEApplyTransition(afterRecovery, client);
-    assert([client.markedString isEqual:afterRecovery[@"view"][@"preedit"]]);
-    NSDictionary *expandedAfterRecovery = [session typeASCII:';' shift:NO error:&error];
-    assert(expandedAfterRecovery && !error);
-    // The last accepted preference was formatted display, not the raw startup value.
-    assert([expandedAfterRecovery[@"view"][@"preedit"] isEqual:@"bing"]);
-    [NSNotificationCenter.defaultCenter removeObserver:observer];
-    NSMutableDictionary *otherOptions = [[MSIMEClientSession activeHostOptions] mutableCopy];
+    assert(staleError && [session.hostOptions[@"preferences"][@"shuangpin_preedit_uses_raw"] isEqual:@NO]);
+    NSMutableDictionary *otherOptions = [session.hostOptions mutableCopy];
     NSMutableDictionary *otherPreferences = [otherOptions[@"preferences"] mutableCopy];
     otherPreferences[@"scheme"] = @"quanpin";
     otherOptions[@"preferences"] = otherPreferences;
     MSIMEClientSession *other = [[MSIMEClientSession alloc] initWithOptions:otherOptions error:&error];
     assert(other && !error);
-    assert([[MSIMEClientSession activeHostOptions][@"preferences"][@"scheme"] isEqual:@"shuangpin"]);
+    assert([session.hostOptions[@"preferences"][@"scheme"] isEqual:@"shuangpin"]);
     assert([other setFocused:YES error:&error]);
-    assert([[MSIMEClientSession activeHostOptions][@"preferences"][@"scheme"] isEqual:@"quanpin"]);
+    assert([other.hostOptions[@"preferences"][@"scheme"] isEqual:@"quanpin"]);
     NSMutableDictionary *formattedOptions = [otherOptions mutableCopy];
     NSMutableDictionary *formattedPreferences = [otherPreferences mutableCopy];
     formattedPreferences[@"scheme"] = @"shuangpin";
@@ -508,15 +445,11 @@ static void TestEnginePreedit(FakeTextClient *client) {
     }
     assert([formatted closeWithError:&error] && !error);
     assert([session setFocused:YES error:&error]);
-    assert([[MSIMEClientSession activeHostOptions][@"preferences"][@"scheme"] isEqual:@"shuangpin"]);
     assert([session setFocused:NO error:&error]);
-    assert([[MSIMEClientSession activeHostOptions][@"preferences"][@"scheme"] isEqual:@"shuangpin"]);
     assert([other closeWithError:&error]);
     NSError *closedError = nil;
     assert(![other setFocused:YES error:&closedError] && closedError);
-    assert([[MSIMEClientSession activeHostOptions][@"preferences"][@"scheme"] isEqual:@"shuangpin"]);
     assert([session closeWithError:&error] && !error);
-    assert([MSIMEClientSession activeHostOptions][@"error"] != nil);
     assert([NSFileManager.defaultManager removeItemAtPath:root error:nil]);
 }
 

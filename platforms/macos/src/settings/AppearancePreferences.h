@@ -7,6 +7,7 @@
 @class MSIMECandidateCanvasAssets;
 
 FOUNDATION_EXPORT NSNotificationName const MSIMEAppearanceDidChangeNotification;
+FOUNDATION_EXPORT NSNotificationName const MSIMEAppearanceDidPersistNotification;
 FOUNDATION_EXPORT NSNotificationName const MSIMETranslationPreferencesDidSaveNotification;
 /// Set to @YES in the userInfo of an MSIMEAppearanceDidChangeNotification that only moved the Chinese/English mode. The mode is not part of the shared preferences document, so observers refresh what they show but have nothing to save.
 FOUNDATION_EXPORT NSString *const MSIMEAppearanceInputModeOnlyKey;
@@ -29,6 +30,11 @@ extern BOOL (*MSIMEInputModeEnabledProbe)(NSString *identifier);
 /// Opens the window on a named page. The identifiers are the tails of the shared settings: routes — input, habits, shortcuts, voice, appearance, skin, floating, dictionary, account, help, about — so an entry point that deep-links into the desktop application can hand its native fallback the same name. Returns NO, and leaves the page alone, for a name this version does not have, which is what the retired helpcode, feedback and utilities names now get; callers that do not care which page they land on should not call this at all, so that the window opens on the page the user left it on.
 - (BOOL)showSettingsPageWithIdentifier:(NSString *)identifier;
 - (void)setTranslationPreferencesDirectory:(NSString *)directory;
+/// 将当前外观和输入偏好与磁盘上的 `config.json`（含从旧 `preferences.json` 的首次幂等迁移）非破坏性合并并写盘。
+/// 仅 `MSIMEAppearancePreferences` 负责写 `config.json`，控制器只读刷新。
+- (NSDictionary *)persistPreferencesToDirectory:(NSString *)directory error:(NSError **)error;
+/// 在串行持久化队列上异步合并写入已绑定的偏好目录，完成后主线程发送 `MSIMEAppearanceDidPersistNotification`。
+- (void)schedulePersistPreferences;
 /// Applies only settings owned by this window to an existing shared Preferences object.
 - (NSDictionary<NSString *, id> *)sharedPreferencesByMerging:(NSDictionary<NSString *, id> *)snapshot;
 - (msime::mac::ResolvedSkin)resolvedSkinForDark:(BOOL)dark;
@@ -184,7 +190,7 @@ extern BOOL (*MSIMEInputModeEnabledProbe)(NSString *identifier);
 - (BOOL)fuzzyPinyinRuleEnabled:(NSString *)rule;
 - (void)setFuzzyPinyinRule:(NSString *)rule enabled:(BOOL)enabled;
 @property(nonatomic) BOOL cloudCandidates;
-/// Records, once per profile, whether the first-use cloud consent still has to be asked. An existing NSUserDefaults choice, an existing `<directory>/preferences.json`, or a non-empty Engine `userDataDirectory` counts as an upgrade and is never asked about; otherwise the consent becomes pending. Nothing is recorded without a preferences directory. Later calls do nothing.
+/// Records, once per profile, whether the first-use cloud consent still has to be asked. An existing NSUserDefaults choice, an existing `<directory>/config.json` or legacy `preferences.json`, or a non-empty Engine `userDataDirectory` counts as an upgrade and is never asked about; otherwise the consent becomes pending. Nothing is recorded without a preferences directory. Later calls do nothing.
 - (void)resolveCloudCandidatesConsentWithPreferencesDirectory:(NSString *)directory userDataDirectory:(NSString *)userDataDirectory;
 /// NO only while the first-use consent is pending. A profile that was never resolved counts as answered.
 @property(nonatomic, readonly) BOOL cloudCandidatesAnswered;

@@ -220,36 +220,6 @@ enum Operation {
         #[serde(default)]
         user_only: bool,
     },
-    /// 把用户词库导出成与 `/v1/users/me/dictionary/snapshot` 相同的 NDJSON 文件，`destination` 是绝对路径。`include_learning` 为真时再写上输入记录（本地备份用；云同步不传，输出与原来逐字节相同）。
-    ExportSnapshot {
-        destination: String,
-        #[serde(default)]
-        include_learning: bool,
-    },
-    /// 本机输入记录的条数，只读（`dictionary_snapshot::learning_count`）。
-    LearningCount,
-    /// 把快照文件 `source` 里的输入记录存成待合并的文件，键盘收起后空闲时合并进本机（`dictionary_snapshot::queue_learning_merge`）。要求 `preferences_directory` 是绝对路径。
-    QueueLearningMerge {
-        source: String,
-    },
-    /// 合并 `QueueLearningMerge` 排下的输入记录和 `QueueHabitsMerge` 排下的输入习惯（`dictionary_snapshot::merge_pending_learning`），要独占维护权。要求 `preferences_directory` 是绝对路径。
-    MergePendingLearning,
-    /// 只读地完整校验一份词库快照文件 `source`（本地备份恢复前先查一遍），返回它的元数据（`dictionary_snapshot::inspect_snapshot`）。
-    InspectSnapshot {
-        source: String,
-    },
-    /// 把本机的输入习惯（整句联想、选词对、拼写纠错、自动纠错抑制、置顶）写成 `destination`（`dictionary_snapshot::habits::export_learning_habits`），本地备份用。
-    ExportHabits {
-        destination: String,
-    },
-    /// 只读地完整校验一份输入习惯文件 `source`，返回 `{habits}`。
-    InspectHabits {
-        source: String,
-    },
-    /// 把输入习惯文件 `source` 存成待合并的文件，键盘收起后空闲时与输入记录一起合并（`dictionary_snapshot::habits::queue_habits_merge`）。要求 `preferences_directory` 是绝对路径。
-    QueueHabitsMerge {
-        source: String,
-    },
 }
 
 #[derive(Deserialize)]
@@ -292,48 +262,6 @@ fn parse_personal_dictionary_import(text: &str) -> Result<Vec<PersonalWord>, Str
         entries.push(entry);
     }
     Ok(entries)
-}
-
-/// 一个要排进个人词库导入队列的词，按 `import_personal` 导入文件的规则规范化并检查；`kind` 是导入文件的写法（`pinyin`、`quickPhrase` 等），不合规时为 `None`。云同步合并时用它算出与队列里一致的身份。
-pub(crate) fn personal_import_word(
-    kind: &str,
-    key: &str,
-    value: &str,
-    weight: i64,
-) -> Option<PersonalWord> {
-    let kind: PersonalWordKind = serde_json::from_value(json!(kind)).ok()?;
-    let word = normalize_personal_word(PersonalWord {
-        kind,
-        key: key.to_owned(),
-        value: value.to_owned(),
-        weight,
-    })
-    .ok()?;
-    word.validate_new().ok()?;
-    Some(word)
-}
-
-/// 一个已经存着的词在个人词库里的身份（权重不参与）：编码按 Engine 对已存词的规则规范（`dictionary_validate_previous`，权重不设上限，英文学习抬过上限的词也认得），规范不了时用原样的写法。云同步合并时用它比较云端的词和本机导出的词，与 [`personal_import_word`] 排进队列的词的身份一致。种类不认识时为 `None`。
-pub(crate) fn personal_stored_identity(kind: &str, key: &str, value: &str) -> Option<String> {
-    let kind: PersonalWordKind = serde_json::from_value(json!(kind)).ok()?;
-    let word = PersonalWord {
-        kind,
-        key: key.to_owned(),
-        value: value.to_owned(),
-        weight: 1,
-    };
-    Some(
-        match msime_engine::host::dictionary_validate_previous(&personal_engine_entry(&word)) {
-            Ok(entry) => PersonalWord {
-                kind: personal_kind(entry.kind),
-                key: entry.key,
-                value: entry.value,
-                weight: 1,
-            }
-            .identity(),
-            Err(_) => word.identity(),
-        },
-    )
 }
 
 /// Native management requests return only redacted errors.
@@ -732,12 +660,6 @@ pub fn dictionary_request_json(bytes: &[u8]) -> Result<serde_json::Value, String
         return crate::dictionary_updates::request(&request.options, command, *enabled);
     }
 
-    // 只有 `queue_learning_merge` 和 `merge_pending_learning` 用到：待合并的输入记录放在它下面。
-    let preferences_directory = request
-        .options
-        .preferences_directory
-        .clone()
-        .filter(|path| Path::new(path).is_absolute());
     let options = request.options.into_engine_options();
     match request.action {
         Operation::Browse {
@@ -975,87 +897,6 @@ pub fn dictionary_request_json(bytes: &[u8]) -> Result<serde_json::Value, String
             .map_err(|_| "dictionary access unavailable")?
             .ok_or("dictionary maintenance busy")?;
             count_entries(&options, kind, user_only)
-        }
-        Operation::ExportSnapshot {
-            destination,
-            include_learning,
-        } => {
-            let _access = DictionaryAccess::try_session(
-                Path::new(&options.user_data),
-                Path::new(&options.dictionaries),
-            )
-            .map_err(|_| "dictionary access unavailable")?
-            .ok_or("dictionary maintenance busy")?;
-            crate::dictionary_snapshot::export_local_snapshot(
-                &options,
-                Path::new(&destination),
-                include_learning,
-            )
-            .map_err(str::to_owned)
-        }
-        Operation::LearningCount => {
-            let _access = DictionaryAccess::try_session(
-                Path::new(&options.user_data),
-                Path::new(&options.dictionaries),
-            )
-            .map_err(|_| "dictionary access unavailable")?
-            .ok_or("dictionary maintenance busy")?;
-            crate::dictionary_snapshot::learning_count(&options).map_err(str::to_owned)
-        }
-        Operation::QueueLearningMerge { source } => {
-            let preferences =
-                preferences_directory.ok_or("personal dictionary shared directory unavailable")?;
-            crate::dictionary_snapshot::queue_learning_merge(
-                Path::new(&preferences),
-                Path::new(&source),
-            )
-            .map_err(str::to_owned)
-        }
-        Operation::MergePendingLearning => {
-            let preferences =
-                preferences_directory.ok_or("personal dictionary shared directory unavailable")?;
-            crate::dictionary_snapshot::merge_pending_learning(&options, Path::new(&preferences))
-                .map_err(str::to_owned)
-        }
-        Operation::InspectSnapshot { source } => {
-            let source = Path::new(&source);
-            if !source.is_absolute() {
-                return Err("invalid snapshot path".into());
-            }
-            let metadata =
-                crate::dictionary_snapshot::inspect_snapshot(source).map_err(str::to_owned)?;
-            serde_json::to_value(metadata).map_err(|_| "invalid snapshot file".to_owned())
-        }
-        Operation::ExportHabits { destination } => {
-            let _access = DictionaryAccess::try_session(
-                Path::new(&options.user_data),
-                Path::new(&options.dictionaries),
-            )
-            .map_err(|_| "dictionary access unavailable")?
-            .ok_or("dictionary maintenance busy")?;
-            crate::dictionary_snapshot::habits::export_learning_habits(
-                &options,
-                Path::new(&destination),
-            )
-            .map_err(str::to_owned)
-        }
-        Operation::InspectHabits { source } => {
-            let source = Path::new(&source);
-            if !source.is_absolute() {
-                return Err("invalid habits path".into());
-            }
-            crate::dictionary_snapshot::habits::inspect_learning_habits(source)
-                .map(|habits| json!({ "habits": habits }))
-                .map_err(str::to_owned)
-        }
-        Operation::QueueHabitsMerge { source } => {
-            let preferences =
-                preferences_directory.ok_or("personal dictionary shared directory unavailable")?;
-            crate::dictionary_snapshot::habits::queue_habits_merge(
-                Path::new(&preferences),
-                Path::new(&source),
-            )
-            .map_err(str::to_owned)
         }
     }
 }
@@ -1304,16 +1145,7 @@ pub fn personal_dictionary_request_json(bytes: &[u8]) -> Result<serde_json::Valu
             let state = store.read().map_err(personal_dictionary_error)?;
             Ok(json!({ "pending_count": state.pending_count() }))
         }
-        Operation::Browse { .. }
-        | Operation::Count { .. }
-        | Operation::ExportSnapshot { .. }
-        | Operation::LearningCount
-        | Operation::QueueLearningMerge { .. }
-        | Operation::MergePendingLearning
-        | Operation::InspectSnapshot { .. }
-        | Operation::ExportHabits { .. }
-        | Operation::InspectHabits { .. }
-        | Operation::QueueHabitsMerge { .. } => {
+        Operation::Browse { .. } | Operation::Count { .. } => {
             Err("dictionary read operations require msime_client_dictionary".into())
         }
         Operation::DismissFailure { request_id } => {

@@ -4,30 +4,6 @@
 #include <cassert>
 #include <initializer_list>
 
-static BOOL gSnapshotIntegerProbeCalled;
-static uint64_t gSnapshotIntegerProbeHandle;
-
-@interface SnapshotIntegerProbe : MSIMEClientSession
-@end
-
-@implementation SnapshotIntegerProbe
-+ (BOOL)discardSnapshotHandle:(uint64_t)handle error:(NSError **)error {
-    (void)error;
-    (void)self;
-    gSnapshotIntegerProbeHandle = handle;
-    gSnapshotIntegerProbeCalled = YES;
-    return YES;
-}
-+ (BOOL)applySnapshotHandle:(uint64_t)handle expectedVersion:(NSString *)version error:(NSError **)error {
-    (void)version;
-    (void)error;
-    (void)self;
-    gSnapshotIntegerProbeHandle = handle;
-    gSnapshotIntegerProbeCalled = YES;
-    return YES;
-}
-@end
-
 static NSDictionary *reload(MSIMEClientSession *session, NSString *directory, BOOL expectError) {
     __block BOOL done = NO;
     __block NSDictionary *loaded = nil;
@@ -48,36 +24,6 @@ static NSDictionary *reload(MSIMEClientSession *session, NSString *directory, BO
 int main() {
     @autoreleasepool {
         MSIMEApplyTransition((NSDictionary *)@[], nil);
-        for (id invalid in @[@YES, @1.5, @1e30, @(-1), @0, @"1", NSNull.null]) {
-            gSnapshotIntegerProbeCalled = NO;
-            NSDictionary *discarded = [SnapshotIntegerProbe discardSnapshot:@{ @"handle": invalid }];
-            assert(discarded[@"error"] && ![discarded[@"discarded"] boolValue]);
-            assert(!gSnapshotIntegerProbeCalled);
-            gSnapshotIntegerProbeCalled = NO;
-            NSDictionary *applied = [SnapshotIntegerProbe applySnapshot:@{ @"handle": invalid,
-                @"expectedVersion": [@"0" stringByPaddingToLength:64 withString:@"0" startingAtIndex:0] }];
-            assert(applied[@"error"] && ![applied[@"activated"] boolValue]);
-            assert(!gSnapshotIntegerProbeCalled);
-        }
-        NSDictionary *invalidDiscardObject = [SnapshotIntegerProbe discardSnapshot:(NSDictionary *)@YES];
-        assert(invalidDiscardObject[@"error"]);
-        NSDictionary *invalidApplyObject = [SnapshotIntegerProbe applySnapshot:(NSDictionary *)@YES];
-        assert(invalidApplyObject[@"error"]);
-        NSDictionary *invalidPrepareObject = [SnapshotIntegerProbe prepareSnapshot:(NSDictionary *)@YES];
-        assert(invalidPrepareObject[@"error"]);
-        gSnapshotIntegerProbeCalled = NO;
-        NSDictionary *missingDiscardHandle = [SnapshotIntegerProbe discardSnapshot:@{}];
-        assert(missingDiscardHandle[@"error"] && !gSnapshotIntegerProbeCalled);
-        gSnapshotIntegerProbeCalled = NO;
-        NSDictionary *missingApplyHandle = [SnapshotIntegerProbe applySnapshot:@{
-            @"expectedVersion": [@"0" stringByPaddingToLength:64 withString:@"0" startingAtIndex:0] }];
-        assert(missingApplyHandle[@"error"] && !gSnapshotIntegerProbeCalled);
-        gSnapshotIntegerProbeCalled = NO;
-        NSDictionary *discarded = [SnapshotIntegerProbe discardSnapshot:@{ @"handle": @42 }];
-        assert([discarded[@"discarded"] isEqual:@YES] && gSnapshotIntegerProbeCalled && gSnapshotIntegerProbeHandle == 42);
-        gSnapshotIntegerProbeCalled = NO;
-        NSDictionary *maxDiscarded = [SnapshotIntegerProbe discardSnapshot:@{ @"handle": @(UINT64_MAX) }];
-        assert([maxDiscarded[@"discarded"] isEqual:@YES] && gSnapshotIntegerProbeCalled && gSnapshotIntegerProbeHandle == UINT64_MAX);
         NSString *root = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
         NSMutableDictionary *options = [@{@"api_version": @1, @"preferences": @{@"scheme": @"quanpin", @"default_ime_mode": @"chinese", @"candidate_page_size": @5, @"learning": @NO, @"chinese_punctuation": @YES}} mutableCopy];
         for (NSString *name in @[@"resources", @"user_data", @"cache", @"dictionaries"]) {
@@ -106,11 +52,7 @@ int main() {
         NSDictionary *largeSaved = [MSIMEClientSession savePreferencesInDirectory:largeRoot expectedRevision:0
             snapshot:@{ @"format_version": @1, @"revision": @0, @"preferences": largePreferences } error:&error];
         assert(largeSaved && !error);
-        NSDictionary *activeOptions = [MSIMEClientSession activeHostOptions];
-        assert([activeOptions[@"api_version"] isEqual:@1]);
-        error = nil;
-        assert(![MSIMEClientSession applySnapshotHandle:UINT64_MAX expectedVersion:[@"0" stringByPaddingToLength:64 withString:@"0" startingAtIndex:0] error:&error]);
-        assert(error);
+        assert([session.hostOptions[@"api_version"] isEqual:@1]);
         error = nil;
         NSDictionary *initialPreferences = [MSIMEClientSession loadPreferencesInDirectory:root error:&error];
         assert(initialPreferences && !error && [initialPreferences[@"revision"] isEqual:@0]);
@@ -153,7 +95,7 @@ int main() {
         assert([result[@"commit"] isEqual:@"中"]);
         assert([[session updatePreferencesSnapshot:snapshot error:&error][@"deferred"] isEqual:@NO]);
         assert([[session typeASCII:',' shift:NO error:&error][@"handled"] isEqual:@NO]);
-        NSString *preferencesPath = [root stringByAppendingPathComponent:@"preferences.json"];
+        NSString *preferencesPath = [root stringByAppendingPathComponent:@"config.json"];
         NSDictionary *on = @{@"format_version": @1, @"revision": @2, @"preferences": options[@"preferences"]};
         assert([[NSJSONSerialization dataWithJSONObject:on options:0 error:nil] writeToFile:preferencesPath atomically:YES]);
         assert([session typeASCII:'U' shift:YES error:&error]);

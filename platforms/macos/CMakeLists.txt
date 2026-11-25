@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0" CACHE STRING "Minimum macOS version; match the Cargo build")
 project(MSIMEClientMacOS LANGUAGES CXX OBJCXX)
 enable_testing()
-include_directories("${CMAKE_CURRENT_SOURCE_DIR}/src/backend" "${CMAKE_CURRENT_SOURCE_DIR}/src/voice" "${CMAKE_CURRENT_SOURCE_DIR}/src/candidate" "${CMAKE_CURRENT_SOURCE_DIR}/src/input" "${CMAKE_CURRENT_SOURCE_DIR}/src/cloud" "${CMAKE_CURRENT_SOURCE_DIR}/src/dictionary" "${CMAKE_CURRENT_SOURCE_DIR}/src/settings" "${CMAKE_CURRENT_SOURCE_DIR}/src/core")
+include_directories("${CMAKE_CURRENT_SOURCE_DIR}/src/voice" "${CMAKE_CURRENT_SOURCE_DIR}/src/candidate" "${CMAKE_CURRENT_SOURCE_DIR}/src/input" "${CMAKE_CURRENT_SOURCE_DIR}/src/cloud" "${CMAKE_CURRENT_SOURCE_DIR}/src/dictionary" "${CMAKE_CURRENT_SOURCE_DIR}/src/settings" "${CMAKE_CURRENT_SOURCE_DIR}/src/core")
 add_executable(desktop-input-session-test tests/input/DesktopInputSessionTest.mm src/core/DesktopInputSession.mm)
 target_compile_options(desktop-input-session-test PRIVATE -fobjc-arc -UNDEBUG -Wall -Wextra -Werror)
 target_link_libraries(desktop-input-session-test PRIVATE "-framework AppKit")
@@ -98,19 +98,6 @@ if(TARGET shared-doubao-auth)
   # The Rust archive needs the same Apple/system dependencies in shared ABI tests.
   target_link_libraries(shared-doubao-auth PRIVATE ${SQLITE_TARGET} ${MSIME_HOST_LIBRARY_FRAMEWORKS})
 endif()
-# UsageReporting.mm 引用 msime_client.h 并调用宿主的 msime_client_telemetry_*，所以测试要链接 apple-client（带上头文件路径和 Rust 宿主库），且须定义在它之后。原先只链 AppKit，CI 在编译这个文件时就报 'msime_client.h' file not found。
-add_executable(usage-reporting-path-test tests/core/UsageReportingPathTest.mm src/core/UsageReporting.mm)
-target_compile_options(usage-reporting-path-test PRIVATE -fobjc-arc -UNDEBUG -Wall -Wextra -Werror)
-target_compile_definitions(usage-reporting-path-test PRIVATE MSIME_USAGE_REPORTING_TEST_SUPPORT="/tmp/msime-usage-reporting-path-test")
-target_link_libraries(usage-reporting-path-test PRIVATE apple-client)
-add_test(NAME usage-reporting-path COMMAND usage-reporting-path-test)
-# 起子进程向它发 SIGTERM，检查会话照样结束、进程仍按 SIGTERM 退出；宿主函数由测试里的桩代替，同上链 apple-client。
-add_executable(usage-reporting-termination-test tests/core/UsageReportingTerminationTest.mm src/core/UsageReporting.mm)
-target_compile_options(usage-reporting-termination-test PRIVATE -fobjc-arc -UNDEBUG -Wall -Wextra -Werror)
-target_compile_definitions(usage-reporting-termination-test PRIVATE MSIME_USAGE_REPORTING_TEST_SUPPORT="/tmp/msime-usage-reporting-termination-test")
-target_link_libraries(usage-reporting-termination-test PRIVATE apple-client)
-add_test(NAME usage-reporting-termination COMMAND usage-reporting-termination-test)
-set_tests_properties(usage-reporting-termination PROPERTIES TIMEOUT 60)
 # src/cloud 的 CloudClipboardClient、CloudClipboardWindowController、CloudDictionaryClient、CloudURLSession 是账号和云端改走 Rust（#8201）以前的 Objective-C 实现，输入法里已经没有代码引用它们，不再编进输入法；它们仍由下面的 cloud-clipboard-deletion、cloud-clipboard-selection、cloud-dictionary-client 三个测试目标编译，scripts/test-macos-cloud-query-encoding.py 和 test-macos-cloud-redirect-policy.py 也读它们的源码，所以文件留着，删不删由负责人定。同一批里没人引用的 CloudFileTransfer 和 src/core/Account{AuthClient,Keychain,SessionManager,WindowController} 已经删掉。
 add_executable(MSIMEClientInputMethod MACOSX_BUNDLE src/input/input_method_main.mm src/settings/PreferencesWindowController.mm src/core/SupportWindowController.mm src/voice/VoiceInputService.mm src/voice/VoiceWaveOverlay.mm src/voice/VoiceCuePlayer.mm src/voice/VoiceAudioMuter.mm src/voice/VoiceSettings.mm src/voice/VoiceProviderSettings.mm src/voice/VoiceArchive.mm src/voice/VoiceHistoryView.mm src/voice/TextStreamSupport.mm src/voice/OpenLessImport.mm src/input/InputController.mm src/input/InputModeHUDPanel.mm src/input/InputModeStatusItem.mm src/candidate/CandidateSkinAppearance.mm src/settings/AppearancePreferences.mm src/core/DiagnosticLog.cpp src/core/BoundedFileReader.mm src/candidate/CandidateSkin.cpp src/candidate/CandidateSkinPreviewView.mm src/candidate/SkinSettingsView.mm src/core/ChineseTextConversion.mm src/settings/ShuangpinKeymapPanel.mm src/input/InputSourceRegistration.mm src/core/FloatingToolbarPanel.mm src/core/UpdateController.mm src/dictionary/DictionaryWindowController.mm src/core/ClientDictionaryRuntime.mm src/dictionary/DictionaryInstaller.mm src/core/Uninstaller.mm)
 target_sources(MSIMEClientInputMethod PRIVATE src/core/AISettingsWindow.mm src/core/ScreenKeyboardPanel.mm src/cloud/CloudCandidateRequest.mm src/core/CustomTranslationBatch.mm src/voice/VoicePCMBuffer.mm src/voice/HTTPVoiceRequest.mm)
@@ -119,37 +106,53 @@ target_link_libraries(MSIMEClientInputMethod PRIVATE "-framework Security")
 # 所有编译 VoicePolishClient.mm 的目标（宿主、控制器测试、voice-polish-client-test）均链接 apple-client，统一静态绑定 Rust C ABI。
 set_source_files_properties(src/voice/VoicePolishClient.mm PROPERTIES COMPILE_DEFINITIONS "MSIME_VOICE_POLISH_USE_RUST_FFI=1")
 target_sources(MSIMEClientInputMethod PRIVATE src/core/DesktopInputSession.mm)
-target_sources(MSIMEClientInputMethod PRIVATE src/core/UsageReporting.mm)
 target_sources(MSIMEClientInputMethod PRIVATE src/core/DesktopCloudClipboard.mm)
 target_link_libraries(MSIMEClientInputMethod PRIVATE "-framework ApplicationServices" "-framework CoreGraphics" "-framework CoreText" "-framework UniformTypeIdentifiers")
-file(GLOB_RECURSE MSIME_BACKEND_SWIFT CONFIGURE_DEPENDS
-  "${CMAKE_CURRENT_SOURCE_DIR}/../../shared/backend/account/*.swift"
-  "${CMAKE_CURRENT_SOURCE_DIR}/../../shared/backend/clients/*.swift"
-  "${CMAKE_CURRENT_SOURCE_DIR}/../../shared/backend/content/*.swift"
-  "${CMAKE_CURRENT_SOURCE_DIR}/../../shared/backend/storage/*.swift"
-  "${CMAKE_CURRENT_SOURCE_DIR}/../../shared/backend-ui/*.swift"
-  "${CMAKE_CURRENT_SOURCE_DIR}/../../shared/backend/rust/*"
-  "${CMAKE_CURRENT_SOURCE_DIR}/../../crates/host-api/include/msime_client.h"
-  "${CMAKE_CURRENT_SOURCE_DIR}/src/backend/*.swift")
-# bundle 里每个 Mach-O 都要包含的架构：发布包传 CMAKE_OSX_ARCHITECTURES="arm64;x86_64" 出 universal，未设置时只编宿主架构。CMake 自己编的目标直接跟随 CMAKE_OSX_ARCHITECTURES；Swift 后端和预编译的 sherpa-onnx 不经过 CMake 的编译器，所以在下面显式按这份列表处理。
+# 将 macOS 26 端侧 SpeechAnalyzer（Swift）静态编译进输入法主二进制，不再构建或加载 MSIMEBackend.dylib。
+find_program(MSIME_XCRUN xcrun REQUIRED)
+execute_process(COMMAND "${MSIME_XCRUN}" -f swiftc
+  OUTPUT_VARIABLE MSIME_SWIFTC_PATH OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+get_filename_component(MSIME_SWIFTC_BIN_DIR "${MSIME_SWIFTC_PATH}" DIRECTORY)
+get_filename_component(MSIME_SWIFTC_TOOLCHAIN_ROOT "${MSIME_SWIFTC_BIN_DIR}" DIRECTORY)
+set(MSIME_SWIFT_RUNTIME_LIB_DIR "${MSIME_SWIFTC_TOOLCHAIN_ROOT}/lib/swift/macosx")
+set(MSIME_SPEECH_ANALYZER_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/voice/BackendSpeechAnalyzer.swift")
 set(MSIME_BUNDLE_ARCHITECTURES ${CMAKE_OSX_ARCHITECTURES})
 if(NOT MSIME_BUNDLE_ARCHITECTURES)
   set(MSIME_BUNDLE_ARCHITECTURES ${CMAKE_HOST_SYSTEM_PROCESSOR})
 endif()
 string(REPLACE ";" " " MSIME_SWIFT_ARCHS "${MSIME_BUNDLE_ARCHITECTURES}")
-set(MSIME_SWIFT_BACKEND_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/MSIMEBackend.dylib")
-# `MSIME_SWIFT_CONFIGURATION` 让脚本对发布包用的 Release dylib 做优化、dead strip 和剥离符号，其他配置都保持 `-Onone`。命令行上的配置变了 Makefile 生成器不会重跑这条命令，所以用 `file(CONFIGURE)` 把当前配置写进一个只在内容变化时才重写的 stamp 文件并加入 DEPENDS，换配置后复用的构建目录也会重新编 MSIMEBackend.dylib，不会把 `-Onone` 的后端打进包里。
-set(MSIME_SWIFT_CONFIGURATION_STAMP "${CMAKE_CURRENT_BINARY_DIR}/swift-backend-configuration.txt")
-file(CONFIGURE OUTPUT "${MSIME_SWIFT_CONFIGURATION_STAMP}" CONTENT "${CMAKE_BUILD_TYPE}\n")
-add_custom_command(OUTPUT "${MSIME_SWIFT_BACKEND_OUTPUT}"
-  COMMAND "${CMAKE_COMMAND}" -E env "MSIME_SWIFT_ARCHS=${MSIME_SWIFT_ARCHS}" "MSIME_SWIFT_CONFIGURATION=$<CONFIG>" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/build_backend_swift.sh" "${MSIME_SWIFT_BACKEND_OUTPUT}"
-  DEPENDS ${MSIME_BACKEND_SWIFT} "${CMAKE_CURRENT_SOURCE_DIR}/scripts/build_backend_swift.sh" "${MSIME_SWIFT_CONFIGURATION_STAMP}")
-add_custom_target(macos-swift-backend DEPENDS "${MSIME_SWIFT_BACKEND_OUTPUT}")
-add_dependencies(MSIMEClientInputMethod macos-swift-backend)
-target_link_libraries(MSIMEClientInputMethod PRIVATE "${MSIME_SWIFT_BACKEND_OUTPUT}")
-target_include_directories(MSIMEClientInputMethod PRIVATE src ../../shared/backend/rust)
+set(MSIME_SPEECH_ANALYZER_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/libShurufaSpeechAnalyzer.a")
+set(MSIME_SWIFT_CONFIGURATION_STAMP "${CMAKE_CURRENT_BINARY_DIR}/swift-speech-configuration.txt")
+file(CONFIGURE OUTPUT "${MSIME_SWIFT_CONFIGURATION_STAMP}" CONTENT "${CMAKE_BUILD_TYPE}:${MSIME_SWIFT_ARCHS}\n")
+set(MSIME_SPEECH_ANALYZER_SLICES)
+foreach(arch IN LISTS MSIME_BUNDLE_ARCHITECTURES)
+  set(slice_obj "${CMAKE_CURRENT_BINARY_DIR}/speech-analyzer-${arch}.o")
+  set(slice_lib "${CMAKE_CURRENT_BINARY_DIR}/libShurufaSpeechAnalyzer-${arch}.a")
+  add_custom_command(OUTPUT "${slice_lib}"
+    COMMAND "${MSIME_XCRUN}" swiftc -parse-as-library -emit-object
+      -module-name ShurufaSpeechAnalyzer
+      "$<IF:$<CONFIG:Release>,-Osize,-Onone>"
+      "$<$<CONFIG:Release>:-wmo>"
+      -target "${arch}-apple-macosx${CMAKE_OSX_DEPLOYMENT_TARGET}"
+      "${MSIME_SPEECH_ANALYZER_SOURCE}" -o "${slice_obj}"
+    COMMAND "${MSIME_XCRUN}" ar rcs "${slice_lib}" "${slice_obj}"
+    DEPENDS "${MSIME_SPEECH_ANALYZER_SOURCE}" "${MSIME_SWIFT_CONFIGURATION_STAMP}"
+    COMMAND_EXPAND_LISTS VERBATIM)
+  list(APPEND MSIME_SPEECH_ANALYZER_SLICES "${slice_lib}")
+endforeach()
+add_custom_command(OUTPUT "${MSIME_SPEECH_ANALYZER_OUTPUT}"
+  COMMAND "${MSIME_XCRUN}" lipo -create ${MSIME_SPEECH_ANALYZER_SLICES} -output "${MSIME_SPEECH_ANALYZER_OUTPUT}"
+  DEPENDS ${MSIME_SPEECH_ANALYZER_SLICES}
+  VERBATIM)
+add_custom_target(macos-speech-analyzer DEPENDS "${MSIME_SPEECH_ANALYZER_OUTPUT}")
+add_dependencies(MSIMEClientInputMethod macos-speech-analyzer)
+target_include_directories(MSIMEClientInputMethod PRIVATE src)
 target_compile_options(MSIMEClientInputMethod PRIVATE -fobjc-arc -Wall -Wextra -Werror)
 target_link_libraries(MSIMEClientInputMethod PRIVATE apple-client msime-voice-providers "-framework AppKit" "-framework InputMethodKit" "-framework Carbon" "-framework AVFoundation" "-framework Speech")
+target_link_options(MSIMEClientInputMethod PRIVATE
+  "LINKER:-force_load,${MSIME_SPEECH_ANALYZER_OUTPUT}"
+  "-L${MSIME_SWIFT_RUNTIME_LIB_DIR}"
+  "LINKER:-rpath,/usr/lib/swift")
 # 单按 Caps Lock 切换中英文时用 IOKit 的 IOHIDSetModifierLockState 撤回大写锁定（系统框架，不需要额外权限）。
 target_link_libraries(MSIMEClientInputMethod PRIVATE "-framework IOKit")
 # build-number.txt 是本地构建的默认构建号；发布工作流传入 MSIME_BUILD_NUMBER，缺省是所构建提交的提交时间距 2026-01-01T00:00:00Z 的分钟数（release-macos.yml），同一版本号的正式版、测试版和每日构建按代码先后排序，同一个提交重跑得到同一个构建号。以前用工作流运行 ID 对 999999999 取模，约两个月回绕一次，回绕后的构建会被 Sparkle 当成降级；改用时间之后的构建号比那时发出的小，同一版本号内要等下一次版本号递增才能盖过它们（见 .agents/notes/implemented/feature/2026-10-25-macos-update-channels.md）。CFBundleVersion 不直接用它，而是把版本号编进去：((主 × 1000 + 次) × 1000 + 修订) × 1,000,000,000 + 构建号。这样发布构建号可以在 1 到 999999999 之间增长，且跨版本保持单调；0.54.0 的本地构建 1 是 5400000000000000001。Sparkle 的安装进程（Autoupdate 的 SUPlainInstaller）只用标准比较器比新旧 bundle 的 CFBundleVersion，新的更小就当降级拒绝装，不经过输入法里的任何委托。设置应用把构建号按 u64 解析（apps/desktop/src-tauri/src/platform/macos/macos_input_source.rs 的 BundleVersion）。
@@ -402,7 +405,7 @@ foreach(MSIME_TEXTSTREAM_FILE IN LISTS MSIME_TEXTSTREAM_FILES)
 endforeach()
 add_custom_command(TARGET MSIMEClientInputMethod POST_BUILD
   COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>/Contents/Frameworks"
-  COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${MSIME_SWIFT_BACKEND_OUTPUT}" "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>/Contents/Frameworks/MSIMEBackend.dylib"
+  COMMAND "${CMAKE_COMMAND}" -E rm -f "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>/Contents/Frameworks/MSIMEBackend.dylib"
   COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_FILE:msime-voice-local>" "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>/Contents/MacOS/${MSIME_LOCAL_VOICE_HELPER_NAME}")
 if(MSIME_BUNDLE_VOICE_RUNTIME)
   add_dependencies(MSIMEClientInputMethod macos-voice-runtime)
@@ -423,290 +426,20 @@ if(MSIME_OPTIONS_FILE)
   target_sources(MSIMEClientInputMethod PRIVATE "${MSIME_OPTIONS_FILE}")
   set_source_files_properties("${MSIME_OPTIONS_FILE}" PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
 endif()
-include(ClipboardTests.cmake)
-# 云词库和云剪贴板的 IPC provider 经 Rust（#8201 迁移计划 4e）：Rust 是 tests/core/FakeRustTable.swift 的替身函数表，`-I shared/backend/rust` 只为 C 头文件的类型。
-set(MSIME_BACKEND_RUST_ACCOUNT_SOURCES
-  ../../shared/backend/account/BackendAccountClient.swift ../../shared/backend/account/BackendAccountSession.swift
-  ../../shared/backend/account/BackendAnonymousAccount.swift ../../shared/backend/account/BackendRustClient.swift
-  ../../shared/backend/account/BackendRustAccount.swift ../../shared/backend/account/BackendRustSessionStore.swift
-  ../../shared/backend/storage/BackendLocalStore.swift ../../shared/backend/storage/BackendBoundedFileReader.swift
-  tests/core/FakeRustTable.swift)
-set(MSIME_DESKTOP_DICTIONARY_PROVIDER_SOURCES ${MSIME_BACKEND_RUST_ACCOUNT_SOURCES}
-  src/backend/core/BackendEdition.swift src/backend/dictionary/BackendCloudDictionaryProvider.swift
-  src/backend/dictionary/BackendLocalDictionary.swift src/backend/dictionary/BackendFileTransfer.swift src/backend/dictionary/BackendDesktopSnapshots.swift
-  tests/dictionary/DesktopCloudDictionaryProviderTest.swift)
-list(TRANSFORM MSIME_DESKTOP_DICTIONARY_PROVIDER_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
-add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/desktop-dictionary-provider-test"
-  COMMAND "${MSIME_XCRUN}" swiftc -Onone -parse-as-library
-    -target "${CMAKE_HOST_SYSTEM_PROCESSOR}-apple-macosx${CMAKE_OSX_DEPLOYMENT_TARGET}"
-    -I "${CMAKE_CURRENT_SOURCE_DIR}/../../shared/backend/rust"
-    ${MSIME_DESKTOP_DICTIONARY_PROVIDER_SOURCES} -o "${CMAKE_CURRENT_BINARY_DIR}/desktop-dictionary-provider-test"
-  DEPENDS ${MSIME_DESKTOP_DICTIONARY_PROVIDER_SOURCES} VERBATIM)
-add_custom_target(desktop-dictionary-provider-test-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/desktop-dictionary-provider-test")
-add_test(NAME desktop-dictionary-provider COMMAND "${CMAKE_CURRENT_BINARY_DIR}/desktop-dictionary-provider-test")
-set_tests_properties(desktop-dictionary-provider PROPERTIES TIMEOUT 30)
-set(MSIME_SECURE_FILE_READER_SOURCES src/backend/dictionary/BackendSecureFileReader.swift tests/dictionary/SecureFileReaderTest.swift)
-list(TRANSFORM MSIME_SECURE_FILE_READER_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
-add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/secure-file-reader-test"
-  COMMAND "${MSIME_XCRUN}" swiftc -Onone -parse-as-library
-    -target "${CMAKE_HOST_SYSTEM_PROCESSOR}-apple-macosx${CMAKE_OSX_DEPLOYMENT_TARGET}"
-    ${MSIME_SECURE_FILE_READER_SOURCES} -o "${CMAKE_CURRENT_BINARY_DIR}/secure-file-reader-test"
-  DEPENDS ${MSIME_SECURE_FILE_READER_SOURCES} VERBATIM)
-add_custom_target(secure-file-reader-test-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/secure-file-reader-test")
-add_test(NAME secure-file-reader COMMAND "${CMAKE_CURRENT_BINARY_DIR}/secure-file-reader-test")
-set_tests_properties(secure-file-reader PROPERTIES TIMEOUT 30)
-set(MSIME_DESKTOP_CLOUD_PROVIDER_SOURCES ${MSIME_BACKEND_RUST_ACCOUNT_SOURCES}
-  src/backend/clipboard/BackendCloudClipboardProvider.swift
-  src/backend/clipboard/BackendCloudClipboardRoute.swift
-  src/backend/clipboard/BackendCloudClipboardDriver.swift tests/clipboard/DesktopCloudClipboardProviderTest.swift)
-list(TRANSFORM MSIME_DESKTOP_CLOUD_PROVIDER_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
-add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/desktop-cloud-provider-test"
-  COMMAND "${MSIME_XCRUN}" swiftc -Onone -parse-as-library
-    -target "${CMAKE_HOST_SYSTEM_PROCESSOR}-apple-macosx${CMAKE_OSX_DEPLOYMENT_TARGET}"
-    -I "${CMAKE_CURRENT_SOURCE_DIR}/../../shared/backend/rust"
-    ${MSIME_DESKTOP_CLOUD_PROVIDER_SOURCES} -o "${CMAKE_CURRENT_BINARY_DIR}/desktop-cloud-provider-test"
-  DEPENDS ${MSIME_DESKTOP_CLOUD_PROVIDER_SOURCES} VERBATIM)
-add_custom_target(desktop-cloud-provider-test-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/desktop-cloud-provider-test")
-add_test(NAME desktop-cloud-provider COMMAND "${CMAKE_CURRENT_BINARY_DIR}/desktop-cloud-provider-test")
-set_tests_properties(desktop-cloud-provider PROPERTIES TIMEOUT 30)
-# The account backend harness compiles the whole Swift backend with its test entry point, the same source list build_backend_swift.sh links into the dylib, so the script owns the list rather than a second copy here.
-add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/backend-account-swift-test"
-  COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_backend_account_swift.sh" "${CMAKE_CURRENT_BINARY_DIR}/backend-account-swift-test"
-  DEPENDS ${MSIME_BACKEND_SWIFT} "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/BackendAccountTests.swift" "${CMAKE_CURRENT_SOURCE_DIR}/tests/core/FakeRustTable.swift"
-    "${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_backend_account_swift.sh" VERBATIM)
-add_custom_target(backend-account-swift-test-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/backend-account-swift-test")
-add_test(NAME backend-account-swift COMMAND "${CMAKE_CURRENT_BINARY_DIR}/backend-account-swift-test")
-# 注入会话存储对着真的 Rust 宿主库（#8201 迁移计划 4a）：后端的回调读写临时目录里的 `account-session.json` 和 App Group 文件，Rust 经 `msime_rust_client_linked()` 填的同一张函数表调用。不联网、不碰钥匙串。
-set(MSIME_BACKEND_RUST_STORE_SOURCES
-  ../../shared/backend/account/BackendAccountClient.swift ../../shared/backend/account/BackendAccountSession.swift
-  ../../shared/backend/account/BackendAnonymousAccount.swift ../../shared/backend/account/BackendRustClient.swift
-  ../../shared/backend/account/BackendRustSessionStore.swift ../../shared/backend/storage/BackendLocalStore.swift
-  ../../shared/backend/storage/BackendBoundedFileReader.swift tests/core/BackendRustSessionStoreTest.swift)
-list(TRANSFORM MSIME_BACKEND_RUST_STORE_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
-add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/backend-rust-session-store-test"
-  COMMAND "${MSIME_XCRUN}" swiftc -Onone -parse-as-library
-    -target "${CMAKE_HOST_SYSTEM_PROCESSOR}-apple-macosx${CMAKE_OSX_DEPLOYMENT_TARGET}"
-    -I "${CMAKE_CURRENT_SOURCE_DIR}/../../shared/backend/rust"
-    ${MSIME_BACKEND_RUST_STORE_SOURCES} "${MSIME_HOST_LIBRARY}" -lsqlite3 -lc++
-    -framework Foundation -framework Security -framework CoreText -framework CoreAudio -framework AudioToolbox -framework AppKit -framework SystemConfiguration
-    -o "${CMAKE_CURRENT_BINARY_DIR}/backend-rust-session-store-test"
-  DEPENDS ${MSIME_BACKEND_RUST_STORE_SOURCES} "${CMAKE_CURRENT_SOURCE_DIR}/../../shared/backend/rust/MSIMERustClient.h"
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../shared/backend/rust/module.modulemap" "${MSIME_HOST_LIBRARY}" VERBATIM)
-add_custom_target(backend-rust-session-store-test-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/backend-rust-session-store-test")
-add_test(NAME backend-rust-session-store COMMAND "${CMAKE_CURRENT_BINARY_DIR}/backend-rust-session-store-test")
-set_tests_properties(backend-rust-session-store PROPERTIES TIMEOUT 60)
-set_tests_properties(backend-account-swift PROPERTIES TIMEOUT 60)
-set(MSIME_EMOJI_WINDOW_CHROME_SOURCES src/backend/emoji/BackendEmojiWindowController.swift tests/emoji/EmojiWindowChromeTest.swift)
-list(TRANSFORM MSIME_EMOJI_WINDOW_CHROME_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
-add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/emoji-window-chrome-test"
-  COMMAND "${MSIME_XCRUN}" swiftc -Onone -parse-as-library -target "${CMAKE_HOST_SYSTEM_PROCESSOR}-apple-macosx${CMAKE_OSX_DEPLOYMENT_TARGET}"
-    ${MSIME_EMOJI_WINDOW_CHROME_SOURCES} -o "${CMAKE_CURRENT_BINARY_DIR}/emoji-window-chrome-test"
-  DEPENDS ${MSIME_EMOJI_WINDOW_CHROME_SOURCES} VERBATIM)
-add_custom_target(emoji-window-chrome-test-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/emoji-window-chrome-test")
-add_test(NAME emoji-window-chrome COMMAND "${CMAKE_CURRENT_BINARY_DIR}/emoji-window-chrome-test")
-set_tests_properties(emoji-window-chrome PROPERTIES LABELS "emoji-local" TIMEOUT 30)
-set(MSIME_EMOJI_APPEARANCE_TEST_SOURCES src/backend/emoji/BackendEmojiAppearance.swift tests/emoji/EmojiAppearanceTest.swift)
-list(TRANSFORM MSIME_EMOJI_APPEARANCE_TEST_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
-add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/emoji-appearance-test"
-  COMMAND "${MSIME_XCRUN}" swiftc -Onone
-    -target "${CMAKE_HOST_SYSTEM_PROCESSOR}-apple-macosx${CMAKE_OSX_DEPLOYMENT_TARGET}"
-    ${MSIME_EMOJI_APPEARANCE_TEST_SOURCES} -o "${CMAKE_CURRENT_BINARY_DIR}/emoji-appearance-test"
-  DEPENDS ${MSIME_EMOJI_APPEARANCE_TEST_SOURCES} VERBATIM)
-add_custom_target(emoji-appearance-test-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/emoji-appearance-test")
-add_test(NAME emoji-appearance COMMAND "${CMAKE_CURRENT_BINARY_DIR}/emoji-appearance-test")
-set_tests_properties(emoji-appearance PROPERTIES LABELS "emoji-local" TIMEOUT 30)
-set(MSIME_EMOJI_DELIVERY_NOTICE_TEST_SOURCES src/backend/emoji/BackendEmojiAppearance.swift src/backend/emoji/BackendEmojiDeliveryNotice.swift tests/emoji/EmojiDeliveryNoticeTest.swift)
-list(TRANSFORM MSIME_EMOJI_DELIVERY_NOTICE_TEST_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
-add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/emoji-delivery-notice-test"
-  COMMAND "${MSIME_XCRUN}" swiftc -Onone
-    -target "${CMAKE_HOST_SYSTEM_PROCESSOR}-apple-macosx${CMAKE_OSX_DEPLOYMENT_TARGET}"
-    ${MSIME_EMOJI_DELIVERY_NOTICE_TEST_SOURCES} -o "${CMAKE_CURRENT_BINARY_DIR}/emoji-delivery-notice-test"
-  DEPENDS ${MSIME_EMOJI_DELIVERY_NOTICE_TEST_SOURCES} VERBATIM)
-add_custom_target(emoji-delivery-notice-test-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/emoji-delivery-notice-test")
-add_test(NAME emoji-delivery-notice COMMAND "${CMAKE_CURRENT_BINARY_DIR}/emoji-delivery-notice-test")
-set_tests_properties(emoji-delivery-notice PROPERTIES LABELS "emoji-local" TIMEOUT 30)
-set(MSIME_EMOJI_EMPTY_TEST_SOURCES src/backend/emoji/BackendEmojiAppearance.swift src/backend/emoji/BackendEmojiEmptyState.swift tests/emoji/EmojiEmptyStateTest.swift)
-list(TRANSFORM MSIME_EMOJI_EMPTY_TEST_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
-add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/emoji-empty-test"
-  COMMAND "${MSIME_XCRUN}" swiftc -Onone -target "${CMAKE_HOST_SYSTEM_PROCESSOR}-apple-macosx${CMAKE_OSX_DEPLOYMENT_TARGET}"
-    ${MSIME_EMOJI_EMPTY_TEST_SOURCES} -o "${CMAKE_CURRENT_BINARY_DIR}/emoji-empty-test"
-  DEPENDS ${MSIME_EMOJI_EMPTY_TEST_SOURCES} VERBATIM)
-add_custom_target(emoji-empty-test-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/emoji-empty-test")
-add_test(NAME emoji-empty COMMAND "${CMAKE_CURRENT_BINARY_DIR}/emoji-empty-test")
-set_tests_properties(emoji-empty PROPERTIES LABELS "emoji-local" TIMEOUT 30)
-set(MSIME_EMOJI_EXIT_SOURCES src/backend/emoji/BackendEmojiExit.swift tests/emoji/EmojiExitTest.swift)
-list(TRANSFORM MSIME_EMOJI_EXIT_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
-add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/emoji-exit-test"
-  COMMAND "${MSIME_XCRUN}" swiftc -Onone
-    -target "${CMAKE_HOST_SYSTEM_PROCESSOR}-apple-macosx${CMAKE_OSX_DEPLOYMENT_TARGET}"
-    ${MSIME_EMOJI_EXIT_SOURCES} -o "${CMAKE_CURRENT_BINARY_DIR}/emoji-exit-test"
-  DEPENDS ${MSIME_EMOJI_EXIT_SOURCES} VERBATIM)
-add_custom_target(emoji-exit-test-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/emoji-exit-test")
-add_test(NAME emoji-exit COMMAND "${CMAKE_CURRENT_BINARY_DIR}/emoji-exit-test")
-set_tests_properties(emoji-exit PROPERTIES LABELS "emoji-local" TIMEOUT 30)
+add_executable(clipboard-preferences-test tests/clipboard/ClipboardPreferencesTest.mm)
+target_compile_options(clipboard-preferences-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
+target_link_libraries(clipboard-preferences-test PRIVATE "-framework Foundation")
+add_test(NAME clipboard-preferences COMMAND clipboard-preferences-test)
+set_tests_properties(clipboard-preferences PROPERTIES LABELS "clipboard-local" TIMEOUT 30)
 add_executable(emoji-host-cursor-test tests/emoji/EmojiHostCursorTest.mm)
 target_compile_options(emoji-host-cursor-test PRIVATE -fobjc-arc -UNDEBUG -Wall -Wextra -Werror)
 target_link_libraries(emoji-host-cursor-test PRIVATE apple-client)
 add_test(NAME emoji-host-cursor COMMAND emoji-host-cursor-test)
 set_tests_properties(emoji-host-cursor PROPERTIES LABELS "emoji-local" TIMEOUT 30)
-set(MSIME_EMOJI_SWIFT_HOST_SOURCES src/backend/emoji/BackendEmojiSymbolGroups.swift src/backend/emoji/BackendEmojiCatalog.swift
-  src/backend/emoji/BackendEmojiCatalogCursor.swift tests/emoji/EmojiSwiftHostTest.swift)
-list(TRANSFORM MSIME_EMOJI_SWIFT_HOST_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
-# swiftc links this one itself, against apple-client, so a sanitized apple-client needs the sanitizer runtime on this link line too; CMake adds it to the ones it drives.
-set(MSIME_EMOJI_SWIFT_HOST_SANITIZE "")
-if(CMAKE_OBJCXX_FLAGS MATCHES "-fsanitize=[^ ]*address")
-  set(MSIME_EMOJI_SWIFT_HOST_SANITIZE -sanitize=address)
-endif()
-add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/emoji-swift-host-test"
-  COMMAND "${MSIME_XCRUN}" swiftc -Onone ${MSIME_EMOJI_SWIFT_HOST_SANITIZE}
-    -target "${CMAKE_HOST_SYSTEM_PROCESSOR}-apple-macosx${CMAKE_OSX_DEPLOYMENT_TARGET}"
-    ${MSIME_EMOJI_SWIFT_HOST_SOURCES}
-    -Xlinker -force_load -Xlinker "$<TARGET_FILE:apple-client>"
-    "${MSIME_HOST_LIBRARY}" -lsqlite3 -lc++ -framework Foundation -framework Security -framework CoreText -framework CoreAudio -framework AudioToolbox -framework AppKit -framework SystemConfiguration
-    -o "${CMAKE_CURRENT_BINARY_DIR}/emoji-swift-host-test"
-  DEPENDS ${MSIME_EMOJI_SWIFT_HOST_SOURCES} apple-client "${MSIME_HOST_LIBRARY}" VERBATIM)
-add_custom_target(emoji-swift-host-test-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/emoji-swift-host-test")
-add_test(NAME emoji-swift-host COMMAND "${CMAKE_CURRENT_BINARY_DIR}/emoji-swift-host-test")
-set_tests_properties(emoji-swift-host PROPERTIES LABELS "emoji-local" TIMEOUT 30)
-set(MSIME_EMOJI_HOME_TEST_SOURCES src/backend/emoji/BackendEmojiSymbolGroups.swift src/backend/emoji/BackendEmojiCatalog.swift src/backend/emoji/BackendEmojiCatalogCursor.swift src/backend/emoji/BackendEmojiClipboardDisabled.swift src/backend/emoji/BackendEmojiEmptyState.swift src/backend/emoji/BackendEmojiBackButton.swift
-  src/backend/emoji/BackendEmojiAppearance.swift src/backend/emoji/BackendEmojiScroll.swift src/backend/emoji/BackendEmojiHomeHeading.swift src/backend/emoji/BackendEmojiHome.swift src/backend/emoji/BackendEmojiHomeNavigation.swift
-  src/backend/emoji/BackendEmojiKeyboard.swift src/backend/emoji/BackendEmojiFlow.swift src/backend/emoji/BackendEmojiGrid.swift src/backend/emoji/BackendEmojiNavigation.swift tests/emoji/EmojiHomeTest.swift)
-list(TRANSFORM MSIME_EMOJI_HOME_TEST_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
-add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/emoji-home-test"
-  COMMAND "${MSIME_XCRUN}" swiftc -Onone
-    -target "${CMAKE_HOST_SYSTEM_PROCESSOR}-apple-macosx${CMAKE_OSX_DEPLOYMENT_TARGET}"
-    ${MSIME_EMOJI_HOME_TEST_SOURCES} -o "${CMAKE_CURRENT_BINARY_DIR}/emoji-home-test"
-  DEPENDS ${MSIME_EMOJI_HOME_TEST_SOURCES} VERBATIM)
-add_custom_target(emoji-home-test-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/emoji-home-test")
-add_test(NAME emoji-home COMMAND "${CMAKE_CURRENT_BINARY_DIR}/emoji-home-test")
-set_tests_properties(emoji-home PROPERTIES LABELS "emoji-local" TIMEOUT 30)
-set(MSIME_EMOJI_FLOW_TEST_SOURCES src/backend/emoji/BackendEmojiSymbolGroups.swift src/backend/emoji/BackendEmojiCatalog.swift
-  src/backend/emoji/BackendEmojiAppearance.swift src/backend/emoji/BackendEmojiFlow.swift tests/emoji/EmojiFlowTest.swift)
-list(TRANSFORM MSIME_EMOJI_FLOW_TEST_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
-add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/emoji-flow-test"
-  COMMAND "${MSIME_XCRUN}" swiftc -Onone
-    -target "${CMAKE_HOST_SYSTEM_PROCESSOR}-apple-macosx${CMAKE_OSX_DEPLOYMENT_TARGET}"
-    ${MSIME_EMOJI_FLOW_TEST_SOURCES} -o "${CMAKE_CURRENT_BINARY_DIR}/emoji-flow-test"
-  DEPENDS ${MSIME_EMOJI_FLOW_TEST_SOURCES} VERBATIM)
-add_custom_target(emoji-flow-test-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/emoji-flow-test")
-add_test(NAME emoji-flow COMMAND "${CMAKE_CURRENT_BINARY_DIR}/emoji-flow-test")
-set_tests_properties(emoji-flow PROPERTIES LABELS "emoji-local" TIMEOUT 30)
-set(MSIME_EMOJI_GRID_TEST_SOURCES src/backend/emoji/BackendEmojiSymbolGroups.swift src/backend/emoji/BackendEmojiCatalog.swift
-  src/backend/emoji/BackendEmojiAppearance.swift src/backend/emoji/BackendEmojiFlow.swift src/backend/emoji/BackendEmojiGrid.swift
-  src/backend/emoji/BackendEmojiKeyboard.swift tests/emoji/EmojiGridTest.swift)
-list(TRANSFORM MSIME_EMOJI_GRID_TEST_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
-add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/emoji-grid-test"
-  COMMAND "${MSIME_XCRUN}" swiftc -Onone
-    -target "${CMAKE_HOST_SYSTEM_PROCESSOR}-apple-macosx${CMAKE_OSX_DEPLOYMENT_TARGET}"
-    ${MSIME_EMOJI_GRID_TEST_SOURCES} -o "${CMAKE_CURRENT_BINARY_DIR}/emoji-grid-test"
-  DEPENDS ${MSIME_EMOJI_GRID_TEST_SOURCES} VERBATIM)
-add_custom_target(emoji-grid-test-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/emoji-grid-test")
-add_test(NAME emoji-grid COMMAND "${CMAKE_CURRENT_BINARY_DIR}/emoji-grid-test")
-set_tests_properties(emoji-grid PROPERTIES LABELS "emoji-local" TIMEOUT 30)
-set(MSIME_EMOJI_SCROLL_TEST_SOURCES src/backend/emoji/BackendEmojiScroll.swift tests/emoji/EmojiScrollTest.swift)
-list(TRANSFORM MSIME_EMOJI_SCROLL_TEST_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
-add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/emoji-scroll-test"
-  COMMAND "${MSIME_XCRUN}" swiftc -Onone
-    -target "${CMAKE_HOST_SYSTEM_PROCESSOR}-apple-macosx${CMAKE_OSX_DEPLOYMENT_TARGET}"
-    ${MSIME_EMOJI_SCROLL_TEST_SOURCES} -o "${CMAKE_CURRENT_BINARY_DIR}/emoji-scroll-test"
-  DEPENDS ${MSIME_EMOJI_SCROLL_TEST_SOURCES} VERBATIM)
-add_custom_target(emoji-scroll-test-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/emoji-scroll-test")
-add_test(NAME emoji-scroll COMMAND "${CMAKE_CURRENT_BINARY_DIR}/emoji-scroll-test")
-set_tests_properties(emoji-scroll PROPERTIES LABELS "emoji-local" TIMEOUT 30)
-set(MSIME_EMOJI_SEARCH_TEST_SOURCES src/backend/emoji/BackendEmojiAppearance.swift src/backend/emoji/BackendEmojiSearchField.swift tests/emoji/EmojiSearchChromeTest.swift)
-list(TRANSFORM MSIME_EMOJI_SEARCH_TEST_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
-add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/emoji-search-test"
-  COMMAND "${MSIME_XCRUN}" swiftc -Onone
-    -target "${CMAKE_HOST_SYSTEM_PROCESSOR}-apple-macosx${CMAKE_OSX_DEPLOYMENT_TARGET}"
-    ${MSIME_EMOJI_SEARCH_TEST_SOURCES} -o "${CMAKE_CURRENT_BINARY_DIR}/emoji-search-test"
-  DEPENDS ${MSIME_EMOJI_SEARCH_TEST_SOURCES} VERBATIM)
-add_custom_target(emoji-search-test-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/emoji-search-test")
-add_test(NAME emoji-search COMMAND "${CMAKE_CURRENT_BINARY_DIR}/emoji-search-test")
-set_tests_properties(emoji-search PROPERTIES LABELS "emoji-local" TIMEOUT 30)
-set(MSIME_EMOJI_TOAST_TEST_SOURCES src/backend/emoji/BackendEmojiAppearance.swift src/backend/emoji/BackendEmojiToast.swift tests/emoji/EmojiToastTest.swift)
-list(TRANSFORM MSIME_EMOJI_TOAST_TEST_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
-add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/emoji-toast-test"
-  COMMAND "${MSIME_XCRUN}" swiftc -Onone
-    -target "${CMAKE_HOST_SYSTEM_PROCESSOR}-apple-macosx${CMAKE_OSX_DEPLOYMENT_TARGET}"
-    ${MSIME_EMOJI_TOAST_TEST_SOURCES} -o "${CMAKE_CURRENT_BINARY_DIR}/emoji-toast-test"
-  DEPENDS ${MSIME_EMOJI_TOAST_TEST_SOURCES} VERBATIM)
-add_custom_target(emoji-toast-test-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/emoji-toast-test")
-add_test(NAME emoji-toast COMMAND "${CMAKE_CURRENT_BINARY_DIR}/emoji-toast-test")
-set_tests_properties(emoji-toast PROPERTIES LABELS "emoji-local" TIMEOUT 30)
-set(MSIME_EMOJI_TABS_TEST_SOURCES src/backend/emoji/BackendEmojiAppearance.swift src/backend/emoji/BackendEmojiNavigation.swift
-  src/backend/emoji/BackendEmojiMainTabs.swift tests/emoji/EmojiMainTabsTest.swift)
-list(TRANSFORM MSIME_EMOJI_TABS_TEST_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
-add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/emoji-main-tabs-test"
-  COMMAND "${MSIME_XCRUN}" swiftc -Onone
-    -target "${CMAKE_HOST_SYSTEM_PROCESSOR}-apple-macosx${CMAKE_OSX_DEPLOYMENT_TARGET}"
-    ${MSIME_EMOJI_TABS_TEST_SOURCES} -o "${CMAKE_CURRENT_BINARY_DIR}/emoji-main-tabs-test"
-  DEPENDS ${MSIME_EMOJI_TABS_TEST_SOURCES} VERBATIM)
-add_custom_target(emoji-main-tabs-test-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/emoji-main-tabs-test")
-add_test(NAME emoji-main-tabs COMMAND "${CMAKE_CURRENT_BINARY_DIR}/emoji-main-tabs-test")
-set_tests_properties(emoji-main-tabs PROPERTIES LABELS "emoji-local" TIMEOUT 30)
-set(MSIME_EMOJI_CATEGORY_TEST_SOURCES src/backend/emoji/BackendEmojiAppearance.swift src/backend/emoji/BackendEmojiNavigation.swift
-  src/backend/emoji/BackendEmojiSymbolGroups.swift src/backend/emoji/BackendEmojiCatalog.swift src/backend/emoji/BackendEmojiCategoryTabs.swift tests/emoji/EmojiCategoryTabsTest.swift)
-list(TRANSFORM MSIME_EMOJI_CATEGORY_TEST_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
-add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/emoji-category-tabs-test"
-  COMMAND "${MSIME_XCRUN}" swiftc -Onone
-    -target "${CMAKE_HOST_SYSTEM_PROCESSOR}-apple-macosx${CMAKE_OSX_DEPLOYMENT_TARGET}"
-    ${MSIME_EMOJI_CATEGORY_TEST_SOURCES} -o "${CMAKE_CURRENT_BINARY_DIR}/emoji-category-tabs-test"
-  DEPENDS ${MSIME_EMOJI_CATEGORY_TEST_SOURCES} VERBATIM)
-add_custom_target(emoji-category-tabs-test-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/emoji-category-tabs-test")
-add_test(NAME emoji-category-tabs COMMAND "${CMAKE_CURRENT_BINARY_DIR}/emoji-category-tabs-test")
-set_tests_properties(emoji-category-tabs PROPERTIES LABELS "emoji-local" TIMEOUT 30)
-set(MSIME_EMOJI_SECTIONS_TEST_SOURCES src/backend/emoji/BackendEmojiAppearance.swift src/backend/emoji/BackendEmojiSymbolGroups.swift
-  src/backend/emoji/BackendEmojiCatalog.swift src/backend/emoji/BackendEmojiFlow.swift src/backend/emoji/BackendEmojiGrid.swift src/backend/emoji/BackendEmojiKeyboard.swift
-  src/backend/emoji/BackendEmojiSymbolSections.swift tests/emoji/EmojiSymbolSectionsTest.swift)
-list(TRANSFORM MSIME_EMOJI_SECTIONS_TEST_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
-add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/emoji-symbol-sections-test"
-  COMMAND "${MSIME_XCRUN}" swiftc -Onone
-    -target "${CMAKE_HOST_SYSTEM_PROCESSOR}-apple-macosx${CMAKE_OSX_DEPLOYMENT_TARGET}"
-    ${MSIME_EMOJI_SECTIONS_TEST_SOURCES} -o "${CMAKE_CURRENT_BINARY_DIR}/emoji-symbol-sections-test"
-  DEPENDS ${MSIME_EMOJI_SECTIONS_TEST_SOURCES} VERBATIM)
-add_custom_target(emoji-symbol-sections-test-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/emoji-symbol-sections-test")
-add_test(NAME emoji-symbol-sections COMMAND "${CMAKE_CURRENT_BINARY_DIR}/emoji-symbol-sections-test")
-set_tests_properties(emoji-symbol-sections PROPERTIES LABELS "emoji-local" TIMEOUT 30)
-set(MSIME_EMOJI_CURSOR_TEST_SOURCES src/backend/emoji/BackendEmojiSymbolGroups.swift src/backend/emoji/BackendEmojiCatalog.swift
-  src/backend/emoji/BackendEmojiCatalogCursor.swift tests/emoji/EmojiCatalogCursorTest.swift)
-list(TRANSFORM MSIME_EMOJI_CURSOR_TEST_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
-add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/emoji-catalog-cursor-test"
-  COMMAND "${MSIME_XCRUN}" swiftc -Onone
-    -target "${CMAKE_HOST_SYSTEM_PROCESSOR}-apple-macosx${CMAKE_OSX_DEPLOYMENT_TARGET}"
-    ${MSIME_EMOJI_CURSOR_TEST_SOURCES} -o "${CMAKE_CURRENT_BINARY_DIR}/emoji-catalog-cursor-test"
-  DEPENDS ${MSIME_EMOJI_CURSOR_TEST_SOURCES} VERBATIM)
-add_custom_target(emoji-catalog-cursor-test-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/emoji-catalog-cursor-test")
-add_test(NAME emoji-catalog-cursor COMMAND "${CMAKE_CURRENT_BINARY_DIR}/emoji-catalog-cursor-test")
-set_tests_properties(emoji-catalog-cursor PROPERTIES LABELS "emoji-local" TIMEOUT 30)
-set(MSIME_EMOJI_CATALOG_TEST_SOURCES src/backend/emoji/BackendEmojiSymbolGroups.swift src/backend/emoji/BackendEmojiCatalog.swift
-  tests/emoji/EmojiCatalogTest.swift)
-list(TRANSFORM MSIME_EMOJI_CATALOG_TEST_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
-add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/emoji-catalog-test"
-  COMMAND "${MSIME_XCRUN}" swiftc -Onone
-    -target "${CMAKE_HOST_SYSTEM_PROCESSOR}-apple-macosx${CMAKE_OSX_DEPLOYMENT_TARGET}"
-    ${MSIME_EMOJI_CATALOG_TEST_SOURCES} -o "${CMAKE_CURRENT_BINARY_DIR}/emoji-catalog-test"
-  DEPENDS ${MSIME_EMOJI_CATALOG_TEST_SOURCES} VERBATIM)
-add_custom_target(emoji-catalog-test-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/emoji-catalog-test")
-add_test(NAME emoji-catalog COMMAND "${CMAKE_CURRENT_BINARY_DIR}/emoji-catalog-test")
-set_tests_properties(emoji-catalog PROPERTIES LABELS "emoji-local" TIMEOUT 30)
-set(MSIME_HANDWRITING_TEST_SOURCES src/backend/handwriting/BackendHandwritingView.swift tests/core/HandwritingProviderTest.swift)
-list(TRANSFORM MSIME_HANDWRITING_TEST_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
-add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/handwriting-provider-test"
-  COMMAND "${MSIME_XCRUN}" swiftc -Onone
-    -target "${CMAKE_HOST_SYSTEM_PROCESSOR}-apple-macosx${CMAKE_OSX_DEPLOYMENT_TARGET}"
-    ${MSIME_HANDWRITING_TEST_SOURCES} -o "${CMAKE_CURRENT_BINARY_DIR}/handwriting-provider-test"
-  DEPENDS ${MSIME_HANDWRITING_TEST_SOURCES} VERBATIM)
-add_custom_target(handwriting-provider-test-build ALL DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/handwriting-provider-test")
-add_test(NAME handwriting-provider COMMAND "${CMAKE_CURRENT_BINARY_DIR}/handwriting-provider-test")
-set_tests_properties(handwriting-provider PROPERTIES LABELS "handwriting-local" TIMEOUT 30)
 add_executable(screen-keyboard-panel-test tests/core/ScreenKeyboardPanelTest.mm src/core/ScreenKeyboardPanel.mm)
 target_compile_options(screen-keyboard-panel-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(screen-keyboard-panel-test PRIVATE "-framework AppKit" "-framework CoreGraphics" "-framework Carbon")
 add_test(NAME screen-keyboard-panel COMMAND screen-keyboard-panel-test)
-add_executable(preference-snapshot-merge-test tests/settings/PreferenceSnapshotMergeTest.mm)
-target_compile_options(preference-snapshot-merge-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
-target_link_libraries(preference-snapshot-merge-test PRIVATE "-framework Foundation")
-add_test(NAME preference-snapshot-merge COMMAND preference-snapshot-merge-test)
 add_executable(macos-diagnostic-log-test tests/core/DiagnosticLogTest.cpp src/core/DiagnosticLog.cpp)
 target_compile_options(macos-diagnostic-log-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
 target_include_directories(macos-diagnostic-log-test PRIVATE src)
@@ -807,12 +540,6 @@ add_executable(openless-import-test tests/voice/OpenLessImportTest.mm src/voice/
 target_compile_options(openless-import-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(openless-import-test PRIVATE "-framework Foundation" "-framework Security")
 add_test(NAME openless-import COMMAND openless-import-test)
-add_executable(preference-save-state-test tests/settings/PreferenceSaveStateTest.cpp)
-target_compile_options(preference-save-state-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
-add_test(NAME preference-save-state COMMAND preference-save-state-test)
-add_executable(preference-load-state-test tests/settings/PreferenceLoadStateTest.cpp)
-target_compile_options(preference-load-state-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
-add_test(NAME preference-load-state COMMAND preference-load-state-test)
 add_executable(typing-statistics-test tests/core/TypingStatisticsTest.cpp)
 target_compile_options(typing-statistics-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(typing-statistics-test PRIVATE apple-client)
@@ -877,14 +604,6 @@ add_executable(cloud-clipboard-deletion-test tests/clipboard/CloudClipboardDelet
 target_compile_options(cloud-clipboard-deletion-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(cloud-clipboard-deletion-test PRIVATE "-framework Foundation")
 add_test(NAME cloud-clipboard-deletion COMMAND cloud-clipboard-deletion-test)
-add_executable(backend-account-entry-test tests/core/BackendAccountEntryTest.mm)
-target_compile_options(backend-account-entry-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
-target_link_libraries(backend-account-entry-test PRIVATE "-framework Foundation")
-add_test(NAME backend-account-entry COMMAND backend-account-entry-test)
-add_executable(backend-selection-observation-test tests/core/BackendSelectionObservationTest.mm)
-target_compile_options(backend-selection-observation-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
-target_link_libraries(backend-selection-observation-test PRIVATE "-framework Foundation")
-add_test(NAME backend-selection-observation COMMAND backend-selection-observation-test)
 add_executable(tool-text-return-test tests/core/ToolTextReturnTest.mm)
 target_compile_options(tool-text-return-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(tool-text-return-test PRIVATE "-framework Foundation")
@@ -893,12 +612,6 @@ add_executable(tool-application-activation-test tests/core/ToolApplicationActiva
 target_compile_options(tool-application-activation-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(tool-application-activation-test PRIVATE "-framework AppKit")
 add_test(NAME tool-application-activation COMMAND tool-application-activation-test)
-add_executable(backend-library-load-test tests/core/BackendLibraryLoadTest.mm)
-target_compile_options(backend-library-load-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
-target_link_libraries(backend-library-load-test PRIVATE "-framework Foundation")
-target_include_directories(backend-library-load-test PRIVATE ../../shared/backend/rust)
-add_dependencies(backend-library-load-test MSIMEClientInputMethod)
-add_test(NAME backend-library-load COMMAND backend-library-load-test "$<TARGET_BUNDLE_DIR:MSIMEClientInputMethod>/Contents/Frameworks/MSIMEBackend.dylib")
 add_compile_definitions(MSIME_ENABLE_SPARKLE=$<BOOL:${MSIME_ENABLE_SPARKLE}>)
 set(MSIME_SPARKLE_ROOT "" CACHE PATH "Directory containing the pinned Sparkle.framework (Apple reference: 2.9.6)")
 if(MSIME_ENABLE_SPARKLE AND NOT MSIME_SPARKLE_ROOT)
@@ -988,11 +701,6 @@ add_executable(translation-settings-test tests/dictionary/TranslationSettingsTes
 target_compile_options(translation-settings-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(translation-settings-test PRIVATE apple-client "-framework AppKit")
 add_test(NAME translation-settings COMMAND translation-settings-test)
-# Run explicitly with the directory matching desktop-dictionary.lock.json.
-# This resource-dependent integration test does not enable or trigger CI.
-add_executable(snapshot-activation-test tests/core/SnapshotActivationTest.mm)
-target_compile_options(snapshot-activation-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
-target_link_libraries(snapshot-activation-test PRIVATE apple-client)
 add_executable(chinese-text-conversion-test tests/core/ChineseTextConversionTest.mm src/core/ChineseTextConversion.mm)
 target_compile_options(chinese-text-conversion-test PRIVATE -fobjc-arc -Wall -Wextra -Werror -UNDEBUG)
 target_link_libraries(chinese-text-conversion-test PRIVATE apple-client "-framework Foundation")
@@ -1512,13 +1220,8 @@ endforeach()
 #
 # The settings window's dictionary controller is the counter-example and the reason this loop exists rather than a hand-kept list: `feat(macos): open dictionary manager from settings` added the reference and the source file to shortcut-test only, and the other five targets compiling the same file did not link again until now.
 set(MSIME_OPTIONAL_BACKEND_SYMBOLS
-  _MSIMEAccountPaneView _MSIMEAccountPaneAttach _MSIMEAccountPaneClose
-  _MSIMEEnsureAnonymousAccount _MSIMEFetchAccountCandidateGlosses _MSIMECancelAccountCandidateGlosses
-  _MSIMEFetchOnDeviceCandidateGlosses _MSIMEBackendAccountTranslationMarker
   _msime_macos_uninstall_input_source)
-# The input method links MSIMEBackend.dylib itself, but a toolchain older than Swift 6.2 builds that without the on-device translation entry point (BackendOnDeviceGloss.swift), which the controller then finds null.
-target_link_options(MSIMEClientInputMethod PRIVATE "LINKER:-U,_MSIMEFetchOnDeviceCandidateGlosses")
-# Rust 宿主的 staticlib 由 CMake 链进输入法，Cargo 自己的 `-dead_strip` 管不到这里；不加它的话，ld64 会保留任何一个导出牵连到的所有归档成员（image、rink、rustls 等输入法从不调用的库）。只在 Release 加：链接实验里 arm64 可执行文件从 43 MB 降到 27 MB。Objective-C 类和 category 不受影响，因为 ld64 把 `__objc_classlist` 当作根；也没有任何地方按名字解析可执行文件自己的符号，它绑定的 `_MSIME*` 入口都在 MSIMEBackend.dylib 里。
+# Rust 宿主的 staticlib 由 CMake 链进输入法，Cargo 自己的 `-dead_strip` 管不到这里；不加它的话，ld64 会保留任何一个导出牵连到的所有归档成员（image、rink、rustls 等输入法从不调用的库）。只在 Release 加：链接实验里 arm64 可执行文件从 43 MB 降到 27 MB。Objective-C 类和 category 不受影响，因为 ld64 把 `__objc_classlist` 当作根。
 target_link_options(MSIMEClientInputMethod PRIVATE "$<$<CONFIG:Release>:LINKER:-dead_strip>")
 get_property(MSIME_DIRECTORY_TARGETS DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
 foreach(msime_target IN LISTS MSIME_DIRECTORY_TARGETS)

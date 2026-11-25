@@ -1,6 +1,5 @@
 #import "AppearancePreferences.h"
 #import "SettingsLayout.h"
-#import "../backend/account/BackendAccountEntry.h"
 #import "../candidate/CandidateFontCache.h"
 #import "../candidate/CandidateSkinPreviewView.h"
 #import "../candidate/CandidateCanvas.h"
@@ -67,12 +66,65 @@ static NSDictionary *MSIMEToggleHotkeyChords(id keys) {
 - (void)reloadSettings;
 @end
 
-extern "C" NSView *MSIMEAccountPaneView(void) __attribute__((weak_import));
-extern "C" void MSIMEAccountPaneAttach(NSWindow *window) __attribute__((weak_import));
+@protocol MSIMEAppearancePreferencesStoreBridge <NSObject>
++ (NSDictionary *)loadPreferencesInDirectory:(NSString *)directory error:(NSError **)error;
++ (NSDictionary *)savePreferencesInDirectory:(NSString *)directory
+                            expectedRevision:(uint64_t)revision
+                                    snapshot:(NSDictionary *)snapshot
+                                       error:(NSError **)error;
+@end
+
+static BOOL MSIMEStrictConfigUnsignedInteger(id value, uint64_t *parsed) {
+    if (![value isKindOfClass:NSNumber.class] ||
+        CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID()) return NO;
+    const char *encoding = [value objCType];
+    if (!encoding) return NO;
+    switch (encoding[0]) {
+    case 'd': case 'f': return NO;
+    case 'c': case 's': case 'i': case 'l': case 'q':
+        if ([value longLongValue] < 0) return NO;
+        break;
+    default: break;
+    }
+    if (parsed) *parsed = [value unsignedLongLongValue];
+    return YES;
+}
+
+static NSDictionary *MSIMEMergePreferenceSnapshot(NSDictionary *base, NSDictionary *overrides) {
+    if (![base isKindOfClass:NSDictionary.class] || ![overrides isKindOfClass:NSDictionary.class]) return nil;
+    NSMutableDictionary *merged = [base mutableCopy];
+    for (NSString *key in overrides) {
+        id value = overrides[key];
+        // 应用例外是一张以应用标识为键的表，整体替换以避免被移除的规则残留。
+        if ([value isKindOfClass:NSDictionary.class] && ![key isEqual:@"app_input_mode_rules"]) {
+            id original = base[key] ?: @{};
+            NSDictionary *nested = MSIMEMergePreferenceSnapshot(original, value);
+            if (!nested) return nil;
+            merged[key] = nested;
+        } else {
+            merged[key] = value;
+        }
+    }
+    return [merged copy];
+}
+
+static const void *const MSIMEAppearancePersistQueueKey = &MSIMEAppearancePersistQueueKey;
+static dispatch_queue_t MSIMEAppearancePersistQueue(void) {
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        queue = dispatch_queue_create("dev.shurufa.appearance.config-persist", DISPATCH_QUEUE_SERIAL);
+        dispatch_queue_set_specific(queue, MSIMEAppearancePersistQueueKey, (void *)MSIMEAppearancePersistQueueKey, nullptr);
+    });
+    return queue;
+}
+
+static NSNotificationName const MSIMEAppearanceVoiceSettingsChangedName = @"MSIMEClientVoiceProviderSettingsDidChange";
+
 BOOL (*MSIMEInputModeEnabledProbe)(NSString *identifier) = nullptr;
-extern "C" void MSIMEAccountPaneClose(void) __attribute__((weak_import));
 
 NSNotificationName const MSIMEAppearanceDidChangeNotification = @"MSIMEClientAppearanceDidChange";
+NSNotificationName const MSIMEAppearanceDidPersistNotification = @"MSIMEClientAppearanceDidPersist";
 NSNotificationName const MSIMETranslationPreferencesDidSaveNotification = @"MSIMEClientTranslationPreferencesDidSave";
 NSString *const MSIMEAppearanceInputModeOnlyKey = @"MSIMEClientAppearanceInputModeOnly";
 static NSString *const LayoutKey = @"MSIMEClientCandidatePanelStyle";
@@ -801,9 +853,6 @@ static BOOL ShurufaHiddenSetting(NSString *title) {
         if ([title containsString:word]) return YES;
     return NO;
 }
-/// The account page hosts a view owned by the Swift backend, so showing and leaving it has to
-/// attach and detach that view.
-constexpr NSInteger kAccountPageIndex = MSIMESettingsPageAccount;
 /// The 皮肤 page is the skin browser, so the native fallback for the shared skin route shows it.
 constexpr NSInteger kSkinPageIndex = MSIMESettingsPageSkin;
 /// The voice form is also reachable from the input method's toolbar, so the page reloads on entry.
@@ -1367,6 +1416,8 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     NSTextField *_pagingPresetLabel;
     /// The sentence above 拼音匹配, for the scheme whose candidates none of those settings reach.
     NSTextField *_pinyinMatchingSchemeLabel;
+    BOOL _persistInFlight;
+    BOOL _persistPending;
 }
 + (instancetype)sharedPreferences {
     static MSIMEAppearancePreferences *preferences;
@@ -1388,8 +1439,107 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
         _punctuationToggleChord = msime::mac::FactoryPunctuationToggleChord();
         _voiceInputToggleChord = msime::mac::UnboundToggleChord();
         [self reloadSkins];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(voiceProviderSettingsChangedForPersistence:)
+                                                     name:MSIMEAppearanceVoiceSettingsChangedName
+                                                   object:nil];
     }
     return self;
+}
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+- (void)voiceProviderSettingsChangedForPersistence:(NSNotification *)notification {
+    (void)notification;
+    [self schedulePersistPreferences];
+}
++ (nullable NSDictionary *)persistOverrides:(NSDictionary *)overrides
+                                toDirectory:(NSString *)directory
+                                      error:(NSError **)error {
+    if (![directory isKindOfClass:NSString.class] || !directory.length || !directory.isAbsolutePath) return nil;
+    Class sessionClass = NSClassFromString(@"MSIMEClientSession");
+    if (![sessionClass respondsToSelector:@selector(loadPreferencesInDirectory:error:)] ||
+        ![sessionClass respondsToSelector:@selector(savePreferencesInDirectory:expectedRevision:snapshot:error:)]) {
+        return nil;
+    }
+    __block NSDictionary *saved = nil;
+    __block NSError *capturedError = nil;
+    dispatch_block_t work = ^{
+        for (int attempt = 0; attempt < 2 && !saved; ++attempt) {
+            NSError *loadError = nil;
+            NSDictionary *snapshot = [(Class<MSIMEAppearancePreferencesStoreBridge>)sessionClass
+                loadPreferencesInDirectory:directory error:&loadError];
+            NSDictionary *preferences = snapshot ? MSIMEMergePreferenceSnapshot(snapshot[@"preferences"], overrides) : nil;
+            uint64_t revision = 0;
+            if (snapshot && snapshot[@"revision"] && !MSIMEStrictConfigUnsignedInteger(snapshot[@"revision"], &revision)) {
+                preferences = nil;
+            }
+            if (!preferences) {
+                capturedError = loadError;
+                break;
+            }
+            NSError *saveError = nil;
+            saved = [(Class<MSIMEAppearancePreferencesStoreBridge>)sessionClass
+                savePreferencesInDirectory:directory
+                          expectedRevision:revision
+                                  snapshot:@{
+                                      @"format_version": @1,
+                                      @"revision": snapshot[@"revision"] ?: @0,
+                                      @"preferences": preferences,
+                                  }
+                                     error:&saveError];
+            if (!saved && saveError) capturedError = saveError;
+        }
+    };
+    if (dispatch_get_specific(MSIMEAppearancePersistQueueKey)) work();
+    else dispatch_sync(MSIMEAppearancePersistQueue(), work);
+    if (error && !*error) *error = capturedError;
+    return saved;
+}
+- (NSDictionary *)persistPreferencesToDirectory:(NSString *)directory error:(NSError **)error {
+    if (![directory isKindOfClass:NSString.class] || !directory.length || !directory.isAbsolutePath) return nil;
+    NSDictionary *overrides = [self sharedPreferencesByMerging:@{}];
+    NSDictionary *saved = [MSIMEAppearancePreferences persistOverrides:overrides toDirectory:directory error:error];
+    if (saved) {
+        if ([NSThread isMainThread]) {
+            [[NSNotificationCenter defaultCenter] postNotificationName:MSIMEAppearanceDidPersistNotification
+                                                                object:self
+                                                              userInfo:@{@"snapshot": saved}];
+        } else {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [[NSNotificationCenter defaultCenter] postNotificationName:MSIMEAppearanceDidPersistNotification
+                                                                    object:self
+                                                                  userInfo:@{@"snapshot": saved}];
+            });
+        }
+    }
+    return saved;
+}
+- (void)schedulePersistPreferences {
+    if (_silent || ![_translationPreferencesDirectory isKindOfClass:NSString.class] ||
+        !_translationPreferencesDirectory.length || !_translationPreferencesDirectory.isAbsolutePath) return;
+    if (_persistInFlight) { _persistPending = YES; return; }
+    _persistInFlight = YES;
+    NSString *directory = [_translationPreferencesDirectory copy];
+    NSDictionary *overrides = [self sharedPreferencesByMerging:@{}];
+    __weak MSIMEAppearancePreferences *weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSError *saveError = nil;
+        NSDictionary *saved = [MSIMEAppearancePreferences persistOverrides:overrides toDirectory:directory error:&saveError];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            MSIMEAppearancePreferences *strongSelf = weakSelf;
+            if (!strongSelf) return;
+            strongSelf->_persistInFlight = NO;
+            const BOOL again = strongSelf->_persistPending;
+            strongSelf->_persistPending = NO;
+            if (saved && !saveError) {
+                [[NSNotificationCenter defaultCenter] postNotificationName:MSIMEAppearanceDidPersistNotification
+                                                                    object:strongSelf
+                                                                  userInfo:@{@"snapshot": saved}];
+            }
+            if (again) [strongSelf schedulePersistPreferences];
+        });
+    });
 }
 /// The same object over the same storage, minus the announcement. -reloadSkins resolves the selected skin and says so, which is right for the host's own preferences and wrong for an object built only to be asked what a value is when nothing has been set: MSIMEAppearanceDidChangeNotification reaches every live MSIMEInputController, and -appearanceChanged: cancels its cloud candidates and resets its gloss state on the way past. Silence is not an optimisation here; the notification is a lie, because nothing changed.
 - (instancetype)initSilentlyWithDefaults:(NSUserDefaults *)defaults {
@@ -2096,6 +2246,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     const BOOL typedBefore = [userDataDirectory isKindOfClass:NSString.class] && userDataDirectory.length &&
         [files contentsOfDirectoryAtPath:userDataDirectory error:nil].count > 0;
     const BOOL existing = [_defaults objectForKey:CloudCandidatesKey] != nil || typedBefore ||
+        [files fileExistsAtPath:[directory stringByAppendingPathComponent:@"config.json"]] ||
         [files fileExistsAtPath:[directory stringByAppendingPathComponent:@"preferences.json"]];
     [_defaults setInteger:existing ? CloudCandidatesConsentAnswered : CloudCandidatesConsentPending forKey:CloudCandidatesConsentKey];
 }
@@ -3197,6 +3348,7 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     [self resolveSelectedSkinIfChanged];
     [self refreshControls];
     if (_silent) return;
+    [self schedulePersistPreferences];
     [[NSNotificationCenter defaultCenter] postNotificationName:MSIMEAppearanceDidChangeNotification object:self];
 }
 // 与共享默认（client-core 的 `default_candidate_preedit_font_size`，15）、React 页和 Windows 的
@@ -4946,17 +5098,9 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     ]];
 
     // ---- 账号 -------------------------------------------------------------------------------
-    NSView *accountPaneView = nil;
-    if (!MSIMEEditionIsShurufa() && MSIMEAccountPaneView != nullptr) {
-        accountPaneView = MSIMEAccountPaneView();
-        [accountPaneView.heightAnchor constraintGreaterThanOrEqualToConstant:520.0].active = YES;
-    } else {
-        NSButton *accountButton = [NSButton buttonWithTitle:@"管理水杉账号…" target:self action:@selector(showBackendAccount:)];
-        accountButton.accessibilityIdentifier = @"MSIMEClientBackendAccount";
-        NSBox *accountCard = MSIMECardWithViews(@[[self settingRow:@"登录与账号管理" control:accountButton]], 0.0);
-        accountCard.accessibilityLabel = @"水杉账号卡片";
-        accountPaneView = MSIMECardWithViews(@[MSIMESectionLabel(@"水杉账号"), accountCard], 0.0);
-    }
+    NSBox *accountCard = MSIMECardWithViews(@[], 0.0);
+    accountCard.accessibilityLabel = @"水杉账号卡片";
+    NSView *accountPaneView = MSIMECardWithViews(@[MSIMESectionLabel(@"水杉账号"), accountCard], 0.0);
     NSScrollView *accountPage = [self page:MSIMESettingsPageAccount
                                      title:@"账号"
                                    summary:@"登录水杉账号后，云同步等需要账号的功能才会生效；候选词翻译要在「翻译服务」里选择「水杉账号」才会使用账号。"
@@ -5256,11 +5400,8 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     // launch would "restore" whatever centring had just produced.
     if (![window setFrameUsingName:MSIMESettingsWindowFrameAutosaveName()]) [window center];
     [window setFrameAutosaveName:MSIMESettingsWindowFrameAutosaveName()];
-    // MSIMESettingsPage is what kSkinPageIndex, kVoicePageIndex, kAboutPageIndex and
-    // kAccountPageIndex are derived from, and it is only true of the array above by being written
-    // alongside it. A page added to one list and not the other is caught here rather than as a page
-    // that never reloads, or as an account pane attached to the wrong page. The test binaries build
-    // with -UNDEBUG, so this runs in all of them.
+    // MSIMESettingsPage is what kSkinPageIndex, kVoicePageIndex and kAboutPageIndex are derived from,
+    // and it is only true of the array above by being written alongside it.
     NSAssert(_preferencePages.count == (NSUInteger)MSIMESettingsPageCount &&
                  _pageTitles.count == (NSUInteger)MSIMESettingsPageCount &&
                  _pageIdentifiers.count == (NSUInteger)MSIMESettingsPageCount,
@@ -5274,7 +5415,6 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
 - (void)preferencesWindowWillClose:(NSNotification *)notification {
     (void)notification;
     _windowHasAppeared = NO;
-    if (MSIMEAccountPaneClose != nullptr) MSIMEAccountPaneClose();
 }
 /// The window is on screen, so the page in front of the user is one they are actually looking at
 /// and the work it owes them is due. Every later page change runs it directly; this is only how the
@@ -5729,10 +5869,6 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     if (_selectedPageIndex == kVoicePageIndex) [_voiceSettingsView reloadSettings];
     if (_selectedPageIndex == MSIMESettingsPageVoiceHistory) [_voiceHistoryView reloadHistory];
     if (_selectedPageIndex == kAboutPageIndex) [self refreshUpdateControls];
-    if (_selectedPageIndex == kAccountPageIndex && MSIMEAccountPaneAttach != nullptr)
-        MSIMEAccountPaneAttach(self.window);
-    else if (MSIMEAccountPaneClose != nullptr)
-        MSIMEAccountPaneClose();
 }
 - (void)selectSidebarRowForPageAtIndex:(NSInteger)navigationIndex {
     if (_sidebarOutline == nil) return;
@@ -5925,15 +6061,6 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
 - (void)openInputSourceSettings:(id)sender {
     (void)sender;
     [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:@"x-apple.systempreferences:com.apple.Keyboard-Settings.extension"]];
-}
-- (void)showBackendAccount:(id)sender {
-    (void)sender;
-    if (MSIMEAccountPaneAttach != nullptr) {
-        [self showPreferencesPageAtIndex:kAccountPageIndex navigationIndex:kAccountPageIndex];
-        MSIMEAccountPaneAttach(self.window);
-    } else {
-        MSIMEOpenBackendAccount(NSClassFromString(@"MSIMEBackendAccountWindow"));
-    }
 }
 - (void)showHelp:(id)sender { (void)sender; [self showSupportPage:MSIMESupportPageHelp]; }
 - (void)showFeedback:(id)sender { (void)sender; [self showSupportPage:MSIMESupportPageFeedback]; }

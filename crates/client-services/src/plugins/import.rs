@@ -10,7 +10,9 @@ use std::path::{Component, Path};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 
-use super::{is_builtin, kind_directory, load_directory, PluginError, PluginSummary, MAX_PACK_FILES};
+use super::{
+    is_builtin, kind_directory, load_directory, PluginError, PluginSummary, MAX_PACK_FILES,
+};
 use crate::storage::StagingDirectory as Staging;
 
 /// Serializes every write to the plugins root in this process. The file lock below does the same across processes (the settings window and an input process both install and remove packs), but a lock on a file is not something every platform promises to hold between two threads of one process.

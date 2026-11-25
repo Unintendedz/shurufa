@@ -24,10 +24,12 @@ modes = sorted(info["ComponentInputModeDict"]["tsInputModeListKey"])
 assert modes == sorted(identifier + "." + suffix for suffix in ("Hans", "Shuangpin"))
 assert not any(key.startswith("SU") for key in info)
 assert not (contents / "Frameworks/Sparkle.framework").exists()
+assert not (contents / "Frameworks/MSIMEBackend.dylib").exists()
 executable = contents / "MacOS" / info["CFBundleExecutable"]
 assert subprocess.check_output(["lipo", "-archs", str(executable)], text=True).strip() == "arm64"
 linked = subprocess.check_output(["otool", "-L", str(executable)], text=True)
 assert "Sparkle" not in linked
+assert "MSIMEBackend" not in linked
 assert (contents / "MacOS/shurufa-voice-local").is_file()
 assert (contents / "Helpers/ShurufaNeuralService").is_file()
 assert not (contents / "MacOS/msime-voice-local").exists()

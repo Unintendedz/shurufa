@@ -52,28 +52,16 @@ pub(crate) fn parse_absolute_path<'a>(
         .ok_or_else(|| non_absolute.to_owned())
 }
 
-pub mod account;
-pub mod ai_skin;
 pub mod candidates;
-pub mod chat_stream;
-pub mod cloud_dictionary;
-pub mod cloud_sync;
-pub mod community;
 pub mod credentials;
-pub mod dictionary_sync;
-pub mod google;
 pub mod host;
 pub mod input;
 pub mod lifecycle;
-pub mod mcp;
-pub mod moderation;
 pub mod neural;
 pub mod pack_downloads;
 pub mod plugins;
 pub mod providers;
-pub mod reporting;
 pub mod session;
-pub mod session_store;
 pub mod skin_image;
 pub mod spacing;
 pub mod translation;
@@ -84,11 +72,9 @@ pub mod voice_archive;
 // below is for readers, not for callers, so each module is flattened back out.
 pub use candidates::*;
 pub use credentials::*;
-pub use dictionary_sync::*;
 pub use host::*;
 pub use input::*;
 pub use lifecycle::*;
-pub use mcp::*;
 pub use neural::*;
 pub use pack_downloads::*;
 pub use plugins::*;
