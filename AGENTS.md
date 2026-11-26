@@ -9,10 +9,11 @@
 - **本机构建、签名与强制部署**：
   - 构建使用 `platforms/macos/build-shurufa.sh`，安装使用 `platforms/macos/scripts/install-shurufa.sh`（原子部署至 `~/Library/Input Methods/Shurufa.app`）。
   - 构建默认使用登录钥匙串中的本机自签名证书「`Shurufa Local Signing`」签名，保持授权身份稳定，重编重装后无需重新授予麦克风、辅助功能或输入监控权限；若新环境缺少该证书，`build-shurufa.sh` 会自动调用 `platforms/macos/scripts/create-shurufa-signing-identity.sh` 创建。语音存档加密密钥在首次录音时自动写入登录钥匙串（`dev.shurufa.voice-archive`）。
-  - **每次合入 `main` 后必须直接部署到本机并 `git push origin main`，不用先问**：影响产物的改动跑完 `build-shurufa.sh` + `install-shurufa.sh` 并核验签名与包内容（仅改文档、笔记或测试时可跳过重编重装，仍须 push）；未部署或未 push 均不算完成。
+  - **每次合入 `main` 后必须同步文档、直接部署到本机并 `git push origin main`，不用先问**：影响产物的改动跑完 `build-shurufa.sh` + `install-shurufa.sh` 并核验签名与包内容（仅改文档、笔记或测试时可跳过重编重装，仍须 push）；涉及功能、架构、行为边界或构建方式调整的提交须同步更新根目录 [README.md](README.md)（并将重要演进记入 [docs/CHANGELOG.md](docs/CHANGELOG.md)）；未更新文档（适用时）、未部署或未 push 均不算完成。
 
 ## 改动范围与契约检查
 
+- **每次更新必须同步维护 [README.md](README.md)（及 [docs/CHANGELOG.md](docs/CHANGELOG.md)）**：凡是新增、修改或下线功能特性、输入行为边界、核心架构、配置项或构建安装方式，**必须在同一次交付中同步更新根目录 `README.md`（并将重要演进按日期记入 `docs/CHANGELOG.md`）**，及时清理已移除能力的旧说明；未同步更新 `README.md` 不算完成。
 - 只暂存明确列出的路径，**禁止使用 `git add -A`**。
 - 不复制相邻仓库的未提交内容；不擅自修改会改变用户手感的出厂默认值，若确需调整须获得维护者明确授权，并记录在决策笔记中。
 - 日志、测试与提交记录严禁包含真实用户输入、凭据或私人隐私数据，测试用例一律使用合成数据。

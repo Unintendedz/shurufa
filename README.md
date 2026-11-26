@@ -19,7 +19,7 @@ Shurufa 是我自己用的 macOS 中文输入法，结合了[水杉输入法](ht
 ## 这个仓库的约定
 
 - **不接 PR。** 一切以我自己用得爽为准。
-- **没有支持多平台的打算。** 目前我只在 Mac 上用它。仓库里其他平台的代码是从水杉继承来的，不维护，也不保证还能编译。
+- **没有支持多平台的打算。** 目前只在 Apple Silicon Mac 上自用；原先从水杉继承的其他五个平台、Tauri/React 外壳、脚本插件与非拼音语种代码均已物理移除。
 - **不跟随上游。** 分叉点是 tag `fork-point/msime-2026-10-27`，之后的上游提交不合并。
 
 ---
@@ -28,35 +28,38 @@ Shurufa 是我自己用的 macOS 中文输入法，结合了[水杉输入法](ht
 
 ### 一、瘦身与系统边界
 
-- **原生独立 macOS 宿主**：只构建 `Shurufa.app` 单一原生输入法包，去掉多平台负担、Tauri 壳、Sparkle 自动更新，强制关闭使用统计和云联想。
+- **纯 macOS 单产品与原生宿主**：仓库只保留 8 个核心 Rust crate、`platforms/macos` 原生 `Shurufa.app` 宿主与 `ShurufaNeuralService`，物理移除其余五个平台、Tauri/React 外壳、脚本插件、非拼音语种方案、8 套全拼辅助码表、`Tab` 笔画筛选、包内 4.5 MB / 25 MB 旧 `safetensors` 模型以及 Sparkle 自动更新，强制关闭使用统计和云联想。
 - **系统输入源作为唯一权威**：去掉输入法内部的中英文切换状态与中英角标，英文直接交给系统 ABC，`Caps Lock` 原样交还系统。
-- **收窄杂项入口**：移除用不到的快捷模式、符号模式、超级简拼、脚本插件、云同步等外围功能，只保留高频刚需；保留单一语音快捷键，去掉多套冲突热键。
+- **输入能力白名单聚焦高频刚需**：仅保留全拼 + 双拼、OpenCC 简繁转换、基本中文标点与全半角、英文单词自动补全、精选内联 Emoji 投影、小写 `v` 数字与算式、个人学习闭环及本地/云端语音；保留单一语音快捷键，去掉多套冲突热键。
 - **固定本机签名身份**：使用登录钥匙串里自动生成的自签名证书 `Shurufa Local Signing` 签名，重编重装后麦克风、辅助功能、输入监控授权不丢失。
+- **单一 `config.json` 与零拷贝 `ShurufaViewSnapshot`**：废除历史双进程遗留的 `NSUserDefaults + options.json` 双存储合并层，全部设置收敛至 `~/Library/Application Support/Shurufa/config.json`（首次启动幂等迁移旧偏好）；按键与翻页热路径通过只读 C 结构体 `ShurufaViewSnapshot` 零拷贝跨层传递，移除宿主侧 `_adaptiveCandidates` 影子分页状态。
 
 ### 二、中文打字引擎：更准、更稳、不乱跳
 
+- **三段单向候选管线（`CursorSnapshot → RecallPool → UnifiedScorer → PurePresenter`）**：
+  - 组字在焦点会话处原子绑定不可变 `CursorSnapshot`（含左右上下文与段内暂存前缀 `locked_prefix`，退格可反悔拆回拼音并自然推进 `Qwen3-0.6B` KV-Cache）。
+  - `RecallPool` 只负责多源召回并产出带 64 位稳定 `CandidateId` 的结构化证据，严禁在召回阶段计算展示下标；`UnifiedScorer` 维护全仓唯一三参数对数线性目标函数；无状态纯函数 `PurePresenter` 一次性完成首槽置顶保护、首页纠错限流、内联 Emoji 锚定、英文补全（首页上限 3 席）与单字排座，所有操作经稳定 `CandidateId` 寻址。
 - **Shurufa v2 统一概率词格与混淆网络（Tier 0）**：
   - 废除旧词格 `+47.63 nat` 人工断崖，**清空 356 条静态动宾离合词硬编码表**，将单字、多字词与万象 LTS `.gram`（修复 `LOG10_E` 错误衰减并重构为零分配查表）统一映射到同一自然对数概率空间。
-  - 按句长自适应调度束宽（`56/40/32`）与出边上限，叠加 1-Span 混淆网络位置扰动消除候选后缀塌缩；3+ 字整句首屏采用 `4+2` 读法布局，由纯函数 `SlotAllocator` 统一接管展示席位分配。
+  - 按句长自适应调度束宽（`56/40/32`）与出边上限，叠加 1-Span 混淆网络位置扰动消除候选后缀塌缩；3+ 字整句首屏采用 `4+2` 读法布局，由 `PurePresenter` 统一一次性分配展示席位。
 - **任意句长切分、简全混拼与物理键盘错拼信道**：
   - 任意句长 A* 零声母隔音切分 + 长句边界词法剪枝，解决长句漏切与耗时膨胀。
   - 简全混拼与 4+ 音节纯简拼走统一词网格解码；高频简拼与整串纠错按统一物理信道概率公平竞争，不再被数百条单字纠错淹没。
   - 统一建模 QWERTY 物理邻键、跨音节换位、缺后鼻音 `g` 与两字母非法尾恢复，去掉候选窗里重复的纠错回显。
-- **进程外 Metal 两阶段端侧神经解码（Tier 1）**：
-  - 将 `llama.cpp`（Metal）封装在包内独立助手进程 `ShurufaNeuralService` 与 `libshurufa_neural.dylib`，通过私有 UDS 与主输入法隔离显存和故障域；服务异常时零掉键无缝降级回 Tier 0 并指数退避自愈，空闲 10 分钟或系统内存压力时自动卸载释放内存。
-  - 自动发现本地纯预训练基座模型 **`Qwen3-0.6B-Base-Q4_K_M.gguf`（378 MB）**；读取光标前至多 **512 字完整上文**（通过 `IMKTextInput` 与辅助功能采集，完整保留中文标点、空格、ASCII 与 Emoji，密码框严格禁用）做 KV-Cache 增量预热。
-  - 两阶段推理：先对去重等跨度候选（Top-16）执行前缀树共享 KV 批量打分，再仅对高惊奇度难句按需触发局部窗口受限束搜索救回词典 OOV 整句；全部 3 参数线性融合与排座留在纯 Rust 引擎内，主线程 `<3 ms` 非阻塞，配 22 ms 延迟绘制窗与双兜底 **80 ms 槽 0 锁**（防止盲打按空格前首位翻位）。本地未放 GGUF 模型时自动回退至升级后的 Tier 0 + 随包 25 MB 停顿精排。
+- **进程外 Metal 两阶段端侧神经解码与两阶段状态机（Tier 1）**：
+  - 将 `llama.cpp`（Metal）封装在包内独立助手进程 `ShurufaNeuralService` 与 `libshurufa_neural.dylib` 中；子进程生命周期管理、私有 UDS 二进制帧通信、`50 ms` 空闲预热防抖、热态快敲空格有界等待以及两阶段展示状态机全部收拢在纯 Rust `crates/input-runtime`，物理删除 ObjC++ `ShurufaNeuralClient`。服务异常时零掉键无缝降级回 Tier 0 并指数退避自愈，空闲 10 分钟或系统内存压力时自动卸载释放内存。
+  - 自动发现本地纯预训练基座模型 **`Qwen3-0.6B-Base-Q4_K_M.gguf`（378 MB）**；读取光标前至多 **512 字完整上文**及右文前瞻（通过 `IMKTextInput` 与辅助功能采集，完整保留中文标点、空格、ASCII 与 Emoji，密码框严格禁用）做 KV-Cache 增量预热。
+  - `ShurufaNeuralEngine` 收口为统一双边界条件对数概率算子（左 Token Healing + 右单字前缀边际化 + 句中右侧前瞻）：先对等跨度候选执行前缀树共享 KV 批量打分，再对高惊奇度难句按需触发局部窗口受限束搜索救回词典 OOV 整句；纯 Rust 运行时执行 `Provisional → Presented` 状态机（主线程 `<3 ms` 非阻塞，配 `~28 ms` 防闪微窗口；候选面板一经绘出即硬锁槽 0 绝不跳动，迟到神经回包仅重排槽 `1..`）。本地未放 GGUF 模型时自动无损回退至 Tier 0（统一概率词格 + 万象 `.gram`）。
 - **更克制的防劫持个人词频学习**：
   - 独立追加式个人学习叠加层（永不改写主词库静态权重），采用以榜首权重为锚的 **30 天半衰期贝叶斯排序** 与竞争多音节键空格确认，跨补全词夹层生效。
   - 单字键未置顶永不劫持第 1 槽，交由语境同音（含单字与多字语境消歧及万象 `.gram` 跨界搭配）与引擎层统一手动置顶接管。
-  - **5 秒内紧接退格删光即时回滚**：选错词立刻按 Backspace 删光时确定性撤销该条选择并写入 **24 小时半衰期负反馈**，同时将个人增益严格钳位在 `[-1.5, +1.5]` nats 注入统一神经融合。
+  - **5 秒内紧接退格删光即时回滚**：选错词立刻按 Backspace 删光时确定性撤销该条选择并写入 **24 小时半衰期负反馈**，同时将个人增益严格钳位在 `[-1.5, +1.5]` nats 注入统一融合打分。
 - **顺手的日常打字增强**：
-  - **精选内联 Emoji 投影**：重排后按 4400+ 条精选映射与 MRU 自动给出对应 Emoji，不打乱正文候选序。
+  - **精选内联 Emoji 投影**：重排后按精选映射表与独立本地 MRU 自动给出对应 Emoji，不打乱正文候选序。
   - **中文组字夹带离线英文**：3～4 字母不可拆前缀、5 字母以上前缀、`Shift+字母` 大写起手自动补全离线英文词，回车原样上屏，日常夹几个英文词不用来回切 ABC。
-  - **Tab 笔画 / 偏旁筛选**：全拼、双拼打完拼音按 `Tab`，按首字笔顺（`h` 横、`s` 竖、`p` 撇、`n/d` 点、`z` 折、`x` 任意一笔）或部首（首字母、全拼前缀、俗称如 `jiao` 绞丝、`dan` 单人）筛候选。
-  - **小写 `v` 快捷工具**：全拼里打小写 `v` 接算式、数字、日期或单位换算（如 `v1+2*3`、`v123`、`v2026.11.4`、`v3jin'g`），`v` 后直接接字母仍按正常拼音处理。
+  - **小写 `v` 快捷工具**：全拼里打小写 `v` 接算式、数字或日期（如 `v1+2*3`、`v123`、`v2026.11.4`），`v` 后直接接字母仍按正常拼音处理。
   - **搜狗细胞词库导入**：原生词库窗口支持整份分批导入 `.scel`（含 `DCS`/`ECS` 布局），无权重词表按同音键既有词频动态标定，不再固定高权空降压过常用词。
-  - **非激活右键菜单**：候选右键菜单不抢走浏览器或编辑器焦点。
+  - **精简非激活右键菜单**：候选右键菜单仅保留「置顶到第 1 位」与「删除/屏蔽词条」（取消 `fixed_position = 2..9`），全程通过稳定 `CandidateId` 寻址且不抢走浏览器或编辑器焦点。
 
 ### 三、全链路本地语音输入：从录音前端到自动学词
 
@@ -93,14 +96,15 @@ Shurufa 是我自己用的 macOS 中文输入法，结合了[水杉输入法](ht
 
 ## 自己构建
 
-只在我的环境里验证过：Apple Silicon、Command Line Tools 的 MacOSX26.5 SDK、Rust、Homebrew（CMake、Ninja、python@3.14、uv、`llama.cpp`——同时提供端侧神经解码所需的 `libllama` 与可选的本机托管润色 `llama-server`）。
+只在我的环境里验证过：Apple Silicon、Command Line Tools 的 MacOSX26.5 SDK、Rust、Homebrew（CMake、Ninja、python@3.14、uv、`llama.cpp`——同时提供端侧神经解码所需的 `libllama` 与可选的本机托管润色 `llama-server`）。分层设计与本地门禁细节见[架构说明](docs/ARCHITECTURE.md)。
 
 ```sh
 bash platforms/macos/build-shurufa.sh            # 构建 target/macos-isolated/Shurufa.app（含 ShurufaNeuralService）
 bash platforms/macos/scripts/install-shurufa.sh  # 安装到 ~/Library/Input Methods/Shurufa.app
+bash scripts/verify-local.sh                     # 运行笔记校验、契约检查、Rust 单测/Clippy 与全量 macOS CTest
 ```
 
-构建时会拉取笔画词库和 25 MB 停顿精排模型，首次安装本地缺万象语法模型时会自动下载 `wanxiang-lts-zh-hans.gram`（约 373 MB）；将端侧神经语言模型 `Qwen3-0.6B-Base-Q4_K_M.gguf`（约 378 MB）放入 `~/Library/Application Support/Shurufa/resource-packs/neural-lm/` 后自动启用两阶段 Metal 神经解码（缺模型时自动无损降级回 Tier 0 与随包 25 MB 停顿精排）；本地流式语音的运行环境与模型在设置窗口里按需用 `uv` 安装。构建按登录钥匙串里的本机自签名证书「Shurufa Local Signing」签名，没有时脚本会自己建一张。换到你的机器上大概率要改点什么，这正是上面说的：fork 下来，按你自己的来。
+构建时会按 `resources/editions/shurufa.lock.json` 拉取并校验核心词库（不再拉取笔画词库或旧 25 MB `safetensors` 模型）；首次安装本地缺万象语法模型时会自动下载 `wanxiang-lts-zh-hans.gram`（约 373 MB）；将端侧神经语言模型 `Qwen3-0.6B-Base-Q4_K_M.gguf`（约 378 MB）放入 `~/Library/Application Support/Shurufa/resource-packs/neural-lm/` 后自动启用两阶段 Metal 神经解码（缺模型时自动无损降级回 Tier 0 统一概率词格与万象 `.gram`）；本地流式语音的运行环境与模型在设置窗口里按需用 `uv` 安装。构建按登录钥匙串里的本机自签名证书「Shurufa Local Signing」签名，没有时脚本会自己建一张。换到你的机器上大概率要改点什么，这正是上面说的：fork 下来，按你自己的来。
 
 ## 致谢
 

@@ -2,6 +2,14 @@
 
 Shurufa 从水杉输入法 tag `fork-point/msime-2026-10-27` 分出来之后的改动，按 `git log` 整理。没有版本号，也不发版：`main` 上的最新提交就是我在用的那一版。更早的历史是水杉的，见上游仓库。
 
+## 2026-11-25 — 11-26
+
+- **纯 macOS 单产品减法与三段单向候选管线收敛**：
+  - **物理减法收敛单产品**：物理移除 `windows / linux / android / ios / harmony` 五个平台目录、`apps/`、`packages/ui`、`plugins/`、`fuzz/`、多余 crates 与多 edition 契约（仅保留 8 个 Rust crate、`platforms/macos` 与 `ShurufaNeuralService`），移除非拼音方案、8 套辅助码表、`Tab` 笔画筛选、包内 4.5 MB / 25 MB 旧 `safetensors` 模型及 macOS 侧 Sparkle / Tauri / 云剪贴板 / 云词库 / 悬浮栏 / 屏幕键盘等死模块，收口 `scripts/run-checks.sh` 与 `scripts/verify-local.sh`；同步重写 `docs/ARCHITECTURE.md` 与 `AGENTS.md` 并归档架构决策笔记。
+  - **三段单向纯管线与双边界神经算子**：围绕不可变 `CursorSnapshot`（含左右上下文与段内暂存前缀 `locked_prefix`）建立 `RecallPool<CandidateEntry> → UnifiedScorer → PurePresenter` 唯一单向管线，废除平行数组快照、`IndexRemap`、`usize::MAX` 假下标及多段原地洗牌；`ShurufaNeuralEngine` 收口为统一双边界条件对数概率算子（左 Token Healing + 右单字前缀边际化 + 句中右侧前瞻），候选右键菜单精简为「置顶到第 1 位」与「删除/屏蔽词条」。
+  - **纯 Rust 托管 UDS 客户端与 `Provisional → Presented` 状态机**：将 `ShurufaNeuralService` 子进程生命周期、私有 UDS 二进制帧通信、`50 ms` 空闲预热、热态快敲空格有界等待及 `~28 ms` 微窗口延迟绘制与已绘出面板槽 0 硬锁全部下沉至 `crates/input-runtime`，物理删除 ObjC++ `ShurufaNeuralClient`。
+  - **单一 `config.json` 与零拷贝 `ShurufaViewSnapshot`**：废除历史 `NSUserDefaults + options.json` 双存储合并监听，收敛至单一 `~/Library/Application Support/Shurufa/config.json`（兼容首次幂等迁移既有配置）；按键与翻页热路径改用只读零拷贝结构体 `ShurufaViewSnapshot`，消除宿主侧 `_adaptiveCandidates` 影子分页状态。
+
 ## 2026-11-24 — 11-25
 
 - **Shurufa v2 统一概率词格与端侧 Metal 两阶段神经解码架构**：
