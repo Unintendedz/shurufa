@@ -82,13 +82,14 @@ impl ImportFormat {
         }
     }
 
-    /// 在整份文本上识别 Gboard v1，不计为列序翻转；分批调用者必须固定识别结果。
+    /// 在整份文本上识别 `Gboard` v1 与 Rime `.dict.yaml` YAML 头，不计为列序翻转；分批调用者必须固定识别结果。
     pub fn for_text(self, text: &str) -> Self {
         if !matches!(self, Self::Standard | Self::Windows) {
             return self;
         }
-        for line in text.strip_prefix('\u{feff}').unwrap_or(text).lines() {
-            let line = line.trim();
+        let mut lines = text.strip_prefix('\u{feff}').unwrap_or(text).lines();
+        while let Some(raw_line) = lines.next() {
+            let line = raw_line.trim();
             if line.is_empty() {
                 continue;
             }
@@ -102,6 +103,26 @@ impl ImportFormat {
                     };
                 }
                 continue;
+            }
+            // Rime `.dict.yaml` 以 `---` 开头并在 `...` 之前包含至少一行不含制表符的 YAML 配置。
+            if line == "---" {
+                let mut has_yaml_config = false;
+                for header_line in lines {
+                    let trimmed = header_line.trim();
+                    if trimmed.is_empty() || trimmed.starts_with('#') {
+                        continue;
+                    }
+                    if trimmed == "..." {
+                        return if has_yaml_config { Self::Rime } else { self };
+                    }
+                    if trimmed.contains('\t') {
+                        return self;
+                    }
+                    if trimmed.contains(':') || trimmed.starts_with("- ") {
+                        has_yaml_config = true;
+                    }
+                }
+                return self;
             }
             let columns: Vec<_> = line.splitn(4, '\t').collect();
             return if columns.len() == 3 && gboard_language_hint(columns[2].trim()) {
@@ -641,6 +662,41 @@ mod tests {
 
         let standard = parse(ImportKind::Pinyin, "standard", "你好\tni hao\n", LIMIT);
         assert_eq!(standard, Err(ImportError::NoUsableRows));
+    }
+
+    #[test]
+    fn rime_dict_yaml_header_is_detected_from_standard_and_windows_formats() {
+        for format in ["standard", "windows", "rime"] {
+            for text in [
+                "---\nname: demo\nversion: \"1.0\"\n...\n你好\tni hao\tc=3\n世界\tshi jie\t50%\n",
+                "\u{feff}# Rime dictionary\r\n# encoding: utf-8\r\n\r\n---\r\nname: luna_pinyin.custom\r\ncolumns:\r\n  - text\r\n  - code\r\n...\r\n你好\tni hao\tc=3\r\n世界\tshi jie\t50%\r\n",
+            ] {
+                let report = parse_ok(ImportKind::Pinyin, format, text);
+                assert_eq!(report.failed, 0, "format={format}");
+                assert!(!report.swapped, "format={format}");
+                assert_eq!(report.entries.len(), 2, "format={format}");
+                assert_eq!(report.entries[0].key, "ni hao");
+                assert_eq!(report.entries[0].value, "你好");
+                assert_eq!(report.entries[0].weight, DEFAULT_WEIGHT);
+                assert!(report.entries[0].defaulted_weight);
+                assert_eq!(report.entries[1].key, "shi jie");
+                assert_eq!(report.entries[1].weight, 5000);
+                assert!(!report.entries[1].defaulted_weight);
+            }
+        }
+        // 未闭合或无 YAML 配置行时，不误判为 Rime。
+        for non_yaml_header in [
+            "---\n...\n你好\tni hao\n",
+            "---\n# 只有注释\n...\n你好\tni hao\n",
+            "---\n你好\tni'hao\n...\n",
+            "---\nname: unclosed\n你好\tni hao\n",
+        ] {
+            assert_eq!(
+                ImportFormat::Standard.for_text(non_yaml_header),
+                ImportFormat::Standard,
+                "不应误识别为 Rime: {non_yaml_header:?}"
+            );
+        }
     }
 
     #[test]

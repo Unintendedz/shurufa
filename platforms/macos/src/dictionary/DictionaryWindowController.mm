@@ -99,7 +99,16 @@ static NSString *MSIMEDescribeImport(NSString *label, NSDictionary *result, NSSt
     return message;
 }
 
-// 读一个词库文件并整份导入，返回给窗口的一句话。细胞词库（选了这个格式、扩展名是 .scel，或文件头是细胞词库的魔数）先经 `msime_client_dictionary_scel_text` 转成标准文本；之后与文本文件一样，以一次 import 交给 `msime_client_settings_dictionary_announced`，由它分批送进词库、放开输入会话并合成一份报告。不在主线程调用。
+// 判断词库文件路径是否为 Rime `.dict.yaml` / `.yaml`（或 `.yml`）词典文件。
+static BOOL MSIMEIsRimeDictionaryURL(NSURL *url) {
+    NSString *fileName = url.lastPathComponent.lowercaseString;
+    NSString *pathExtension = url.pathExtension.lowercaseString;
+    return [fileName hasSuffix:@".dict.yaml"] ||
+        [pathExtension isEqualToString:@"yaml"] ||
+        [pathExtension isEqualToString:@"yml"];
+}
+
+// 读一个词库文件并整份导入，返回给窗口的一句话。细胞词库（选了这个格式、扩展名是 .scel，或文件头是细胞词库的魔数）先经 `msime_client_dictionary_scel_text` 转成标准文本；Rime `.dict.yaml` / `.yaml` 文件自动视作 `rime` 格式；之后与文本文件一样，以一次 import 交给 `msime_client_settings_dictionary_announced`，由它分批送进词库、放开输入会话并合成一份报告。不在主线程调用。
 static NSString *MSIMEImportDictionaryFile(NSURL *url, NSString *kind, NSString *format, NSDictionary *options) {
     NSString *label = MSIMEDictionaryKindLabel(kind);
     NSError *error = nil;
@@ -127,6 +136,7 @@ static NSString *MSIMEImportDictionaryFile(NSURL *url, NSString *kind, NSString 
     } else {
         text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
         if (!text || [text rangeOfString:@"\0"].location != NSNotFound) return @"文件需为不超过 32 MB 的 UTF-8 文本或 8 MB 的搜狗细胞词库。";
+        if (MSIMEIsRimeDictionaryURL(url)) textFormat = @"rime";
     }
     NSDictionary *request = @{ @"options": options, @"action": @{ @"operation": @"import", @"kind": kind, @"format": textFormat, @"text": text, @"request_id": [@"ui-import-" stringByAppendingString:NSUUID.UUID.UUIDString] } };
     NSDictionary *result = [MSIMEClientSession settingsDictionaryRequest:request announce:^{
@@ -370,8 +380,13 @@ static NSString *MSIMEImportDictionaryFile(NSURL *url, NSString *kind, NSString 
     panel.allowsMultipleSelection = NO;
     panel.canChooseDirectories = NO;
     NSMutableArray<UTType *> *types = [NSMutableArray arrayWithObjects:UTTypePlainText, UTTypeTabSeparatedText, UTTypeYAML, nil];
-    UTType *scelType = [UTType typeWithFilenameExtension:@"scel"];
-    if (scelType) [types addObject:scelType];
+    for (NSString *ext in @[@"yaml", @"yml", @"scel"]) {
+        for (UTType *type in [UTType typesWithTag:ext tagClass:UTTagClassFilenameExtension conformingToType:nil]) {
+            if (![types containsObject:type]) [types addObject:type];
+        }
+        UTType *fallback = [UTType typeWithFilenameExtension:ext];
+        if (fallback && ![types containsObject:fallback]) [types addObject:fallback];
+    }
     panel.allowedContentTypes = types;
     __weak MSIMEDictionaryWindowController *weakSelf = self;
     [panel beginWithCompletionHandler:^(NSModalResponse response) {

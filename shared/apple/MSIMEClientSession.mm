@@ -642,6 +642,22 @@ static void MSIMEInvokeAnnounce(void *context) {
         _handle, static_cast<const uint8_t *>(utf8.bytes), utf8.length), error);
     return [value isEqual:@YES];
 }
+
+- (BOOL)setAppBundleID:(NSString *)bundleID error:(NSError **)error {
+    if (![self checkThreadAndHandle:error]) return NO;
+    NSString *input = bundleID ?: @"";
+    if (input.length > 512) {
+        NSUInteger keepUnits = 512;
+        if (CFStringIsSurrogateHighCharacter([input characterAtIndex:keepUnits - 1])) --keepUnits;
+        input = [input substringToIndex:keepUnits];
+    }
+    NSData *utf8 = [input dataUsingEncoding:NSUTF8StringEncoding];
+    if (!utf8 || utf8.length > 512) return NO;
+    // 空串会传 length == 0；保证字节指针非空或随 length == 0 安全透传。
+    const uint8_t *bytes = utf8.length > 0 ? static_cast<const uint8_t *>(utf8.bytes) : nullptr;
+    id value = decodeValue(msime_client_set_app_bundle_id(_handle, bytes, utf8.length), error);
+    return [value isEqual:@YES];
+}
 - (nullable NSDictionary *)setCharacterWidthFull:(BOOL)fullwidth error:(NSError **)error {
     if (![self checkThreadAndHandle:error]) return nil;
     NSDictionary *view = decode(msime_client_set_character_width(_handle, fullwidth), error);

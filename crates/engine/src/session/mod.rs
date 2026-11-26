@@ -26,6 +26,7 @@ use crate::types::{
     SchemeType, WordItem,
 };
 
+pub use crate::user_dictionary::overlay::AppScope;
 pub use clock::Clock;
 use input::InputSession;
 pub use options::{SessionOptions, SessionSnapshot};
@@ -56,6 +57,21 @@ impl Session {
 
     pub fn set_clock(&mut self, clock: Clock) {
         self.input.clock = clock;
+    }
+
+    /// 设置当前会话的前台应用粗粒度场景桶（仅存枚举，不留存原始应用标识）。
+    pub fn set_app_scope(&mut self, app_scope: AppScope) {
+        self.input.app_scope = app_scope;
+    }
+
+    /// 按前台应用 `bundle_id` 映射并更新当前会话的场景桶（`""` 或未知应用映射为 `AppScope::General`）。
+    pub fn set_app_bundle_id(&mut self, bundle_id: &str) {
+        self.set_app_scope(AppScope::from_bundle_id(bundle_id));
+    }
+
+    /// 返回当前会话生效的前台应用场景桶。
+    pub fn app_scope(&self) -> AppScope {
+        self.input.app_scope
     }
 
     pub fn character(&mut self, value: u8, shift_only: bool) -> KeyResult {

@@ -68,6 +68,8 @@ pub struct Runtime<E: InputEngine = Session> {
     /// 段内暂存前缀（单次会话内已选定但尚未整句上屏的词段），可直接拼入左上下文与退格拆回。
     pub(crate) locked_prefix: Vec<LockedSegment>,
     pub(crate) ai_context: String,
+    /// 当前会话的前台应用粗粒度场景桶键名（仅保存 5 个静态枚举标签之一，绝不存原始 `bundleIdentifier`）。
+    pub(crate) app_scope_key: &'static str,
     pub(crate) neural_v2_enabled: bool,
     pub(crate) neural_context: String,
     pub(crate) neural_right_context: String,
@@ -748,6 +750,7 @@ impl<E: InputEngine> Runtime<E> {
             session,
             generation: 0,
             ai_context: String::new(),
+            app_scope_key: "general",
             neural_v2_enabled: false,
             neural_context: String::new(),
             neural_right_context: String::new(),
@@ -1337,6 +1340,26 @@ impl<E: InputEngine> Runtime<E> {
         }
     }
 
+    /// 根据前台客户端 `bundle_id` 解析粗粒度 `AppScope` 键并同步到底层引擎；不保存原始 `bundle_id`。
+    pub fn set_app_bundle_id(&mut self, bundle_id: &str) {
+        self.set_app_scope_key(msime_engine::host::Session::resolve_app_scope_key(
+            bundle_id,
+        ));
+    }
+
+    /// 直接设置规范化的 `AppScope` 键（未知值一律回退为 `"general"`）。
+    pub fn set_app_scope_key(&mut self, scope_key: &str) {
+        let canonical = canonical_app_scope_key(scope_key);
+        self.app_scope_key = canonical;
+        self.engine.set_app_scope_key(canonical);
+    }
+
+    /// 返回当前会话使用的粗粒度 `AppScope` 键。
+    #[must_use]
+    pub fn app_scope_key(&self) -> &'static str {
+        self.app_scope_key
+    }
+
     pub fn set_caret(&mut self, caret: Option<usize>) -> Result<(), RuntimeError> {
         self.advance()?;
         self.engine.set_caret(caret);
@@ -1786,6 +1809,7 @@ impl<E: InputEngine> Runtime<E> {
         self.advance()?;
         self.engine = engine;
         self.engine.set_rescoring_context(&self.ai_context);
+        self.engine.set_app_scope_key(self.app_scope_key);
         self.load_snapshot(cached);
         self.snapshot_valid = true;
         self.presentation_phase = PresentationPhase::Idle;
@@ -3202,5 +3226,15 @@ fn preserve_fixed_seats_in_order(candidates: &[CandidateEntry], order: &mut [usi
         } else if let Some(old_idx) = unpinned_iter.next() {
             *slot = old_idx;
         }
+    }
+}
+
+fn canonical_app_scope_key(scope_key: &str) -> &'static str {
+    match scope_key {
+        "im_chat" => "im_chat",
+        "code_ide" => "code_ide",
+        "docs_writing" => "docs_writing",
+        "browser_search" => "browser_search",
+        _ => "general",
     }
 }

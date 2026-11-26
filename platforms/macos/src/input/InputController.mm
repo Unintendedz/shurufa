@@ -1516,6 +1516,7 @@ static constexpr uint64_t MSIMESessionRecoveryNoticeInterval = 60 * NSEC_PER_SEC
 - (void)invalidateServiceSnapshots;
 - (void)showCandidatePanel;
 - (void)observeGlobalVoiceShortcutEvent:(NSEvent *)event;
+- (void)syncAppScopeContextForClient:(id)client;
 @end
 
 // 当前持有焦点客户端的控制器。由 `MSIMEAppearancePreferences` 统一落盘写入 `config.json`，控制器在收到持久化通知或聚焦刷新时只读重新加载。
@@ -1761,6 +1762,9 @@ static NSImage *MSIMECandidateLogoImage() {
     BOOL _secureEventInput;
     // 最后报告给会话的字段属性（MSIME_TRAIT_*），0 是还没报告过。会话新建时清零，之后每个键前比较一次，变了才报告。
     uint32_t _fieldTraits;
+    // 已同步到 `_session` 的最近一次前台应用标识（仅作宿主侧去重缓存，安全输入时固定为空串）。
+    __weak MSIMEClientSession *_syncedAppScopeSession;
+    NSString *_syncedAppScopeBundleID;
     // 打字特效：前台应用是否占着全屏，以及还没画出来的特效答复（按键来自 msime_client_key，上屏来自派发回复的 feedback）。全屏状态要遍历窗口列表，所以放到主队列的下一轮去读，从不在按键上读：激活后、偏好更新后、当前空间切换时（应用进出原生全屏），以及有按键时最多每秒一次（无边框的全屏窗口不切换空间）。按键只在这里记下答复；绘制等到主队列的下一轮，按键从不等它，其间到达的几个键只按最新的计数画一次。
     BOOL _typingEffectFullscreen;
     NSTimeInterval _typingEffectFullscreenCheckedAt;
@@ -1971,6 +1975,7 @@ static NSImage *MSIMECandidateLogoImage() {
         scheme != msime::mac::scheme::Shuangpin &&
         scheme != msime::mac::scheme::Wubi)
         return;
+    [self syncAppScopeContextForClient:client];
     NSString *bundle = [(id)client respondsToSelector:@selector(bundleIdentifier)]
         ? [(id)client bundleIdentifier] : nil;
     if (msime::mac::IsTerminalBundleIdentifier(bundle)) return;
@@ -6071,6 +6076,8 @@ static NSString *MSIMEVoiceArchiveFailureReason(MSIMEVoiceFailure failure, NSStr
         else [_session setFocused:NO error:nil];
         [_session closeWithError:nil];
         _session = nil;
+        _syncedAppScopeSession = nil;
+        _syncedAppScopeBundleID = nil;
         [_preferencesTimer invalidate];
         _preferencesTimer = nil;
     }
@@ -6169,6 +6176,8 @@ static constexpr NSUInteger MSIMEIdleDictionarySessionLimit = 4;
     else [_session setFocused:NO error:nil];
     [_session closeWithError:nil];
     _session = nil;
+    _syncedAppScopeSession = nil;
+    _syncedAppScopeBundleID = nil;
     _focusPending = YES;
     [_candidateMotion stop];
     [_panel orderOut:nil];
@@ -6212,7 +6221,10 @@ static constexpr NSUInteger MSIMEIdleDictionarySessionLimit = 4;
     [self ensureAppearance];
     _focusPending = _appearance.englishMode;
     if (!_appearance.englishMode || _englishOnlineCandidatesEnabled) [self prepareSession];
-    else [self startPreferencesMonitoring];
+    else {
+        if (_session) [self syncAppScopeContextForClient:sender];
+        [self startPreferencesMonitoring];
+    }
     [self claimBackgroundMusic];
     NSNotificationCenter *workspaceCenter = NSWorkspace.sharedWorkspace.notificationCenter;
     [workspaceCenter removeObserver:self name:NSWorkspaceActiveSpaceDidChangeNotification object:nil];
@@ -6480,6 +6492,8 @@ static NSString *MSIMESessionUnavailableReason(NSDictionary *options, NSError *e
             id directory = options[@"preferences_directory"];
             if ([directory isKindOfClass:NSString.class] && [directory isAbsolutePath]) _preferencesDirectory = [directory copy];
             if (_session) {
+                _syncedAppScopeSession = nil;
+                _syncedAppScopeBundleID = nil;
                 [MSIMEInputController holdDictionarySession:self];
                 created = YES;
                 // 生命周期核心接管按键音、上屏音、打字特效和背景音乐。先于下面的 setFocused:，让核心看到这次聚焦；字段属性在聚焦之前由 confirmFieldTraitsBeforeFocus 报告，音乐所有权等到 claimBackgroundMusic。
@@ -6504,6 +6518,7 @@ static NSString *MSIMESessionUnavailableReason(NSDictionary *options, NSError *e
             NSDictionary *view = [_session setDedicatedEnglishEnabled:YES error:nil];
             if (view) _viewState = shurufa::mac::ViewState::fromDictionary(view);
         }
+        [self syncAppScopeContextForClient:_activeClient];
         [self confirmFieldTraitsBeforeFocus];
         [self dispatchFocus:YES];
         _focusPending = NO;
@@ -7081,10 +7096,31 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
                                 msime::mac::TypingSource::English);
 }
 
+// 将前台客户端 `bundleIdentifier` 透传给引擎映射为粗粒度 `AppScope` 场景桶；
+// 开启安全输入或处于安全密码输入框时一律传空串，禁止携带来源应用标识。
+- (void)syncAppScopeContextForClient:(id)client {
+    if (!_session || ![_session respondsToSelector:@selector(setAppBundleID:error:)]) return;
+    const BOOL secure = [self secureEventInputActive] || _voiceContextSnapshot.isSecureField;
+    NSString *bundle = @"";
+    if (!secure && [client respondsToSelector:@selector(bundleIdentifier)]) {
+        NSString *candidate = [client bundleIdentifier];
+        if ([candidate isKindOfClass:NSString.class]) bundle = candidate;
+    }
+    MSIMEClientSession *syncedSession = _syncedAppScopeSession;
+    if (syncedSession == _session && _syncedAppScopeBundleID && [_syncedAppScopeBundleID isEqualToString:bundle]) {
+        return;
+    }
+    if ([_session setAppBundleID:bundle error:nil]) {
+        _syncedAppScopeSession = _session;
+        _syncedAppScopeBundleID = [bundle copy];
+    }
+}
+
 // 把字段属性报告给生命周期核心：安全输入是 SECURE，英文模式是 HOST_ENGLISH，macOS 两项都读得到，所以带 KNOWN。只在变了时调用，按契约先于这个键的 msime_client_key。核心按 SECURE 关掉声音、特效和音乐，所以安全输入的开关不必再由这里去开关音乐。
 - (void)syncFieldTraits {
     _secureEventInput = [self secureEventInputActive];
     if (_secureEventInput) [MSIMEInputSessionRecoveryPanel dismissForDelegate:self];
+    [self syncAppScopeContextForClient:_activeClient];
     const uint32_t traits = MSIME_TRAIT_KNOWN | (_secureEventInput ? MSIME_TRAIT_SECURE : 0) |
         (_appearance.englishMode ? MSIME_TRAIT_HOST_ENGLISH : 0);
     if (!_session || traits == _fieldTraits) return;

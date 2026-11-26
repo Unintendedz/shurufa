@@ -49,6 +49,8 @@ typedef void (^MSIMEVoiceProviderPhase)(NSUInteger phase);
 - (BOOL)setSurroundingContext:(NSString *)context error:(NSError **)error;
 /// 组字开始前同步光标右侧同行现成后文（`msime_client_set_following_context`），供句中补字双向消歧。
 - (BOOL)setFollowingContext:(NSString *)context error:(NSError **)error;
+/// 同步前台应用标识（`msime_client_set_app_bundle_id`），在引擎内存中映射为粗粒度 `AppScope` 场景桶，原始标识不落盘。
+- (BOOL)setAppBundleID:(nullable NSString *)bundleID error:(NSError **)error;
 - (nullable NSDictionary<NSString *, id> *)typeASCII:(uint8_t)character shift:(BOOL)shift error:(NSError **)error;
 /// Finish the highlighted composition and append a literal ASCII punctuation mark.
 - (nullable NSDictionary<NSString *, id> *)punctuationASCII:(uint8_t)ascii error:(NSError **)error;

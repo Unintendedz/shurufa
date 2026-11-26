@@ -30,6 +30,7 @@ use crate::types::{
     MixedExpressiveOptions, QuickPhraseEntry, SchemeKey, SchemeType, WordItem,
 };
 use crate::user_dictionary::ngram_store::PersonalNgramStore;
+use crate::user_dictionary::overlay::AppScope;
 use crate::user_dictionary::removal::learn_entered_english_word;
 use crate::user_dictionary::typo_profile::PersonalTypoProfile;
 
@@ -41,6 +42,7 @@ pub(super) struct LastOverlayLearning {
     pub event_id: i64,
     pub entry_key: String,
     pub word: String,
+    pub app_scope: AppScope,
     pub committed_at_unix: i64,
     pub remaining_chars: usize,
 }
@@ -74,6 +76,8 @@ pub(super) struct InputSession {
     pub punctuation_lock: i32,
     pub learning_enabled: bool,
     pub decoupled_personal_learning: bool,
+    /// 当前会话的前台应用粗粒度场景桶（仅存枚举，不持久化原始 `bundleIdentifier`）。
+    pub app_scope: AppScope,
     pub last_overlay_learning: Option<LastOverlayLearning>,
     pub learn_english_on_enter: bool,
     pub personal_context_enabled: bool,
@@ -148,6 +152,7 @@ impl InputSession {
             punctuation_lock: 0,
             learning_enabled: true,
             decoupled_personal_learning: options.decoupled_personal_learning,
+            app_scope: AppScope::General,
             last_overlay_learning: None,
             learn_english_on_enter: options.learn_english_on_enter,
             personal_context_enabled: true,

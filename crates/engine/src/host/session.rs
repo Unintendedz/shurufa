@@ -331,6 +331,29 @@ impl Session {
         self.inner.set_rescoring_context(context);
     }
 
+    /// 将宿主前台应用标识映射为粗粒度 `AppScope` 持久化键名（不保留原始标识）。
+    pub fn resolve_app_scope_key(bundle_id: &str) -> &'static str {
+        crate::user_dictionary::overlay::AppScope::from_bundle_id(bundle_id).as_str()
+    }
+
+    /// 按粗粒度 `AppScope` 键名更新当前会话的应用场景桶（未知值安全回落 `"general"`）。
+    pub fn set_app_scope_key(&mut self, scope_key: &str) {
+        self.inner
+            .set_app_scope(crate::user_dictionary::overlay::AppScope::from_stored(
+                scope_key,
+            ));
+    }
+
+    /// 按前台应用 `bundle_id` 更新当前会话的粗粒度 `AppScope` 场景桶。
+    pub fn set_app_bundle_id(&mut self, bundle_id: &str) {
+        self.inner.set_app_bundle_id(bundle_id);
+    }
+
+    /// 返回当前会话生效的粗粒度 `AppScope` 键名。
+    pub fn app_scope_key(&self) -> &'static str {
+        self.inner.app_scope().as_str()
+    }
+
     pub fn set_first_page_rows(&mut self, rows: usize) {
         self.inner.set_first_page_rows(FirstPageRows::new(rows));
     }

@@ -5441,6 +5441,99 @@ static void TestFieldTraitsAreConfirmedBeforeEveryFocusIn() {
     MSIMERemoveTestPreferenceSuite(defaults, suite);
 }
 
+@interface AppScopeShortcutSession : ShortcutSession
+@property(nonatomic, strong) NSMutableArray<NSString *> *reportedBundleIDs;
+@end
+@implementation AppScopeShortcutSession
+- (BOOL)setAppBundleID:(NSString *)bundleID error:(NSError **)error {
+    (void)error;
+    if (!self.reportedBundleIDs) self.reportedBundleIDs = [NSMutableArray array];
+    [self.reportedBundleIDs addObject:bundleID ?: @""];
+    return YES;
+}
+@end
+
+@interface AppScopeActivationController : ModeController
+@end
+@implementation AppScopeActivationController
+- (void)startPreferencesMonitoring {}
+- (void)applySharedInputPreferencesBeforeFirstUse {}
+- (void)scheduleSystemInputModeSyncForClient:(id)sender { (void)sender; }
+@end
+
+static void AppScopeSyntheticActivation(id, SEL, id) {}
+
+// 验证前台 `bundleIdentifier` 在 prepareSession、按键切换客户、终端早退路径、安全输入与激活路径下的同步及隐私清零约束。
+static void TestAppScopeSyncsBundleIDAndClearsInSecureInput(void) {
+    NSString *suite = [@"msime.app-scope." stringByAppendingString:NSUUID.UUID.UUIDString];
+    NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
+    MSIMEAppearancePreferences *appearance = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults];
+    appearance.fullWidthInput = NO;
+    AppScopeActivationController *controller = [AppScopeActivationController alloc];
+    AppScopeShortcutSession *session = [AppScopeShortcutSession new];
+    VimModeClient *codeClient = [VimModeClient new];
+    codeClient.bundleIdentifier = @"com.microsoft.VSCode";
+    VimModeClient *terminalClient = [VimModeClient new];
+    terminalClient.bundleIdentifier = @"com.apple.Terminal";
+    VimModeClient *chatClient = [VimModeClient new];
+    chatClient.bundleIdentifier = @"com.tencent.xinWeChat";
+    [controller setValue:appearance forKey:@"appearance"];
+    [controller setValue:session forKey:@"session"];
+    [controller setValue:codeClient forKey:@"activeClient"];
+    NSDictionary *idle = @{ @"focused": @YES, @"editing_text": @"", @"candidates": @[], @"scheme": @0 };
+    [controller setValue:idle forKey:@"view"];
+    session.nextTransition = @{ @"handled": @YES, @"commit": NSNull.null, @"view": idle };
+    NSEvent *(^letter)(unsigned short, NSString *) = ^NSEvent *(unsigned short code, NSString *characters) {
+        return [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0
+                                 context:nil characters:characters charactersIgnoringModifiers:characters isARepeat:NO keyCode:code];
+    };
+
+    // 1. prepareSession 同步当前客户端 `bundleIdentifier`；相同非安全客户连续按键复用缓存。
+    [controller setValue:@YES forKey:@"focusPending"];
+    [controller prepareSession];
+    assert([session.reportedBundleIDs.lastObject isEqual:@"com.microsoft.VSCode"]);
+    const NSUInteger afterPrepareCount = session.reportedBundleIDs.count;
+    [controller handleEvent:letter(0, @"a") client:codeClient];
+    assert(session.reportedBundleIDs.count == afterPrepareCount);
+
+    // 2. 安全输入（IsSecureEventInputEnabled 模拟）开启时传空串，关闭后恢复真实 `bundleIdentifier`。
+    controller.secureInput = YES;
+    [controller handleEvent:letter(11, @"b") client:codeClient];
+    assert([session.reportedBundleIDs.lastObject isEqual:@""]);
+    controller.secureInput = NO;
+    [controller handleEvent:letter(8, @"c") client:codeClient];
+    assert([session.reportedBundleIDs.lastObject isEqual:@"com.microsoft.VSCode"]);
+
+    // 3. `_voiceContextSnapshot.isSecureField` 为真时同样传空串；清掉快照后恢复透传。
+    MSIMEVoiceContextSnapshot *secureVoice = [[MSIMEVoiceContextSnapshot alloc]
+        initWithAppBundleID:@"com.microsoft.VSCode" appName:@"Code" windowTitle:@"" webDomain:@""
+              precedingText:@"" followingText:@"" selectedText:@"" visibleScreenText:@""
+              isSecureField:YES axBlacklisted:NO];
+    [controller setValue:secureVoice forKey:@"voiceContextSnapshot"];
+    [controller handleEvent:letter(2, @"d") client:codeClient];
+    assert([session.reportedBundleIDs.lastObject isEqual:@""]);
+    [controller setValue:nil forKey:@"voiceContextSnapshot"];
+    [controller handleEvent:letter(14, @"e") client:codeClient];
+    assert([session.reportedBundleIDs.lastObject isEqual:@"com.microsoft.VSCode"]);
+
+    // 4. 切换到终端（跳过上下文读取的客户），仍须透传 `bundleIdentifier`。
+    [controller handleEvent:letter(3, @"f") client:terminalClient];
+    assert([session.reportedBundleIDs.lastObject isEqual:@"com.apple.Terminal"]);
+
+    // 5. 英文模式下 `activateServer:` 虽不调 `prepareSession`，已有会话仍须刷新 `bundleIdentifier`。
+    appearance.englishMode = YES;
+    Method baseActivate = class_getInstanceMethod(IMKInputController.class, @selector(activateServer:));
+    IMP originalActivate = method_setImplementation(baseActivate, (IMP)AppScopeSyntheticActivation);
+    [controller activateServer:chatClient];
+    method_setImplementation(baseActivate, originalActivate);
+    assert([session.reportedBundleIDs.lastObject isEqual:@"com.tencent.xinWeChat"]);
+
+    [controller releaseBackgroundMusic];
+    [[NSWorkspace.sharedWorkspace notificationCenter] removeObserver:controller];
+    MSIMEFocusedController = nil;
+    MSIMERemoveTestPreferenceSuite(defaults, suite);
+}
+
 // IMK 在焦点移走或用户点进文档时调 commitComposition:，这是 macOS 失焦上屏最常走的一条路：用 MSIME_FINISH_ON_FOCUS_LOSS 结束组字，核心按失焦上屏处理，不出提交音也不画；回复里 feedback 为 0，控制器也就不画上屏特效。不是当前客户端的调用什么都不做。
 static void TestCommitCompositionFinishesAsAFocusLoss() {
     NSString *suite = [@"msime.commit-composition." stringByAppendingString:NSUUID.UUID.UUIDString];
@@ -13932,6 +14025,7 @@ int main(int argc, char **argv) {
         @autoreleasepool { TestTheKeyThatOpensTheSessionIsReportedBeforeItsDispatch(); }
         @autoreleasepool { TestCommitCompositionFinishesAsAFocusLoss(); }
         @autoreleasepool { TestFieldTraitsAreConfirmedBeforeEveryFocusIn(); }
+        @autoreleasepool { TestAppScopeSyncsBundleIDAndClearsInSecureInput(); }
         @autoreleasepool { TestMusicIsClaimedOnceTheSessionOpens(); }
         @autoreleasepool { TestPreferenceClientGeneration(); }
         @autoreleasepool { TestPreferenceReadDoesNotDeallocControllerOffMain(); }

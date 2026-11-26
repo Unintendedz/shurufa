@@ -495,6 +495,43 @@ pub unsafe extern "C" fn msime_client_set_following_context(
     })
 }
 
+const APP_BUNDLE_ID_LIMIT: usize = 512;
+
+/// 同步前台应用 `bundleIdentifier`（UTF-8，最多 512 字节）：仅在内存中按 `AppScope` 映射为 5 个粗粒度场景桶，
+/// 绝不持久化或记录原始标识；隐私会话或安全输入（`TRAIT_SECURE` / `TRAIT_PRIVATE`）强制复位为 `general` 并返回 `false`。
+///
+/// # Safety
+/// `length` 不为 0 时，`bundle_id` 必须指向至少 `length` 个可读字节。
+#[no_mangle]
+pub unsafe extern "C" fn msime_client_set_app_bundle_id(
+    handle: u64,
+    bundle_id: *const u8,
+    length: usize,
+) -> *mut c_char {
+    if length > APP_BUNDLE_ID_LIMIT || (length != 0 && bundle_id.is_null()) {
+        return response(|| Err("invalid app bundle id".into()));
+    }
+    let bytes = if length == 0 {
+        &[][..]
+    } else {
+        // SAFETY：由调用方契约保证缓冲区有效且不超过上限。
+        unsafe { std::slice::from_raw_parts(bundle_id, length) }
+    };
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return response(|| Err("invalid app bundle id".into()));
+    };
+    response(|| {
+        with_session(handle, |session| {
+            if session.is_private_or_secure() {
+                session.runtime.set_app_scope_key("general");
+                return Ok(Value::Bool(false));
+            }
+            session.runtime.set_app_bundle_id(text);
+            Ok(Value::Bool(true))
+        })
+    })
+}
+
 /// 启用或关闭会话的 Tier 1 两阶段异步神经解码模式。
 #[no_mangle]
 pub extern "C" fn msime_client_set_neural_v2_enabled(handle: u64, enabled: bool) -> *mut c_char {
@@ -579,4 +616,123 @@ pub unsafe extern "C" fn msime_client_apply_neural_response(
             }
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use msime_client_core::preferences::{DefaultImeMode, Preferences};
+    use std::ffi::CString;
+
+    fn read_json(ptr: *mut c_char) -> Value {
+        assert!(!ptr.is_null());
+        // SAFETY: 返回指针由 `host-api` 经 `CString::into_raw` 分配，仅在此处接管释放一次。
+        let raw = unsafe { CString::from_raw(ptr) };
+        serde_json::from_slice(raw.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn app_bundle_id_updates_scope_and_resets_under_secure_or_private_session() {
+        let root = tempfile::tempdir().unwrap();
+        let make = |name: &str| {
+            let dir = root.path().join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        };
+        let resources = make("resources");
+        let dictionaries = make("dictionaries");
+        let user = make("user");
+        let cache = make("cache");
+        std::fs::write(resources.join("msime-wubi.db"), b"").unwrap();
+        let fixture = "CREATE TABLE tbl_2_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);
+                       INSERT INTO tbl_2_n VALUES('ni''hao','nh','你好',100);
+                       CREATE TABLE wubi86(key TEXT,value TEXT,weight INTEGER);";
+        for directory in [&resources, &dictionaries] {
+            rusqlite::Connection::open(directory.join("msime-pinyin.db"))
+                .unwrap()
+                .execute_batch(fixture)
+                .unwrap();
+        }
+        let prefs = Preferences {
+            default_ime_mode: DefaultImeMode::Chinese,
+            ..Preferences::default()
+        };
+        let req = json!({
+            "api_version": 1,
+            "resources": resources,
+            "user_data": user,
+            "cache": cache,
+            "dictionaries": dictionaries,
+            "preferences": prefs,
+        })
+        .to_string();
+        // SAFETY: `req` 为合法 UTF-8 JSON 字符串且在同步调用期间有效。
+        let created = read_json(unsafe { msime_client_create(req.as_ptr(), req.len()) });
+        assert_eq!(created["ok"], true, "{created}");
+        let handle = created["value"]["session"].as_u64().unwrap();
+        assert_eq!(
+            msime_client_set_lifecycle(handle, lifecycle::FEEDBACK),
+            lifecycle::FEEDBACK
+        );
+
+        let scope_for = |handle: u64| {
+            with_session(handle, |session| Ok(session.runtime.app_scope_key())).unwrap()
+        };
+
+        assert_eq!(scope_for(handle), "general");
+
+        let set_bundle = |bundle: &[u8]| {
+            // SAFETY: 切片在同步调用期间有效。
+            read_json(unsafe {
+                msime_client_set_app_bundle_id(handle, bundle.as_ptr(), bundle.len())
+            })
+        };
+
+        // 无效 UTF-8 与超长缓冲区直接拒绝。
+        assert_eq!(set_bundle(&[0xFF, 0xFE])["ok"], false);
+        let oversized = vec![b'a'; 513];
+        assert_eq!(set_bundle(&oversized)["ok"], false);
+
+        // 正常传入应用标识后切换到对应场景桶。
+        assert_eq!(set_bundle(b"com.microsoft.VSCode")["value"], true);
+        assert_eq!(scope_for(handle), "code_ide");
+
+        // 切入安全密码框属性后立即复位为 `"general"`，并拒绝继续覆盖场景桶。
+        assert_eq!(
+            msime_client_set_field_traits(handle, lifecycle::TRAIT_KNOWN | lifecycle::TRAIT_SECURE),
+            lifecycle::TRAIT_KNOWN | lifecycle::TRAIT_SECURE
+        );
+        assert_eq!(scope_for(handle), "general");
+        assert_eq!(set_bundle(b"com.tencent.xinWeChat")["value"], false);
+        assert_eq!(scope_for(handle), "general");
+
+        // 离开安全密码框后恢复接受应用标识更新。
+        assert_eq!(
+            msime_client_set_field_traits(handle, lifecycle::TRAIT_KNOWN),
+            lifecycle::TRAIT_KNOWN
+        );
+        assert_eq!(set_bundle(b"com.tencent.xinWeChat")["value"], true);
+        assert_eq!(scope_for(handle), "im_chat");
+
+        // 切入隐私会话后同样立即复位为 `"general"` 并屏蔽更新；退出后传入空指针视为清空回 `"general"`。
+        assert_eq!(
+            read_json(msime_client_set_private_session(handle, true))["value"],
+            true
+        );
+        assert_eq!(scope_for(handle), "general");
+        assert_eq!(set_bundle(b"com.microsoft.VSCode")["value"], false);
+        assert_eq!(scope_for(handle), "general");
+
+        assert_eq!(
+            read_json(msime_client_set_private_session(handle, false))["value"],
+            false
+        );
+        // SAFETY: `length == 0` 允许空指针，等价传入空串。
+        let cleared =
+            read_json(unsafe { msime_client_set_app_bundle_id(handle, std::ptr::null(), 0) });
+        assert_eq!(cleared["value"], true);
+        assert_eq!(scope_for(handle), "general");
+
+        assert_eq!(read_json(msime_client_destroy(handle))["ok"], true);
+    }
 }

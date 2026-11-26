@@ -25,7 +25,8 @@ use crate::types::{
 use crate::user_dictionary::journal::is_user_deleted;
 use crate::user_dictionary::overlay::{
     delete_personal_selection_event, record_backspace_rollback_feedback,
-    record_contested_leader_confirmation, record_personal_selection, unix_now_seconds, AppScope,
+    record_contested_leader_confirmation_scoped, record_personal_selection_scoped,
+    unix_now_seconds,
 };
 use crate::user_dictionary::picks::{clear_pick_transition, record_pick_transition};
 use crate::user_dictionary::ranking::{
@@ -106,7 +107,7 @@ impl InputSession {
                 Some(last.event_id),
                 &last.entry_key,
                 &last.word,
-                AppScope::General,
+                last.app_scope,
                 last.committed_at_unix,
                 unix_now_seconds(),
             )
@@ -257,10 +258,11 @@ impl InputSession {
                         } else {
                             selected.canonical_pinyin.as_str()
                         };
-                        let _ = record_contested_leader_confirmation(
+                        let _ = record_contested_leader_confirmation_scoped(
                             self.journal_path(),
                             entry_key,
                             &selected.word,
+                            self.app_scope,
                             unix_now_seconds(),
                         );
                     }
@@ -348,10 +350,11 @@ impl InputSession {
             let entry_key_owned = entry_key.to_owned();
             let user_db_owned = user_db.to_path_buf();
             let now_unix = unix_now_seconds();
-            match record_personal_selection(
+            match record_personal_selection_scoped(
                 &user_db_owned,
                 &entry_key_owned,
                 &selected_word,
+                self.app_scope,
                 now_unix,
             ) {
                 Ok(event_id) => {
@@ -360,6 +363,7 @@ impl InputSession {
                         event_id,
                         entry_key: entry_key_owned,
                         word: selected_word.to_string(),
+                        app_scope: self.app_scope,
                         committed_at_unix: now_unix,
                         remaining_chars,
                     });
@@ -450,11 +454,14 @@ impl InputSession {
         }
         let user_db = self.paths.user(assets::USER_JOURNAL);
         let now_unix = unix_now_seconds();
-        if let Ok(event_id) = record_personal_selection(&user_db, &entry_key, word, now_unix) {
+        if let Ok(event_id) =
+            record_personal_selection_scoped(&user_db, &entry_key, word, self.app_scope, now_unix)
+        {
             self.last_overlay_learning = Some(super::input::LastOverlayLearning {
                 event_id,
                 entry_key,
                 word: word.to_owned(),
+                app_scope: self.app_scope,
                 committed_at_unix: now_unix,
                 remaining_chars: count_utf8_chars(word),
             });
@@ -741,6 +748,7 @@ mod tests {
     use crate::session::{Clock, Session, SessionOptions};
     use crate::types::{autocorrect_type, SchemeType, ShuangpinProfileKind};
     use crate::user_dictionary::ngram_store::flush_all;
+    use crate::user_dictionary::overlay::AppScope;
 
     #[test]
     fn sentence_segment_count_avoids_temporary_strings() {
@@ -1549,5 +1557,148 @@ mod tests {
             fixture.main_count("SELECT weight FROM tbl_1_n WHERE value='己'"),
             50
         );
+    }
+
+    #[test]
+    fn app_scope_isolates_learning_rollback_and_contested_leader_without_leaking_bundle_id() {
+        let fixture = Fixture::new(
+            &[
+                ("ni", "你", 500_000),
+                ("hao", "好", 500_000),
+                ("ni'hao", "你好", 500_000),
+                ("ni'hao", "拟好", 2_000),
+                ("ni'hao", "泥嚎", 1_500),
+            ],
+            &[],
+        );
+        let mut session = fixture.session(|options| {
+            options.learning = true;
+            options.decoupled_personal_learning = true;
+            options.frequency = frequency(FrequencyAdjustmentMode::Promote, 1, 1);
+        });
+        assert_eq!(session.app_scope(), AppScope::General);
+
+        // 1. 在 `CodeIde`（VS Code）学习「拟好」，验证排序提升、`neural_v2_metadata` 缓存加成和首选确认落入 `code_ide` 桶。
+        session.set_app_bundle_id("com.microsoft.VSCode");
+        assert_eq!(session.app_scope(), AppScope::CodeIde);
+        for _ in 0..3 {
+            type_text(&mut session, "nihao");
+            assert_eq!(
+                select_word(&mut session, "拟好").commit.as_deref(),
+                Some("拟好")
+            );
+        }
+
+        type_text(&mut session, "nihao");
+        let code_words = words(&session);
+        assert_eq!(code_words[0], "拟好");
+        let code_meta = session
+            .neural_v2_metadata()
+            .expect("neural_v2_metadata should exist in CodeIde");
+        assert_eq!(code_meta.candidates.len(), code_words.len());
+        let code_bonus = code_meta.candidates[0].user_log_prob;
+        assert!(
+            code_bonus > 0.0,
+            "CodeIde 场景应当拥有正的个人缓存对数加分: {code_bonus}"
+        );
+        // 尚无竞争词时不写确认；制造同场景竞争词「泥嚎」后，再次选择首位「拟好」会写入 `code_ide` 桶。
+        assert_eq!(session.select(0).commit.as_deref(), Some("拟好"));
+        assert_eq!(
+            fixture.journal_count(
+                "SELECT count(*) FROM personal_selection_events WHERE entry_key=\"ni'hao\" AND value='拟好' AND app_scope='code_ide'"
+            ),
+            3
+        );
+        for _ in 0..2 {
+            type_text(&mut session, "nihao");
+            assert_eq!(
+                select_word(&mut session, "泥嚎").commit.as_deref(),
+                Some("泥嚎")
+            );
+        }
+        type_text(&mut session, "nihao");
+        assert_eq!(words(&session)[0], "拟好");
+        assert_eq!(session.select(0).commit.as_deref(), Some("拟好"));
+        assert_eq!(
+            fixture.journal_count(
+                "SELECT count(*) FROM personal_selection_events WHERE entry_key=\"ni'hao\" AND value='拟好' AND app_scope='code_ide'"
+            ),
+            4
+        );
+        assert_eq!(
+            fixture.journal_count(
+                "SELECT count(*) FROM personal_selection_events WHERE app_scope='im_chat'"
+            ),
+            0
+        );
+
+        // 2. 切至 `ImChat`（微信）：跨桶按 0.5 折算后「你好」保持首位，`personal_cache_log_bonus` 严格低于同桶。
+        session.set_app_bundle_id("com.tencent.xinWeChat");
+        assert_eq!(session.app_scope(), AppScope::ImChat);
+        type_text(&mut session, "nihao");
+        let im_words = words(&session);
+        assert_eq!(
+            im_words[0], "你好",
+            "CodeIde 的学习结果不应跨场景劫持 ImChat 高频首位: {im_words:?}"
+        );
+        let im_pos = im_words.iter().position(|w| w == "拟好").unwrap();
+        let im_meta = session
+            .neural_v2_metadata()
+            .expect("neural_v2_metadata should exist in ImChat");
+        assert_eq!(im_meta.candidates.len(), im_words.len());
+        let im_bonus = im_meta.candidates[im_pos].user_log_prob;
+        assert!(
+            im_bonus > 0.0 && code_bonus > im_bonus,
+            "跨桶缓存对数加分应弱于同桶（code_bonus={code_bonus}, im_bonus={im_bonus}）"
+        );
+
+        // 3. 在 `ImChat` 上屏两字词「泥嚎」后紧接按两次 Backspace（5 秒窗口内删光），负反馈仅写入 `im_chat` 桶。
+        assert_eq!(
+            select_word(&mut session, "泥嚎").commit.as_deref(),
+            Some("泥嚎")
+        );
+        session.command(crate::types::Command::Backspace);
+        session.command(crate::types::Command::Backspace);
+        assert_eq!(
+            fixture.journal_count(
+                "SELECT count(*) FROM personal_negative_feedback WHERE entry_key=\"ni'hao\" AND value='泥嚎' AND app_scope='im_chat'"
+            ),
+            1
+        );
+        assert_eq!(
+            fixture.journal_count(
+                "SELECT count(*) FROM personal_negative_feedback WHERE app_scope!='im_chat'"
+            ),
+            0
+        );
+
+        // 4. 隐私硬约束：检查 `msime_user.db` 所有表，严禁写入任何原始 `bundleIdentifier`。
+        let conn = Connection::open(fixture.journal()).unwrap();
+        let mut tables_stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table'")
+            .unwrap();
+        let table_names: Vec<String> = tables_stmt
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        for table in table_names {
+            let mut stmt = conn.prepare(&format!("SELECT * FROM \"{table}\"")).unwrap();
+            let cols = stmt.column_count();
+            let mut rows = stmt.query([]).unwrap();
+            while let Some(row) = rows.next().unwrap() {
+                for col in 0..cols {
+                    if let Ok(val) = row.get::<_, String>(col) {
+                        assert!(
+                            !val.contains("VSCode")
+                                && !val.contains("xinWeChat")
+                                && !val.contains("com.microsoft")
+                                && !val.contains("com.tencent"),
+                            "raw bundle id leaked in table {table}: {val}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }

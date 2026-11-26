@@ -266,6 +266,14 @@ int main() {
         SmokeClient *snapClient = [SmokeClient new];
         MSIMEApplyTransitionSnapshotWithCommitObserver(selSnap, nil, snapClient, MSIMEInlinePreeditStylePinyin, nil, nullptr, nil, nil);
         assert([snapClient.committed isEqual:@"中"]);
+        // 前台应用场景桶同步与安全域保护：常规应用允许写入，进入 SECURE 后强制拒绝并退回 general。
+        assert([lifecycle setAppBundleID:@"com.microsoft.VSCode" error:&error] && !error);
+        assert([lifecycle setFieldTraits:MSIME_TRAIT_KNOWN | MSIME_TRAIT_SECURE] == (MSIME_TRAIT_KNOWN | MSIME_TRAIT_SECURE));
+        error = nil;
+        assert(![lifecycle setAppBundleID:@"com.tencent.xinWeChat" error:&error] && !error);
+        assert([lifecycle setFieldTraits:MSIME_TRAIT_KNOWN] == MSIME_TRAIT_KNOWN);
+        assert([lifecycle setAppBundleID:@"com.tencent.xinWeChat" error:&error] && !error);
+        assert([lifecycle setAppBundleID:nil error:&error] && !error);
         assert([lifecycle setLifecycleActive:NO]);
         assert([lifecycle closeWithError:&error]);
         assert([lifecycle lifecycleKey:0] == 0 && ![lifecycle setLifecycleActive:YES] && [lifecycle setFieldTraits:MSIME_TRAIT_KNOWN] == 0 && [lifecycle setLifecycle:MSIME_LIFECYCLE_FEEDBACK] == 0);

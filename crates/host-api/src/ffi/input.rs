@@ -205,6 +205,9 @@ pub extern "C" fn msime_client_set_private_session(handle: u64, enabled: bool) -
         with_session(handle, |session| {
             let changed = session.statistics_private != enabled;
             session.statistics_private = enabled;
+            if enabled {
+                session.runtime.set_app_scope_key("general");
+            }
             if changed {
                 session
                     .runtime

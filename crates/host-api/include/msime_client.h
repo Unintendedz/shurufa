@@ -699,6 +699,8 @@ char *msime_client_poll_neural(uint64_t session);
 char *msime_client_flush_provisional_neural(uint64_t session);
 /* 组字开始前同步光标右侧同行现成后文（最多 4096 字节 UTF-8，遇换行截断保留头部至多 16 字），供句中补字双向消歧；隐私/安全字段清空上下文并返回 false，组字中返回 false 不改状态。 */
 char *msime_client_set_following_context(uint64_t session, const uint8_t *context, size_t length);
+/* 同步前台应用标识（UTF-8，最多 512 字节）；仅在内存中按 `AppScope` 映射为粗粒度场景桶，严禁将原始 `bundleIdentifier` 落盘或写入日志。处于隐私会话或安全输入（`TRAIT_SECURE` / `TRAIT_PRIVATE`）时强制复位为 `general` 并返回 false。 */
+char *msime_client_set_app_bundle_id(uint64_t session, const uint8_t *bundle_id, size_t length);
 /* 取出当前代次的 Tier 1 神经解码请求（含完整保留标点/空格的 512 字上文、可选同行后文、音节 DAG 路径与候选）；不可用时返回 value=null。 */
 char *msime_client_take_neural_request(uint64_t session);
 /* 读取当前会话完整保留标点/空格的 512 字上文，供宿主在空闲 50 ms 后预热端侧 KV-Cache。返回 {"context": "..."}。 */

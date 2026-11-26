@@ -25,6 +25,8 @@ pub trait InputEngine {
     fn reset_context(&mut self) {}
     /// The committed text the Engine's neural sentence models condition on, pushed by the runtime whenever the text it keeps changes. Engines without such models ignore it.
     fn set_rescoring_context(&mut self, _context: &str) {}
+    /// 设置当前会话的前台应用粗粒度 `AppScope` 场景桶键名；无场景隔离能力的引擎忽略它。
+    fn set_app_scope_key(&mut self, _scope_key: &str) {}
     /// 首页放得下几行，宿主改每页候选数时跟着分页一起下发；没有按切分查词库的引擎忽略它。
     fn set_first_page_rows(&mut self, _rows: usize) {}
     /// Moves the caret prefix decoding answers for; `None` returns to the end of the composition.
@@ -210,6 +212,10 @@ impl InputEngine for Session {
     }
     fn set_rescoring_context(&mut self, context: &str) {
         Session::set_rescoring_context(self, context);
+    }
+
+    fn set_app_scope_key(&mut self, scope_key: &str) {
+        Session::set_app_scope_key(self, scope_key);
     }
     fn set_first_page_rows(&mut self, rows: usize) {
         Session::set_first_page_rows(self, rows);

@@ -829,6 +829,9 @@ impl HostSession {
         self.runtime
             .replace_engine_with_touch_layout(engine, page_size, preferences.touch_keyboard_layout)
             .map_err(|e| e.to_string())?;
+        if self.is_private_or_secure() {
+            self.runtime.set_app_scope_key("general");
+        }
         let emoji_mru = (!options.user_data.is_empty())
             .then(|| std::path::PathBuf::from(&options.user_data).join("emoji_mru.json"));
         self.runtime.set_inline_emoji_projection(
@@ -2441,6 +2444,9 @@ pub(crate) fn dispatch_session_transition(
     // code; doing it per host would have meant six chances to forget.
     let position = selected_position(&action);
     let efficiency = position.and_then(|_| session.efficiency_candidate(&action));
+    if session.is_private_or_secure() {
+        session.runtime.set_app_scope_key("general");
+    }
     let result = session.runtime.dispatch(action).map_err(|e| e.to_string());
     // 报错前 runtime 可能已经改了组字，生命周期照样收尾。
     let mut result = session.lifecycle_on_error(pending, result)?;

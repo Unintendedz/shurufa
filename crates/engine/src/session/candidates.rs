@@ -17,8 +17,8 @@ use crate::types::{
 };
 use crate::user_dictionary::journal::has_matching_user_weight;
 use crate::user_dictionary::overlay::{
-    apply_personal_overlay, effective_bayesian_weights, personal_cache_log_bonus, unix_now_seconds,
-    AppScope,
+    apply_personal_overlay_scoped, effective_bayesian_weights_scoped, personal_cache_log_bonus,
+    unix_now_seconds,
 };
 use crate::user_dictionary::positions::{
     apply_fixed_positions_with_state, clear_fixed_position_with_pin_context, is_pinned_candidate,
@@ -149,10 +149,11 @@ impl InputSession {
         {
             let entry_key = self.pinyin_ranking_context();
             let pinned = pinned_candidate_for(self.journal_path(), &entry_key);
-            let outcome = apply_personal_overlay(
+            let outcome = apply_personal_overlay_scoped(
                 self.journal_path(),
                 &entry_key,
                 pinned.as_deref(),
+                self.app_scope,
                 &mut decoded,
                 unix_now_seconds(),
             );
@@ -341,7 +342,13 @@ impl InputSession {
             return None;
         }
         let effective_weights = self.decoupled_personal_learning.then(|| {
-            effective_bayesian_weights(journal, &context, &refs[..count], unix_now_seconds())
+            effective_bayesian_weights_scoped(
+                journal,
+                &context,
+                &refs[..count],
+                self.app_scope,
+                unix_now_seconds(),
+            )
         });
         let effective_weights = effective_weights.flatten();
         let best = self.engine.pick_dictionary_homophone(
@@ -1080,7 +1087,7 @@ impl InputSession {
                     journal,
                     &rank_context,
                     &item.word,
-                    AppScope::General,
+                    self.app_scope,
                     now_unix,
                 );
             }

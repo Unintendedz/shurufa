@@ -109,10 +109,15 @@ pub extern "C" fn msime_client_key(handle: u64, key: u32) -> u32 {
 #[no_mangle]
 pub extern "C" fn msime_client_set_field_traits(handle: u64, traits: u32) -> u32 {
     with_host_session(handle, 0, |session| {
-        session
+        let applied = session
             .lifecycle
             .as_deref_mut()
-            .map_or(0, |state| state.set_traits(&session.sound, traits))
+            .map_or(0, |state| state.set_traits(&session.sound, traits));
+        // 安全或隐私输入框期间强制复位场景桶为 `general`，避免泄露或学习密码框场景习惯。
+        if applied & (lifecycle::TRAIT_SECURE | lifecycle::TRAIT_PRIVATE) != 0 {
+            session.runtime.set_app_scope_key("general");
+        }
+        applied
     })
 }
 
