@@ -30,9 +30,7 @@ use crate::quanpin::dictionary::{
 };
 use crate::quanpin::series::fold_reading;
 use crate::text::last_characters;
-use crate::types::{
-    CandidateSource, SentenceAssociationOptions, ShuangpinProfileKind, WordItem,
-};
+use crate::types::{CandidateSource, SentenceAssociationOptions, ShuangpinProfileKind, WordItem};
 use crate::user_dictionary::ngram_store::PersonalNgramStore;
 
 // 双拼前缀候选的短合并直接扫描已有词，避免临时哈希表和重复索引分配。
@@ -644,8 +642,8 @@ fn append_prefix_rows(candidates: &mut Vec<WordItem>, prefix_rows: Vec<Vec<WordI
 #[cfg(test)]
 mod tests {
     use super::{
-        append_prefix_rows, prefix_group_count, typo_codes, typo_sentence_seat, ShuangpinDictionary,
-        INLINE_TYPO_CODES, SHUANGPIN_TYPO_TYPES,
+        append_prefix_rows, prefix_group_count, typo_codes, typo_sentence_seat,
+        ShuangpinDictionary, INLINE_TYPO_CODES, SHUANGPIN_TYPO_TYPES,
     };
     use crate::shuangpin::profile::profile;
     use crate::types::{CandidateSource, WordItem};

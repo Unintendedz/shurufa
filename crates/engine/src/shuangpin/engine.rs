@@ -113,9 +113,9 @@ impl ShuangpinEngine {
             return Vec::new();
         }
         let segmentation = segment_input(raw, self.profile);
-        let exact = self
-            .dictionary
-            .generate_series(&remove_manual_delimiters(raw), &segmentation, raw);
+        let exact =
+            self.dictionary
+                .generate_series(&remove_manual_delimiters(raw), &segmentation, raw);
         let mut candidates = self.append_fuzzy(exact, &segmentation, request.fuzzy_pinyin);
         keep_typo_sentence_off_first_seat(&mut candidates);
         candidates

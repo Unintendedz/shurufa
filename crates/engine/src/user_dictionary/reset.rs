@@ -108,11 +108,7 @@ pub fn reset_learned_data_with(paths: &RuntimePaths, main_dictionary: bool) -> R
     }
 }
 
-fn swap(
-    replacements: &mut [Replacement],
-    sources: &[PathBuf],
-    journal: &Path,
-) -> Result<()> {
+fn swap(replacements: &mut [Replacement], sources: &[PathBuf], journal: &Path) -> Result<()> {
     // A plain copy, as the reference made: the packaged bundle is immutable, so it has no WAL to lose.
     for (source, replacement) in sources.iter().zip(replacements.iter()) {
         copy_private_file(source, &replacement.temporary)

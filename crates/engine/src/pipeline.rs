@@ -15,7 +15,9 @@ use crate::neural_v2::{
     NeuralDecodeResponse, NeuralFusionOutcome, NeuralFusionWeights,
 };
 use crate::ordering::StaticEvidence;
-use crate::slot_allocator::{allocate_slots, AllocatedSlot, SlotBudget, SlotCandidate, SlotCandidateKind};
+use crate::slot_allocator::{
+    allocate_slots, AllocatedSlot, SlotBudget, SlotCandidate, SlotCandidateKind,
+};
 use crate::types::CandidateSource;
 
 /// 单次会话内已选定并暂存在预编辑区中的词段（`locked_prefix` 组成单元）。
@@ -233,7 +235,8 @@ impl CandidateEntry {
 
     /// 用当前视图代次刷新 [`CandidateId`]。
     pub fn stamp_generation(&mut self, generation: u64) {
-        self.id = CandidateId::for_entry(generation, self.kind, &self.text, &self.code, self.source);
+        self.id =
+            CandidateId::for_entry(generation, self.kind, &self.text, &self.code, self.source);
     }
 }
 

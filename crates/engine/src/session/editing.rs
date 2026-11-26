@@ -205,7 +205,9 @@ impl InputSession {
             return self.literal_raw_boundaries();
         }
         match self.engine.current_scheme_type() {
-            SchemeType::Shuangpin => segment_raw_boundaries(raw_with_cases, self.shuangpin_profile()),
+            SchemeType::Shuangpin => {
+                segment_raw_boundaries(raw_with_cases, self.shuangpin_profile())
+            }
             SchemeType::Quanpin => quanpin_raw_boundaries(
                 raw_with_cases,
                 self.pinyin_segmentation_with_cases().as_ref(),

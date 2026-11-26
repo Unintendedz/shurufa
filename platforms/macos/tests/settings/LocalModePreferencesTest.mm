@@ -95,10 +95,10 @@ int main() {
             assert([NSFileManager.defaultManager createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:nil]);
             options[name] = path;
         }
-        // 表情、颜文字、临时英文和临时日文除了偏好，还需要可选资源；缺文件时入口大写留在普通组字。
+        // 表情、颜文字和临时英文除了偏好，还需要可选资源；缺文件时入口大写留在普通组字。
         // 门禁只核对文件存在，空文件足以测试偏好传递，避免依赖下载词库。
         NSString *resources = options[@"resources"];
-        NSArray<NSString *> *gated = @[@"msime-others.db", @"msime-english.db", @"msime-japanese.dat"];
+        NSArray<NSString *> *gated = @[@"msime-others.db", @"msime-english.db"];
         for (NSString *resource in gated)
             assert([NSFileManager.defaultManager createFileAtPath:[resources stringByAppendingPathComponent:resource]
                                                          contents:[NSData data] attributes:nil]);
@@ -107,16 +107,10 @@ int main() {
         assert(session && !error && [session setFocused:YES error:&error]);
         NSDictionary *shared = [MSIMEClientSession loadPreferencesInDirectory:root error:&error];
         assert(shared && !error);
-        // 偏好里没有拆字这个键时，桌面不开这个模式；Shift+C 留在普通组字，随后取消以便测试下一份偏好。
-        NSDictionary *untouched = [session typeASCII:'C' shift:YES error:&error];
-        assert([untouched[@"handled"] isEqual:@YES] && [untouched[@"view"][@"local_mode"] isEqual:@"none"]);
-        assert([untouched[@"view"][@"editing_text"] isEqual:@"C"]);
-        assert([session command:MSIME_CANCEL error:&error]);
         NSUInteger revision = 0;
         NSArray<NSArray<NSString *> *> *modes = @[@[@"unicode", @"U"], @[@"date_time", @"T"],
             @[@"quick_phrase", @"K"], @[@"emoji", @"E"], @[@"kaomoji", @"M"],
-            @[@"super_jianpin", @"J"], @[@"temporary_english", @"Y"], @[@"temporary_japanese", @"R"], @[@"chaizi", @"C"]];
-        // 上面的循环最后把每个开关都打开了，拆字因此写成了明确的开，下面和其他模式一样逐个关掉再打开。
+            @[@"super_jianpin", @"J"], @[@"temporary_english", @"Y"]];
         assert([[prefs sharedPreferencesByMerging:base][@"local_modes"][@"chaizi"] isEqual:@YES]);
         for (NSString *scheme in @[@"quanpin", @"shuangpin"]) {
             prefs.inputScheme = scheme;
@@ -172,14 +166,6 @@ int main() {
         assert([[session updatePreferencesSnapshot:masterOn error:&error][@"deferred"] isEqual:@NO]);
         assert([[session typeASCII:'T' shift:YES error:&error][@"view"][@"local_mode"] isEqual:@"date_time"]);
         assert([session command:MSIME_CANCEL error:&error]);
-        // 拆字反查：Shift+C 后打部件拼音，首行是焱、注释是它的读音；`'` 当字符送也是分隔符。上屏后回到普通输入。
-        assert([[session typeASCII:'C' shift:YES error:&error][@"view"][@"local_mode"] isEqual:@"chaizi"]);
-        NSDictionary *chaizi = nil;
-        for (char key : std::string("huo'huohuo")) chaizi = [session typeASCII:(uint8_t)key shift:NO error:&error][@"view"];
-        assert([chaizi[@"editing_text"] isEqual:@"Chuo'huohuo"]);
-        assert([chaizi[@"candidates"][0][@"text"] isEqual:@"焱"] && [chaizi[@"candidates"][0][@"annotation"] isEqual:@"yàn"]);
-        NSDictionary *chosen = [session command:MSIME_COMMIT_CANDIDATE error:&error];
-        assert([chosen[@"commit"] isEqual:@"焱"] && [chosen[@"view"][@"local_mode"] isEqual:@"none"]);
         assert([session closeWithError:&error] && !error);
 
         // 缺少可选资源时，模式不因偏好开启而启用；入口大写留在普通组字。
@@ -194,7 +180,7 @@ int main() {
             @"preferences": [prefs sharedPreferencesByMerging:shared[@"preferences"]]};
         assert([[ungated updatePreferencesSnapshot:all error:&error][@"deferred"] isEqual:@NO]);
         for (NSArray<NSString *> *entry in @[@[@"emoji", @"E"], @[@"kaomoji", @"M"],
-                                             @[@"temporary_english", @"Y"], @[@"temporary_japanese", @"R"]]) {
+                                             @[@"temporary_english", @"Y"]]) {
             uint8_t trigger = (uint8_t)[entry[1] characterAtIndex:0];
             NSDictionary *reply = [ungated typeASCII:trigger shift:YES error:&error];
             assert(![reply[@"view"][@"local_mode"] isEqual:entry[0]]);

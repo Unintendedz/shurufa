@@ -1,3 +1,4 @@
+#import "TestPreferenceSuite.h"
 #import "../../src/settings/ShurufaPreferenceMigration.h"
 #include <cassert>
 
@@ -117,6 +118,6 @@ int main() {
         document = @{@"revision":@7,@"preferences":@{@"mixed_input":@{@"emoji":@NO}}};
         assert(MSIMEMigrateShurufaInlineEmoji(defaults, load, save) && saves == 1);
         assert([document[@"preferences"][@"mixed_input"][@"emoji"] isEqual:@NO]);
-        [defaults removePersistentDomainForName:suite];
+        MSIMERemoveTestPreferenceSuite(defaults, suite);
     }
 }

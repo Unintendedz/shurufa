@@ -62,11 +62,13 @@ int main() {
             "系统还在其他输入法时不能抢回输入源。");
         require(MSIMESelectSystemInputMode(activation, MSIMEEnglishInputModeID, activationClient, Available, MSIMEChineseInputModeID),
             "本输入法内部的显式中英文切换应继续工作。");
-        // 版本身份：没有 MSIMEEdition 的 Info.plist（full 的，以及不是 bundle 的测试进程）每个值都是 full 今天的那个；声明了版本的取 plist 里的值。
-        NSDictionary *wubi = @{@"MSIMEEdition": @"wubi", @"CFBundleIdentifier": @"app.msime.inputmethod.wubi",
-                               @"MSIMEInputSchemes": @[@"wubi"], @"MSIMEDefaultScheme": @"wubi",
-                               @"MSIMESettingsBundleIdentifier": @"app.msime.macos.wubi",
-                               @"MSIMEKeychainService": @"com.metasequoia.msime.wubi.account", @"MSIMEWubiMixedPinyinDefault": @YES};
+        // 版本身份：没有 MSIMEEdition 的 Info.plist（测试基线 `full`）取默认标识；声明了 `shurufa` 版本的取 plist 里的值。
+        NSDictionary *shurufa = @{@"MSIMEEdition": @"shurufa", @"CFBundleIdentifier": @"dev.shurufa.inputmethod.Shurufa",
+                                  @"MSIMEInputSchemes": @[@"quanpin", @"shuangpin"], @"MSIMEDefaultScheme": @"quanpin",
+                                  @"MSIMESettingsBundleIdentifier": @"dev.shurufa.settings",
+                                  @"MSIMEStateDirectoryName": @"Shurufa",
+                                  @"MSIMELocalVoiceHelperName": @"shurufa-voice-local",
+                                  @"MSIMEKeychainService": @"dev.shurufa.account"};
         require([MSIMEEditionIdentifierIn(@{}) isEqualToString:@"full"] && MSIMEEditionIsFullIn(@{@"CFBundleIdentifier": @"x"}) &&
                     [MSIMEInputMethodBundleIdentifierIn(@{@"CFBundleIdentifier": @"x"}) isEqualToString:@"app.msime.inputmethod.MetasequoiaIME"] &&
                     [MSIMESettingsBundleIdentifierIn(@{}) isEqualToString:@"app.msime.macos"] &&
@@ -75,34 +77,36 @@ int main() {
                     !MSIMEEditionWubiMixedPinyinDefaultIn(@{@"MSIMEWubiMixedPinyinDefault": @YES}) &&
                     [MSIMEEditionNotificationNameIn(@{}, @"N") isEqualToString:@"N"],
                 "An Info.plist without an edition did not read as full.");
-        require([MSIMEEditionIdentifierIn(wubi) isEqualToString:@"wubi"] &&
-                    [MSIMEInputMethodBundleIdentifierIn(wubi) isEqualToString:@"app.msime.inputmethod.wubi"] &&
-                    [MSIMESettingsBundleIdentifierIn(wubi) isEqualToString:@"app.msime.macos.wubi"] &&
-                    [MSIMEKeychainServiceIn(wubi) isEqualToString:@"com.metasequoia.msime.wubi.account"] &&
-                    [MSIMEEditionInputSchemesIn(wubi) isEqualToArray:@[@"wubi"]] && [MSIMEEditionDefaultSchemeIn(wubi) isEqualToString:@"wubi"] &&
-                    MSIMEEditionWubiMixedPinyinDefaultIn(wubi) && [MSIMEEditionNotificationNameIn(wubi, @"N") isEqualToString:@"N.wubi"],
-                "The wubi edition's Info.plist did not give the wubi identity.");
-        // 手写：full 和没写 MSIMEHandwriting 的版本都有；不提供中文方案的版本写了 false 就没有，full 不认这个键。
-        require(MSIMEEditionOffersHandwritingIn(@{}) && MSIMEEditionOffersHandwritingIn(wubi) &&
+        require([MSIMEEditionIdentifierIn(shurufa) isEqualToString:@"shurufa"] && MSIMEEditionIsShurufaIn(shurufa) &&
+                    [MSIMEInputMethodBundleIdentifierIn(shurufa) isEqualToString:@"dev.shurufa.inputmethod.Shurufa"] &&
+                    [MSIMESettingsBundleIdentifierIn(shurufa) isEqualToString:@"dev.shurufa.settings"] &&
+                    [MSIMEStateDirectoryNameIn(shurufa) isEqualToString:@"Shurufa"] &&
+                    [MSIMELocalVoiceHelperNameIn(shurufa) isEqualToString:@"shurufa-voice-local"] &&
+                    [MSIMEKeychainServiceIn(shurufa) isEqualToString:@"dev.shurufa.account"] &&
+                    ([MSIMEEditionInputSchemesIn(shurufa) isEqualToArray:@[@"quanpin", @"shuangpin"]]) &&
+                    [MSIMEEditionDefaultSchemeIn(shurufa) isEqualToString:@"quanpin"] &&
+                    [MSIMEEditionNotificationNameIn(shurufa, @"N") isEqualToString:@"N.shurufa"],
+                "The shurufa edition's Info.plist did not give the shurufa identity.");
+        // 手写：基础策略默认开；`shurufa` 在 Info.plist 显式声明 `MSIMEHandwriting = NO`。
+        require(MSIMEEditionOffersHandwritingIn(@{}) && MSIMEEditionOffersHandwritingIn(shurufa) &&
                     MSIMEEditionOffersHandwritingIn(@{@"MSIMEHandwriting": @NO}) &&
-                    !MSIMEEditionOffersHandwritingIn(@{@"MSIMEEdition": @"vietnamese", @"MSIMEHandwriting": @NO}) &&
-                    MSIMEEditionOffersHandwritingIn(@{@"MSIMEEdition": @"pinyin", @"MSIMEHandwriting": @YES}),
+                    !MSIMEEditionOffersHandwritingIn(@{@"MSIMEEdition": @"shurufa", @"MSIMEHandwriting": @NO}),
                 "Handwriting did not follow the edition's MSIMEHandwriting declaration.");
-        // 语音服务凭据和使用统计目录：full 沿用今天的名字，其他版本各有各的，语音服务名正是卸载时删掉的 `<bundle id>.voice`。
+        // 语音服务凭据和使用统计目录。
         require([MSIMEVoiceProviderKeychainServiceIn(@{}) isEqualToString:@"app.msime.client.voice.providers"] &&
-                    [MSIMEVoiceProviderKeychainServiceIn(wubi) isEqualToString:[wubi[@"CFBundleIdentifier"] stringByAppendingString:@".voice"]] &&
+                    [MSIMEVoiceProviderKeychainServiceIn(shurufa) isEqualToString:@"dev.shurufa.inputmethod.Shurufa.voice"] &&
                     [MSIMEUsageReportingDirectoryNameIn(@{}) isEqualToString:@"MSIME/telemetry"] &&
-                    [MSIMEUsageReportingDirectoryNameIn(wubi) isEqualToString:@"MSIME/wubi/telemetry"],
+                    [MSIMEUsageReportingDirectoryNameIn(shurufa) isEqualToString:@"Shurufa/telemetry"],
                 "The voice provider keychain service or the usage reporting directory did not follow the edition.");
-        // 卸载按 bundle 文件名找要移走的 bundle：五笔版只能是它自己的，名字缺了时宁可不卸载也不退回 full 的。
-        NSMutableDictionary *named = [wubi mutableCopy];
-        named[@"CFBundleExecutable"] = @"水杉五笔";
-        named[@"CFBundleDisplayName"] = @"水杉五笔";
+        // 卸载按 bundle 文件名找要移走的 bundle：缺少 executable 时不退回 `full`。
+        NSMutableDictionary *named = [shurufa mutableCopy];
+        named[@"CFBundleExecutable"] = @"Shurufa";
+        named[@"CFBundleDisplayName"] = @"Shurufa";
         require([MSIMEInputMethodBundleNameIn(@{}) isEqualToString:@"水杉输入法.app"] &&
-                    [MSIMEInputMethodBundleNameIn(named) isEqualToString:@"水杉五笔.app"] &&
-                    MSIMEInputMethodBundleNameIn(wubi) == nil &&
+                    [MSIMEInputMethodBundleNameIn(named) isEqualToString:@"Shurufa.app"] &&
+                    MSIMEInputMethodBundleNameIn(shurufa) == nil &&
                     [MSIMEEditionDisplayNameIn(@{}) isEqualToString:@"水杉输入法"] &&
-                    [MSIMEEditionDisplayNameIn(named) isEqualToString:@"水杉五笔"],
+                    [MSIMEEditionDisplayNameIn(named) isEqualToString:@"Shurufa"],
                 "The bundle file name or the display name did not follow the edition.");
         require(MSIMEEditionIsFull() && MSIMEEditionOffersScheme(@"tibetan") && !MSIMEEditionOffersScheme(@"klingon") &&
                     [MSIMEEffectiveInputScheme(@"cantonese", @"klingon", @{}) isEqualToString:@"quanpin"],
@@ -115,29 +119,31 @@ int main() {
         require([MSIMEInputModeID(MSIMEInputModeFor(NO, @"shuangpin")) isEqualToString:@"app.msime.inputmethod.MetasequoiaIME.Shuangpin"] &&
                     [MSIMEInputModeID(MSIMEInputModeFor(NO, @"wubi")) isEqualToString:@"app.msime.inputmethod.MetasequoiaIME.Wubi"],
                 "The shuangpin and wubi schemes do not map to the modes Info.plist.in declares.");
-        // 五笔版只声明 .Hans 和 .Roman，五笔的名字和图标在 .Hans 上：设置窗口检查菜单栏入口时不能去找一个不存在的 .Wubi，否则提示永远消不掉。full 每个方案仍是它自己的模式。
-        NSDictionary *wubiModes = @{@"MSIMEEdition": @"wubi", @"ComponentInputModeDict": @{@"tsInputModeListKey": @{
-            MSIMEChineseInputModeID: @{}, MSIMEEnglishInputModeID: @{}}}};
-        require(MSIMEInputModeDeclaredIn(@{}, MSIMETibetanInputModeID) && MSIMEInputModeDeclaredIn(wubiModes, MSIMEChineseInputModeID) &&
-                    !MSIMEInputModeDeclaredIn(wubiModes, MSIMEWubiInputModeID) && !MSIMEInputModeDeclaredIn(@{@"MSIMEEdition": @"wubi"}, MSIMEChineseInputModeID) &&
-                    [MSIMEInputModeIDForSchemeIn(wubiModes, @"wubi") isEqualToString:MSIMEChineseInputModeID] &&
+        // Shurufa 只声明 .Hans 和 .Shuangpin，不声明 .Wubi 或 .Roman：设置窗口查找模式和图标时应落在 .Hans，full 仍拥有全部模式。
+        NSDictionary *shurufaModes = @{@"MSIMEEdition": @"shurufa", @"ComponentInputModeDict": @{@"tsInputModeListKey": @{
+            MSIMEChineseInputModeID: @{}, MSIMEShuangpinInputModeID: @{}}}};
+        require(MSIMEInputModeDeclaredIn(@{}, MSIMETibetanInputModeID) && MSIMEInputModeDeclaredIn(shurufaModes, MSIMEChineseInputModeID) &&
+                    MSIMEInputModeDeclaredIn(shurufaModes, MSIMEShuangpinInputModeID) &&
+                    !MSIMEInputModeDeclaredIn(shurufaModes, MSIMEWubiInputModeID) && !MSIMEInputModeDeclaredIn(@{@"MSIMEEdition": @"shurufa"}, MSIMEChineseInputModeID) &&
+                    [MSIMEInputModeIDForSchemeIn(shurufaModes, @"wubi") isEqualToString:MSIMEChineseInputModeID] &&
+                    [MSIMEInputModeIDForSchemeIn(shurufaModes, @"shuangpin") isEqualToString:MSIMEShuangpinInputModeID] &&
                     [MSIMEInputModeIDForSchemeIn(@{}, @"wubi") isEqualToString:MSIMEWubiInputModeID] &&
                     [MSIMEInputModeIDForSchemeIn(@{}, @"shuangpin") isEqualToString:MSIMEShuangpinInputModeID],
                 "The settings window would look for a mode the edition does not declare.");
-        // 菜单栏状态项（#7066）的图标与系统输入法菜单同一张：full 每个模式各有自己的，「英」是 English.tiff；五笔版没有 .Wubi，取 .Hans 上的五笔图标；缺项时回退到输入法本身的图标。
+        // 菜单栏状态项（#7066）的图标与系统输入法菜单同一张：full 每个模式各有自己的，「英」是 English.tiff；Shurufa 没有 .Wubi，回退取 .Hans 上的中文图标；缺项时回退到输入法本身的图标。
         NSDictionary *fullIcons = @{@"ComponentInputModeDict": @{@"tsInputModeListKey": @{
             MSIMEChineseInputModeID: @{@"tsInputModeMenuIconFileKey": @"MSIMEClientInputMethodMenuIconChinese.tiff"},
             MSIMEShuangpinInputModeID: @{@"tsInputModeMenuIconFileKey": @"MSIMEClientInputMethodMenuIconShuangpin.tiff"},
             MSIMEEnglishInputModeID: @{@"tsInputModeMenuIconFileKey": @"MSIMEClientInputMethodMenuIconEnglish.tiff"}}},
             @"tsInputMethodIconFileKey": @"MSIMEClientInputMethodMenuIcon.tiff"};
-        NSDictionary *wubiIcons = @{@"MSIMEEdition": @"wubi", @"ComponentInputModeDict": @{@"tsInputModeListKey": @{
-            MSIMEChineseInputModeID: @{@"tsInputModeMenuIconFileKey": @"MSIMEClientInputMethodMenuIconWubi.tiff"},
-            MSIMEEnglishInputModeID: @{@"tsInputModeMenuIconFileKey": @"MSIMEClientInputMethodMenuIconEnglish.tiff"}}}};
+        NSDictionary *shurufaIcons = @{@"MSIMEEdition": @"shurufa", @"ComponentInputModeDict": @{@"tsInputModeListKey": @{
+            MSIMEChineseInputModeID: @{@"tsInputModeMenuIconFileKey": @"MSIMEClientInputMethodMenuIconChinese.tiff"},
+            MSIMEShuangpinInputModeID: @{@"tsInputModeMenuIconFileKey": @"MSIMEClientInputMethodMenuIconShuangpin.tiff"}}}};
         require([MSIMEInputModeMenuIconFileIn(fullIcons, MSIMEEnglishInputModeID) isEqualToString:@"MSIMEClientInputMethodMenuIconEnglish.tiff"] &&
                     [MSIMEInputModeMenuIconFileIn(fullIcons, MSIMEChineseInputModeID) isEqualToString:@"MSIMEClientInputMethodMenuIconChinese.tiff"] &&
                     [MSIMEInputModeMenuIconFileIn(fullIcons, MSIMEShuangpinInputModeID) isEqualToString:@"MSIMEClientInputMethodMenuIconShuangpin.tiff"] &&
-                    [MSIMEInputModeMenuIconFileIn(wubiIcons, MSIMEWubiInputModeID) isEqualToString:@"MSIMEClientInputMethodMenuIconWubi.tiff"] &&
-                    [MSIMEInputModeMenuIconFileIn(wubiIcons, MSIMEEnglishInputModeID) isEqualToString:@"MSIMEClientInputMethodMenuIconEnglish.tiff"],
+                    [MSIMEInputModeMenuIconFileIn(shurufaIcons, MSIMEWubiInputModeID) isEqualToString:@"MSIMEClientInputMethodMenuIconChinese.tiff"] &&
+                    [MSIMEInputModeMenuIconFileIn(shurufaIcons, MSIMEShuangpinInputModeID) isEqualToString:@"MSIMEClientInputMethodMenuIconShuangpin.tiff"],
                 "The menu bar status item would not show the icon the input menu shows for the mode.");
         require([MSIMEInputModeMenuIconFileIn(@{@"ComponentInputModeDict": @{@"tsInputModeListKey": @{}}, @"tsInputMethodIconFileKey": @"Custom.tiff"}, MSIMEJapaneseInputModeID) isEqualToString:@"Custom.tiff"] &&
                     [MSIMEInputModeMenuIconFileIn(@{}, MSIMEEnglishInputModeID) isEqualToString:@"MSIMEClientInputMethodMenuIcon.tiff"] &&

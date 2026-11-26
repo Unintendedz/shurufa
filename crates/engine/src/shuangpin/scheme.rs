@@ -47,15 +47,14 @@ impl ShuangpinScheme {
                 self.raw.push(char::from(letter));
                 true
             }
-            SchemeKey::Letter(_) | SchemeKey::Symbol(_) | SchemeKey::Requery => {
-                false
-            }
+            SchemeKey::Letter(_) | SchemeKey::Symbol(_) | SchemeKey::Requery => false,
         }
     }
 
     /// `;` 只能是一个音节的第二个键（接在自上一 `'` 起奇数长度的片段之后）。
     fn accepts_ing_key(&self) -> bool {
-        self.profile.uses_semicolon_key() && self.raw.rsplit('\'').next().unwrap_or("").len() % 2 == 1
+        self.profile.uses_semicolon_key()
+            && self.raw.rsplit('\'').next().unwrap_or("").len() % 2 == 1
     }
 
     #[cfg(test)]

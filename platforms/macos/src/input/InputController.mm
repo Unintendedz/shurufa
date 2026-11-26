@@ -12,17 +12,12 @@
 #import "../candidate/CandidateGlossSenses.h"
 #import "InputSourceRegistration.h"
 #import "InputControllerActivity.h"
-#import "../core/UpdateController.h"
 #include "../../../common/DictionaryQuiesceLease.h"
-#import "../core/ScreenKeyboardPanel.h"
 #import "../dictionary/DictionaryWindowController.h"
 #import "../core/ClientDictionaryRuntime.h"
 #import "../settings/AppearancePreferences.h"
 #import "InputMenu.h"
 #import "../settings/PreferencesWindowController.h"
-#import "../core/DesktopSettingsLauncher.h"
-#import "../core/DesktopInputSession.h"
-#import "../core/DesktopCloudClipboard.h"
 #import "../core/SharedVoicePreferences.h"
 #import "../voice/VoiceProviderOptions.h"
 #import "../voice/VoiceTextCommit.h"
@@ -46,8 +41,6 @@
 #include <time.h>
 #import "../voice/VoiceFailureMessages.h"
 #import "../core/SupportWindowController.h"
-#include "../core/ToolTextReturn.h"
-#include "../core/ToolApplicationActivation.h"
 #include "../core/AXPrecedingContext.h"
 #import "../candidate/CandidateChrome.h"
 #import "../candidate/CandidatePointerMenu.h"
@@ -73,7 +66,6 @@
 #include "../core/EditableShiftFocus.h"
 #include "../core/VimMode.h"
 #import "../settings/ShuangpinKeymapPanel.h"
-#import "../core/FloatingToolbarPanel.h"
 #import "InputModeHUDPanel.h"
 #import "InputModeStatusItem.h"
 #import "TypingEffectPanel.h"
@@ -1515,7 +1507,7 @@ static constexpr uint64_t MSIMESessionRecoveryNoticeInterval = 60 * NSEC_PER_SEC
 - (void)later:(id)sender { [self.recoveryDelegate dismissSessionRecoveryNotice:sender]; }
 @end
 
-@interface MSIMEInputController : IMKInputController <MSIMEFloatingToolbarDelegate, MSIMEInputSessionRecoveryDelegate, NSAnimationDelegate>
+@interface MSIMEInputController : IMKInputController <MSIMEInputSessionRecoveryDelegate, NSAnimationDelegate>
 - (MSIMECustomTranslationBatch *)aiBatchForItems:(NSArray<NSDictionary *> *)items
                                        completion:(void (^)(NSArray<NSDictionary *> *))completion;
 - (NSDictionary *)recoverPreferencesInDirectory:(NSString *)directory error:(NSError **)error;
@@ -1633,10 +1625,6 @@ static NSImage *MSIMECandidateLogoImage() {
     id _activeClient;
     NSAppearance *_candidateHostAppearance;
     __weak id _candidateChromeClient;
-    MSIMEToolTextReturn _emojiReturn;
-    MSIMEDesktopInputSession *_desktopInputSession;
-    MSIMEPanelTextCompletion _desktopEmojiCompletion;
-    double _desktopEmojiDeadline;
     shurufa::mac::ViewState _viewState;
     shurufa::mac::ViewState _renderedCandidateState;
     // 上一次请求读屏朗读的高亮候选（它的 accessibilityLabel），同一段话不重复读；候选窗收起后再出现时清掉。
@@ -1658,7 +1646,6 @@ static NSImage *MSIMECandidateLogoImage() {
     BOOL _candidateFollowCursorMode;
     BOOL _candidateFollowCursorModeKnown;
     MSIMEShuangpinKeymapPanel *_keymapPanel;
-    MSIMEFloatingToolbarPanel *_toolbar;
     NSString *_preferencesDirectory;
     NSTimer *_preferencesTimer;
     uint64_t _preferenceLoadGeneration;
@@ -3816,7 +3803,6 @@ BOOL MSIMEInputControllerHasUnfinishedInput(void) {
     [self resetPreferenceLoadState];
     [self applySharedToolbarPreferences:notification.userInfo];
     [self syncCurrentViewFromSession];
-    [self refreshFloatingToolbarState];
     if (_activeClient) { [self renderCandidates]; [self reloadPreferences]; }
 }
 // 视图里正在跑的方案的标识，按引擎顺序编号：quanpin、shuangpin、wubi、japanese、korean、cantonese、zhuyin、vietnamese、tibetan、stroke。
@@ -3825,7 +3811,7 @@ BOOL MSIMEInputControllerHasUnfinishedInput(void) {
     const NSInteger index = MSIMEViewScheme(_viewState);
     return index >= 0 && index < (NSInteger)schemes.count ? schemes[index] : MSIMEEditionDefaultScheme();
 }
-// 悬浮工具栏和候选窗首行显示的方案名，双拼带上它的方案（如「小鹤双拼」）。
+// 候选窗首行等界面显示的方案名，双拼带上它的方案（如「小鹤双拼」）。
 - (NSString *)schemeTitleForScheme:(NSString *)scheme {
     NSString *profile = _viewState.shuangpinProfile.length ? _viewState.shuangpinProfile : _appearance.shuangpinProfile;
     NSDictionary<NSString *, NSString *> *schemeTitles = @{
@@ -3841,19 +3827,6 @@ BOOL MSIMEInputControllerHasUnfinishedInput(void) {
         @"stroke": @"笔画",
     };
     return schemeTitles[scheme];
-}
-- (void)refreshFloatingToolbarState {
-    if (!_toolbar || !_appearance) return;
-    const BOOL englishCandidateMode = _viewState.dedicatedEnglish && !_appearance.englishMode;
-    NSString *scheme = [self viewSchemeName];
-    [_toolbar updateEnglishInputMode:_appearance.englishMode
-             englishCandidateMode:englishCandidateMode
-                              scheme:scheme
-                         schemeTitle:[self schemeTitleForScheme:scheme]
-                            capsLock:_capsLock
-              chinesePunctuationEnabled:_appearance.runtimeChinesePunctuation
-                       fullWidthEnabled:_appearance.runtimeFullWidthInput
-        traditionalChineseOutputEnabled:_appearance.traditionalOutput];
 }
 - (void)appearanceChanged:(NSNotification *)notification {
     (void)notification;
@@ -3878,14 +3851,7 @@ BOOL MSIMEInputControllerHasUnfinishedInput(void) {
     [self syncPageSize];
     [self syncPunctuation];
     [self syncCharacterWidth];
-    [_toolbar applyLightSkin:[_appearance resolvedSkinForDark:NO].tokens darkSkin:[_appearance resolvedSkinForDark:YES].tokens];
-    [_toolbar applyLightToolbarSkin:[_appearance toolbarSkinForDark:NO]
-                            darkSkin:[_appearance toolbarSkinForDark:YES]];
-    [_toolbar applyLightToolbarImage:[_appearance resolvedSkinForDark:NO].toolbarImage
-                             darkSkin:[_appearance resolvedSkinForDark:YES].toolbarImage];
-    [self refreshFloatingToolbarState];
     if (_activeClient) [self renderCandidates];
-    if (_activeClient) [_toolbar setVisible:_appearance.floatingToolbarEnabled forDelegate:self];
     if (_activeClient) [self syncSystemInputModeForClient:_activeClient];
     else if (_appearance && !_appearance.inputModeStatusItem) [self presentInputModeStatusItem:nil];
 }
@@ -4014,7 +3980,6 @@ BOOL MSIMEInputControllerHasUnfinishedInput(void) {
     if (_capsLock == capsLock) return;
     _capsLock = capsLock;
     [self syncCapsLock];
-    [self refreshFloatingToolbarState];
 }
 - (void)cancelCapsLockTap {
     _capsLockTap.reset();
@@ -4213,10 +4178,6 @@ BOOL MSIMEInputControllerHasUnfinishedInput(void) {
     }
     return schemeMenu;
 }
-- (NSMenu *)floatingToolbarInputSchemeMenu:(MSIMEFloatingToolbarPanel *)toolbar {
-    (void)toolbar;
-    return [self inputSchemeMenuWithCurrentTitle:nullptr];
-}
 - (NSMenu *)menu {
     [self ensureAppearance];
     NSMenu *menu = [[NSMenu alloc] initWithTitle:MSIMEEditionDisplayName()];
@@ -4290,26 +4251,11 @@ BOOL MSIMEInputControllerHasUnfinishedInput(void) {
     theme.submenu = themes;
     [menu addItem:theme];
     [menu addItem:NSMenuItem.separatorItem];
-    // The floating toolbar is one click from the language bar in the reference - the first item of its tray menu, with a tick showing the state. Here it could only be reached by opening the settings window and finding a checkbox, which is a long way round for something the user turns on and off while typing.
-    NSMenuItem *toolbar = [[NSMenuItem alloc] initWithTitle:@"悬浮工具栏" action:@selector(toggleFloatingToolbar:) keyEquivalent:@""];
-    toolbar.target = self;
-    toolbar.state = _appearance.floatingToolbarEnabled ? NSControlStateValueOn : NSControlStateValueOff;
-    [menu addItem:toolbar];
 
-    // Keep the live input tools one click away. Account, update and support destinations stay in the settings window; listing those management pages here made this menu taller than the screen, but hiding the tools behind a second submenu made the useful part too hard to reach.
+    // 保留直接从输入法菜单触发的常用输入工具入口。
     NSMenuItem *emoji = [[NSMenuItem alloc] initWithTitle:@"水杉表情面板…" action:@selector(showEmoji:) keyEquivalent:@""];
     emoji.target = self;
     [menu addItem:emoji];
-    // The cloud clipboard panel pastes into the editor like the emoji panel's clipboard page, so it sits beside it; the account, sync switch and history management stay in the settings window.
-    NSMenuItem *cloudClipboard = [[NSMenuItem alloc] initWithTitle:@"云剪贴板…" action:@selector(showCloudClipboard:) keyEquivalent:@""];
-    cloudClipboard.target = self;
-    [menu addItem:cloudClipboard];
-    NSMenuItem *cloudDictionary = [[NSMenuItem alloc] initWithTitle:@"云词库…" action:@selector(showCloudDictionary:) keyEquivalent:@""];
-    cloudDictionary.target = self;
-    [menu addItem:cloudDictionary];
-    NSMenuItem *keyboard = [[NSMenuItem alloc] initWithTitle:@"水杉屏幕键盘…" action:@selector(showScreenKeyboard:) keyEquivalent:@""];
-    keyboard.target = self;
-    [menu addItem:keyboard];
     // 手写模型只认汉字，不提供手写的版本（日文、越南文和藏文版）菜单里没有这一项。
     if (MSIMEEditionOffersHandwriting()) {
         NSMenuItem *handwriting = [[NSMenuItem alloc] initWithTitle:@"手写输入…" action:@selector(showHandwriting:) keyEquivalent:@""];
@@ -4351,34 +4297,10 @@ BOOL MSIMEInputControllerHasUnfinishedInput(void) {
 }
 - (void)showAccount:(id)sender {
     (void)sender;
-    MSIMEOpenDesktopRoute(@"settings:account", NSWorkspace.sharedWorkspace, ^{
-        NSAlert *alert = [[NSAlert alloc] init];
-        alert.messageText = @"账号窗口暂不可用";
-        alert.informativeText = @"请重新启动输入法；若仍无法打开，请检查安装是否完整。";
-        [alert runModal];
-    });
-}
-- (void)showCloudClipboard:(id)sender {
-    if (MSIMEEditionIsShurufa()) return;
-    // Cloud history is never listed, let alone pasted, while a password field or a terminal's secure keyboard entry holds the keyboard.
-    if ([self secureEventInputActive]) { NSBeep(); return; }
-    NSRunningApplication *application = NSWorkspace.sharedWorkspace.frontmostApplication;
-    if (_activeClient && application &&
-        application.processIdentifier != NSProcessInfo.processInfo.processIdentifier &&
-        MSIMEToolApplicationMatches([(id<IMKTextInput>)_activeClient bundleIdentifier], application.bundleIdentifier)) {
-        [self showSharedTextTool:@"cloud-clipboard" options:[self runtimeOptions] bridge:nil];
-        return;
-    }
-    __weak MSIMEInputController *weakSelf = self;
-    MSIMEOpenDesktopCloudClipboard(MSIMERuntimeOptionsPath(), NSWorkspace.sharedWorkspace, ^{
-        [weakSelf showAccount:sender];
-    });
-}
-- (void)showCloudDictionary:(id)sender {
-    if (MSIMEEditionIsShurufa()) return;
-    (void)sender;
-    __weak MSIMEInputController *weakSelf = self;
-    MSIMEOpenDesktopCloudDictionary(MSIMERuntimeOptionsPath(), NSWorkspace.sharedWorkspace, ^{ [weakSelf showAccount:nil]; });
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"账号窗口暂不可用";
+    alert.informativeText = @"请重新启动输入法；若仍无法打开，请检查安装是否完整。";
+    [alert runModal];
 }
 - (void)showHandwriting:(id)sender {
     (void)sender;
@@ -4391,178 +4313,7 @@ BOOL MSIMEInputControllerHasUnfinishedInput(void) {
     [self showSystemCharacterPalette];
 }
 - (void)showVoicePanel {
-    NSString *providerSocket = MSIMEVoiceProviderSocket();
-    if (![providerSocket isKindOfClass:NSString.class] || !providerSocket.isAbsolutePath ||
-        ![[NSFileManager defaultManager] fileExistsAtPath:providerSocket]) {
-        // Direct macOS Speech/HTTP/Doubao providers remain native. The shared
-        // panel is only advertised when a session-scoped provider socket can
-        // actually serve its recognition requests.
-        [self toggleVoiceInput:nil];
-        return;
-    }
-    NSRunningApplication *application = NSWorkspace.sharedWorkspace.frontmostApplication;
-    id targetClient = _activeClient;
-    if (!targetClient || !application || application.processIdentifier == NSProcessInfo.processInfo.processIdentifier ||
-        !MSIMEToolApplicationMatches([(id<IMKTextInput>)targetClient bundleIdentifier], application.bundleIdentifier)) {
-        return;
-    }
-    // Match the native voice providers and the Windows session: voice starts
-    // from a committed Engine state, so panel text cannot be appended to a
-    // stale preedit or be resent after the panel closes.
-    if (_session) {
-        NSDictionary *finished = [_session command:MSIME_FINISH_COMPOSITION error:nil];
-        if (!finished) {
-            [self toggleVoiceInput:nil];
-            return;
-        }
-        [self apply:finished];
-    }
-    [_desktopInputSession stop];
-    _desktopInputSession = nil;
-    if (_desktopEmojiCompletion) {
-        _desktopEmojiCompletion(NO);
-        _desktopEmojiCompletion = nil;
-    }
-    __weak MSIMEInputController *weakSelf = self;
-    MSIMEDesktopInputSession *session = [[MSIMEDesktopInputSession alloc]
-        initWithTargetPID:application.processIdentifier
-        launchTime:application.launchDate.timeIntervalSince1970
-        handler:^(NSString *text, double deadline, MSIMEPanelTextCompletion completion) {
-            (void)deadline;
-            MSIMEInputController *controller = weakSelf;
-            if (!controller || application.terminated || controller->_activeClient != targetClient ||
-                NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier != application.processIdentifier ||
-                !text.length) {
-                completion(NO);
-                return;
-            }
-            NSDictionary *voiceOptions = MSIMEVoiceProviderOptions(@{}, NSUserDefaults.standardUserDefaults);
-            MSIMEVoiceCommitRoute route = MSIMECaptureVoiceCommit(voiceOptions[@"commit_mode"], targetClient);
-            // Text from outside the key path lands without passing the shadow, so the document answers next.
-            [controller invalidateSmartPunctuationShadow];
-            const MSIMEVoiceCommitOutcome outcome = route.deliver(text);
-            if (outcome == MSIMEVoiceCommitOutcome::stale) {
-                // The external editor lost focus after the panel submitted. The
-                // route may have posted a partial result, so never retry through IMK.
-                completion(NO);
-                return;
-            }
-            if (outcome == MSIMEVoiceCommitOutcome::posted) {
-                NSDictionary *options = controller->_session ? MSIMEStatisticsHostOptions(controller->_session) : @{};
-                MSIMERecordTypingStatistics(controller->_preferencesDirectory ?: options[@"preferences_directory"],
-                                            text, msime::mac::TypingSource::Voice);
-                completion(YES);
-                return;
-            }
-            @try {
-                [targetClient insertText:text replacementRange:NSMakeRange(NSNotFound, 0)];
-                NSDictionary *options = controller->_session ? MSIMEStatisticsHostOptions(controller->_session) : @{};
-                MSIMERecordTypingStatistics(controller->_preferencesDirectory ?: options[@"preferences_directory"],
-                                            text, msime::mac::TypingSource::Voice);
-                completion(YES);
-            } @catch (NSException *) {
-                completion(NO);
-            }
-        }];
-    _desktopInputSession = session;
-    dispatch_block_t fallback = ^{
-        [session stop];
-        MSIMEInputController *controller = weakSelf;
-        if (controller && controller->_activeClient == targetClient) [controller toggleVoiceInput:nil];
-    };
-    if (!session) {
-        fallback();
-        return;
-    }
-    MSIMEOpenDesktopRouteWithContext(@"voice", MSIMERuntimeOptionsPath(), session.launchEnvironment,
-        NSWorkspace.sharedWorkspace, ^(NSRunningApplication *peer) {
-            [session authorizePID:peer.processIdentifier stillValid:^BOOL { return !peer.terminated; }];
-        }, fallback);
-}
-- (void)showSharedTextTool:(NSString *)route options:(NSDictionary *)options bridge:(id)shared {
-    NSRunningApplication *application = NSWorkspace.sharedWorkspace.frontmostApplication;
-    if (!_activeClient || !application || application.processIdentifier == NSProcessInfo.processInfo.processIdentifier) return;
-    if (!MSIMEToolApplicationMatches([(id<IMKTextInput>)_activeClient bundleIdentifier], application.bundleIdentifier)) return;
-    [_desktopInputSession stop];
-    _desktopInputSession = nil;
-    if (_desktopEmojiCompletion) { _desktopEmojiCompletion(NO); _desktopEmojiCompletion = nil; }
-    const uint64_t token = _emojiReturn.capture(_activeClient);
-    __weak MSIMEInputController *weakSelf = self;
-    BOOL (^selection)(NSString *) = ^BOOL(NSString *text) {
-        MSIMEInputController *controller = weakSelf;
-        if (!controller || application.terminated ||
-            !controller->_emojiReturn.queue(text, token, NSProcessInfo.processInfo.systemUptime)) return NO;
-        if (controller->_desktopEmojiCompletion)
-            controller->_emojiReturn.deadline = std::min(controller->_emojiReturn.deadline, controller->_desktopEmojiDeadline);
-        // The Swift bridge closes its window before this activation is executed.
-        dispatch_async(dispatch_get_main_queue(), ^{
-            MSIMEInputController *current = weakSelf;
-            if (!current || current->_emojiReturn.generation != token || !current->_emojiReturn.pending) return;
-            if (current->_desktopEmojiCompletion &&
-                (![current->_desktopInputSession isAuthorizedPeerAlive] ||
-                 NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier != application.processIdentifier)) {
-                if (current->_emojiReturn.fail(token)) [current reportEmojiDeliveryFailure];
-                return;
-            }
-            if (NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier == application.processIdentifier &&
-                current->_activeClient && current->_activeClient == current->_emojiReturn.target) {
-                [current commitPendingEmojiForClient:current->_activeClient];
-                return;
-            }
-            if (!MSIMEActivateToolApplication(NSApp, NSRunningApplication.currentApplication, application)) {
-                if (current->_emojiReturn.fail(token)) [current reportEmojiDeliveryFailure];
-            }
-        });
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-            MSIMEInputController *current = weakSelf;
-            if (current && current->_emojiReturn.fail(token)) [current reportEmojiDeliveryFailure];
-        });
-        return YES;
-    };
-    MSIMEDesktopInputSession *inputSession = [[MSIMEDesktopInputSession alloc]
-        initWithTargetPID:application.processIdentifier launchTime:application.launchDate.timeIntervalSince1970
-        clipboard:[route isEqualToString:@"cloud-clipboard"] || [route isEqualToString:@"emoji"]
-        handler:^(NSString *text, double deadline, MSIMEPanelTextCompletion completion) {
-            MSIMEInputController *controller = weakSelf;
-            if (!controller || controller->_emojiReturn.generation != token || controller->_desktopEmojiCompletion) {
-                completion(NO); return;
-            }
-            controller->_desktopEmojiCompletion = completion;
-            controller->_desktopEmojiDeadline = deadline;
-            if (!selection(text)) {
-                controller->_desktopEmojiCompletion = nil;
-                completion(NO);
-            }
-        }];
-    _desktopInputSession = inputSession;
-    dispatch_block_t fallback = ^{
-        [inputSession stop];
-        MSIMEInputController *controller = weakSelf;
-        if (!controller || controller->_emojiReturn.generation != token) return;
-        if ([route isEqualToString:@"cloud-clipboard"] || [route isEqualToString:@"handwriting"]) {
-            controller->_emojiReturn.discard(token);
-            [controller showAccount:nil];
-        } else {
-            controller->_emojiReturn.discard(token);
-            [controller showSystemCharacterPalette];
-        }
-        (void)shared;
-        (void)options;
-    };
-    if (!inputSession) { fallback(); return; }
-    if ([route isEqualToString:@"cloud-clipboard"]) {
-        MSIMEOpenDesktopCloudClipboardWithInput(MSIMERuntimeOptionsPath(), NSWorkspace.sharedWorkspace, inputSession, fallback);
-        return;
-    }
-    MSIMEOpenDesktopRouteWithContext(route, MSIMERuntimeOptionsPath(), inputSession.launchEnvironment,
-        NSWorkspace.sharedWorkspace, ^(NSRunningApplication *peer) {
-            [inputSession authorizePID:peer.processIdentifier stillValid:^BOOL { return !peer.terminated; }];
-        }, fallback);
-}
-- (void)showScreenKeyboard:(id)sender {
-    if (MSIMEEditionIsShurufa()) return;
-    (void)sender;
-    MSIMEOpenDesktopRoute(@"keyboard", NSWorkspace.sharedWorkspace, ^{ [[MSIMEScreenKeyboardPanel sharedPanel] showKeyboard]; });
+    [self toggleVoiceInput:nil];
 }
 // 普通英文在未选词就离开输入框或撤销授权时保留原始字母，不自动采用补全。
 - (BOOL)commitManagedEnglishRaw {
@@ -4863,22 +4614,10 @@ BOOL MSIMEInputControllerHasUnfinishedInput(void) {
 - (void)toggleTraditionalOutput:(id)sender { (void)sender; [self ensureAppearance]; [self setTraditionalOutput:!_appearance.traditionalOutput]; }
 - (void)selectEnglishMode:(id)sender { (void)sender; [self setEnglishInputMode:YES]; }
 - (void)showSystemCharacterPalette { [NSApp orderFrontCharacterPalette:nil]; }
-- (void)checkForUpdates:(id)sender {
-    (void)sender;
-    // 带 feed 的发布包由 Sparkle 直接更新输入法本体；设置应用的「关于」页只能给出 DMG 的下载链接。
-    if (MSIMEUpdateHostUsesSparkle(NSBundle.mainBundle)) {
-        [[MSIMEUpdateController sharedController] checkForUpdates:nil];
-        return;
-    }
-    MSIMEOpenDesktopUpdateSettings(NSWorkspace.sharedWorkspace, ^{
-        [[MSIMEUpdateController sharedController] checkForUpdates:nil];
-    });
-}
+- (void)checkForUpdates:(id)sender { (void)sender; }
 - (void)showVoiceSettings:(id)sender {
     (void)sender;
-    MSIMEOpenDesktopSettings(MSIMEDesktopSettingsPage::Voice, NSWorkspace.sharedWorkspace, ^{
-        [[MetasequoiaVoiceProviderSettingsWindow sharedController] showAndActivate];
-    });
+    [[MetasequoiaVoiceProviderSettingsWindow sharedController] showAndActivate];
 }
 - (BOOL)usesLocalModelVoice {
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
@@ -4907,10 +4646,8 @@ BOOL MSIMEInputControllerHasUnfinishedInput(void) {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [NSDistributedNotificationCenter.defaultCenter removeObserver:self];
     [NSWorkspace.sharedWorkspace.notificationCenter removeObserver:self];
-    // The toolbar outlives focus-outs, so a controller freed by IMK releases it here; the panel's owner check leaves a newer owner in place.
-    [_toolbar deactivateForDelegate:self];
     if (_globalVoiceHotkeyMonitor) [NSEvent removeMonitor:_globalVoiceHotkeyMonitor];
-    [_desktopInputSession stop]; [_httpVoiceRequest cancel]; [_doubaoVoiceRequest cancel];
+    [_httpVoiceRequest cancel]; [_doubaoVoiceRequest cancel];
     [_doubaoPolishRequest cancel]; [_livePolishRequest cancel];
     [_voicePolishTask cancel]; _voicePolishTask = nil; _voicePolishPending = NO;
     [_voiceEditTracker cancel]; _voiceEditTracker = nil;
@@ -6296,16 +6033,12 @@ static NSString *MSIMEVoiceArchiveFailureReason(MSIMEVoiceFailure failure, NSStr
     start();
 }
 - (void)openWebsite:(id)sender { (void)sender; if (MSIMEEditionOffersUpstreamLinks()) [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:@"https://msime.app/"]]; }
-- (void)showHelp:(id)sender { (void)sender; MSIMEOpenDesktopRoute(@"settings:help", NSWorkspace.sharedWorkspace, ^{ [[MSIMESupportWindowController sharedController] showPage:MSIMESupportPageHelp]; }); }
+- (void)showHelp:(id)sender { (void)sender; [[MSIMESupportWindowController sharedController] showPage:MSIMESupportPageHelp]; }
 - (void)showAbout:(id)sender {
     (void)sender;
-    if (MSIMEEditionIsShurufa()) {
-        [[MSIMEPreferencesWindowController sharedController] showAndActivateWithPageIdentifier:@"about"];
-        return;
-    }
-    MSIMEOpenDesktopRoute(@"settings:about", NSWorkspace.sharedWorkspace, ^{ [[MSIMESupportWindowController sharedController] showPage:MSIMESupportPageAbout]; });
+    [[MSIMEPreferencesWindowController sharedController] showAndActivateWithPageIdentifier:@"about"];
 }
-- (void)showFeedback:(id)sender { (void)sender; MSIMEOpenDesktopRoute(@"settings:feedback", NSWorkspace.sharedWorkspace, ^{ [[MSIMESupportWindowController sharedController] showPage:MSIMESupportPageFeedback]; }); }
+- (void)showFeedback:(id)sender { (void)sender; [[MSIMESupportWindowController sharedController] showPage:MSIMESupportPageFeedback]; }
 - (void)openCharacterPalette:(id)sender {
     (void)sender;
     if (_session && _activeClient) {
@@ -6317,26 +6050,15 @@ static NSString *MSIMEVoiceArchiveFailureReason(MSIMEVoiceFailure failure, NSStr
 }
 - (void)showAppearance:(id)sender {
     (void)sender;
-    // The desktop application answers this route on its 外观 page, so the native window has to open
-    // on its own 外观 page rather than on whichever one it happens to be showing. Which page the
-    // route named was the one thing the fallback threw away.
-    MSIMEOpenDesktopSettings(MSIMEDesktopSettingsPage::Appearance, NSWorkspace.sharedWorkspace, ^{
-        [[MSIMEPreferencesWindowController sharedController] showAndActivateWithPageIdentifier:MSIMEEditionIsShurufa() ? @"input" : @"appearance"];
-    });
+    [[MSIMEPreferencesWindowController sharedController] showAndActivateWithPageIdentifier:MSIMEEditionIsShurufa() ? @"input" : @"appearance"];
 }
 - (void)showDictionary:(id)sender {
     (void)sender;
-    // 只捕获弱引用，理由同 showCloudClipboard:；回退在主线程执行，在那里再取强引用。
-    __weak MSIMEInputController *weakSelf = self;
-    MSIMEOpenDesktopRoute(@"settings:dictionary", NSWorkspace.sharedWorkspace, ^{
-        MSIMEInputController *controller = weakSelf;
-        if (!controller) return;
-        if (!controller->_session) [controller prepareSession];
-        if (!controller->_session) return;
-        controller->_dictionaryWindow = [[MSIMEDictionaryWindowController alloc] initWithOptions:controller->_session.hostOptions];
-        [controller->_dictionaryWindow showWindow:nil];
-        MSIMEPresentWindow(controller->_dictionaryWindow.window);
-    });
+    if (!_session) [self prepareSession];
+    if (!_session) return;
+    _dictionaryWindow = [[MSIMEDictionaryWindowController alloc] initWithOptions:_session.hostOptions];
+    [_dictionaryWindow showWindow:nil];
+    MSIMEPresentWindow(_dictionaryWindow.window);
 }
 - (void)prepareDictionary:(id)sender {
     (void)sender;
@@ -6483,17 +6205,9 @@ static constexpr NSUInteger MSIMEIdleDictionarySessionLimit = 4;
     [self scheduleSystemInputModeSyncForClient:sender];
     _capsLock = !MSIMEEditionIsShurufa() && ([NSEvent modifierFlags] & NSEventModifierFlagCapsLock) != 0;
     [self syncCapsLock];
-    _toolbar = MSIMEEditionIsShurufa() ? nil : [MSIMEFloatingToolbarPanel sharedPanel];
-    [_toolbar applyLightSkin:[_appearance resolvedSkinForDark:NO].tokens darkSkin:[_appearance resolvedSkinForDark:YES].tokens];
-    [_toolbar applyLightToolbarSkin:[_appearance toolbarSkinForDark:NO]
-                            darkSkin:[_appearance toolbarSkinForDark:YES]];
-    [_toolbar applyLightToolbarImage:[_appearance resolvedSkinForDark:NO].toolbarImage
-                             darkSkin:[_appearance resolvedSkinForDark:YES].toolbarImage];
-    [_toolbar activateForDelegate:self visible:_appearance.floatingToolbarEnabled];
     _activeClient = sender;
     MSIMEFocusedController = self;
     [self resetPreferenceLoadState];
-    [self refreshFloatingToolbarState];
     [self ensureAppearance];
     _focusPending = _appearance.englishMode;
     if (!_appearance.englishMode || _englishOnlineCandidatesEnabled) [self prepareSession];
@@ -6504,7 +6218,6 @@ static constexpr NSUInteger MSIMEIdleDictionarySessionLimit = 4;
     [workspaceCenter addObserver:self selector:@selector(typingEffectSpaceChanged:) name:NSWorkspaceActiveSpaceDidChangeNotification object:nil];
     [self refreshTypingEffectFullscreen];
     [self requestCloudCandidatesConsentIfNeeded];
-    [self commitPendingEmojiForClient:sender];
     MSIMERefreshVoiceShortcutTap();
 }
 
@@ -6585,39 +6298,6 @@ static NSString *const MSIMECloudConsentMessage =
     alert.window.level = NSFloatingWindowLevel;
     [alert.window center];
     MSIMEPresentWindow(alert.window);
-}
-
-- (void)commitPendingEmojiForClient:(id)client {
-    const BOOL hadPending = _emojiReturn.pending != nil;
-    if (hadPending && _desktopEmojiCompletion && ![_desktopInputSession isAuthorizedPeerAlive]) {
-        _emojiReturn.discard(_emojiReturn.generation);
-        [self reportEmojiDeliveryFailure];
-        return;
-    }
-    NSString *toolText = _emojiReturn.take(client, NSProcessInfo.processInfo.systemUptime);
-    if (toolText) {
-        BOOL committed = NO;
-        [self invalidateSmartPunctuationShadow];
-        @try { [client insertText:toolText replacementRange:NSMakeRange(NSNotFound, 0)]; committed = YES; }
-        @catch (NSException *) { /* Never log input or client exception details. */ }
-        if (committed) MSIMERecordTypingStatistics(_preferencesDirectory ?: [self runtimeOptions][@"preferences_directory"],
-                                                    toolText, msime::mac::TypingSource::Local);
-        if (_desktopEmojiCompletion) {
-            MSIMEPanelTextCompletion completion = _desktopEmojiCompletion;
-            _desktopEmojiCompletion = nil;
-            completion(committed);
-        } else if (!committed) [self reportEmojiDeliveryFailure];
-    }
-    else if (hadPending) [self reportEmojiDeliveryFailure];
-}
-
-- (void)reportEmojiDeliveryFailure {
-    if (_desktopEmojiCompletion) {
-        MSIMEPanelTextCompletion completion = _desktopEmojiCompletion;
-        _desktopEmojiCompletion = nil;
-        completion(NO);
-        return;
-    }
 }
 
 // 背景音乐在本进程某个控制器是当前输入法时播放。IMK 不保证上一个客户端的 deactivateServer: 先于下一个的 activateServer:，所以只有最后让音乐响起的控制器能停它。生命周期核心按会话记着真正的所有者，这里只决定哪个控制器在偏好更新、会话新建或重建之后重新报告激活。声明在 prepareSession 之前，它们也读它。
@@ -6906,9 +6586,6 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     if (snapshot[@"revision"] && !MSIMEStrictUnsignedInteger(snapshot[@"revision"], &revision)) { msime_macos_diagnostic_write("preferences_load_failed"); return; }
     if (revision != 0 && revision == _appliedPreferenceRevision) return;
     NSDictionary *preferences = snapshot[@"preferences"];
-    // 更新通道与会话无关，读到新的偏好就交给 Sparkle：下一次检查按它取 appcast，通道变了时重排检查周期（UpdateController.mm）。没有 feed 的构建不创建更新控制器。
-    if ([preferences isKindOfClass:NSDictionary.class] && MSIMEUpdateHostUsesSparkle(NSBundle.mainBundle))
-        [[MSIMEUpdateController sharedController] applyUpdateChannelPreference:preferences[@"update_channel"]];
     NSMutableDictionary *inputPreferences = [preferences isKindOfClass:NSDictionary.class] ? [preferences mutableCopy] : nil;
     id inlinePreedit = inputPreferences[@"tsf_preedit_style"];
     if (![inlinePreedit isKindOfClass:NSString.class] ||
@@ -6936,7 +6613,6 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
             MSIMEApplyTransitionTrackingMarkedText(@{@"view": _viewState.toDictionary()}, (id<MSIMETextClient>)_activeClient,
                                                    _appearance.inlinePreeditStyle, nil, &_clientHasMarkedText);
         }
-        [self refreshFloatingToolbarState];
         if (MSIMEMusicOwner == self) [self claimBackgroundMusic];
         // Another surface - the shared settings page, an account push - can have changed the scheme.
         [self syncSystemInputModeForClient:_activeClient];
@@ -6949,16 +6625,10 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     }
 }
 
-// 选中的皮肤包被同名替换（MCP 的 `create_candidate_skin` 带 replace、皮肤编辑器、图库重装）时选择没变，偏好文档的 revision 也不变，-completePreferenceLoad: 不会重新应用，旧的配色和装饰图会一直画到进程重启。这里问外观设置包是否换过（几次 stat），换过就让工具栏取新的调色板；候选窗的皮肤和装饰图在下一次绘制时从外观设置读。
+// 选中的皮肤包被同名替换时，清掉展开页高度缓存，候选窗会在下一次绘制时重新读取外观与装饰图。
 - (BOOL)applyReplacedSkinPackages {
     if (!_appearance || ![_appearance reloadReplacedSkinPackages]) return NO;
     _expandedViewportHeight = 0;
-    [_toolbar reloadToolbarImages];
-    [_toolbar applyLightSkin:[_appearance resolvedSkinForDark:NO].tokens darkSkin:[_appearance resolvedSkinForDark:YES].tokens];
-    [_toolbar applyLightToolbarSkin:[_appearance toolbarSkinForDark:NO]
-                            darkSkin:[_appearance toolbarSkinForDark:YES]];
-    [_toolbar applyLightToolbarImage:[_appearance resolvedSkinForDark:NO].toolbarImage
-                             darkSkin:[_appearance resolvedSkinForDark:YES].toolbarImage];
     return YES;
 }
 
@@ -7131,27 +6801,17 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     [_appearance applySharedAssistancePreferences:preferences];
     [_appearance applySharedToolbarPreferences:preferences];
     [_appearance applySharedLocalModes:preferences[@"local_modes"]];
-    [self refreshFloatingToolbarState];
-    [[MSIMEScreenKeyboardPanel sharedPanel] applyThemePreferences:preferences];
-    // 全局主题随文档其余部分一起到达，所以工具栏除了在激活时，在这里也取由它解析出的调色板。自带明暗的主题像钉住候选窗一样钉住工具栏的明暗。工具栏和中英文提示在 macOS 上没有单独的明暗设置，只看 `theme`，所以钉住的就是它。
+    // 全局主题随文档其余部分一起到达，中英文提示与工具栏调色板沿用同一明暗策略；自带明暗的主题钉住明暗。
     NSDictionary *toolbarThemePreferences = preferences;
     if (const auto fixed = [_appearance fixedThemeMode]) {
         NSMutableDictionary *pinned = [preferences mutableCopy];
         pinned[@"theme"] = *fixed ? @"dark" : @"light";
         toolbarThemePreferences = pinned;
     }
-    [_toolbar applyLightSkin:[_appearance resolvedSkinForDark:NO].tokens darkSkin:[_appearance resolvedSkinForDark:YES].tokens];
-    [_toolbar applyLightToolbarSkin:[_appearance toolbarSkinForDark:NO]
-                            darkSkin:[_appearance toolbarSkinForDark:YES]];
-    [_toolbar applyLightToolbarImage:[_appearance resolvedSkinForDark:NO].toolbarImage
-                             darkSkin:[_appearance resolvedSkinForDark:YES].toolbarImage];
     const BOOL systemGlass = [_appearance.globalTheme isEqual:@"system"];
-    _toolbar.liquidGlassEnabled = systemGlass;
     [MSIMEInputModeHUDPanel sharedPanel].liquidGlassEnabled = systemGlass;
-    [_toolbar applyThemePreferences:toolbarThemePreferences];
     // The mode badge wears the toolbar's palette, so it is drawn in the toolbar's mode too; it is updated whether or not the toolbar is shown.
     [[MSIMEInputModeHUDPanel sharedPanel] applyThemePreferences:toolbarThemePreferences];
-    [_toolbar applySizingPreferences:preferences];
     // 提示尺寸独立于工具栏，并遵循显示图标设置。
     [[MSIMEInputModeHUDPanel sharedPanel] applySizingPreferences:preferences];
     // Typing effects follow preferences.plugins; a partial document without it leaves them as they are.
@@ -7162,7 +6822,6 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     id enabled = [toolbar isKindOfClass:NSDictionary.class] ? toolbar[@"enabled"] : nil;
     if ([enabled isKindOfClass:NSNumber.class]) {
         [_appearance applySharedToolbarVisibility:[enabled boolValue]];
-        [_toolbar setVisible:_appearance.floatingToolbarEnabled forDelegate:self];
     }
 }
 
@@ -7212,13 +6871,10 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     [super deactivateServer:sender];
 }
 
-- (void)floatingToolbarDidRequestToggleInputMode:(MSIMEFloatingToolbarPanel *)toolbar {
-    (void)toolbar;
-    if (!_appearance.englishMode && _viewState.dedicatedEnglish) [self setDedicatedEnglishInputMode:NO];
-    else [self setEnglishInputMode:!_appearance.englishMode];
-}
-- (void)floatingToolbarDidRequestTogglePunctuation:(MSIMEFloatingToolbarPanel *)toolbar {
-    (void)toolbar;
+// 菜单与快捷键复用同一套全半角/标点切换路径，保持运行态一致。
+- (void)toggleFullWidthInput:(id)sender { (void)sender; [self toggleRuntimeFullWidthInput]; }
+- (void)toggleChinesePunctuation:(id)sender {
+    (void)sender;
     [self ensureAppearance];
     if (_session && _activeClient && _viewState.hasEditableText()) {
         if (![self dispatchCommand:MSIME_FINISH_COMPOSITION]) return;
@@ -7226,20 +6882,14 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     if ([_appearance.punctuationLock isEqual:@"chinese"] || [_appearance.punctuationLock isEqual:@"english"]) {
         _appearance.runtimeChinesePunctuation = [_appearance.punctuationLock isEqual:@"chinese"];
         [self syncPunctuation];
-        [self refreshFloatingToolbarState];
         return;
     }
     // 标点切换只改变当前应用的运行态，保存值仍是初始状态。
     _appearance.runtimeChinesePunctuation = !_appearance.runtimeChinesePunctuation;
     [self syncPunctuation];
-    [self refreshFloatingToolbarState];
     [self showInputStateHUDText:_appearance.runtimeChinesePunctuation ? @"中文标点" : @"英文标点"
         announcement:_appearance.runtimeChinesePunctuation ? @"中文标点" : @"英文标点"];
 }
-- (void)floatingToolbarDidRequestToggleFullWidth:(MSIMEFloatingToolbarPanel *)toolbar { (void)toolbar; [self toggleRuntimeFullWidthInput]; }
-// The input menu's toggles run the same paths as the floating toolbar and the chords, so all three stay one state.
-- (void)toggleFullWidthInput:(id)sender { (void)sender; [self toggleRuntimeFullWidthInput]; }
-- (void)toggleChinesePunctuation:(id)sender { (void)sender; [self floatingToolbarDidRequestTogglePunctuation:nil]; }
 - (void)toggleCandidateTranslations:(id)sender {
     (void)sender;
     [self ensureAppearance];
@@ -7270,47 +6920,8 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     [self ensureAppearance];
     _appearance.runtimeFullWidthInput = !_appearance.runtimeFullWidthInput;
     [self syncCharacterWidth];
-    [self refreshFloatingToolbarState];
     [self showInputStateHUDText:_appearance.runtimeFullWidthInput ? @"全角" : @"半角"
         announcement:_appearance.runtimeFullWidthInput ? @"全角字符" : @"半角字符"];
-}
-- (void)floatingToolbarDidRequestToggleTraditionalOutput:(MSIMEFloatingToolbarPanel *)toolbar { (void)toolbar; [self toggleTraditionalOutput:nil]; }
-- (void)floatingToolbarDidRequestOpenCharacterPalette:(MSIMEFloatingToolbarPanel *)toolbar { (void)toolbar; [self openCharacterPalette:nil]; }
-- (void)floatingToolbarDidRequestOpenEmoji:(MSIMEFloatingToolbarPanel *)toolbar { (void)toolbar; [self showEmoji:nil]; }
-- (void)floatingToolbarDidRequestOpenHandwriting:(MSIMEFloatingToolbarPanel *)toolbar { (void)toolbar; [self showHandwriting:nil]; }
-- (void)floatingToolbarDidRequestOpenScreenKeyboard:(MSIMEFloatingToolbarPanel *)toolbar { (void)toolbar; [self showScreenKeyboard:nil]; }
-- (void)floatingToolbarDidRequestToggleVoice:(MSIMEFloatingToolbarPanel *)toolbar { (void)toolbar; [self showVoicePanel]; }
-- (void)floatingToolbarDidRequestOpenSettings:(MSIMEFloatingToolbarPanel *)toolbar { (void)toolbar; [self showAppearance:nil]; }
-- (void)floatingToolbarDidRequestCheckForUpdates:(MSIMEFloatingToolbarPanel *)toolbar {
-    (void)toolbar;
-    [self checkForUpdates:nil];
-}
-- (void)floatingToolbarDidRequestOpenWebsite:(MSIMEFloatingToolbarPanel *)toolbar {
-    (void)toolbar;
-    [self openWebsite:nil];
-}
-- (void)floatingToolbarDidRequestPromotion:(MSIMEFloatingToolbarPanel *)toolbar {
-    (void)toolbar;
-    if (!MSIMEEditionOffersUpstreamLinks()) return;
-    if (!_activeClient) return;
-    if (_session && _viewState.hasEditableText()) [self dispatchCommand:MSIME_FINISH_COMPOSITION];
-    NSString *text = @"水杉输入法\n一款博采众长的输入法，目前正在广纳言路，茁壮成长中\n官网：https://msime.app/\nGit 项目：https://github.com/metasequoiaime/msime";
-    @try { [_activeClient insertText:text replacementRange:NSMakeRange(NSNotFound, NSNotFound)];
-        MSIMERecordTypingStatistics(_preferencesDirectory ?: [self runtimeOptions][@"preferences_directory"], text, msime::mac::TypingSource::Local);
-    } @catch (NSException *) { }
-}
-- (void)floatingToolbarDidRequestHide:(MSIMEFloatingToolbarPanel *)toolbar {
-    (void)toolbar;
-    _appearance.floatingToolbarEnabled = NO;
-    [_toolbar setVisible:NO forDelegate:self];
-}
-
-// The menu item writes the same preference the settings page's checkbox writes, so the two never disagree and the choice survives a restart. Showing or hiding it acts through the toolbar's current owner: the controller that last activated keeps the toolbar across focus-outs, so it can toggle it even while no client is focused, and a stale controller's request is ignored by the panel's owner check.
-- (void)toggleFloatingToolbar:(id)sender {
-    (void)sender;
-    const BOOL enabled = !_appearance.floatingToolbarEnabled;
-    _appearance.floatingToolbarEnabled = enabled;
-    [_toolbar setVisible:enabled forDelegate:self];
 }
 
 
@@ -7503,7 +7114,47 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     [_session lifecycleKey:MSIME_KEY_POINTER];
 }
 
-// The foreground application's full-screen state, read on the main queue's next turn rather than on a key: it walks the on-screen window list. The previous answer stands until then.
+// 判断前台应用窗口是否占满所在显示器，用于控制全屏时打字特效的显隐。
+static BOOL MSIMEWindowCoversDisplay(CGRect windowBounds, CGRect displayBounds) {
+    if (!std::isfinite(windowBounds.origin.x) || !std::isfinite(windowBounds.origin.y) ||
+        !std::isfinite(windowBounds.size.width) || !std::isfinite(windowBounds.size.height) ||
+        !std::isfinite(displayBounds.origin.x) || !std::isfinite(displayBounds.origin.y) ||
+        !std::isfinite(displayBounds.size.width) || !std::isfinite(displayBounds.size.height) ||
+        CGRectIsEmpty(windowBounds) || CGRectIsEmpty(displayBounds))
+        return NO;
+    constexpr CGFloat tolerance = 2.0;
+    return CGRectGetMinX(windowBounds) <= CGRectGetMinX(displayBounds) + tolerance &&
+           CGRectGetMinY(windowBounds) <= CGRectGetMinY(displayBounds) + tolerance &&
+           CGRectGetMaxX(windowBounds) >= CGRectGetMaxX(displayBounds) - tolerance &&
+           CGRectGetMaxY(windowBounds) >= CGRectGetMaxY(displayBounds) - tolerance;
+}
+
+static BOOL MSIMEFrontmostApplicationOwnsFullscreenDisplay(void) {
+    NSRunningApplication *frontmost = NSWorkspace.sharedWorkspace.frontmostApplication;
+    if (frontmost == nil || frontmost == NSRunningApplication.currentApplication) return NO;
+    NSArray *windows = CFBridgingRelease(CGWindowListCopyWindowInfo(
+        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID));
+    if (![windows isKindOfClass:NSArray.class]) return NO;
+    const pid_t pid = frontmost.processIdentifier;
+    for (NSDictionary *window in windows) {
+        if (![window isKindOfClass:NSDictionary.class] ||
+            [window[(id)kCGWindowOwnerPID] intValue] != pid ||
+            [window[(id)kCGWindowLayer] integerValue] != 0)
+            continue;
+        CGRect bounds = CGRectZero;
+        if (!CGRectMakeWithDictionaryRepresentation((CFDictionaryRef)window[(id)kCGWindowBounds], &bounds)) continue;
+        for (NSScreen *screen in NSScreen.screens) {
+            // CGWindow 与 CGDisplay 共用 Quartz 全局坐标空间，显式比较原点与宽高，避免仅放大窗口误判为全屏。
+            NSNumber *number = screen.deviceDescription[@"NSScreenNumber"];
+            CGRect display = number != nil ? CGDisplayBounds((CGDirectDisplayID)number.unsignedIntValue)
+                                           : NSRectToCGRect(screen.frame);
+            if (MSIMEWindowCoversDisplay(bounds, display)) return YES;
+        }
+    }
+    return NO;
+}
+
+// 前台应用的全屏状态延后到主队列下一轮读取，避免按键路径上枚举屏幕窗口列表。
 - (void)refreshTypingEffectFullscreen {
     if (!MSIMETypingEffectPanel.sharedPanel.configured) {
         _typingEffectFullscreen = NO;
@@ -7513,7 +7164,7 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     __weak MSIMEInputController *weakSelf = self;
     dispatch_async(dispatch_get_main_queue(), ^{
         MSIMEInputController *strongSelf = weakSelf;
-        if (strongSelf && strongSelf->_activeClient) strongSelf->_typingEffectFullscreen = MetasequoiaFrontmostApplicationOwnsFullscreenDisplay();
+        if (strongSelf && strongSelf->_activeClient) strongSelf->_typingEffectFullscreen = MSIMEFrontmostApplicationOwnsFullscreenDisplay();
     });
 }
 
@@ -7588,18 +7239,10 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     }
     if (event.type == NSEventTypeKeyDown && sender) {
         [self ensureAppearance];
-        if (_appearance.floatingToolbarEnabled)
-            [[MSIMEFloatingToolbarPanel sharedPanel] wakeForInputDelegate:self];
     }
     if (event.type == NSEventTypeKeyDown && sender && !selfPosted && !event.isARepeat) [self reportKeyToLifecycle:event];
     const BOOL handled = [self handleKeyEvent:event client:sender];
     if (event.type == NSEventTypeKeyDown && sender && !selfPosted) {
-        // A key event is the wake-up edge: restore the toolbar before the next event arrives, even if
-        // a preceding focus or preference callback left its requested visibility stale.
-        if (_appearance.floatingToolbarEnabled) {
-            _toolbar = [MSIMEFloatingToolbarPanel sharedPanel];
-            [_toolbar wakeForInputDelegate:self];
-        }
         [self noteKeyForSmartPunctuationShadow:event eaten:handled];
     }
     if (!selfPosted) [self recordKeyPress:event client:sender];
@@ -7799,7 +7442,6 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         // Punctuation and width are per app, so the new client's values reach the Engine before it types.
         [self syncPunctuation];
         [self syncCharacterWidth];
-        [self refreshFloatingToolbarState];
         _focusPending = _appearance.englishMode;
         if (!_appearance.englishMode || _englishOnlineCandidatesEnabled) {
             [self synchronizeManagedEnglishMode];
@@ -7939,14 +7581,14 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         return YES;
     }
     if (MSIMEToggleChordMatches(_appearance.punctuationToggleChord, event)) {
-        if (!event.isARepeat) [self floatingToolbarDidRequestTogglePunctuation:nil];
+        if (!event.isARepeat) [self toggleChinesePunctuation:nil];
         return YES;
     }
     const char shortcutLetter = MSIMEShortcutLetter(event);
     if (_appearance.characterSetShortcut && shortcutLetter == 'f' &&
         (event.modifierFlags & (competing | NSEventModifierFlagShift)) == (NSEventModifierFlagControl | NSEventModifierFlagShift)) {
         // Like the Windows host, reserve the chord but only toggle in Chinese mode.
-        if (!event.isARepeat && !_appearance.englishMode) [self floatingToolbarDidRequestToggleTraditionalOutput:nil];
+        if (!event.isARepeat && !_appearance.englishMode) [self toggleTraditionalOutput:nil];
         return YES;
     }
     if (MSIMEToggleChordMatches(_appearance.englishCandidatesToggleChord, event)) {
@@ -7961,12 +7603,6 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
         (widthArm == msime::mac::ToggleFullWidthArm::chord || _appearance.fullWidthShortcut) &&
         (!_appearance.englishMode || widthArm == msime::mac::ToggleFullWidthArm::chord)) {
         if (!event.isARepeat) [self toggleRuntimeFullWidthInput];
-        return YES;
-    }
-    if (!MSIMEEditionIsShurufa() && shortcutLetter == 'k' &&
-        (event.modifierFlags & (competing | NSEventModifierFlagShift)) ==
-            (NSEventModifierFlagControl | NSEventModifierFlagShift | NSEventModifierFlagCommand)) {
-        if (!event.isARepeat) [self showScreenKeyboard:nil];
         return YES;
     }
     const auto maintenanceShortcut = msime::mac::MaintenanceShortcut(
@@ -8961,7 +8597,6 @@ static NSDictionary *MSIMECommitContextDictionary(const ShurufaOutputContext &co
     }
     if (!_viewState.valid || _viewState.candidates.empty())
         _armedGlossColumn = 0;
-    [self refreshFloatingToolbarState];
     if (_viewState.valid && _viewState.provisional) {
         // 行内预编辑与提交文本已同步落盘（<2 ms）；候选窗等待 ~28 ms 防闪窗或提前回包的神经结果单次绘制。
         return;

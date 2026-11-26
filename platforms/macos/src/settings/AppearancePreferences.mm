@@ -13,11 +13,8 @@ extern "C" bool msime_macos_uninstall_input_source(const char *bundle_path,
                                                      const char *user_data_path,
                                                      const char *preferences_domain,
                                                      bool remove_user_data) __attribute__((weak_import));
-#import "../cloud/TranslationSettingsWindow.h"
-#import "../core/DesktopSettingsLauncher.h"
 #import "../core/AISettingsWindow.h"
 #import "../core/SharedVoicePreferences.h"
-#import "../core/UpdateController.h"
 #import "../core/SupportWindowController.h"
 #import "../core/BoundedFileReader.h"
 #import "../voice/VoiceSettingsEntry.h"
@@ -54,11 +51,6 @@ static NSDictionary *MSIMEToggleHotkeyChords(id keys) {
     return [response[@"ok"] isEqual:@YES] && [response[@"value"] isKindOfClass:NSDictionary.class]
         ? response[@"value"] : nil;
 }
-
-@interface MSIMETranslationSettingsWindow (Lifecycle)
-- (void)invalidatePendingCallbacks;
-@end
-
 
 /// The voice form, looked up at runtime. Linking it here would drag the voice module — and the
 /// keychain and CoreAudio with it — into every test executable that builds this window.
@@ -1139,7 +1131,6 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     NSButton *_updatePageButton;
     NSButton *_uninstallButton;
     NSButton *_removeUserDataButton;
-    MSIMEUpdateController *_updateController;
     NSString *_sharedDefaultImeMode;
     NSString *_sharedImeModeScope;
     // 共享文档里的应用例外（加上还没发布、文档收得下的旧规则，和本窗口对它的改动）；文档没有这个键时为 nil，查找退回 NSUserDefaults 里升级前的规则。本窗口改规则时只改它和 _localOnlyAppInputModeRules 里那一条，两边不合并，见 -setInputMode:forApplication:。
@@ -1366,7 +1357,6 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
     MSIMEVoiceHistoryView *_voiceHistoryView;
     NSButton *_skinPageSharedEntry;
     NSString *_translationPreferencesDirectory;
-    MSIMETranslationSettingsWindow *_translationWindow;
     MSIMEAISettingsWindow *_aiWindow;
     MSIMEDictionaryWindowController *_dictionaryWindow;
     NSSwitch *_inputModeShortcutToggle;
@@ -1562,38 +1552,11 @@ static NSArray<NSString *> *PinyinSpellings(NSString *text) {
 - (NSURL *)skinsRoot { return _skinsRoot; }
 - (void)setTranslationPreferencesDirectory:(NSString *)directory {
     if ([_translationPreferencesDirectory isEqual:directory]) return;
-    MSIMETranslationSettingsWindow *translationWindow = _translationWindow;
-    [translationWindow close];
-    [translationWindow invalidatePendingCallbacks];
-    _translationWindow = nil;
     [_aiWindow close]; _aiWindow = nil;
     _translationPreferencesDirectory = [directory copy];
 }
-- (void)showTranslationSettings:(id)sender {
-    __weak MSIMEAppearancePreferences *weakSelf = self;
-    MSIMEOpenDesktopSettings(MSIMEDesktopSettingsPage::Translation, [self desktopSettingsWorkspace], ^{
-        [weakSelf showNativeTranslationSettings:sender];
-    });
-}
-- (NSWorkspace *)desktopSettingsWorkspace { return NSWorkspace.sharedWorkspace; }
-- (void)showNativeTranslationSettings:(id)sender {
-    if (!_translationWindow) {
-        __weak MSIMEAppearancePreferences *weakSelf = self;
-        _translationWindow = [[MSIMETranslationSettingsWindow alloc] initWithDirectory:_translationPreferencesDirectory saved:^(NSDictionary *preferences) {
-            MSIMEAppearancePreferences *current = weakSelf;
-            if (!current) return;
-            [current applySharedInputPreferences:preferences];
-            [[NSNotificationCenter defaultCenter] postNotificationName:MSIMETranslationPreferencesDidSaveNotification object:current userInfo:preferences];
-        }];
-    }
-    [_translationWindow showWindow:sender];
-    MSIMEPresentWindow(_translationWindow.window);
-}
 - (void)showAISettings:(id)sender {
-    __weak MSIMEAppearancePreferences *weakSelf = self;
-    MSIMEOpenDesktopSettings(MSIMEDesktopSettingsPage::AI, [self desktopSettingsWorkspace], ^{
-        [weakSelf showNativeAISettings:sender];
-    });
+    [self showNativeAISettings:sender];
 }
 - (void)showNativeAISettings:(id)sender {
     if (!_aiWindow) _aiWindow = [[MSIMEAISettingsWindow alloc] initWithDirectory:_translationPreferencesDirectory saved:^(NSDictionary *preferences) {
@@ -4834,7 +4797,6 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     ], 0.0);
     learningCard.accessibilityLabel = @"候选与学习卡片";
     NSButton *aiButton = [NSButton buttonWithTitle:@"配置 AI 联想…" target:self action:@selector(showAISettings:)];
-    NSButton *translationButton = [NSButton buttonWithTitle:@"配置候选翻译…" target:self action:@selector(showTranslationSettings:)];
     NSButton *dictionaryButton = [NSButton buttonWithTitle:@"打开词库管理…" target:self action:@selector(showDictionary:)];
     dictionaryButton.accessibilityLabel = @"打开本机词库管理";
     NSMutableArray<NSView *> *cloudRows = [NSMutableArray arrayWithArray:@[
@@ -4863,7 +4825,6 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
                                        detail:@"在整句解码中启用本地万象 LTS 词语搭配模型（CC-BY-4.0），抑制生造同音词串。"
                                       control:_sentenceWanxiangGrammarToggle]];
     }
-    [cloudRows addObject:[self settingRow:@"翻译服务与目标语言" control:translationButton aka:@[@"候选翻译"]]];
     NSBox *cloudCard = MSIMECardWithViews(cloudRows, 0.0);
     cloudCard.accessibilityLabel = @"云端与智能候选卡片";
     NSBox *dictionaryCard = MSIMECardWithViews(@[
@@ -4889,9 +4850,6 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     ]];
 
     // ---- 关于 -------------------------------------------------------------------------------
-    Class updateControllerClass = NSClassFromString(@"MetasequoiaUpdateController");
-    if ([updateControllerClass respondsToSelector:@selector(sharedController)])
-        _updateController = [updateControllerClass sharedController];
     _versionLabel = [NSTextField labelWithString:@"开发构建"];
     _versionLabel.textColor = [NSColor secondaryLabelColor];
     _versionLabel.alignment = NSTextAlignmentRight;
@@ -5782,37 +5740,25 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
 }
 - (void)showSkinCatalog:(id)sender {
     (void)sender;
-    __weak MSIMEAppearancePreferences *weakSelf = self;
-    // The native fallback used to open a second window holding the same browser the 皮肤 page now
-    // is, so falling back means showing that page rather than a duplicate of it.
-    MSIMEOpenDesktopSettings(MSIMEDesktopSettingsPage::Skin, [self desktopSettingsWorkspace], ^{
-        MSIMEAppearancePreferences *strongSelf = weakSelf;
-        if (strongSelf == nil) return;
-        [[strongSelf ensureSkinSettingsView] reload];
-        [strongSelf showPreferencesPageAtIndex:kSkinPageIndex navigationIndex:kSkinPageIndex];
-        [strongSelf showWindow:nil];
-        MSIMEPresentWindow(strongSelf.window);
-    });
+    [[self ensureSkinSettingsView] reload];
+    [self showPreferencesPageAtIndex:kSkinPageIndex navigationIndex:kSkinPageIndex];
+    [self showWindow:nil];
+    MSIMEPresentWindow(self.window);
 }
 - (void)showDictionary:(id)sender {
     (void)sender;
-    __weak MSIMEAppearancePreferences *weakSelf = self;
-    MSIMEOpenDesktopRoute(@"settings:dictionary", NSWorkspace.sharedWorkspace, ^{
-        MSIMEAppearancePreferences *strongSelf = weakSelf;
-        if (!strongSelf) return;
-        NSDictionary *options = MSIMELoadRuntimeOptions();
-        if (![options isKindOfClass:NSDictionary.class]) {
-            NSAlert *alert = [NSAlert new];
-            alert.messageText = @"词库管理暂不可用";
-            alert.informativeText = @"请先激活输入法，再从输入法菜单打开词库管理。";
-            [alert addButtonWithTitle:@"好"];
-            [alert runModal];
-            return;
-        }
-        strongSelf->_dictionaryWindow = [[MSIMEDictionaryWindowController alloc] initWithOptions:options];
-        [strongSelf->_dictionaryWindow showWindow:nil];
-        MSIMEPresentWindow(strongSelf->_dictionaryWindow.window);
-    });
+    NSDictionary *options = MSIMELoadRuntimeOptions();
+    if (![options isKindOfClass:NSDictionary.class]) {
+        NSAlert *alert = [NSAlert new];
+        alert.messageText = @"词库管理暂不可用";
+        alert.informativeText = @"请先激活输入法，再从输入法菜单打开词库管理。";
+        [alert addButtonWithTitle:@"好"];
+        [alert runModal];
+        return;
+    }
+    _dictionaryWindow = [[MSIMEDictionaryWindowController alloc] initWithOptions:options];
+    [_dictionaryWindow showWindow:nil];
+    MSIMEPresentWindow(_dictionaryWindow.window);
 }
 - (void)togglePreviewTheme:(id)sender { (void)sender; [_preview toggleForcedTheme]; }
 - (void)togglePreviewShowcase:(NSButton *)sender { [_preview setShowsLayoutShowcase:sender.state == NSControlStateValueOn]; }
@@ -6139,15 +6085,12 @@ static NSString *SkinFilesIdentity(const std::vector<std::string> &paths) {
     }
     [NSApp terminate:nil];
 }
-- (void)checkForUpdates:(id)sender { [_updateController checkForUpdates:sender]; }
+- (void)checkForUpdates:(id)sender { (void)sender; }
 - (void)refreshUpdateControls {
     NSString *version = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
     _versionLabel.stringValue = version.length == 0 ? @"开发构建" : [NSString stringWithFormat:@"v%@", version];
-    // Without the update controller linked in, the page still renders and simply reports that
-    // this build cannot check; it must not claim automatic checks are on.
-    const BOOL automatic = [_updateController automaticallyChecksForUpdates];
-    _automaticUpdateLabel.stringValue = automatic ? @"已开启自动检查" : @"自动检查已关闭";
-    _updatePageButton.enabled = [_updateController canCheckForUpdates];
+    _automaticUpdateLabel.stringValue = @"自动检查已关闭";
+    _updatePageButton.enabled = NO;
 }
 /// The heading above a card, and the registration of the settings under it as one thing the window can put back. A section with no stored settings of its own passes an empty list and gets a heading with no link, which is how both 效果预览 sections, 本机词库, 使用帮助, 问题反馈 and the three headings of 关于 stay quiet.
 - (NSView *)sectionHeader:(NSString *)title keys:(NSArray<NSString *> *)keys {

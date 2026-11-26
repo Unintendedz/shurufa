@@ -12,6 +12,20 @@ export CXXFLAGS=-mmacosx-version-min=13.0
 export CMAKE_OSX_DEPLOYMENT_TARGET=13.0
 export CMAKE_PREFIX_PATH="$(brew --prefix)"
 
+# 在构建之前校验签名 entitlements，拒绝包含受限键（com.apple.developer.*）的描述文件，以免包编完后被 AMFI 静默拒载。
+entitlements="${MSIME_VOICE_ENTITLEMENTS:-$root/platforms/macos/resources/VoiceInput.entitlements}"
+[[ -f "$entitlements" ]] || { echo "缺少签名描述文件: $entitlements" >&2; exit 1; }
+if /usr/bin/plutil -convert json -o - "$entitlements" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+restricted = sorted(k for k in data if k.startswith("com.apple.developer."))
+if restricted:
+    sys.stderr.write("restricted entitlements rejected: " + ", ".join(restricted) + "\n")
+    sys.exit(1)
+'; then :; else
+  exit 1
+fi
+
 cargo build --release -p msime-host-api --locked
 resources="$(cargo run --quiet -p msime-client-core --example install_resources --locked -- target/resources)"
 MSIME_EDITION=shurufa bash platforms/macos/stage-resources.sh "$resources"
@@ -26,7 +40,7 @@ bundle="$root/target/macos-isolated/Shurufa.app"
 rm -rf "$bundle"
 cmake -G Ninja -S platforms/macos -B target/macos-isolated \
   -DCMAKE_BUILD_TYPE=Release \
-  -DMSIME_EDITION=shurufa -DMSIME_ENABLE_SPARKLE=OFF \
+  -DMSIME_EDITION=shurufa \
   -DMSIME_INPUT_SOURCE_REVISION="$revision" \
   -DMSIME_HOST_LIBRARY="$CARGO_TARGET_DIR/release/libmsime_host_api.a" \
   -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
@@ -52,6 +66,6 @@ fi
 if [[ -f "$bundle/Contents/Helpers/ShurufaNeuralService" ]]; then
   codesign --force --sign "$identity" "$bundle/Contents/Helpers/ShurufaNeuralService"
 fi
-codesign --force --deep --sign "$identity" --entitlements platforms/macos/resources/VoiceInput.entitlements "$bundle"
+codesign --force --deep --sign "$identity" --entitlements "$entitlements" "$bundle"
 codesign --verify --deep --strict "$bundle"
 printf 'Built: %s\n' "$bundle"

@@ -53,19 +53,6 @@ void OpenURL(NSString *url) {
     [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:url]];
 }
 
-void InvokeUpdateController(void) {
-    if (!MSIMEEditionOffersUpstreamLinks()) return;
-    // MSIMEUpdateController is a source-level alias; the Objective-C runtime name is the
-    // Metasequoia-prefixed class.
-    Class type = NSClassFromString(@"MetasequoiaUpdateController");
-    if (type == Nil || ![type respondsToSelector:@selector(sharedController)]) return;
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-    id controller = [type performSelector:@selector(sharedController)];
-    if ([controller respondsToSelector:@selector(checkForUpdates:)]) [controller performSelector:@selector(checkForUpdates:) withObject:nil];
-#pragma clang diagnostic pop
-}
-
 void OpenPreferences(void) {
     Class type = NSClassFromString(@"MSIMEPreferencesWindowController");
     if (type == Nil || ![type respondsToSelector:@selector(sharedController)]) return;
@@ -183,7 +170,7 @@ void OpenPreferences(void) {
     MSIMEPresentWindow(self.window);
 }
 
-- (void)checkForUpdates:(id)sender { (void)sender; InvokeUpdateController(); }
+- (void)checkForUpdates:(id)sender { (void)sender; }
 - (void)openWebsite:(id)sender { (void)sender; OpenURL(kWebsiteURL); }
 - (void)openLicense:(id)sender { (void)sender; OpenURL(kLicenseURL); }
 - (void)openPrivacy:(id)sender { (void)sender; OpenURL(kPrivacyURL); }

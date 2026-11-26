@@ -7,8 +7,6 @@ use msime_client_base::text::{
     is_bounded_ascii_identifier, is_bounded_utf16,
 };
 use msime_client_base::{bounded_io, calendar, file_lock, storage, text};
-#[cfg(any(windows, test))]
-use msime_client_core::edition;
 use msime_client_core::{host_surface, preferences, theme};
 
 pub mod diagnostics;

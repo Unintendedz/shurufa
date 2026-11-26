@@ -2,33 +2,11 @@
 
 use std::path::Path;
 
-
-
-
-
-
-
 use rusqlite::Connection;
-
-
-
-
-
-
 
 use super::glosses::{candidate_gloss_display, candidate_gloss_key};
 
-
-
-
-
-
 use super::*;
-
-
-
-
-
 
 use crate::types::SchemeType;
 
@@ -107,33 +85,15 @@ fn options(root: &Path) -> EngineOptions {
     }
 }
 
-
-
-
-
-
-
 fn type_text(session: &mut Session, text: &[u8]) {
     for character in text {
         session.character(*character, false).unwrap();
     }
 }
 
-
-
-
-
-
-
 const ENGLISH_SCHEMA: &str = "CREATE TABLE english_words(word TEXT,display TEXT,weight INTEGER);
     CREATE TABLE en_zh_glosses(english TEXT PRIMARY KEY,chinese_gloss TEXT);
     CREATE TABLE zh_en_glosses(chinese TEXT PRIMARY KEY,english_gloss TEXT);";
-
-
-
-
-
-
 
 #[test]
 fn quanpin_host_preedit_keeps_literal_and_local_modes_unsegmented() {
@@ -159,12 +119,6 @@ fn quanpin_host_preedit_keeps_literal_and_local_modes_unsegmented() {
         session.command(Command::Cancel).unwrap();
     }
 }
-
-
-
-
-
-
 
 #[test]
 fn quanpin_host_preedit_preserves_case_and_shuangpin_display_preference() {
@@ -192,12 +146,6 @@ fn quanpin_host_preedit_preserves_case_and_shuangpin_display_preference() {
     }
 }
 
-
-
-
-
-
-
 #[test]
 fn normalizes_full_pinyin_using_the_expected_word_length() {
     assert_eq!(normalize_full_pinyin("xian", 1), "xian");
@@ -209,12 +157,6 @@ fn normalizes_full_pinyin_using_the_expected_word_length() {
     assert_eq!(normalize_full_pinyin("xian", 3), "");
     assert_eq!(normalize_full_pinyin("ni'hao'", 2), "");
 }
-
-
-
-
-
-
 
 #[test]
 fn validates_and_normalizes_personal_dictionary_entries() {
@@ -243,12 +185,6 @@ fn validates_and_normalizes_personal_dictionary_entries() {
     })
     .is_err());
 }
-
-
-
-
-
-
 
 #[test]
 fn learned_glosses_survive_unavailable_packaged_dictionary() {
@@ -315,12 +251,6 @@ fn learned_glosses_survive_unavailable_packaged_dictionary() {
     );
 }
 
-
-
-
-
-
-
 // The user's own file wins through an emergent route: translation-glosses.db sits in the directory the settings page writes custom_translations.txt to, and the learned store reads its sidecar from beside itself. Moving either file, or giving the learned store an explicit translations path, would silently drop the user's glosses to the bottom; this test is what would notice.
 #[test]
 fn hand_written_glosses_outrank_learned_and_packaged_ones() {
@@ -360,12 +290,6 @@ fn hand_written_glosses_outrank_learned_and_packaged_ones() {
         vec!["hand written gloss"]
     );
 }
-
-
-
-
-
-
 
 /// The user's own `custom_translations.txt` outranks every automatic gloss even before any online gloss was saved, which is when `translation-glosses.db` first appears; the file Settings writes must not wait for that store.
 #[test]
@@ -407,12 +331,6 @@ fn hand_written_glosses_apply_without_a_learned_store() {
     );
 }
 
-
-
-
-
-
-
 #[cfg(unix)]
 #[test]
 fn learned_glosses_reject_a_symlinked_database() {
@@ -451,12 +369,6 @@ fn learned_glosses_reject_a_symlinked_database() {
     );
 }
 
-
-
-
-
-
-
 #[cfg(unix)]
 #[test]
 fn saving_learned_glosses_rejects_a_symlinked_database() {
@@ -475,12 +387,6 @@ fn saving_learned_glosses_rejects_a_symlinked_database() {
     ));
     assert!(!external.exists());
 }
-
-
-
-
-
-
 
 #[test]
 fn unsafe_learned_glosses_fall_back_to_packaged_values() {
@@ -526,12 +432,6 @@ fn unsafe_learned_glosses_fall_back_to_packaged_values() {
     }
 }
 
-
-
-
-
-
-
 fn offline_gloss_database(path: &Path, language: &str, version: i32) {
     Connection::open(path)
         .unwrap()
@@ -545,12 +445,6 @@ fn offline_gloss_database(path: &Path, language: &str, version: i32) {
         ))
         .unwrap();
 }
-
-
-
-
-
-
 
 #[test]
 fn offline_target_glosses_answer_chinese_candidates_only() {
@@ -571,12 +465,6 @@ fn offline_target_glosses_answer_chinese_candidates_only() {
         vec!["chat, chatte; félin", "jour; ciel", "", "", ""]
     );
 }
-
-
-
-
-
-
 
 #[test]
 fn offline_target_glosses_refuse_a_file_for_another_language_or_version() {
@@ -613,12 +501,6 @@ fn offline_target_glosses_refuse_a_file_for_another_language_or_version() {
     assert!(candidate_target_glosses(damaged.to_str().unwrap(), "es", &candidates).is_err());
 }
 
-
-
-
-
-
-
 fn pronunciation_database(path: &Path, kind: &str, version: i32) {
     let database = Connection::open(path).unwrap();
     database
@@ -632,12 +514,6 @@ fn pronunciation_database(path: &Path, kind: &str, version: i32) {
         ))
         .unwrap();
 }
-
-
-
-
-
-
 
 #[test]
 fn english_phonetics_answer_known_words_in_order() {
@@ -653,12 +529,6 @@ fn english_phonetics_answer_known_words_in_order() {
         .unwrap()
         .is_empty());
 }
-
-
-
-
-
-
 
 #[test]
 fn english_phonetics_refuse_another_kind_version_or_a_missing_file() {
@@ -679,12 +549,6 @@ fn english_phonetics_refuse_another_kind_version_or_a_missing_file() {
     );
 }
 
-
-
-
-
-
-
 #[cfg(unix)]
 #[test]
 fn english_phonetics_rejects_a_linked_database() {
@@ -699,12 +563,6 @@ fn english_phonetics_rejects_a_linked_database() {
 
     assert!(english_phonetics(linked.to_str().unwrap(), &["love".to_owned()]).is_err());
 }
-
-
-
-
-
-
 
 #[cfg(any(unix, windows))]
 #[test]
@@ -725,12 +583,6 @@ fn english_phonetics_rejects_a_hard_linked_database() {
     assert!(english_phonetics(linked.to_str().unwrap(), &["love".to_owned()]).is_err());
 }
 
-
-
-
-
-
-
 /// 发音库是只读的随包资源；Nix 的 store 去重把它合并成硬链接后，所在目录只有属主能写，照常查询（#6386）。
 #[cfg(unix)]
 #[test]
@@ -746,23 +598,12 @@ fn english_phonetics_reads_a_hard_linked_database_in_a_closed_directory() {
     assert!(english_phonetics(original.to_str().unwrap(), &["love".to_owned()]).is_ok());
 }
 
-
-
-
-
-
-
 #[test]
 fn reset_learned_data_restores_packaged_dictionaries_and_clears_journal() {
     for component in ["ascii", "陆傲天"] {
         reset_learned_data_under_root(component);
     }
 }
-
-
-
-
-
 
 fn reset_learned_data_under_root(component: &str) {
     let temporary = tempfile::tempdir().unwrap();
@@ -837,12 +678,6 @@ fn reset_learned_data_under_root(component: &str) {
     assert_eq!(count("candidate_selection_state"), 0);
 }
 
-
-
-
-
-
-
 #[test]
 fn reset_refuses_to_reset_the_packaged_bundle_in_place() {
     let root = tempfile::tempdir().unwrap();
@@ -858,12 +693,6 @@ fn reset_refuses_to_reset_the_packaged_bundle_in_place() {
         "Packaged dictionary is unavailable"
     );
 }
-
-
-
-
-
-
 
 #[test]
 fn dictionary_revision_uses_real_journal_and_rejects_corruption() {
@@ -881,12 +710,6 @@ fn dictionary_revision_uses_real_journal_and_rejects_corruption() {
         b"synthetic invalid database"
     );
 }
-
-
-
-
-
-
 
 #[test]
 fn staging_rejects_a_zero_limit_and_reports_transport_failures() {
@@ -928,12 +751,6 @@ fn invalid_options_return_errors_instead_of_unwinding_into_rust() {
     assert_eq!(message(&value), "Runtime directories must be absolute");
 }
 
-
-
-
-
-
-
 #[test]
 fn microsoft_profile_accepts_semicolon_as_an_ing_final() {
     let dir = tempfile::tempdir().unwrap();
@@ -948,12 +765,6 @@ fn microsoft_profile_accepts_semicolon_as_an_ing_final() {
         assert_eq!(snapshot.microsoft_shuangpin, profile == 3);
     }
 }
-
-
-
-
-
-
 
 /// 小鹤的键位，zh 换到 a，ing 换到 `;`，零声母改用 o 引导。
 fn custom_table() -> crate::types::ShuangpinCustomTable {
@@ -1017,12 +828,6 @@ fn custom_table() -> crate::types::ShuangpinCustomTable {
     }
 }
 
-
-
-
-
-
-
 #[test]
 fn custom_profile_runs_the_users_table() {
     let dir = tempfile::tempdir().unwrap();
@@ -1045,12 +850,6 @@ fn custom_profile_runs_the_users_table() {
     type_text(&mut session, b"ah;");
     assert_eq!(session.snapshot().unwrap().editing_text, "ah");
 }
-
-
-
-
-
-
 
 /// 韵母都不在 `;` 上、只有零声母编码用 `;` 做第二个键时，会话照样收 `;`，并告诉宿主把它当字母键送进来。
 #[test]
@@ -1080,12 +879,6 @@ fn custom_profile_accepts_semicolon_used_only_by_a_zero_initial_code() {
     assert_eq!(snapshot.preedit, "xing'a");
 }
 
-
-
-
-
-
-
 #[test]
 fn custom_profile_needs_a_valid_table_only_when_shuangpin_is_enabled() {
     let dir = tempfile::tempdir().unwrap();
@@ -1109,12 +902,6 @@ fn custom_profile_needs_a_valid_table_only_when_shuangpin_is_enabled() {
     assert_eq!(session.snapshot().unwrap().shuangpin_profile, "xiaohe");
 }
 
-
-
-
-
-
-
 #[test]
 fn microsoft_profile_keeps_trailing_semicolon_in_segment_boundaries() {
     let dir = tempfile::tempdir().unwrap();
@@ -1131,12 +918,6 @@ fn microsoft_profile_keeps_trailing_semicolon_in_segment_boundaries() {
         assert_eq!(session.snapshot().unwrap().segment_raw_boundaries, expected);
     }
 }
-
-
-
-
-
-
 
 /// A keyboard face labels its letter keys with the units they carry, read from the profile the session runs: this asks the session for its profile name instead of assuming the option index and the name agree.
 #[test]
@@ -1182,12 +963,6 @@ fn shuangpin_key_hints_describe_the_profile_the_session_runs() {
     }
 }
 
-
-
-
-
-
-
 /// Xiaohe keeps two finals on K, and a host-side copy of the keymap once listed only one of them.
 #[test]
 fn shuangpin_key_hints_keep_every_unit_a_key_carries() {
@@ -1199,24 +974,12 @@ fn shuangpin_key_hints_keep_every_unit_a_key_carries() {
     assert_eq!(hints.get("V").map(String::as_str), Some("zh / ui ü"));
 }
 
-
-
-
-
-
-
 #[test]
 fn shuangpin_key_hints_reject_an_unknown_profile() {
     assert!(shuangpin_key_hints("").is_empty());
     assert!(shuangpin_key_hints("xiaohe-v2").is_empty());
     assert!(shuangpin_key_hints("quanpin").is_empty());
 }
-
-
-
-
-
-
 
 #[test]
 fn all_shuangpin_profiles_accept_yo_as_one_syllable() {
@@ -1232,12 +995,6 @@ fn all_shuangpin_profiles_accept_yo_as_one_syllable() {
         assert_eq!(snapshot.preedit, "yo", "yo was split: {snapshot:?}");
     }
 }
-
-
-
-
-
-
 
 #[test]
 fn cloud_query_preserves_manual_quanpin_segmentation() {
@@ -1272,12 +1029,6 @@ fn cloud_query_preserves_manual_quanpin_segmentation() {
     );
 }
 
-
-
-
-
-
-
 #[test]
 fn real_engine_handles_unicode_mode_without_a_dictionary_bundle() {
     let dir = tempfile::tempdir().unwrap();
@@ -1298,12 +1049,6 @@ fn real_engine_handles_unicode_mode_without_a_dictionary_bundle() {
     assert!(session.snapshot().unwrap().preedit.is_empty());
     assert_eq!(session.snapshot().unwrap().local_mode, "none");
 }
-
-
-
-
-
-
 
 #[test]
 fn commit_raw_applies_windows_english_learning_policy() {
@@ -1327,12 +1072,6 @@ fn commit_raw_applies_windows_english_learning_policy() {
         .unwrap();
     assert_eq!(learned, "hello");
 }
-
-
-
-
-
-
 
 fn english_word_count(value: &EngineOptions, word: &str) -> i64 {
     let database = Path::new(&value.dictionaries).join("msime-english.db");
@@ -1359,12 +1098,6 @@ fn english_word_count(value: &EngineOptions, word: &str) -> i64 {
         .unwrap()
 }
 
-
-
-
-
-
-
 #[test]
 fn raw_commit_without_learning_leaves_the_english_dictionary_alone() {
     for dedicated in [true, false] {
@@ -1382,12 +1115,6 @@ fn raw_commit_without_learning_leaves_the_english_dictionary_alone() {
         assert_eq!(english_word_count(&value, "hello"), 0);
     }
 }
-
-
-
-
-
-
 
 #[test]
 fn complete_pinyin_raw_commit_does_not_learn_as_english() {
@@ -1412,12 +1139,6 @@ fn complete_pinyin_raw_commit_does_not_learn_as_english() {
     }
 }
 
-
-
-
-
-
-
 #[test]
 fn incomplete_pinyin_raw_commit_is_learned_as_an_english_word() {
     let dir = tempfile::tempdir().unwrap();
@@ -1429,12 +1150,6 @@ fn incomplete_pinyin_raw_commit_is_learned_as_an_english_word() {
     assert_eq!(result.diagnostic, "");
     assert_eq!(english_word_count(&value, "xyz"), 1);
 }
-
-
-
-
-
-
 
 /// bridge.cpp:1332-1359: Enter in any local mode learns the committed letters as an English word. Local modes are entered only from the pinyin schemes, whose segmentation is empty while one is active, so the incomplete-pinyin rule would learn the word too; this pins the outcome the two rules share.
 #[test]
@@ -1452,12 +1167,6 @@ fn local_mode_raw_commit_is_learned_as_an_english_word() {
     assert_eq!(result.diagnostic, "");
     assert_eq!(english_word_count(&value, "rustacean"), 1);
 }
-
-
-
-
-
-
 
 /// 网址不是英文单词：网址模式下 Enter 上屏整段网址，不写进英文词库。
 #[test]
@@ -1479,12 +1188,6 @@ fn url_enter_is_not_learned_as_english() {
     assert_eq!(english_word_count(&value, "https:a"), 0);
 }
 
-
-
-
-
-
-
 /// 网址模式下 Esc 丢弃网址，不上屏，回到没有本地模式的状态。
 #[test]
 fn url_escape_discards_without_commit() {
@@ -1502,12 +1205,6 @@ fn url_escape_discards_without_commit() {
     assert_eq!(snapshot.local_mode, "none");
     assert!(snapshot.preedit.is_empty());
 }
-
-
-
-
-
-
 
 /// Windows `input.enter_learns_english_word` 出厂为开：回车上屏输入的英文词写进英文词库；
 /// 关掉后回车照常上屏，只是不学词。
@@ -1545,12 +1242,6 @@ fn enter_learns_english_word_follows_the_preference() {
         }
     }
 }
-
-
-
-
-
-
 
 /// bridge.cpp:1349-1357: a local-mode commit that is not an English word (here the Unicode mode's hex digits) is still committed; the failed learning is reported beside it rather than undoing it.
 #[test]
@@ -1658,12 +1349,6 @@ fn session_options_map_every_host_field() {
     assert_eq!(mapped.enabled_schemes, crate::SchemeSet::ALL);
 }
 
-
-
-
-
-
-
 #[test]
 fn translation_sidecar_prefers_the_user_file_and_is_removed_without_one() {
     let dir = tempfile::tempdir().unwrap();
@@ -1682,12 +1367,6 @@ fn translation_sidecar_prefers_the_user_file_and_is_removed_without_one() {
     Session::new(&value).unwrap();
     assert!(!target.exists());
 }
-
-
-
-
-
-
 
 #[cfg(unix)]
 #[test]
@@ -1712,12 +1391,6 @@ fn translation_sidecar_publication_keeps_open_readers_on_complete_old_content() 
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "fixture\tnew\n");
 }
 
-
-
-
-
-
-
 #[test]
 fn translation_sidecar_copy_rejects_an_oversized_source() {
     let dir = tempfile::tempdir().unwrap();
@@ -1738,12 +1411,6 @@ fn translation_sidecar_copy_rejects_an_oversized_source() {
         .join("custom_translations.txt")
         .exists());
 }
-
-
-
-
-
-
 
 #[cfg(unix)]
 #[test]
@@ -1767,12 +1434,6 @@ fn translation_sidecar_copy_rejects_a_symlinked_user_file() {
     super::options::prepare_translation_sidecar(&value).unwrap();
     assert_eq!(std::fs::read_to_string(target).unwrap(), "天\tpackaged\n");
 }
-
-
-
-
-
-
 
 #[cfg(unix)]
 #[test]
@@ -1798,12 +1459,6 @@ fn translation_sidecar_copy_rejects_a_symlinked_target() {
     assert_eq!(std::fs::read_to_string(external).unwrap(), "keep\n");
 }
 
-
-
-
-
-
-
 #[cfg(unix)]
 #[test]
 fn translation_sidecar_writer_does_not_follow_a_replaced_target() {
@@ -1820,12 +1475,6 @@ fn translation_sidecar_writer_does_not_follow_a_replaced_target() {
     assert_eq!(std::fs::read_to_string(external).unwrap(), "keep\n");
 }
 
-
-
-
-
-
-
 #[cfg(any(unix, windows))]
 #[test]
 fn translation_sidecar_writer_rejects_a_hard_linked_target() {
@@ -1839,12 +1488,6 @@ fn translation_sidecar_writer_rejects_a_hard_linked_target() {
     assert!(super::options::write_private_file_no_follow(&target, b"overwrite\n").is_err());
     assert_eq!(std::fs::read_to_string(external).unwrap(), "keep\n");
 }
-
-
-
-
-
-
 
 #[cfg(unix)]
 #[test]
@@ -1871,12 +1514,6 @@ fn translation_sidecar_copy_rejects_a_symlinked_target_parent() {
     );
     assert!(!outside.path().join("custom_translations.txt").exists());
 }
-
-
-
-
-
-
 
 #[test]
 fn english_completions_validate_and_lowercase_the_prefix() {
@@ -1914,12 +1551,6 @@ fn english_completions_validate_and_lowercase_the_prefix() {
     );
 }
 
-
-
-
-
-
-
 #[test]
 fn gloss_keys_follow_the_bridge_rules() {
     assert_eq!(
@@ -1947,12 +1578,6 @@ fn gloss_keys_follow_the_bridge_rules() {
     assert_eq!(candidate_gloss_key("〇", 0), None);
 }
 
-
-
-
-
-
-
 #[test]
 fn gloss_display_keeps_two_senses_and_withholds_control_characters() {
     assert_eq!(candidate_gloss_display("a; b; c"), "a; b");
@@ -1975,12 +1600,6 @@ fn gloss_display_keeps_two_senses_and_withholds_control_characters() {
     // A control character in the third sense is cut before the check sees it.
     assert_eq!(candidate_gloss_display("a; b; \u{1}"), "a; b");
 }
-
-
-
-
-
-
 
 #[test]
 fn emoji_catalog_wrappers_page_through_others_db() {
@@ -2034,12 +1653,6 @@ fn emoji_catalog_wrappers_page_through_others_db() {
     );
 }
 
-
-
-
-
-
-
 #[test]
 fn hanzi_to_pinyin_reads_the_generation_dictionary() {
     let dir = tempfile::tempdir().unwrap();
@@ -2054,12 +1667,6 @@ fn hanzi_to_pinyin_reads_the_generation_dictionary() {
     assert_eq!(hanzi_to_pinyin(&value, "你好"), "ni'hao");
     assert_eq!(hanzi_to_pinyin(&value, "hello"), "");
 }
-
-
-
-
-
-
 
 /// user_dictionary_journal.cpp:445-452: the reference opened msime's journal per call, so no thread kept it open. A one-shot call releases its thread's cached journal on return, a dropped session releases it too, and a live session keeps it for the keystroke path.
 #[test]
@@ -2108,12 +1715,6 @@ fn journal_handles_are_released_when_a_thread_is_done_with_them() {
     drop(session);
     assert!(!thread_holds_journal());
 }
-
-
-
-
-
-
 
 /// Hosts keep their sessions in a thread-local map, so a session can be dropped while its thread exits, after that thread's cached journal is already destroyed. Its drop still flushes and releases without touching the destroyed cache; it used to abort the process (`cannot access a Thread Local Storage value during or after destruction`).
 #[test]
@@ -2167,12 +1768,6 @@ fn a_session_dropped_while_its_thread_exits_does_not_abort() {
     assert_eq!(written, 1);
 }
 
-
-
-
-
-
-
 pub(super) fn generated_mode_options(root: &Path) -> EngineOptions {
     let mut value = options(root);
     value.local_expression = true;
@@ -2194,12 +1789,6 @@ pub(super) fn generated_mode_options(root: &Path) -> EngineOptions {
     }];
     value
 }
-
-
-
-
-
-
 
 #[test]
 fn generated_local_modes_map_through_the_options() {
@@ -2230,12 +1819,6 @@ fn generated_local_modes_map_through_the_options() {
     let off = super::options::session_options(&options(dir.path())).unwrap();
     assert!(!off.local_modes.expression && !off.local_modes.command && !off.local_modes.mention);
 }
-
-
-
-
-
-
 
 #[test]
 fn generated_local_modes_publish_their_spelling_symbols_and_rows() {
@@ -2288,12 +1871,6 @@ fn generated_local_modes_publish_their_spelling_symbols_and_rows() {
     assert_eq!(codes, ["yo", "yinli"]);
 }
 
-
-
-
-
-
-
 /// Enter in the expression, command and mention modes commits what was typed, and unlike the other local modes learns none of it as an English word: arithmetic, a trigger or a mention key is not a word the user spelled.
 #[test]
 fn generated_local_mode_raw_commits_are_not_learned() {
@@ -2317,18 +1894,10 @@ fn generated_local_mode_raw_commits_are_not_learned() {
     }
 }
 
-
-
-
-
-
-
 /// #7616：只按了入口键就回车时，上屏的是入口字母本身，去掉标记后没有正文可学——以前会报「英文词学不了」（`Y`），临时日文还会把补出来的 `r` 写进英文词库。
 #[test]
 fn a_bare_entry_letter_raw_commit_learns_nothing() {
-    for (letter, mode, word) in [
-        (b'Y', "temporary_english", "y"),
-    ] {
+    for (letter, mode, word) in [(b'Y', "temporary_english", "y")] {
         let dir = tempfile::tempdir().unwrap();
         let value = options(dir.path());
         let mut session = Session::new(&value).unwrap();

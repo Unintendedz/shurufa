@@ -322,7 +322,8 @@ impl InputSession {
                     if consumed == 0 || consumed > total {
                         consumed = word_length.min(total);
                     }
-                    let start = raw_length_for_effective_prefix(&base.raw_input_with_cases, consumed);
+                    let start =
+                        raw_length_for_effective_prefix(&base.raw_input_with_cases, consumed);
                     let end = base.raw_input.len();
                     Some((
                         remove_consumed_leading_separators(&base.raw_input[start..end]).to_owned(),
@@ -450,7 +451,9 @@ impl InputSession {
     pub(super) fn is_all_complete_pure_pinyin(&self) -> bool {
         let request = self.engine.request();
         match self.engine.current_scheme_type() {
-            SchemeType::Shuangpin => is_complete_input(&request.raw_input, self.shuangpin_profile()),
+            SchemeType::Shuangpin => {
+                is_complete_input(&request.raw_input, self.shuangpin_profile())
+            }
             SchemeType::Quanpin => {
                 let segmentation = self.pinyin_segmentation();
                 !segmentation.is_empty() && is_complete_pinyin_input(segmentation.as_ref())

@@ -27,56 +27,35 @@ from pathlib import Path
 RESTRICTED_PREFIX = "com.apple.developer."
 
 
-def poisoned_run(install: Path, entitlements: Path) -> int:
-    """Run install.sh with restricted entitlements; return 0 when it refused without touching anything."""
+def poisoned_run(build_script: Path, entitlements: Path) -> int:
+    """用包含受限键的描述文件运行 build-shurufa.sh，确认它在动任何构建产物前拒绝退出。"""
     failures = 0
-    # A list, an empty list and a false: an entitlement is restricted because of its key, whatever it is set
-    # to. "We turned it off" is not a reason for AMFI to let the binary run.
+    # 无论值是数组、空数组还是 false，只要键名落在 com.apple.developer.* 下就会被 AMFI 拒绝。
     for value in (["Default"], [], False):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            bundle = root / "水杉输入法.app"
-            (bundle / "Contents/MacOS").mkdir(parents=True)
-            destination = root / "Input Methods"
-            destination.mkdir()
-            sentinel = destination / "水杉输入法.app"
-            sentinel.mkdir()
-            (sentinel / "installed").write_text("previous installation")
+        entitlements.write_bytes(plistlib.dumps({RESTRICTED_PREFIX + "applesignin": value}))
+        environment = os.environ.copy()
+        environment["MSIME_VOICE_ENTITLEMENTS"] = str(entitlements)
+        result = subprocess.run(["bash", str(build_script)], env=environment,
+                                capture_output=True, text=True)
 
-            entitlements.write_bytes(plistlib.dumps({RESTRICTED_PREFIX + "applesignin": value}))
-            environment = os.environ.copy()
-            environment.update({
-                "MSIME_VOICE_ENTITLEMENTS": str(entitlements),
-                "MSIME_INPUT_METHODS_DIR": str(destination),
-                "MSIME_SIGNING_IDENTITY": "Developer ID Application: Test",
-            })
-            result = subprocess.run(["bash", str(install), str(bundle)], env=environment,
-                                    capture_output=True, text=True)
-
-            if result.returncode == 0:
-                print(f"install.sh accepted restricted entitlements set to {value!r}", file=sys.stderr)
-                failures += 1
-            if "restricted entitlements" not in result.stderr:
-                print(f"install.sh did not say why it refused {value!r}: {result.stderr.strip()}",
-                      file=sys.stderr)
-                failures += 1
-            if sorted(p.name for p in destination.iterdir()) != ["水杉输入法.app"]:
-                print(f"install.sh left {list(destination.iterdir())} behind for {value!r}", file=sys.stderr)
-                failures += 1
-            if (sentinel / "installed").read_text() != "previous installation":
-                print(f"install.sh disturbed the existing installation for {value!r}", file=sys.stderr)
-                failures += 1
+        if result.returncode == 0:
+            print(f"{build_script.name} accepted restricted entitlements set to {value!r}", file=sys.stderr)
+            failures += 1
+        if "restricted entitlements" not in result.stderr:
+            print(f"{build_script.name} did not say why it refused {value!r}: {result.stderr.strip()}",
+                  file=sys.stderr)
+            failures += 1
     return failures
 
 
 def main() -> int:
     if len(sys.argv) != 3:
-        print("usage: entitlements_guard.py <entitlements> <install.sh>", file=sys.stderr)
+        print("usage: entitlements_guard.py <entitlements> <build-shurufa.sh>", file=sys.stderr)
         return 2
-    shipped, install = Path(sys.argv[1]), Path(sys.argv[2])
+    shipped, build_script = Path(sys.argv[1]), Path(sys.argv[2])
     failures = 0
 
-    for path in (shipped, install):
+    for path in (shipped, build_script):
         if not path.is_file():
             print(f"missing {path}", file=sys.stderr)
             return 1
@@ -98,11 +77,11 @@ def main() -> int:
         failures += 1
 
     with tempfile.TemporaryDirectory() as directory:
-        failures += poisoned_run(install, Path(directory) / "VoiceInput.entitlements")
+        failures += poisoned_run(build_script, Path(directory) / "VoiceInput.entitlements")
 
     if failures:
         return 1
-    print(f"{shipped.name} carries {len(declared)} unrestricted entitlements and install.sh rejects the rest")
+    print(f"{shipped.name} carries {len(declared)} unrestricted entitlements and {build_script.name} rejects the rest")
     return 0
 
 

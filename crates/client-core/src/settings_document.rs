@@ -507,16 +507,16 @@ mod tests {
 
     #[test]
     fn a_scheme_this_edition_does_not_offer_keeps_the_local_one() {
-        let wubi = Edition::by_id("wubi").unwrap();
+        let shurufa = Edition::by_id("shurufa").unwrap();
         let exported = Preferences {
-            scheme: InputScheme::Quanpin,
-            last_chinese_scheme: Some(ChineseScheme::Quanpin),
+            scheme: InputScheme::Wubi,
+            last_chinese_scheme: Some(ChineseScheme::Wubi),
             candidate_page_size: 7,
             ..Preferences::default()
         };
         let text = export_document(&exported).unwrap();
-        let current = Preferences::for_edition(wubi);
-        let imported = import_document(text.as_bytes(), &current, wubi).unwrap();
+        let current = Preferences::for_edition(shurufa);
+        let imported = import_document(text.as_bytes(), &current, shurufa).unwrap();
         assert_eq!(imported.scheme, current.scheme);
         assert_eq!(imported.last_chinese_scheme, current.last_chinese_scheme);
         assert_eq!(

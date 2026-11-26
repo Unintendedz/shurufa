@@ -85,14 +85,16 @@ int main() {
                                  axBlacklisted:NO];
             assert(tracker.tracking);
 
-            // 等待初始快照落盘。
-            PumpRunLoopUntil(^BOOL { return NO; }, 0.06);
+            // 等待初始快照在主队列落盘。
+            PumpRunLoopUntil(^BOOL { return [tracker valueForKey:@"_originalBox"] != nil; }, 2.0);
             assert(tracker.tracking);
 
-            // 模拟用户把「可劳德」改成「Claude」并触发一次编辑键防抖采样。
+            // 模拟用户把「可劳德」改成「Claude」并等待防抖采样写回主队列。
             simulatedBox = @"早安，用Claude写一下测试";
             [tracker noteKeyEvent:KeyDownEvent(0)];
-            PumpRunLoopUntil(^BOOL { return NO; }, 0.06);
+            PumpRunLoopUntil(^BOOL {
+                return [[tracker valueForKey:@"_lastEditedBox"] isEqualToString:@"早安，用Claude写一下测试"];
+            }, 2.0);
 
             // 模拟用户按 Enter 发送，输入框随之清空；应复用刚才的非空快照完成学词。
             simulatedBox = @"";

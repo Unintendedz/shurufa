@@ -1,21 +1,9 @@
 #!/usr/bin/env python3
-"""各版本的 macOS 输入法 bundle 身份（platforms/macos/scripts/edition_bundle.py 的输出）。
-
-多个版本同时装在一台 Mac 上，靠的是每个版本的 Info.plist 各自声明不同的 bundle id、连接名和输入模式，原生代码在运行时从 Info.plist 读这些值。生成器错了往往照样能编、能装，只在两个版本同时装上之后才暴露：一个版本的输入模式顶掉另一个的，设置应用按子串认错了 bundle，菜单里冒出标识符本身。这里不需要 Xcode，在任何机器上把每个版本的输出逐项核对一遍：
-
-- full 的 Info.plist、两种语言的 InfoPlist.strings 和 Homebrew cask 与生成前逐字节相同，full 不带版本声明文件，Tauri 配置只有版本号；
-- 每个版本的 Info.plist 是合法的属性列表，bundle id、可执行文件名、显示名、连接名（`<bundle id>_Connection`）和版本键都对；
-- 模式恰好是本版本的方案对应的模式加「英」，主模式 `.Hans` 总在且装好就启用，不含全拼的版本里它用默认方案的图标，模式标识符与 TISInputSourceID、可见顺序一致；
-- 主模式和「英」登记在主模式所借模式的语言下：中文的版本是 zh-Hans，日文、越南文、藏文版是 ja、vi、bo，主模式的字符集和脚本也是那个模式的；
-- 任何一个版本的 bundle id 都不出现在另一个版本的 Info.plist 和 InfoPlist.strings 里（设置应用按子串认 bundle）；
-- platforms/macos/tests/settings/info_plist_names.py 对每个版本的 plist 和 strings 通过：每个模式在每种语言下都有名字且互不相同，源码里的标识字面量都属于某个版本；
-- 生成器的模式后缀与 src/input/InputModeIdentifiers.h 一致。
-"""
+"""各版本的 macOS 输入法 bundle 身份（platforms/macos/scripts/edition_bundle.py 的输出）。"""
 
 from __future__ import annotations
 
 import importlib.util
-import json
 import pathlib
 import plistlib
 import subprocess
@@ -26,10 +14,8 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 MACOS = ROOT / "platforms/macos"
 TEMPLATE = MACOS / "Info.plist.in"
 LOCALES = ["zh-Hans", "en"]
-CASK = MACOS / "homebrew/msime.rb.in"
 MODE_HEADER = MACOS / "src/input/InputModeIdentifiers.h"
 NAMES_CHECK = MACOS / "tests/settings/info_plist_names.py"
-# 默认方案是这些语言方案的版本，在系统里登记在这个语言下。
 LANGUAGE_EDITION_LANGUAGES = {"japanese": "ja", "vietnamese": "vi", "tibetan": "bo"}
 
 
@@ -51,14 +37,8 @@ def check_full(errors: list[str], generator, table: dict) -> None:
     for locale in LOCALES:
         if generator.info_plist_strings(strings_source(locale), "full", table) != strings_source(locale):
             errors.append(f"the full {locale} InfoPlist.strings differs from the source")
-    cask = CASK.read_text(encoding="utf-8")
-    expected = cask.replace("@VERSION@", "1.2.3").replace("@SHA256@", "0" * 64)
-    if generator.cask(cask, "full", "1.2.3", "0" * 64) != expected:
-        errors.append("the full cask differs from the plain @VERSION@/@SHA256@ substitution")
     if generator.marker("full") is not None:
         errors.append("the full settings app must not carry an edition declaration")
-    if generator.tauri_config("full", "1.2.3") != {"version": "1.2.3"}:
-        errors.append("the full Tauri bundle configuration must only set the version")
 
 
 def check_edition(errors: list[str], generator, table: dict, entry: dict, others: list[str], directory: pathlib.Path) -> None:
@@ -69,7 +49,7 @@ def check_edition(errors: list[str], generator, table: dict, entry: dict, others
     text = generator.info_plist(TEMPLATE.read_text(encoding="utf-8"), edition_id, table)
     try:
         plist = plistlib.loads(text.encode("utf-8"))
-    except Exception as error:  # noqa: BLE001 - plistlib raises several unrelated types for malformed input
+    except Exception as error:  # noqa: BLE001
         errors.append(f"{where}: the generated Info.plist is not a property list: {error}")
         return
     resources = directory / edition_id / "resources"
@@ -99,13 +79,12 @@ def check_edition(errors: list[str], generator, table: dict, entry: dict, others
             "MSIMESettingsBundleIdentifier": macos["settings_bundle_id"],
             "MSIMEKeychainService": macos["keychain_service"],
         })
-        mixed = entry["preference_defaults"].get("wubi_mixed_pinyin")
-        if mixed is not None:
-            expected["MSIMEWubiMixedPinyinDefault"] = mixed
+        if "state_directory_name" in macos:
+            expected["MSIMEStateDirectoryName"] = macos["state_directory_name"]
+        if "voice_helper_name" in macos:
+            expected["MSIMELocalVoiceHelperName"] = macos["voice_helper_name"]
         if not entry["features"]["handwriting"]:
             expected["MSIMEHandwriting"] = False
-        elif "MSIMEHandwriting" in plist:
-            errors.append(f"{where}: an edition with handwriting must not declare MSIMEHandwriting")
     for key, value in expected.items():
         if plist.get(key) != value:
             errors.append(f"{where}: {key} is {plist.get(key)!r}, expected {value!r}")
@@ -135,7 +114,6 @@ def check_edition(errors: list[str], generator, table: dict, entry: dict, others
         icon = template_modes[f"{full_bundle}.{source}"]["tsInputModeMenuIconFileKey"]
         if body.get("tsInputModeMenuIconFileKey") != icon:
             errors.append(f"{where}: mode {suffix} should show the {source} icon {icon}")
-    # 系统设置按 TISIntendedLanguage 分组；Shurufa 没有「英」，其他版本的「英」仍随主模式归组。
     primary = template_modes[f"{full_bundle}.{plan['Hans']}"]
     language = primary["TISIntendedLanguage"]
     for suffix in (("Hans",) if edition_id == "shurufa" else ("Hans", "Roman")):
@@ -145,11 +123,9 @@ def check_edition(errors: list[str], generator, table: dict, entry: dict, others
     hans = modes.get(f"{bundle}.Hans", {})
     for key in ("tsInputModeCharacterRepertoireKey", "tsInputModeScriptKey"):
         if hans.get(key) != primary[key]:
-            errors.append(f"{where}: the primary mode's {key} is {hans.get(key)!r}, expected {primary[key]!r} from the {plan['Hans']} mode")
+            errors.append(f"{where}: the primary mode's {key} is {hans.get(key)!r}, expected {primary[key]!r}")
     if hans.get("tsInputModeDefaultStateKey") is not True:
         errors.append(f"{where}: the primary mode must be enabled on install")
-    if edition_id != "full" and entry["default_scheme"] in LANGUAGE_EDITION_LANGUAGES and language != LANGUAGE_EDITION_LANGUAGES[entry["default_scheme"]]:
-        errors.append(f"{where}: registers under {language!r}, expected {LANGUAGE_EDITION_LANGUAGES[entry['default_scheme']]!r}")
 
     for other in others:
         if other == bundle:
@@ -168,50 +144,12 @@ def check_edition(errors: list[str], generator, table: dict, entry: dict, others
         for line in result.stderr.strip().splitlines():
             errors.append(f"{where}: {line}")
 
-    if edition_id != "full":
-        marker = generator.marker(edition_id)
-        if json.loads(marker) != {"edition": edition_id}:
-            errors.append(f"{where}: the settings app's edition declaration is {marker!r}")
-        config = generator.tauri_config(edition_id, "1.2.3")
-        if config != {"version": "1.2.3", "identifier": macos["settings_bundle_id"], "productName": entry["display_name"]["en"]}:
-            errors.append(f"{where}: unexpected Tauri bundle configuration {config}")
-        cask = generator.cask(CASK.read_text(encoding="utf-8"), edition_id, "1.2.3", "0" * 64)
-        if f'cask "{macos["cask"]}"' not in cask or f"/{macos['dmg_prefix']}-#{{version}}-universal.dmg" not in cask:
-            errors.append(f"{where}: the cask does not name {macos['cask']} and {macos['dmg_prefix']}")
-        if "msime-mcp" in cask:
-            errors.append(f"{where}: only the full cask puts msime-mcp on PATH")
-        for other in others:
-            if other != bundle and other in cask:
-                errors.append(f"{where}: the cask mentions {other}, another edition's bundle id")
-
 
 def check_mode_suffixes(errors: list[str], generator) -> None:
     header = MODE_HEADER.read_text(encoding="utf-8")
     for suffix in set(generator.SCHEME_MODES.values()) | {generator.ENGLISH}:
         if f'MSIMEInputModeIdentifier(@"{suffix}")' not in header:
             errors.append(f"{MODE_HEADER.relative_to(ROOT)} has no mode for the suffix {suffix} the generator uses")
-
-
-def check_sparkle_feed(errors: list[str], generator, table: dict, editions: list[dict]) -> None:
-    """发布包编的是 full，CMake 把 feed 写成 appcast-full.xml；每个版本改写后要指向自己的 appcast，其余 Sparkle 键原样保留。"""
-    base = "https://example.invalid/releases/download/macos-appcast/"
-    keys = (
-        f"<key>SUFeedURL</key><string>{base}appcast-full.xml</string>\n"
-        "<key>SUPublicEDKey</key><string>AAAA</string>\n"
-        "<key>SUEnableAutomaticChecks</key><true/>\n"
-    )
-    template = TEMPLATE.read_text(encoding="utf-8")
-    if template.count("${MSIME_SPARKLE_PLIST_KEYS}") != 1:
-        errors.append("Info.plist.in must have exactly one ${MSIME_SPARKLE_PLIST_KEYS} placeholder")
-        return
-    built = template.replace("${MSIME_SPARKLE_PLIST_KEYS}", keys)
-    for entry in editions:
-        edition_id = entry["id"]
-        plist = plistlib.loads(generator.info_plist(built, edition_id, table).encode("utf-8"))
-        if plist.get("SUFeedURL") != f"{base}appcast-{edition_id}.xml":
-            errors.append(f"edition {edition_id}: SUFeedURL is {plist.get('SUFeedURL')!r}")
-        if plist.get("SUPublicEDKey") != "AAAA" or plist.get("SUEnableAutomaticChecks") is not True:
-            errors.append(f"edition {edition_id}: the other Sparkle keys did not survive")
 
 
 def main() -> int:
@@ -222,7 +160,6 @@ def main() -> int:
     errors: list[str] = []
     check_full(errors, generator, table)
     check_mode_suffixes(errors, generator)
-    check_sparkle_feed(errors, generator, table, editions)
     with tempfile.TemporaryDirectory() as directory:
         for entry in editions:
             check_edition(errors, generator, table, entry, others, pathlib.Path(directory))

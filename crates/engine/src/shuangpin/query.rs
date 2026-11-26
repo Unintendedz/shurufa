@@ -4,8 +4,8 @@
 
 use super::utils::{
     convert_seg_shuangpin_to_seg_complete_pinyin,
-    convert_seg_shuangpin_to_seg_complete_pinyin_into, is_all_complete_pinyin,
-    pinyin_segmentation, takes_two_keys,
+    convert_seg_shuangpin_to_seg_complete_pinyin_into, is_all_complete_pinyin, pinyin_segmentation,
+    takes_two_keys,
 };
 use super::ShuangpinProfile;
 use crate::pinyin::fuzzy::fuzzy_initial_partners;

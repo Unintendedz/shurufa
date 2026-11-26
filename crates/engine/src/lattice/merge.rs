@@ -292,7 +292,9 @@ fn merge_decoded_paths(
             if already.contains(path.sentence.as_str()) {
                 continue;
             }
-            if !block.is_empty() && options.include_collocation_best && !options.include_lattice_best
+            if !block.is_empty()
+                && options.include_collocation_best
+                && !options.include_lattice_best
             {
                 break;
             }

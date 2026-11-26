@@ -2,86 +2,28 @@
 
 use std::path::{Path, PathBuf};
 
-
-
-
-
-
 use std::sync::{Arc, Mutex};
-
-
-
-
-
 
 use std::time::{Duration, Instant};
 
-
-
-
-
-
-
 use rusqlite::Connection;
-
-
-
-
-
-
 
 use super::editing::quanpin_raw_boundaries;
 
-
-
-
-
-
 use super::{Clock, Session, SessionOptions};
-
-
-
-
-
 
 use crate::assets;
 
-
-
-
-
-
 use crate::local::date_time::LocalDateTime;
 
-
-
-
-
-
 use crate::paths::RuntimePaths;
-
-
-
-
-
 
 use crate::types::{
     CandidateEdge, CandidateSource, Command, FrequencyAdjustmentMode, FrequencyAdjustmentOptions,
     LocalInputMode, SchemeKey, SchemeType, ShuangpinProfileKind, DEFAULT_FIRST_PAGE_ROWS,
 };
 
-
-
-
-
-
 use crate::user_dictionary::ngram_store::flush_all;
-
-
-
-
-
-
 
 /// test_input_session.cpp:390-430 (fixture M), the rows the portable-selection, caret and edge cases read.
 const QUANPIN_FIXTURE: &str =
@@ -109,11 +51,6 @@ CREATE TABLE tbl_1_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
 INSERT INTO tbl_1_n VALUES('ni','n','你',100);\
 CREATE TABLE tbl_4_x(key TEXT,jp TEXT,value TEXT,weight INTEGER);";
 
-
-
-
-
-
 const CARET_PREFIX_FIXTURE: &str =
     "CREATE TABLE tbl_1_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
 INSERT INTO tbl_1_n VALUES('ni','n','你',100);\
@@ -126,12 +63,6 @@ INSERT INTO tbl_1_s VALUES('shi','sh','是',100);\
 CREATE TABLE tbl_1_j(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
 INSERT INTO tbl_1_j VALUES('jie','j','接',100);";
 
-
-
-
-
-
-
 /// test_personal_context_input_session.cpp:136-149 with test_pick_pair_input_session.cpp:73-94's shan/shui rows.
 const CONTEXT_FIXTURE: &str = "CREATE TABLE tbl_1_n(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
 INSERT INTO tbl_1_n VALUES('ni','n','甲',100),('ni','n','乙',90),('ni','n','丙',80);\
@@ -143,21 +74,9 @@ CREATE TABLE tbl_1_s(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
 INSERT INTO tbl_1_s VALUES('shan','s','闪',100),('shan','s','山',90),('shui','s','睡',100),('shui','s','水',90);\
 CREATE TABLE tbl_2_s(key TEXT, jp TEXT, value TEXT, weight INTEGER);";
 
-
-
-
-
-
-
 const ENGLISH_FIXTURE: &str = "INSERT INTO english_words VALUES('he','HE',110);\
 INSERT INTO english_words VALUES('hello','Hello',100);\
 INSERT INTO english_words VALUES('help','Help',90);";
-
-
-
-
-
-
 
 #[test]
 fn mixed_candidate_refresh_reuses_rows_for_engine_and_caret_prefix() {
@@ -185,12 +104,6 @@ fn mixed_candidate_refresh_reuses_rows_for_engine_and_caret_prefix() {
     assert_eq!(session.snapshot(), before);
 }
 
-
-
-
-
-
-
 #[test]
 fn journal_path_lookup_reuses_the_session_path() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -205,12 +118,6 @@ fn journal_path_lookup_reuses_the_session_path() {
         "journal path lookup allocated {allocations} buffers"
     );
 }
-
-
-
-
-
-
 
 #[test]
 fn ordinary_candidate_positions_skip_missing_journal_work() {
@@ -228,12 +135,6 @@ fn ordinary_candidate_positions_skip_missing_journal_work() {
         "ordinary position refresh allocated {allocations} buffers"
     );
 }
-
-
-
-
-
-
 
 #[test]
 fn personal_rerank_refresh_reuses_shown_rows_and_preserves_learning_order() {
@@ -285,22 +186,10 @@ fn personal_rerank_refresh_reuses_shown_rows_and_preserves_learning_order() {
     }
 }
 
-
-
-
-
-
-
 /// One directory standing in for all four runtime roots, as the reference session tests used.
 struct Fixture {
     directory: tempfile::TempDir,
 }
-
-
-
-
-
-
 
 fn prediction_fixture() -> Fixture {
     Fixture::new(
@@ -319,12 +208,6 @@ CREATE TABLE tbl_1_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);
 INSERT INTO tbl_1_n VALUES('ni','n','你',1000);",
     )
 }
-
-
-
-
-
-
 
 #[test]
 fn next_word_prediction_is_opt_in_and_has_no_composing_text() {
@@ -349,12 +232,6 @@ fn next_word_prediction_is_opt_in_and_has_no_composing_text() {
     assert!(on.snapshot().candidates.iter().any(|row| row.word == "菜"));
 }
 
-
-
-
-
-
-
 #[test]
 fn next_word_prediction_never_commits_on_space_return_delete_or_finish() {
     let fixture = prediction_fixture();
@@ -378,12 +255,6 @@ fn next_word_prediction_never_commits_on_space_return_delete_or_finish() {
     assert!(session.snapshot().candidates.is_empty());
 }
 
-
-
-
-
-
-
 #[test]
 fn next_word_prediction_clears_on_direct_candidate_key_and_conversion_navigation() {
     let fixture = prediction_fixture();
@@ -400,12 +271,6 @@ fn next_word_prediction_clears_on_direct_candidate_key_and_conversion_navigation
         assert!(!session.snapshot().prediction);
     }
 }
-
-
-
-
-
-
 
 #[test]
 fn next_word_prediction_uses_learned_transitions_only_when_learning_is_enabled() {
@@ -438,12 +303,6 @@ fn next_word_prediction_uses_learned_transitions_only_when_learning_is_enabled()
     }
 }
 
-
-
-
-
-
-
 #[test]
 fn next_word_prediction_reset_does_not_learn_across_the_discarded_context() {
     let fixture = prediction_fixture();
@@ -457,12 +316,6 @@ fn next_word_prediction_reset_does_not_learn_across_the_discarded_context() {
         crate::user_dictionary::ngram_store::PersonalNgramStore::for_journal(&fixture.journal());
     assert!(store.next_words("吃", 8).is_empty());
 }
-
-
-
-
-
-
 
 impl Fixture {
     fn new(main_sql: &str) -> Self {
@@ -526,12 +379,6 @@ impl Fixture {
     }
 }
 
-
-
-
-
-
-
 fn type_text(session: &mut Session, text: &str) {
     for byte in text.bytes() {
         assert!(
@@ -542,12 +389,6 @@ fn type_text(session: &mut Session, text: &str) {
     }
 }
 
-
-
-
-
-
-
 fn words(session: &Session) -> Vec<String> {
     session
         .snapshot()
@@ -557,12 +398,6 @@ fn words(session: &Session) -> Vec<String> {
         .collect()
 }
 
-
-
-
-
-
-
 fn index_of(session: &Session, word: &str) -> usize {
     words(session)
         .iter()
@@ -570,22 +405,10 @@ fn index_of(session: &Session, word: &str) -> usize {
         .unwrap_or_else(|| panic!("{word} is not a candidate of {:?}", words(session)))
 }
 
-
-
-
-
-
-
 fn select_word(session: &mut Session, word: &str) -> crate::types::KeyResult {
     let index = index_of(session, word);
     session.select(index)
 }
-
-
-
-
-
-
 
 fn count(database: &Path, sql: &str) -> i64 {
     Connection::open(database)
@@ -593,23 +416,11 @@ fn count(database: &Path, sql: &str) -> i64 {
         .unwrap_or(0)
 }
 
-
-
-
-
-
-
 /// A steady clock tests move by hand, and a pinned wall clock.
 #[derive(Clone)]
 struct TestClock {
     now: Arc<Mutex<Instant>>,
 }
-
-
-
-
-
-
 
 impl TestClock {
     fn install(session: &mut Session) -> Self {
@@ -637,12 +448,6 @@ impl TestClock {
     }
 }
 
-
-
-
-
-
-
 // ---- pure helpers ----
 
 #[test]
@@ -658,12 +463,6 @@ fn quanpin_boundaries_follow_the_display_separators() {
     assert!(quanpin_raw_boundaries("nihao", "ni'ha").is_empty());
     assert!(quanpin_raw_boundaries("'", "'").is_empty());
 }
-
-
-
-
-
-
 
 // ---- caret prefix (upstream bc46f27) ----
 
@@ -718,12 +517,6 @@ fn caret_prefix_decodes_only_the_complete_units_before_the_caret() {
     assert_eq!(words(&session), full);
 }
 
-
-
-
-
-
-
 #[test]
 fn caret_prefix_floors_to_a_shuangpin_unit() {
     let fixture = Fixture::new(CARET_PREFIX_FIXTURE);
@@ -741,12 +534,6 @@ fn caret_prefix_floors_to_a_shuangpin_unit() {
     type_text(&mut prefix, "ni");
     assert_eq!(words(&session), words(&prefix));
 }
-
-
-
-
-
-
 
 #[test]
 fn caret_commands_redecode_and_selection_returns_to_the_end() {
@@ -784,12 +571,6 @@ fn caret_commands_redecode_and_selection_returns_to_the_end() {
     assert_eq!(snapshot.caret_position, 3);
 }
 
-
-
-
-
-
-
 #[test]
 fn selecting_a_prefix_candidate_exits_prefix_mode() {
     let fixture = Fixture::new(CARET_PREFIX_FIXTURE);
@@ -805,12 +586,6 @@ fn selecting_a_prefix_candidate_exits_prefix_mode() {
     assert_eq!(session.prefix_end(), "shijie".len());
     assert!(words(&session).contains(&"是".to_owned()));
 }
-
-
-
-
-
-
 
 /// 904bd0976: the prefix list goes through the same personal context reorder as the whole input, and a pinned leader keeps its seat there too.
 #[test]
@@ -851,12 +626,6 @@ fn caret_prefix_follows_the_personal_context_order_and_its_pins() {
     );
 }
 
-
-
-
-
-
-
 /// Thirty `ni` characters, more than the 24 a lone initial lists before expansion, plus the `ni'hao` rows.
 fn initial_fixture() -> Fixture {
     let rows: Vec<String> = (0..30)
@@ -878,12 +647,6 @@ INSERT INTO tbl_2_n VALUES('ni''hao','nh','你好',5000);",
         rows.join(",")
     ))
 }
-
-
-
-
-
-
 
 /// Paging past a lone initial's capped prefix list widens that list, the one on screen, not the hidden whole-input list.
 #[test]
@@ -917,12 +680,6 @@ fn caret_prefix_expands_its_own_initial_list() {
     assert_eq!(full.first().map(String::as_str), Some("你好"));
 }
 
-
-
-
-
-
-
 /// Expanding the whole input's list writes the whole input's series slot, not the slot of the caret prefix decoded just before it on the same dictionary.
 #[test]
 fn a_whole_input_expansion_leaves_the_prefix_slot_alone() {
@@ -943,12 +700,6 @@ fn a_whole_input_expansion_leaves_the_prefix_slot_alone() {
     assert_eq!(words(&session), prefix);
 }
 
-
-
-
-
-
-
 /// Mixed English rows are looked up for the decoded prefix, not for the whole raw input.
 #[test]
 fn caret_prefix_mixes_english_for_the_prefix_only() {
@@ -968,24 +719,12 @@ fn caret_prefix_mixes_english_for_the_prefix_only() {
     assert!(!words(&session).contains(&"nice".to_owned()));
 }
 
-
-
-
-
-
-
 /// 真实词库里 `hello` 拆不开（he'l'lo），全拼只能给出 和、何 这类前半截的字；英文库里正好有这个词。
 const HELLO_FIXTURE: &str = "CREATE TABLE tbl_1_h(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
 INSERT INTO tbl_1_h VALUES('he','h','和',200);\
 INSERT INTO tbl_1_h VALUES('he','h','何',100);\
 CREATE TABLE tbl_1_l(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
 INSERT INTO tbl_1_l VALUES('lo','l','咯',100);";
-
-
-
-
-
-
 
 fn candidate_sources(session: &Session) -> Vec<CandidateSource> {
     session
@@ -995,12 +734,6 @@ fn candidate_sources(session: &Session) -> Vec<CandidateSource> {
         .map(|item| item.source)
         .collect()
 }
-
-
-
-
-
-
 
 /// 拼音拆不开、英文完全匹配整段输入时英文占首位，空格上屏英文；结束组字的标点也整段上屏这个英文词。能切成完整音节的 `he` 照旧是中文首选。
 #[test]
@@ -1037,12 +770,6 @@ INSERT INTO english_words VALUES('he','he',500);",
     assert_eq!(words(&session)[1], "he", "{:?}", words(&session));
 }
 
-
-
-
-
-
-
 #[test]
 fn capital_pinyin_spelling_keeps_the_typed_latin_word() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -1063,12 +790,6 @@ fn capital_pinyin_spelling_keeps_the_typed_latin_word() {
         assert_eq!(session.select(0).commit.as_deref(), Some(text));
     }
 }
-
-
-
-
-
-
 
 #[test]
 fn capital_literal_prefix_keeps_the_following_lowercase_chinese_conversion() {
@@ -1096,12 +817,6 @@ fn capital_literal_prefix_keeps_the_following_lowercase_chinese_conversion() {
     }
 }
 
-
-
-
-
-
-
 #[test]
 fn shifted_uppercase_starts_pinyin_and_mixes_the_cased_english_word() {
     let fixture = Fixture::new(HELLO_FIXTURE)
@@ -1118,12 +833,6 @@ fn shifted_uppercase_starts_pinyin_and_mixes_the_cased_english_word() {
     assert_eq!(session.snapshot().preedit, "Observable");
 }
 
-
-
-
-
-
-
 #[test]
 fn punctuation_after_unspellable_shifted_word_commits_typed_text() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -1139,12 +848,6 @@ fn punctuation_after_unspellable_shifted_word_commits_typed_text() {
     assert_eq!(result.commit.as_deref(), Some("Nih《"), "{result:?}");
 }
 
-
-
-
-
-
-
 #[test]
 fn punctuation_after_capitalized_spelling_keeps_literal_capital() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -1156,12 +859,6 @@ fn punctuation_after_capitalized_spelling_keeps_literal_capital() {
     let result = session.punctuation(b'<');
     assert_eq!(result.commit.as_deref(), Some("Ni《"), "{result:?}");
 }
-
-
-
-
-
-
 
 /// 英文领先时紧跟着的第二行才是拼音的首选，选它仍是默认选择：不调词频，不写日志。
 #[test]
@@ -1191,12 +888,6 @@ fn picking_the_chinese_row_behind_a_leading_english_word_is_the_default_pick() {
     assert!(!fixture.journal().exists());
 }
 
-
-
-
-
-
-
 /// The prefix request carries the session's fuzzy rules.
 #[test]
 fn caret_prefix_applies_fuzzy_pinyin() {
@@ -1219,12 +910,6 @@ INSERT INTO tbl_1_h VALUES('hao','h','好',100);",
         );
     }
 }
-
-
-
-
-
-
 
 /// The prefix request carries the autocorrect switches, and the suppression a raw commit of the prefix recorded.
 #[test]
@@ -1274,12 +959,6 @@ INSERT INTO tbl_1_h VALUES('hao','h','好',100);",
     );
 }
 
-
-
-
-
-
-
 /// Microsoft `ni'nni` (golden ri_microsoft_semicolon_editing step 18): every shorter prefix group answers 你 and 拟, and the trailing `i` is also a single helpcode whose answer appends the whole-input series again, so the reference listed each word four times. A word keeps its first seat (decision 2026-09-30).
 #[test]
 fn shuangpin_lists_a_word_once() {
@@ -1293,12 +972,6 @@ fn shuangpin_lists_a_word_once() {
     type_text(&mut session, "ni'nni");
     assert_eq!(words(&session), ["你", "拟"]);
 }
-
-
-
-
-
-
 
 /// #6034：双拼会话读同一个「拼音纠错」开关。合成词库里只有关系是词，小鹤把 guan（gr）的 r 按成邻键 f 就是 gen；自然码把 xi 的 x 按成邻键 c 就是 ci。
 const SHUANGPIN_TYPO_FIXTURE: &str =
@@ -1315,12 +988,6 @@ INSERT INTO tbl_2_g VALUES('guan''xi','gx','关系',100000);\
 CREATE TABLE tbl_2_m(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
 CREATE TABLE tbl_3_m(key TEXT,jp TEXT,value TEXT,weight INTEGER);";
 
-
-
-
-
-
-
 /// 生产词库里字面整句可能比纠错词更高频；纠错候选仍应出现在候选列表中，而不是只在它胜过字面整句时出现。
 const SHUANGPIN_NONLEADING_TYPO_FIXTURE: &str =
     "CREATE TABLE tbl_1_m(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
@@ -1333,12 +1000,6 @@ CREATE TABLE tbl_2_g(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
 INSERT INTO tbl_2_g VALUES('guan''xi','gx','关系',1);\
 CREATE TABLE tbl_3_m(key TEXT,jp TEXT,value TEXT,weight INTEGER);";
 
-
-
-
-
-
-
 const QUANPIN_EXTRA_LETTER_FIXTURE: &str =
     "CREATE TABLE tbl_1_s(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
 INSERT INTO tbl_1_s VALUES('shang','s','上',1000);\
@@ -1346,12 +1007,6 @@ CREATE TABLE tbl_1_h(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
 INSERT INTO tbl_1_h VALUES('hao','h','好',1000);\
 CREATE TABLE tbl_2_s(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
 INSERT INTO tbl_2_s VALUES('shang''hao','sh','上好',10000);";
-
-
-
-
-
-
 
 #[test]
 fn quanpin_correction_consumes_extra_typed_letter() {
@@ -1377,12 +1032,6 @@ fn quanpin_correction_consumes_extra_typed_letter() {
     assert_eq!(session.snapshot().preedit, "");
 }
 
-
-
-
-
-
-
 #[test]
 fn converted_quanpin_correction_consumes_extra_typed_letter() {
     let fixture = Fixture::new(QUANPIN_EXTRA_LETTER_FIXTURE);
@@ -1405,12 +1054,6 @@ fn converted_quanpin_correction_consumes_extra_typed_letter() {
     );
     assert_eq!(session.snapshot().preedit, "");
 }
-
-
-
-
-
-
 
 /// 纠错整句排在字面整句之后，选中它按全部按键上屏；开关关着时不出。
 #[test]
@@ -1449,12 +1092,6 @@ fn shuangpin_offers_the_typo_sentence_under_the_autocorrect_switch() {
     );
 }
 
-
-
-
-
-
-
 #[test]
 fn shuangpin_offers_a_nonleading_typo_sentence_from_a_full_dictionary() {
     let fixture = Fixture::new(SHUANGPIN_NONLEADING_TYPO_FIXTURE);
@@ -1474,12 +1111,6 @@ fn shuangpin_offers_a_nonleading_typo_sentence_from_a_full_dictionary() {
     assert!(corrected > 0, "{:?}", words(&session));
     assert_eq!(snapshot.candidates[corrected].corrected_from, "mwgfxi");
 }
-
-
-
-
-
-
 
 /// 双拼方案在宿主重建会话时切换。重建后的会话按新方案的编码纠错：自然码下 `mzgrci` 纠回没关系，小鹤的误触串 `mwgfxi` 不再纠；切回小鹤后反过来。
 #[test]
@@ -1516,12 +1147,6 @@ fn a_rebuilt_session_corrects_with_its_new_profile() {
     }
 }
 
-
-
-
-
-
-
 #[test]
 fn ignored_scheme_key_does_not_clone_preedit_for_change_detection() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -1536,12 +1161,6 @@ fn ignored_scheme_key_does_not_clone_preedit_for_change_detection() {
     // 候选行字段是 `SharedString`：克隆行只加引用计数，新建行的每个非空字段多一个 `Arc`。
     assert_eq!(allocations, 19);
 }
-
-
-
-
-
-
 
 #[test]
 fn typing_at_the_end_does_not_build_the_preedit_twice_for_caret_detection() {
@@ -1565,12 +1184,6 @@ fn typing_at_the_end_does_not_build_the_preedit_twice_for_caret_detection() {
     assert_eq!(allocations, 98);
 }
 
-
-
-
-
-
-
 #[test]
 fn backspacing_at_the_end_does_not_build_the_preedit_twice_for_caret_detection() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -1585,12 +1198,6 @@ fn backspacing_at_the_end_does_not_build_the_preedit_twice_for_caret_detection()
     assert_eq!(allocations, 11);
 }
 
-
-
-
-
-
-
 #[test]
 fn url_entry_readiness_at_the_end_does_not_build_the_preedit_twice() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -1604,12 +1211,6 @@ fn url_entry_readiness_at_the_end_does_not_build_the_preedit_twice() {
     // 候选行字段是 `SharedString`：克隆行只加引用计数，新建行的每个非空字段多一个 `Arc`。
     assert_eq!(allocations, 6);
 }
-
-
-
-
-
-
 
 #[test]
 fn url_trigger_reversion_reuses_the_remaining_text_buffer() {
@@ -1630,12 +1231,6 @@ fn url_trigger_reversion_reuses_the_remaining_text_buffer() {
     );
 }
 
-
-
-
-
-
-
 #[test]
 fn prefix_end_does_not_build_editing_text_to_clamp_the_caret() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -1649,12 +1244,6 @@ fn prefix_end_does_not_build_editing_text_to_clamp_the_caret() {
     assert_eq!(prefix_end, 2);
     assert_eq!(allocations, 1);
 }
-
-
-
-
-
-
 
 #[test]
 fn setting_the_caret_does_not_build_editing_text_to_clamp_it() {
@@ -1670,12 +1259,6 @@ fn setting_the_caret_does_not_build_editing_text_to_clamp_it() {
     // 候选行字段是 `SharedString`：克隆行只加引用计数，新建行的每个非空字段多一个 `Arc`。
     assert_eq!(allocations, 18);
 }
-
-
-
-
-
-
 
 #[test]
 fn moving_the_caret_does_not_build_the_preedit_twice() {
@@ -1694,12 +1277,6 @@ fn moving_the_caret_does_not_build_the_preedit_twice() {
     );
 }
 
-
-
-
-
-
-
 #[test]
 fn typing_at_a_caret_reuses_the_editing_text_length() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -1714,12 +1291,6 @@ fn typing_at_a_caret_reuses_the_editing_text_length() {
     // 候选行字段是 `SharedString`：克隆行只加引用计数，新建行的每个非空字段多一个 `Arc`。
     assert_eq!(allocations, 164, "光标处输入的分配次数：{allocations}");
 }
-
-
-
-
-
-
 
 #[test]
 fn selecting_a_quanpin_candidate_clones_only_needed_request_fields() {
@@ -1737,12 +1308,6 @@ fn selecting_a_quanpin_candidate_clones_only_needed_request_fields() {
     assert_eq!(result.commit.as_deref(), Some("你好"));
     assert!(allocations <= 14, "候选选择分配次数：{allocations}");
 }
-
-
-
-
-
-
 
 #[test]
 fn selecting_a_dictionary_candidate_does_not_build_context_row_vec() {
@@ -1763,12 +1328,6 @@ fn selecting_a_dictionary_candidate_does_not_build_context_row_vec() {
         "个人上下文记录的中间行分配了 {allocations} 次"
     );
 }
-
-
-
-
-
-
 
 #[test]
 fn selecting_a_candidate_does_not_clone_unused_sentence_words() {
@@ -1791,12 +1350,6 @@ fn selecting_a_candidate_does_not_clone_unused_sentence_words() {
     );
 }
 
-
-
-
-
-
-
 #[test]
 fn selecting_a_shuangpin_candidate_does_not_clone_the_full_request() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -1815,12 +1368,6 @@ fn selecting_a_shuangpin_candidate_does_not_clone_the_full_request() {
     // 候选行字段是 `SharedString`：克隆行只加引用计数，新建行的每个非空字段多一个 `Arc`。
     assert!(allocations <= 14, "双拼候选选择分配次数：{allocations}");
 }
-
-
-
-
-
-
 
 #[test]
 fn selecting_an_unsupported_candidate_does_not_clone_its_row() {
@@ -1842,12 +1389,6 @@ fn selecting_an_unsupported_candidate_does_not_clone_its_row() {
     );
 }
 
-
-
-
-
-
-
 #[test]
 fn selecting_the_top_candidate_does_not_clone_an_unused_learning_row() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -1867,12 +1408,6 @@ fn selecting_the_top_candidate_does_not_clone_an_unused_learning_row() {
         "top-candidate learning allocated {allocations} unused buffers"
     );
 }
-
-
-
-
-
-
 
 #[test]
 fn learning_a_non_top_candidate_does_not_clone_the_whole_ranking_list() {
@@ -1903,12 +1438,6 @@ fn learning_a_non_top_candidate_does_not_clone_the_whole_ranking_list() {
     );
 }
 
-
-
-
-
-
-
 #[test]
 fn frequency_learning_borrows_an_existing_entry_key() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -1932,12 +1461,6 @@ fn frequency_learning_borrows_an_existing_entry_key() {
     );
 }
 
-
-
-
-
-
-
 #[test]
 fn removing_an_unsupported_candidate_does_not_clone_its_row() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -1953,12 +1476,6 @@ fn removing_an_unsupported_candidate_does_not_clone_its_row() {
     assert_eq!(session.snapshot(), before);
     assert_eq!(allocations, 0, "拒绝删除候选产生了 {allocations} 次分配");
 }
-
-
-
-
-
-
 
 #[test]
 fn pinning_a_candidate_does_not_clone_the_full_learning_row() {
@@ -1978,12 +1495,6 @@ fn pinning_a_candidate_does_not_clone_the_full_learning_row() {
         "pinning an unsupported candidate allocated {allocations} buffers"
     );
 }
-
-
-
-
-
-
 
 #[test]
 fn removing_an_unsupported_candidate_does_not_clone_the_full_row() {
@@ -2005,12 +1516,6 @@ fn removing_an_unsupported_candidate_does_not_clone_the_full_row() {
     );
 }
 
-
-
-
-
-
-
 #[test]
 fn position_context_borrows_normalized_pinyin() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -2023,12 +1528,6 @@ fn position_context_borrows_normalized_pinyin() {
     ));
 }
 
-
-
-
-
-
-
 #[test]
 fn pinyin_segmentation_borrows_explicit_segmentation_when_normalized_input_is_empty() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -2040,12 +1539,6 @@ fn pinyin_segmentation_borrows_explicit_segmentation_when_normalized_input_is_em
         std::borrow::Cow::Borrowed(_)
     ));
 }
-
-
-
-
-
-
 
 #[test]
 fn complete_pinyin_check_reuses_segmentation_storage() {
@@ -2060,12 +1553,6 @@ fn complete_pinyin_check_reuses_segmentation_storage() {
     assert_eq!(allocations, 0, "完整拼音判定不应复制已有切分");
 }
 
-
-
-
-
-
-
 #[test]
 fn pinyin_ranking_context_borrows_normalized_segmentation() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -2077,12 +1564,6 @@ fn pinyin_ranking_context_borrows_normalized_segmentation() {
         std::borrow::Cow::Borrowed(_)
     ));
 }
-
-
-
-
-
-
 
 /// test_candidate_removal.cpp:166-194: a removal the journal refuses is reported, commits nothing, and leaves the composition and the row where they were, for pinyin and English rows alike.
 #[test]
@@ -2140,12 +1621,6 @@ fn a_removal_the_journal_refuses_reports_and_keeps_the_row() {
     );
 }
 
-
-
-
-
-
-
 // ---- personal learning windows (set_clock) ----
 
 #[test]
@@ -2179,12 +1654,6 @@ fn a_short_pause_keeps_the_chain_and_a_long_one_breaks_it() {
     }
 }
 
-
-
-
-
-
-
 #[test]
 fn prefix_rows_do_not_displace_the_whole_key_leader_in_the_personal_context() {
     let fixture = Fixture::new(
@@ -2206,12 +1675,6 @@ INSERT INTO tbl_1_w VALUES('wo','w','我',100);",
     assert_eq!(list.first().map(String::as_str), Some("给"), "{list:?}");
 }
 
-
-
-
-
-
-
 #[test]
 fn the_pause_is_measured_from_the_last_commit() {
     let fixture = Fixture::new(CONTEXT_FIXTURE);
@@ -2230,12 +1693,6 @@ fn the_pause_is_measured_from_the_last_commit() {
     type_text(&mut session, "hao");
     assert!(session.input.chain.previous.is_none());
 }
-
-
-
-
-
-
 
 #[test]
 fn picks_within_ten_seconds_become_a_phrase() {
@@ -2265,12 +1722,6 @@ fn picks_within_ten_seconds_become_a_phrase() {
     assert_eq!(count(&fixture.main_db(), phrase), 1, "picks 10 s apart");
 }
 
-
-
-
-
-
-
 // ---- test_input_session.cpp ports ----
 
 #[test]
@@ -2295,12 +1746,6 @@ fn nihao_selection_and_commit() {
     type_text(&mut session, "nihao");
     assert_eq!(session.candidate_key(b'2').commit.as_deref(), Some("拟好"));
 }
-
-
-
-
-
-
 
 #[test]
 fn portable_selection_keeps_the_rest_and_learns_the_phrase() {
@@ -2327,12 +1772,6 @@ fn portable_selection_keeps_the_rest_and_learns_the_phrase() {
     select_word(&mut session, "西");
     assert_eq!(session.punctuation(b',').commit.as_deref(), Some("特乐，"));
 }
-
-
-
-
-
-
 
 #[test]
 fn backspacing_away_the_rest_abandons_the_phrase() {
@@ -2362,12 +1801,6 @@ fn backspacing_away_the_rest_abandons_the_phrase() {
     assert!(session.snapshot().preedit.is_empty());
 }
 
-
-
-
-
-
-
 #[test]
 fn selection_completion_prediction_matches_the_selection() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -2386,12 +1819,6 @@ fn selection_completion_prediction_matches_the_selection() {
         );
     }
 }
-
-
-
-
-
-
 
 #[test]
 fn edge_selection_commits_one_han_character() {
@@ -2417,12 +1844,6 @@ fn edge_selection_commits_one_han_character() {
     assert_eq!(session.snapshot().preedit, "nihao");
 }
 
-
-
-
-
-
-
 #[test]
 fn backspace_commit_raw_cancel_and_scheme_switch() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -2444,12 +1865,6 @@ fn backspace_commit_raw_cancel_and_scheme_switch() {
     assert_eq!(session.snapshot().scheme, SchemeType::Shuangpin);
 }
 
-
-
-
-
-
-
 #[test]
 fn idle_keys_pass_through() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -2462,12 +1877,6 @@ fn idle_keys_pass_through() {
     assert!(!session.character(b'N', false).handled);
     assert!(!session.candidate_key(b'1').handled);
 }
-
-
-
-
-
-
 
 #[test]
 fn caret_editing_keeps_the_local_marker() {
@@ -2497,12 +1906,6 @@ fn caret_editing_keeps_the_local_marker() {
     assert_eq!(session.snapshot().editing_text, "n'i");
 }
 
-
-
-
-
-
-
 #[test]
 fn an_edit_rejects_the_answer_to_the_old_composition() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -2524,12 +1927,6 @@ fn an_edit_rejects_the_answer_to_the_old_composition() {
     assert!(words(&session).contains(&"妮".to_owned()));
 }
 
-
-
-
-
-
-
 #[test]
 fn accepting_an_online_answer_does_not_rebuild_the_live_query() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -2546,12 +1943,6 @@ fn accepting_an_online_answer_does_not_rebuild_the_live_query() {
         "在线回包校验不应重建完整查询，仍申请了 {allocations} 次分配"
     );
 }
-
-
-
-
-
-
 
 /// test_runtime_isolation.cpp:257-268: moving the caret changes no query field, so an answer to the unchanged composition is still accepted.
 #[test]
@@ -2586,12 +1977,6 @@ fn caret_only_movement_keeps_the_online_generation() {
     assert!(words(&session).contains(&"妮".to_owned()));
 }
 
-
-
-
-
-
-
 /// While a caret prefix is decoded, an answer to the whole input goes into the whole input's list, which is not on screen: the call reports false, and the row shows once the caret returns to the end.
 #[test]
 fn caret_prefix_defers_a_whole_input_answer_until_move_end() {
@@ -2612,12 +1997,6 @@ fn caret_prefix_defers_a_whole_input_answer_until_move_end() {
         .expect("the answer shows at the end");
     assert_eq!(row.source, CandidateSource::CloudSuggestion);
 }
-
-
-
-
-
-
 
 /// test_online_input_session.cpp:149-176 through the singular entry every cloud response takes: cloud at the second seat, AI at the end (the reference seated it third; input-runtime now shows the first AI row in the last slot of page one, #6888), a new cloud answer replaces the old one, and a word the list already holds or a non-online source is refused without touching the list.
 #[test]
@@ -2659,12 +2038,6 @@ INSERT INTO tbl_1_n VALUES('ni','n','你',100),('ni','n','拟',90),('ni','n','�
     assert_eq!(session.snapshot().candidates, before);
 }
 
-
-
-
-
-
-
 #[test]
 fn cloud_answer_replaces_its_fixed_pending_seat() {
     let fixture = Fixture::new(
@@ -2685,12 +2058,6 @@ INSERT INTO tbl_1_n VALUES('ni','n','你',100),('ni','n','拟',90),('ni','n','�
     assert_eq!(after.candidate_sources[1], CandidateSource::CloudSuggestion);
     assert_eq!(&after.candidates[2..], &before.candidates[2..]);
 }
-
-
-
-
-
-
 
 #[test]
 fn clearing_one_online_source_removes_cached_rows_but_keeps_the_other_source() {
@@ -2716,12 +2083,6 @@ INSERT INTO tbl_1_n VALUES('ni','n','你',100),('ni','n','拟',90);",
     assert!(words(&session).contains(&"AI候选".to_owned()));
 }
 
-
-
-
-
-
-
 /// test_input_session.cpp (longer phrases): a row that continues past the typed syllables keeps the typed reading as its pinyin, and selecting it commits the whole phrase and ends the composition.
 #[test]
 fn selecting_a_longer_phrase_commits_it_whole() {
@@ -2744,12 +2105,6 @@ INSERT INTO tbl_3_n VALUES('ni''hao''ma','nhm','你好吗',900);",
     assert_eq!(result.commit.as_deref(), Some("你好吗"));
     assert!(session.snapshot().preedit.is_empty());
 }
-
-
-
-
-
-
 
 /// test_runtime_isolation.cpp:367-413: twenty threads, each with its own session on one of two roots, read only their own root's dictionary.
 #[test]
@@ -2781,12 +2136,6 @@ fn concurrent_sessions_read_only_their_own_dictionary() {
         }
     });
 }
-
-
-
-
-
-
 
 // ---- local mode fallback rows and temporary modes (overlays.md §8.1, test_temporary_input_session.cpp) ----
 
@@ -2826,12 +2175,6 @@ fn temporary_english_shows_its_prefix_until_a_word_matches() {
     assert_eq!(session.snapshot().local_mode, LocalInputMode::None);
 }
 
-
-
-
-
-
-
 #[test]
 fn selecting_a_local_generated_candidate_does_not_clone_its_learning_row() {
     let fixture = Fixture::new(QUANPIN_FIXTURE).with_english(ENGLISH_FIXTURE);
@@ -2854,12 +2197,6 @@ fn selecting_a_local_generated_candidate_does_not_clone_its_learning_row() {
         "本地生成候选提交产生了 {allocations} 次分配"
     );
 }
-
-
-
-
-
-
 
 #[test]
 fn selecting_a_temporary_english_candidate_does_not_clone_full_ranking_rows() {
@@ -2901,12 +2238,6 @@ fn selecting_a_temporary_english_candidate_does_not_clone_full_ranking_rows() {
     );
 }
 
-
-
-
-
-
-
 #[test]
 fn shuangpin_snapshot_does_not_build_unused_raw_preedit() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -2926,12 +2257,6 @@ fn shuangpin_snapshot_does_not_build_unused_raw_preedit() {
         "shuangpin snapshot allocations: {allocations}"
     );
 }
-
-
-
-
-
-
 
 #[test]
 fn an_unmatched_date_keyword_commits_as_typed() {
@@ -2956,12 +2281,6 @@ fn an_unmatched_date_keyword_commits_as_typed() {
     let dates = words(&session);
     assert_eq!(dates.first().map(String::as_str), Some("2026年8月9日"));
 }
-
-
-
-
-
-
 
 /// test_input_session.cpp:1388-1401: the whole date list on the pinned clock, lunar date last, and a selected row commits and leaves the mode.
 #[test]
@@ -3013,12 +2332,6 @@ fn a_date_row_commits_and_leaves_date_time_mode() {
         words(&session)
     );
 }
-
-
-
-
-
-
 
 #[test]
 fn date_time_mode_restores_keyword_letters_at_the_caret() {
@@ -3075,12 +2388,6 @@ fn date_time_mode_restores_keyword_letters_at_the_caret() {
     }
 }
 
-
-
-
-
-
-
 #[test]
 fn date_time_mode_still_rejects_non_lowercase_insertions() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -3101,12 +2408,6 @@ fn date_time_mode_still_rejects_non_lowercase_insertions() {
     }
 }
 
-
-
-
-
-
-
 /// 组字里的日期时间行（#5952）用的词：每个关键词的锚定词，加上同一串字母、数字的其他读法。
 const INLINE_DATE_TIME_FIXTURE: &str = "CREATE TABLE tbl_1_r(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
 INSERT INTO tbl_1_r VALUES('ri','r','日',100);\
@@ -3120,12 +2421,6 @@ CREATE TABLE tbl_2_x(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
 INSERT INTO tbl_2_x VALUES('xing''qi','xq','星期',500);\
 CREATE TABLE tbl_2_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
 INSERT INTO tbl_2_n VALUES('nong''li','nl','农历',500);";
-
-
-
-
-
-
 
 /// 26 键打 `riqi`、`ri'qi`、`sj`、`xingqi`、`nongli`：当前日期、时间、星期、农历接在对应的词后面，词前后的其他候选不动。
 #[test]
@@ -3185,12 +2480,6 @@ fn date_time_keywords_add_rows_after_their_word() {
     }
 }
 
-
-
-
-
-
-
 /// `utility.date_time_candidates`：行内日期时间混入与 T 模式是两个开关。混入关着时关键词只出它本来的词，T 模式仍照常；T 模式关着而混入开着时日期行照出。
 #[test]
 fn inline_date_time_is_a_separate_switch_from_the_mode() {
@@ -3226,12 +2515,6 @@ fn inline_date_time_is_a_separate_switch_from_the_mode() {
     session.command(Command::Cancel);
 }
 
-
-
-
-
-
-
 /// 选中日期行上屏它的文字并结束组字；它不是拼音读出的词，打开学习时也不写进词库和日志。
 #[test]
 fn a_date_time_row_commits_without_learning() {
@@ -3251,12 +2534,6 @@ fn a_date_time_row_commits_without_learning() {
     );
     assert_eq!(count(&fixture.main_db(), "SELECT count(*) FROM tbl_2_r"), 1);
 }
-
-
-
-
-
-
 
 /// `utility.date_time_menu`：「📅日期」入口跟在第一条行内日期行后面（锚定词在首位时是第三位），选中它不上屏、候选窗换成这一组的全部格式；再选一条格式上屏并结束组字；其他键先换回原来的候选再照常处理。
 #[test]
@@ -3321,12 +2598,6 @@ fn date_time_menu_opens_the_full_format_list() {
     );
 }
 
-
-
-
-
-
-
 #[test]
 fn super_jianpin_bare_entry_keeps_capital_words_literal() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -3349,12 +2620,6 @@ fn super_jianpin_bare_entry_keeps_capital_words_literal() {
         }
     }
 }
-
-
-
-
-
-
 
 #[test]
 fn super_jianpin_lowercase_entry_and_unicode_hex_stay_available() {
@@ -3379,12 +2644,6 @@ fn super_jianpin_lowercase_entry_and_unicode_hex_stay_available() {
         assert!(words(&session).contains(&"Ａ".to_owned()));
     }
 }
-
-
-
-
-
-
 
 #[test]
 fn rejected_capital_after_bare_shortcut_keeps_both_letters_composing() {
@@ -3422,12 +2681,6 @@ fn rejected_capital_after_bare_shortcut_keeps_both_letters_composing() {
     }
 }
 
-
-
-
-
-
-
 #[test]
 fn direct_local_caret_inserts_after_the_entry_marker() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -3454,12 +2707,6 @@ fn direct_local_caret_inserts_after_the_entry_marker() {
     }
 }
 
-
-
-
-
-
-
 #[test]
 fn direct_caret_keeps_zero_for_modes_without_an_entry_marker() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -3484,12 +2731,6 @@ fn direct_caret_keeps_zero_for_modes_without_an_entry_marker() {
         assert_eq!(snapshot.local_mode, mode);
     }
 }
-
-
-
-
-
-
 
 #[test]
 fn direct_local_caret_keeps_end_clamping_and_bare_marker_exit() {
@@ -3516,12 +2757,6 @@ fn direct_local_caret_keeps_end_clamping_and_bare_marker_exit() {
     assert_eq!(session.snapshot().editing_text, "U00412");
 }
 
-
-
-
-
-
-
 #[test]
 fn accepted_local_mode_characters_keep_spelling_until_enter() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -3542,12 +2777,6 @@ fn accepted_local_mode_characters_keep_spelling_until_enter() {
     }
 }
 
-
-
-
-
-
-
 #[test]
 fn temporary_local_modes_keep_their_composition_when_returning_a_key() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -3566,12 +2795,6 @@ fn temporary_local_modes_keep_their_composition_when_returning_a_key() {
     }
 }
 
-
-
-
-
-
-
 #[test]
 fn disabled_local_modes_leave_the_key_to_pinyin() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -3588,12 +2811,6 @@ fn disabled_local_modes_leave_the_key_to_pinyin() {
     assert!(session.character(b'K', true).handled);
     assert_eq!(session.snapshot().local_mode, LocalInputMode::QuickPhrase);
 }
-
-
-
-
-
-
 
 #[test]
 fn dedicated_english_offers_the_typed_word_when_unknown() {
@@ -3615,12 +2832,6 @@ fn dedicated_english_offers_the_typed_word_when_unknown() {
     assert!(result.diagnostic.is_none(), "{result:?}");
     assert!(session.snapshot().dedicated_english);
 }
-
-
-
-
-
-
 
 #[test]
 fn english_online_requires_opt_in_and_answers_enter_the_visible_list() {
@@ -3666,12 +2877,6 @@ fn english_online_requires_opt_in_and_answers_enter_the_visible_list() {
         assert!(session.online_query().is_none());
     }
 }
-
-
-
-
-
-
 
 #[test]
 fn english_online_edits_revocation_and_mode_changes_reject_old_answers() {
@@ -3743,12 +2948,6 @@ fn english_online_edits_revocation_and_mode_changes_reject_old_answers() {
     }
 }
 
-
-
-
-
-
-
 #[test]
 fn english_online_batches_replace_sources_and_validate_query_mode() {
     let fixture = Fixture::new(QUANPIN_FIXTURE).with_english(ENGLISH_FIXTURE);
@@ -3786,12 +2985,6 @@ fn english_online_batches_replace_sources_and_validate_query_mode() {
     assert!(!words(&session).contains(&"Hero".to_owned()));
     assert!(!session.apply_online_candidate(&query, "Hero", CandidateSource::CloudSuggestion));
 }
-
-
-
-
-
-
 
 #[test]
 fn dedicated_english_refresh_reuses_candidate_row_storage() {
@@ -3837,12 +3030,6 @@ fn dedicated_english_refresh_reuses_candidate_row_storage() {
     );
 }
 
-
-
-
-
-
-
 #[test]
 fn dedicated_english_caret_rejects_nonletters_without_releasing_the_key() {
     let fixture = Fixture::new(QUANPIN_FIXTURE).with_english(ENGLISH_FIXTURE);
@@ -3864,12 +3051,6 @@ fn dedicated_english_caret_rejects_nonletters_without_releasing_the_key() {
     assert_eq!(session.snapshot().preedit, "HLE");
     assert_eq!(session.snapshot().caret_position, 2);
 }
-
-
-
-
-
-
 
 #[test]
 fn dedicated_english_writes_ascii_punctuation_unless_locked_to_chinese() {
@@ -3901,12 +3082,6 @@ fn dedicated_english_writes_ascii_punctuation_unless_locked_to_chinese() {
     assert_eq!(session.punctuation(b'.').commit.as_deref(), Some("。"));
 }
 
-
-
-
-
-
-
 /// Rows in every table of the user journal, 0 when nothing ever opened it.
 fn journal_rows(journal: &Path) -> i64 {
     let Ok(connection) = Connection::open(journal) else {
@@ -3925,12 +3100,6 @@ fn journal_rows(journal: &Path) -> i64 {
         .map(|table| count(journal, &format!("SELECT count(*) FROM \"{table}\"")))
         .sum()
 }
-
-
-
-
-
-
 
 // ---- expression, command and mention modes ----
 
@@ -3961,12 +3130,6 @@ fn generated_modes_session(fixture: &Fixture) -> Session {
     session
 }
 
-
-
-
-
-
-
 #[test]
 fn generated_modes_are_off_by_default() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -3982,12 +3145,6 @@ fn generated_modes_are_off_by_default() {
     // `/` still has no Chinese mark and goes to the host as typed.
     assert!(!session.punctuation(b'/').handled);
 }
-
-
-
-
-
-
 
 #[test]
 fn expression_mode_evaluates_what_follows_shift_v() {
@@ -4021,12 +3178,6 @@ fn expression_mode_evaluates_what_follows_shift_v() {
     assert_eq!(session.snapshot().local_mode, LocalInputMode::None);
 }
 
-
-
-
-
-
-
 #[test]
 fn expression_mode_commits_finite_results_near_the_float_limit() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -4044,12 +3195,6 @@ fn expression_mode_commits_finite_results_near_the_float_limit() {
         assert_eq!(session.select(0).commit.as_deref(), Some(expected));
     }
 }
-
-
-
-
-
-
 
 #[test]
 fn expression_mode_converts_units_after_a_number() {
@@ -4090,12 +3235,6 @@ fn expression_mode_converts_units_after_a_number() {
     assert_eq!(words(&session), ["V3xyz"]);
 }
 
-
-
-
-
-
-
 #[test]
 fn expression_mode_converts_signed_measurements() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -4124,12 +3263,6 @@ fn expression_mode_converts_signed_measurements() {
         );
     }
 }
-
-
-
-
-
-
 
 #[test]
 fn expression_mode_keeps_an_unfinished_input_as_raw_text_and_bounds_it() {
@@ -4164,12 +3297,6 @@ fn expression_mode_keeps_an_unfinished_input_as_raw_text_and_bounds_it() {
     assert!(session.snapshot().preedit.is_empty());
 }
 
-
-
-
-
-
-
 #[test]
 fn expression_mode_inserts_unit_letters_at_the_caret() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -4189,12 +3316,6 @@ fn expression_mode_inserts_unit_letters_at_the_caret() {
     assert_eq!(session.snapshot().preedit, "V3g");
     assert_eq!(session.snapshot().caret_position, 2);
 }
-
-
-
-
-
-
 
 #[test]
 fn expression_mode_inserts_a_unit_separator_at_the_caret() {
@@ -4236,12 +3357,6 @@ fn expression_mode_inserts_a_unit_separator_at_the_caret() {
     }
 }
 
-
-
-
-
-
-
 #[test]
 fn expression_mode_does_not_accept_a_unit_letter_before_the_number_at_the_caret() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -4263,12 +3378,6 @@ fn expression_mode_does_not_accept_a_unit_letter_before_the_number_at_the_caret(
     }
 }
 
-
-
-
-
-
-
 #[test]
 fn expression_mode_limits_unit_insertions_at_the_caret() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -4289,12 +3398,6 @@ fn expression_mode_limits_unit_insertions_at_the_caret() {
     }
 }
 
-
-
-
-
-
-
 fn lowercase_v_session(fixture: &Fixture, lowercase_entry: bool) -> Session {
     let mut session = fixture.session_with(|options| {
         options.local_modes.expression = true;
@@ -4305,12 +3408,6 @@ fn lowercase_v_session(fixture: &Fixture, lowercase_entry: bool) -> Session {
     TestClock::install(&mut session);
     session
 }
-
-
-
-
-
-
 
 #[test]
 fn lowercase_v_opens_the_expression_mode_in_quanpin() {
@@ -4345,12 +3442,6 @@ fn lowercase_v_opens_the_expression_mode_in_quanpin() {
     assert_eq!(session.snapshot().local_mode, LocalInputMode::None);
 }
 
-
-
-
-
-
-
 #[test]
 fn a_letter_after_lowercase_v_types_the_letters_as_before() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -4368,12 +3459,6 @@ fn a_letter_after_lowercase_v_types_the_letters_as_before() {
         assert_eq!(words(&entry), words(&plain), "{text:?}");
     }
 }
-
-
-
-
-
-
 
 #[test]
 fn lowercase_v_needs_quanpin_an_empty_composition_and_both_switches() {
@@ -4403,12 +3488,6 @@ fn lowercase_v_needs_quanpin_an_empty_composition_and_both_switches() {
     shuangpin.character(b'v', false);
     assert_eq!(shuangpin.snapshot().local_mode, LocalInputMode::None);
 }
-
-
-
-
-
-
 
 #[test]
 fn slash_opens_the_command_list_and_letters_filter_it() {
@@ -4460,12 +3539,6 @@ fn slash_opens_the_command_list_and_letters_filter_it() {
     );
 }
 
-
-
-
-
-
-
 #[test]
 fn slash_after_a_composition_is_still_the_typed_character() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -4479,12 +3552,6 @@ fn slash_after_a_composition_is_still_the_typed_character() {
     assert!(!session.punctuation(b'/').handled);
     assert_eq!(session.snapshot().local_mode, LocalInputMode::None);
 }
-
-
-
-
-
-
 
 #[test]
 fn a_mark_on_a_bare_prefix_types_punctuation_instead_of_a_row() {
@@ -4530,12 +3597,6 @@ fn a_mark_on_a_bare_prefix_types_punctuation_instead_of_a_row() {
     );
 }
 
-
-
-
-
-
-
 #[test]
 fn symbol_entries_follow_the_punctuation_mode() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -4553,12 +3614,6 @@ fn symbol_entries_follow_the_punctuation_mode() {
     session.set_chinese_punctuation_enabled(false);
     assert!(session.character(b'V', true).handled);
 }
-
-
-
-
-
-
 
 #[test]
 fn at_lists_the_mention_list_and_letters_filter_it() {
@@ -4603,12 +3658,6 @@ fn at_lists_the_mention_list_and_letters_filter_it() {
     );
 }
 
-
-
-
-
-
-
 #[test]
 fn mention_mode_offers_places_after_the_list_when_switched_on() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -4651,12 +3700,6 @@ fn mention_mode_offers_places_after_the_list_when_switched_on() {
     assert_eq!(words(&session), ["深圳市"]);
 }
 
-
-
-
-
-
-
 #[test]
 fn mention_place_annotation_uses_the_shown_row_when_a_list_name_does_not_match() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -4679,12 +3722,6 @@ fn mention_place_annotation_uses_the_shown_row_when_a_list_name_does_not_match()
     assert_eq!(snapshot.candidates[shenzhen].pinyin, "shen'zhen'shi");
     assert_eq!(snapshot.candidate_annotations[shenzhen], "广东省");
 }
-
-
-
-
-
-
 
 #[test]
 fn generated_mode_commits_are_never_learned() {
@@ -4727,12 +3764,6 @@ fn generated_mode_commits_are_never_learned() {
     );
 }
 
-
-
-
-
-
-
 /// 进入符号模式并打出 `typed`，返回候选。
 fn symbol_mode_rows(fixture: &Fixture, typed: &str) -> Vec<String> {
     let mut session = fixture.session();
@@ -4747,12 +3778,6 @@ fn symbol_mode_rows(fixture: &Fixture, typed: &str) -> Vec<String> {
         .collect()
 }
 
-
-
-
-
-
-
 /// 符号模式（Shift+S）的分组码 `xl` 出希腊字母。
 #[test]
 fn symbol_mode_group_xl_gives_greek_letters() {
@@ -4760,12 +3785,6 @@ fn symbol_mode_group_xl_gives_greek_letters() {
     let rows = symbol_mode_rows(&fixture, "xl");
     assert_eq!(rows[..3], ["α", "β", "γ"], "{rows:?}");
 }
-
-
-
-
-
-
 
 /// 分组码 `sx` 出数学符号。
 #[test]
@@ -4776,12 +3795,6 @@ fn symbol_mode_group_sx_gives_math_symbols() {
     assert!(rows.iter().any(|text| text == "√"), "{rows:?}");
 }
 
-
-
-
-
-
-
 /// 分组码 `jt` 出箭头。
 #[test]
 fn symbol_mode_group_jt_gives_arrows() {
@@ -4789,12 +3802,6 @@ fn symbol_mode_group_jt_gives_arrows() {
     let rows = symbol_mode_rows(&fixture, "jt");
     assert!(rows.iter().any(|text| text == "→"), "{rows:?}");
 }
-
-
-
-
-
-
 
 /// 符号名 `alpha` 出 α；符号名在分组码之后给，不重复。
 #[test]
@@ -4804,12 +3811,6 @@ fn symbol_mode_name_alpha_gives_the_letter() {
     assert_eq!(rows[0], "α", "{rows:?}");
     assert_eq!(rows.iter().filter(|text| *text == "α").count(), 1);
 }
-
-
-
-
-
-
 
 /// 选中符号行整段上屏并结束组字；与 emoji 行一样不学习、不调频。
 #[test]
@@ -4833,12 +3834,6 @@ fn symbol_mode_commits_the_row_and_ends_the_composition() {
     );
 }
 
-
-
-
-
-
-
 /// 关掉偏好后 Shift+S 不再进入符号模式，照常打出一个大写 S（或开始拼音组字）。
 #[test]
 fn disabled_symbol_mode_leaves_shift_s_to_the_scheme() {
@@ -4858,12 +3853,6 @@ fn disabled_symbol_mode_leaves_shift_s_to_the_scheme() {
         Some("S")
     );
 }
-
-
-
-
-
-
 
 #[test]
 fn local_modes_never_ask_for_online_candidates() {
@@ -4923,12 +3912,6 @@ fn local_modes_never_ask_for_online_candidates() {
     assert!(session.command_translation_query().is_none());
 }
 
-
-
-
-
-
-
 #[test]
 fn translate_command_inserts_word_separators_at_the_caret() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -4967,12 +3950,6 @@ fn translate_command_inserts_word_separators_at_the_caret() {
     }
 }
 
-
-
-
-
-
-
 #[test]
 fn translate_command_checks_the_caret_before_accepting_a_separator() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -4996,12 +3973,6 @@ fn translate_command_checks_the_caret_before_accepting_a_separator() {
         assert!(session.snapshot().editing_text.is_empty());
     }
 }
-
-
-
-
-
-
 
 #[test]
 fn translate_command_preserves_separator_insertion_limits() {
@@ -5047,12 +4018,6 @@ fn translate_command_preserves_separator_insertion_limits() {
         assert!(session.snapshot().editing_text.is_empty());
     }
 }
-
-
-
-
-
-
 
 #[test]
 fn the_translate_command_asks_for_its_english_and_commits_the_answer() {
@@ -5117,12 +4082,6 @@ fn the_translate_command_asks_for_its_english_and_commits_the_answer() {
     assert_eq!(words(&session), ["hellox"]);
 }
 
-
-
-
-
-
-
 #[test]
 fn pinyin_candidate_refresh_reuses_preedit_storage() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -5134,12 +4093,6 @@ fn pinyin_candidate_refresh_reuses_preedit_storage() {
 
     assert_eq!(session.input.engine.preedit().as_ptr(), preedit_pointer);
 }
-
-
-
-
-
-
 
 #[test]
 fn pinyin_refresh_reuses_request_strings() {
@@ -5170,12 +4123,6 @@ fn pinyin_refresh_reuses_request_strings() {
     );
 }
 
-
-
-
-
-
-
 #[test]
 fn shuangpin_refresh_reuses_request_strings() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -5204,12 +4151,6 @@ fn shuangpin_refresh_reuses_request_strings() {
         pointers
     );
 }
-
-
-
-
-
-
 
 /// K 模式先列数据库里的短语，再接上宿主短语表里编码匹配的行；文本重复的不再列出。短语表可以在 K 模式打开时实时替换。
 #[test]
@@ -5243,12 +4184,6 @@ INSERT INTO quick_parases VALUES('dh','电话',10);",
     assert_eq!(words(&session), ["电话"]);
 }
 
-
-
-
-
-
-
 /// macOS 的普通组字把编码匹配的快捷短语追加到原有候选之后，选中后直接上屏。
 #[test]
 fn macos_quick_phrase_candidates_join_regular_composition() {
@@ -5269,12 +4204,6 @@ INSERT INTO quick_parases VALUES('dh','电话',20);",
         .expect("quick phrase candidate");
     assert_eq!(session.select(phrase).commit.as_deref(), Some("电话"));
 }
-
-
-
-
-
-
 
 /// 普通组字只认整个编码：K 模式按前缀列表，普通候选若也按前缀，单个字母就会带出以它开头的所有短语。数据库行和宿主短语表都一样。
 #[test]
@@ -5306,12 +4235,6 @@ INSERT INTO quick_parases VALUES('dhx','电话线',30);",
     assert!(!single.contains(&"电话".to_owned()), "{single:?}");
 }
 
-
-
-
-
-
-
 /// 设置页的「快捷短语」开关同时管两种入口：关掉后普通候选里也不出现短语。
 #[test]
 fn the_quick_phrase_switch_also_keeps_phrases_out_of_regular_candidates() {
@@ -5326,12 +4249,6 @@ INSERT INTO quick_parases VALUES('dh','电话',20);",
     type_text(&mut session, "dh");
     assert!(!words(&session).contains(&"电话".to_owned()));
 }
-
-
-
-
-
-
 
 /// `quick_phrase_frequency` 开着（`mixed_input.quick_phrase_frequency`，Windows `utility.quick_phrase_frequency`）：选中组内快捷短语让整组按调频规则前移，越过它选普通候选让整组后退一格。
 #[test]
@@ -5397,12 +4314,6 @@ INSERT INTO quick_parases VALUES('nihao','号码二',20);",
     assert_eq!(words(&session)[6..], ["号码一", "号码二"]);
 }
 
-
-
-
-
-
-
 /// `quick_phrase_frequency` 关着时，整组固定在普通候选末尾：选中短语、越过它选普通候选，位置都不变。
 #[test]
 fn the_group_stays_at_the_end_when_quick_phrase_frequency_is_off() {
@@ -5442,12 +4353,6 @@ INSERT INTO quick_parases VALUES('nihao','号码一',10);",
     assert_eq!(group_at(&session), position, "关掉调频后越过组不挪组");
 }
 
-
-
-
-
-
-
 /// 小鹤双拼 `zj`（zan）的合成词库：`ordinary` 个单字读 zan，权重递减，第一个是 U+4E00；再加 `phrases` 里编码为 `zj` 的快捷短语（权重递减，组内按这个顺序排）。#9702 实测这个码有 83 个普通候选。
 fn zan_fixture(ordinary: usize, phrases: &[&str]) -> Fixture {
     let mut sql = String::from("CREATE TABLE tbl_1_z(key TEXT,jp TEXT,value TEXT,weight INTEGER);");
@@ -5468,12 +4373,6 @@ fn zan_fixture(ordinary: usize, phrases: &[&str]) -> Fixture {
     Fixture::new(&sql)
 }
 
-
-
-
-
-
-
 /// 快捷短语组在列表里的起点。
 fn quick_phrase_group_at(session: &Session) -> usize {
     session
@@ -5483,12 +4382,6 @@ fn quick_phrase_group_at(session: &Session) -> usize {
         .position(|item| item.source == CandidateSource::QuickPhrase)
         .expect("quick phrase group")
 }
-
-
-
-
-
-
 
 fn zan_session(fixture: &Fixture, page: usize, frequency: FrequencyAdjustmentMode) -> Session {
     fixture.session_with(|options| {
@@ -5505,11 +4398,6 @@ fn zan_session(fixture: &Fixture, page: usize, frequency: FrequencyAdjustmentMod
         options.personal_context = false;
     })
 }
-
-
-
-
-
 
 /// #9702：普通候选有一页以上时，没有学习记录的快捷短语落在首页最后一格，而不是排到 83 个普通候选之后（每页 6 个时在第 14 页）。首选仍是普通候选，每页 5、6、9 个都一样；调频关着时也是这个默认位置。
 #[test]
@@ -5539,12 +4427,6 @@ fn an_unlearned_quick_phrase_takes_the_last_slot_of_the_first_page() {
         }
     }
 }
-
-
-
-
-
-
 
 /// 默认落位之后，学习规则照旧：选中短语整组前移（Promote 从首页末格拉到第 4 个普通候选之后，再选一次到第 3 个之后）；越过整组选后面的普通候选，整组最多退回首页末位，不会再退到首页之外。
 #[test]
@@ -5578,12 +4460,6 @@ fn learning_still_moves_the_quick_phrase_group_from_its_default_slot() {
     }
 }
 
-
-
-
-
-
-
 /// 同码有多条短语：组内顺序不变、整组连在一起，首页最多让出一半（向下取整）的格子给它们，普通候选的前一半（向上取整）留在首页；放不下的接在下一页开头。每页只有 1 个时首页不让格子，整组紧跟首选。
 #[test]
 fn several_quick_phrases_share_the_tail_of_the_first_page() {
@@ -5611,12 +4487,6 @@ fn several_quick_phrases_share_the_tail_of_the_first_page() {
     }
 }
 
-
-
-
-
-
-
 /// 普通候选不满一页时短语照旧接在普通候选之后，不把任何普通候选挤到下一页。
 #[test]
 fn quick_phrases_follow_fewer_than_a_page_of_candidates() {
@@ -5636,12 +4506,6 @@ fn quick_phrases_follow_fewer_than_a_page_of_candidates() {
     }
 }
 
-
-
-
-
-
-
 /// K 模式只列快捷短语，不经过混输落位，每页候选数也不改变它的顺序。
 #[test]
 fn quick_phrase_mode_is_unaffected_by_the_first_page_default() {
@@ -5658,12 +4522,6 @@ fn quick_phrase_mode_is_unaffected_by_the_first_page_default() {
     }
 }
 
-
-
-
-
-
-
 /// 依次送入网址的各个字符：字母和数字走 `character`，符号走 `punctuation`，与宿主把符号报成标点时一样。
 fn type_url(session: &mut Session, text: &str) {
     for byte in text.bytes() {
@@ -5679,12 +4537,6 @@ fn type_url(session: &mut Session, text: &str) {
         );
     }
 }
-
-
-
-
-
-
 
 #[test]
 fn url_scheme_colon_in_quanpin_and_shuangpin() {
@@ -5713,12 +4565,6 @@ fn url_scheme_colon_in_quanpin_and_shuangpin() {
     }
 }
 
-
-
-
-
-
-
 #[test]
 fn url_mark_outside_the_url_ends_it() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -5741,12 +4587,6 @@ fn url_mark_outside_the_url_ends_it() {
     assert_eq!(session.snapshot().preedit, "www.a");
 }
 
-
-
-
-
-
-
 /// 退回组字只是进入的逆操作：删掉中间的 `.` 后剩下的 `wwwexample` 不是触发词，留在网址模式。
 #[test]
 fn url_deleting_a_middle_dot_keeps_the_mode() {
@@ -5763,12 +4603,6 @@ fn url_deleting_a_middle_dot_keeps_the_mode() {
     assert_eq!(snapshot.local_mode, LocalInputMode::Url);
     assert_eq!(snapshot.preedit, "wwwexample");
 }
-
-
-
-
-
-
 
 /// 光标在中间且网址已到长度上限时，网址收的键被吞掉而不是交还宿主；网址不收的键照旧交还。
 #[test]
@@ -5789,12 +4623,6 @@ fn url_caret_insert_at_the_limit_is_swallowed() {
     assert!(!session.character(b'|', false).handled);
 }
 
-
-
-
-
-
-
 #[test]
 fn url_backspace_keeps_the_mode_when_the_rest_is_not_lowercase_letters() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -5806,12 +4634,6 @@ fn url_backspace_keeps_the_mode_when_the_rest_is_not_lowercase_letters() {
     assert_eq!(snapshot.local_mode, LocalInputMode::Url);
     assert_eq!(snapshot.preedit, "www.A");
 }
-
-
-
-
-
-
 
 #[test]
 fn url_digits_and_uppercase_are_kept() {
@@ -5830,12 +4652,6 @@ fn url_digits_and_uppercase_are_kept() {
     assert_eq!(session.snapshot().preedit, "www.1G!@#$%^&*()2");
 }
 
-
-
-
-
-
-
 #[test]
 fn url_input_commits_at_the_limit_and_returns_the_overflow_key() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -5853,22 +4669,10 @@ fn url_input_commits_at_the_limit_and_returns_the_overflow_key() {
     assert!(session.snapshot().preedit.is_empty());
 }
 
-
-
-
-
-
-
 /// 网址模式里补全了邮箱后缀或顶级域名的行：整段网址那一行之后的全部行。
 fn url_completions(session: &Session) -> Vec<String> {
     words(session).split_off(1)
 }
-
-
-
-
-
-
 
 #[test]
 fn url_at_after_a_local_part_offers_email_suffixes() {
@@ -5928,12 +4732,6 @@ fn url_at_after_a_local_part_offers_email_suffixes() {
     assert_eq!(session.select(0).commit.as_deref(), Some("abc@"));
 }
 
-
-
-
-
-
-
 #[test]
 fn url_email_backspace_over_the_at_returns_to_the_composition() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -5962,12 +4760,6 @@ fn url_email_backspace_over_the_at_returns_to_the_composition() {
     assert_eq!(snapshot.preedit, "abcdef");
 }
 
-
-
-
-
-
-
 #[test]
 fn url_at_needs_a_plain_local_part() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -5980,12 +4772,6 @@ fn url_at_needs_a_plain_local_part() {
     assert_eq!(snapshot.local_mode, LocalInputMode::None);
     assert_eq!(snapshot.editing_text, "ni'hao");
 }
-
-
-
-
-
-
 
 #[test]
 fn url_scheme_completions_enter_url_mode_when_picked() {
@@ -6058,12 +4844,6 @@ fn url_scheme_completions_enter_url_mode_when_picked() {
     }
 }
 
-
-
-
-
-
-
 #[test]
 fn plain_pinyin_period_is_still_chinese() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -6080,12 +4860,6 @@ fn plain_pinyin_period_is_still_chinese() {
         .is_some_and(|text| text.ends_with('，')));
     assert_eq!(session.snapshot().local_mode, LocalInputMode::None);
 }
-
-
-
-
-
-
 
 #[test]
 fn url_caret_editing_reaches_the_first_character_and_an_empty_url_leaves_the_mode() {
@@ -6117,12 +4891,6 @@ fn url_caret_editing_reaches_the_first_character_and_an_empty_url_leaves_the_mod
     assert!(!session.character(b'1', false).handled);
 }
 
-
-
-
-
-
-
 // ---- 打拼音出符号（local/symbol_candidates.rs） ----
 
 /// 正负（zheng'fu）排在 政府 后面；大于 供部分选择后再选符号；派（pai）可以由 pa 加辅助码 I 拼出。
@@ -6147,24 +4915,12 @@ CREATE TABLE tbl_2_d(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
 INSERT INTO tbl_2_d VALUES('da''yu','dy','大于',900);\
 CREATE TABLE tbl_4_z(key TEXT,jp TEXT,value TEXT,weight INTEGER);";
 
-
-
-
-
-
-
 fn symbol_session(fixture: &Fixture, configure: impl FnOnce(&mut SessionOptions)) -> Session {
     fixture.session_with(|options| {
         options.expressive.symbol_candidates = true;
         configure(options);
     })
 }
-
-
-
-
-
-
 
 /// 列表里文字为 `symbol` 的符号行（来源 Emoji）的位置。
 fn symbol_index(session: &Session, symbol: &str) -> Option<usize> {
@@ -6174,12 +4930,6 @@ fn symbol_index(session: &Session, symbol: &str) -> Option<usize> {
         .iter()
         .position(|item| item.source == CandidateSource::Emoji && item.word == symbol)
 }
-
-
-
-
-
-
 
 #[test]
 fn a_whole_symbol_name_offers_its_symbol_after_the_name() {
@@ -6212,12 +4962,6 @@ fn a_whole_symbol_name_offers_its_symbol_after_the_name() {
     assert_eq!(symbol_index(&off, "±"), None);
 }
 
-
-
-
-
-
-
 #[test]
 fn microsoft_semicolon_spelling_offers_the_symbol_after_its_name() {
     let fixture = Fixture::new(SYMBOL_FIXTURE);
@@ -6232,12 +4976,6 @@ fn microsoft_semicolon_spelling_offers_the_symbol_after_its_name() {
         .unwrap();
     assert_eq!(symbol_index(&session, "㎡"), Some(name + 1));
 }
-
-
-
-
-
-
 
 #[test]
 fn a_symbol_after_a_partial_pick_makes_no_word() {
@@ -6264,12 +5002,6 @@ fn a_symbol_after_a_partial_pick_makes_no_word() {
     assert!(!words(&session).iter().any(|word| word.contains('＞')));
 }
 
-
-
-
-
-
-
 // ---- 整句改字（session/conversion.rs） ----
 
 /// 「woqubeijing」的首选整句是「我去背景」，想要的「我去北京」不在候选里。
@@ -6292,24 +5024,12 @@ INSERT INTO tbl_2_b VALUES('bei''jing','bj','北京',20000);\
 CREATE TABLE tbl_2_w(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
 CREATE TABLE tbl_4_w(key TEXT,jp TEXT,value TEXT,weight INTEGER);";
 
-
-
-
-
-
-
 fn conversion_session(fixture: &Fixture) -> Session {
     let mut session = fixture.session_with(|options| options.personal_context = false);
     type_text(&mut session, "woqubeijing");
     assert_eq!(words(&session)[0], "我去背景");
     session
 }
-
-
-
-
-
-
 
 #[test]
 fn the_left_key_enters_the_sentence_and_moves_by_character() {
@@ -6348,12 +5068,6 @@ fn the_left_key_enters_the_sentence_and_moves_by_character() {
     assert!(session.snapshot().preedit.is_empty());
 }
 
-
-
-
-
-
-
 #[test]
 fn choosing_a_word_pins_it_and_commits_the_sentence() {
     let fixture = Fixture::new(CONVERSION_FIXTURE);
@@ -6382,12 +5096,6 @@ fn choosing_a_word_pins_it_and_commits_the_sentence() {
     );
 }
 
-
-
-
-
-
-
 #[test]
 fn a_pinned_character_inside_a_word_reconverts_its_neighbours() {
     let fixture = Fixture::new(CONVERSION_FIXTURE);
@@ -6407,12 +5115,6 @@ fn a_pinned_character_inside_a_word_reconverts_its_neighbours() {
     let finished = session.punctuation(b',');
     assert_eq!(finished.commit.as_deref(), Some("我去北京，"));
 }
-
-
-
-
-
-
 
 #[test]
 fn typing_or_escaping_leaves_the_sentence_and_keeps_the_letters() {
@@ -6452,12 +5154,6 @@ fn typing_or_escaping_leaves_the_sentence_and_keeps_the_letters() {
     assert_eq!(session.snapshot().caret_position, 10);
 }
 
-
-
-
-
-
-
 #[test]
 fn without_a_sentence_the_conversion_keys_move_the_letter_caret() {
     let fixture = Fixture::new(CONVERSION_FIXTURE);
@@ -6493,12 +5189,6 @@ fn without_a_sentence_the_conversion_keys_move_the_letter_caret() {
     assert!(session.snapshot().conversion.is_empty());
 }
 
-
-
-
-
-
-
 #[test]
 fn shuangpin_enters_the_same_sentence() {
     let fixture = Fixture::new(CONVERSION_FIXTURE);
@@ -6517,12 +5207,6 @@ fn shuangpin_enters_the_same_sentence() {
         Some("我去北京")
     );
 }
-
-
-
-
-
-
 
 #[test]
 fn the_conversion_starts_from_the_highlighted_row() {
@@ -6559,21 +5243,9 @@ fn the_conversion_starts_from_the_highlighted_row() {
     assert_eq!(session.snapshot().caret_position, 10);
 }
 
-
-
-
-
-
-
 /// #6888 的 AI 回答：读音 ni 有四个本地候选。
 const AI_ANSWER_FIXTURE: &str = "CREATE TABLE tbl_1_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);\
 INSERT INTO tbl_1_n VALUES('ni','n','你',100),('ni','n','拟',90),('ni','n','妮',80),('ni','n','倪',70);";
-
-
-
-
-
-
 
 fn sources(session: &Session) -> Vec<(String, CandidateSource)> {
     session
@@ -6583,12 +5255,6 @@ fn sources(session: &Session) -> Vec<(String, CandidateSource)> {
         .map(|item| (item.word.into_string(), item.source))
         .collect()
 }
-
-
-
-
-
-
 
 /// 不再有 AI 占位行：等回答时列表里只有本地候选，第 2 位就是第二个本地候选。
 #[test]
@@ -6610,12 +5276,6 @@ fn no_ai_placeholder_is_ever_inserted() {
         ]
     );
 }
-
-
-
-
-
-
 
 /// AI 回答到达时整批接在本地候选之后，本地候选一个都不挪；第一条显示在第一页最后一格是 input-runtime 的事（#6888）。
 #[test]
@@ -6640,12 +5300,6 @@ fn an_ai_answer_goes_after_the_local_rows_without_moving_them() {
     );
 }
 
-
-
-
-
-
-
 #[test]
 fn an_answer_of_listed_words_changes_nothing() {
     let fixture = Fixture::new(AI_ANSWER_FIXTURE);
@@ -6659,12 +5313,6 @@ fn an_answer_of_listed_words_changes_nothing() {
     ));
     assert_eq!(words(&session), ["你", "拟", "妮", "倪"]);
 }
-
-
-
-
-
-
 
 #[test]
 fn a_cloud_answer_takes_slot_one_and_ai_rows_stay_last() {
@@ -6683,12 +5331,6 @@ fn a_cloud_answer_takes_slot_one_and_ai_rows_stay_last() {
         ["你", "云", "拟", "妮", "倪", "智一", "智二"]
     );
 }
-
-
-
-
-
-
 
 #[test]
 fn first_page_rows_reaches_the_dictionary_through_the_session_options() {
@@ -6725,12 +5367,6 @@ fn first_page_rows_reaches_the_dictionary_through_the_session_options() {
     );
 }
 
-
-
-
-
-
-
 #[test]
 fn a_zero_first_page_rows_reads_as_one_row() {
     // `QueryRequest` 派生 `Default`，裸 `usize` 会默认成 0，而 0 会让 `exact_rows < 首页行数` 永远不成立，
@@ -6754,12 +5390,6 @@ fn a_zero_first_page_rows_reads_as_one_row() {
     );
 }
 
-
-
-
-
-
-
 // ---- 引号与方头括号样式 ----
 
 const CORNER_HOLLOW: crate::punctuation::PunctuationMarks = crate::punctuation::PunctuationMarks {
@@ -6768,12 +5398,6 @@ const CORNER_HOLLOW: crate::punctuation::PunctuationMarks = crate::punctuation::
     enumeration_comma_backslash: true,
     enumeration_comma_slash: false,
 };
-
-
-
-
-
-
 
 #[test]
 fn punctuation_marks_reach_the_bare_prefix_route() {
@@ -6792,12 +5416,6 @@ fn punctuation_marks_reach_the_bare_prefix_route() {
     assert_eq!(session.punctuation(b'"').commit.as_deref(), Some("你好『"));
 }
 
-
-
-
-
-
-
 #[test]
 fn set_punctuation_marks_applies_live_without_resetting_alternation() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -6811,12 +5429,6 @@ fn set_punctuation_marks_applies_live_without_resetting_alternation() {
     assert_eq!(session.punctuation(b'[').commit.as_deref(), Some("【"));
 }
 
-
-
-
-
-
-
 #[test]
 fn idle_backspace_undoes_a_deleted_quote_but_not_an_older_one() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -6829,12 +5441,6 @@ fn idle_backspace_undoes_a_deleted_quote_but_not_an_older_one() {
     assert!(!session.command(Command::Backspace).handled);
     assert_eq!(session.punctuation(b'"').commit.as_deref(), Some("”"));
 }
-
-
-
-
-
-
 
 #[test]
 fn contacts_lead_with_name_and_combination_without_learning() {
@@ -6886,12 +5492,6 @@ fn contacts_lead_with_name_and_combination_without_learning() {
     }
 }
 
-
-
-
-
-
-
 #[test]
 fn contacts_refresh_live_and_do_not_replace_caret_prefixes() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -6917,12 +5517,6 @@ fn contacts_refresh_live_and_do_not_replace_caret_prefixes() {
         .contains(&CandidateSource::Contact));
     assert_eq!(words(&session)[0], "你好");
 }
-
-
-
-
-
-
 
 #[test]
 fn literal_symbol_keeps_pinyin_uncommitted_with_one_raw_candidate() {
@@ -6959,12 +5553,6 @@ fn literal_symbol_keeps_pinyin_uncommitted_with_one_raw_candidate() {
     }
 }
 
-
-
-
-
-
-
 #[test]
 fn literal_symbol_deletion_and_caret_editing_restore_pinyin() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -6989,12 +5577,6 @@ fn literal_symbol_deletion_and_caret_editing_restore_pinyin() {
     }
 }
 
-
-
-
-
-
-
 #[test]
 fn literal_symbol_stops_chinese_queries_and_does_not_learn() {
     let fixture = Fixture::new(QUANPIN_FIXTURE);
@@ -7018,12 +5600,6 @@ fn literal_symbol_stops_chinese_queries_and_does_not_learn() {
     assert_eq!(journal_rows(&fixture.journal()), journal_before);
 }
 
-
-
-
-
-
-
 // 顿号开关不能抢占词首的命令模式；组字和裸前缀提交仍按相同的标点表出字。
 #[test]
 fn enumeration_comma_respects_command_prefix_and_composition() {
@@ -7044,12 +5620,6 @@ fn enumeration_comma_respects_command_prefix_and_composition() {
     assert_eq!(disabled.punctuation(b'/').commit.as_deref(), Some("、"));
 }
 
-
-
-
-
-
-
 const ANSWERS_KEY_FIXTURE: &str = "\
 CREATE TABLE tbl_1_z(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
 INSERT INTO tbl_1_z VALUES('zhe','z','这',900);\
@@ -7066,12 +5636,6 @@ INSERT INTO tbl_4_z VALUES('zhe''me''fa''zhan','zmfz','这么发展',700);\
 CREATE TABLE tbl_6_z(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
 INSERT INTO tbl_6_z VALUES('zhe''me''fa''zhan''xia''qu','zmfzxq','这么发展下去',700);";
 
-
-
-
-
-
-
 fn answers_key(session: &Session, word: &str) -> bool {
     let snapshot = session.snapshot();
     let index = snapshot
@@ -7081,12 +5645,6 @@ fn answers_key(session: &Session, word: &str) -> bool {
         .unwrap_or_else(|| panic!("{word} is not a candidate of {:?}", words(session)));
     snapshot.candidate_answers_key[index]
 }
-
-
-
-
-
-
 
 #[test]
 fn completion_and_prefix_range_rows_do_not_answer_the_typed_key() {
@@ -7103,12 +5661,6 @@ fn completion_and_prefix_range_rows_do_not_answer_the_typed_key() {
     }
 }
 
-
-
-
-
-
-
 #[test]
 fn an_incomplete_final_piece_is_answered_by_its_prefix_range_row() {
     let fixture = Fixture::new(ANSWERS_KEY_FIXTURE);
@@ -7116,12 +5668,6 @@ fn an_incomplete_final_piece_is_answered_by_its_prefix_range_row() {
     type_text(&mut session, "zhemef");
     assert!(answers_key(&session, "这么烦"), "{:?}", words(&session));
 }
-
-
-
-
-
-
 
 #[test]
 fn jianpin_and_ambiguous_segmentations_still_answer_the_typed_key() {
@@ -7141,11 +5687,6 @@ INSERT INTO tbl_2_x VALUES('xi''an','xa','西安',800);",
     assert!(answers_key(&session, "先"), "{:?}", words(&session));
     assert!(answers_key(&session, "西安"), "{:?}", words(&session));
 }
-
-
-
-
-
 
 #[test]
 fn shurufa_short_prefix_completion_handles_uppercase_and_lowercase_boundaries() {
@@ -7207,10 +5748,7 @@ fn shurufa_short_prefix_completion_handles_uppercase_and_lowercase_boundaries() 
 
     assert!(session.character(b'C', true).handled);
     type_text(&mut session, "la");
-    assert_eq!(
-        &words(&session)[..4],
-        ["Cla", "Class", "Claude", "Classic"],
-    );
+    assert_eq!(&words(&session)[..4], ["Cla", "Class", "Claude", "Classic"],);
     assert_eq!(
         session.command(Command::CommitRaw).commit.as_deref(),
         Some("Cla")
@@ -7265,12 +5803,6 @@ fn shurufa_short_prefix_completion_handles_uppercase_and_lowercase_boundaries() 
         Some("conf")
     );
 }
-
-
-
-
-
-
 
 #[test]
 fn decoupled_personal_learning_overlay_protects_static_weights_recalls_rare_nouns_and_undoes_on_backspace(
@@ -7419,16 +5951,8 @@ fn decoupled_personal_learning_works_across_interleaved_completions_and_survives
 
     session.set_rescoring_context("前文");
     type_text(&mut session, "chufale");
-    assert_eq!(
-        &words(&session)[..2],
-        ["触发了", "出发了"],
-    );
+    assert_eq!(&words(&session)[..2], ["触发了", "出发了"],);
 }
-
-
-
-
-
 
 #[test]
 fn single_char_personal_learning_keeps_leader_while_contested_words_confirm_on_space() {
@@ -7481,11 +6005,5 @@ fn single_char_personal_learning_keeps_leader_while_contested_words_confirm_on_s
     type_text(&mut session, "chufa");
     assert_eq!(words(&session)[0], "出发");
 }
-
-
-
-
-
-
 
 mod caret_suffix;

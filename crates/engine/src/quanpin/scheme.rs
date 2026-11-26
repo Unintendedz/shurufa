@@ -42,7 +42,10 @@ impl QuanpinScheme {
                 }
             }
             SchemeKey::Backspace => self.raw.pop().is_some(),
-            SchemeKey::Letter(_) | SchemeKey::Semicolon | SchemeKey::Symbol(_) | SchemeKey::Requery => false,
+            SchemeKey::Letter(_)
+            | SchemeKey::Semicolon
+            | SchemeKey::Symbol(_)
+            | SchemeKey::Requery => false,
         }
     }
 

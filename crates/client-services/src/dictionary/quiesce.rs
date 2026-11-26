@@ -3,8 +3,6 @@
 //! Importing, editing or clearing learned data needs the Engine's exclusive dictionary lock, and every open input session holds it shared. The Linux hosts (IBus, Fcitx5) and the macOS input method are other processes, so on those platforms this writes a lease beside the lock. The hosts check it on their preference timers (Fcitx5 every 250 ms, IBus and macOS every second), finish the composition, close their sessions and open no new ones while it is live; the settings window also tells the macOS input method at once over a distributed notification (the `announce` of [`QuiescedHosts`]), so it lets go without waiting for its timer. The lease holds its own expiry, so a writer that dies mid-import cannot leave input off for longer than that. The file name, the expiry on the first line and the 30 second bound are shared with `platforms/common/DictionaryQuiesceLease.h`. Moving the data directory on Linux holds the same lease for the whole copy (the desktop app's `platform::linux::linux_dictionary_quiesce`).
 //!
 //! More than one process writes the lease: the settings window and the `msime-mcp` server. Each writes a second line naming itself and removes the lease only while that line is still its own, so one writer finishing does not take down a lease another one is still working under. The hosts read only the first line.
-//!
-//! Windows 上输入会话由 Server 进程持有，经辅助管道请求时由它放开（见 [`server`]）。Server 不记是谁请求的，一个写者恢复时可能把会话交还回去，而另一个写者还在工作；后者的下一个请求于是遇到词库忙，再请求一次，和第一次一样重试。Windows 上还有第二类持锁者：每个用着输入法的应用进程里 TIP 自己的宿主会话，Server 管不到，所以 Windows 同时写下同一份租约，TIP 看着它放开（[`server::WindowsRelease`]）。
 
 use std::ffi::OsStr;
 #[cfg(not(unix))]
@@ -129,10 +127,7 @@ fn open_lease_lock(path: &Path) -> std::io::Result<std::fs::File> {
     crate::file_lock::open_private_lock_file(lock)
 }
 
-#[cfg(windows)]
-use server::WindowsRelease as Release;
-/// 宿主在什么之下放开：Linux 和 macOS 是租约；Windows 是 Server 自己的放开加上同一份租约（见 [`server::WindowsRelease`]）。都用 `acquire` 取得、`publish` 续期，放下时撤销。
-#[cfg(not(windows))]
+/// 宿主在什么之下放开：macOS 通过租约让输入法释放共享词库锁，都用 `acquire` 取得、`publish` 续期，放下时撤销。
 use Lease as Release;
 
 /// The lease as one writer holds it: where it is and what this writer last put there.
@@ -346,133 +341,9 @@ impl<'a, Announce: FnMut()> QuiescedHosts<'a, Announce> {
         let deadline = Instant::now() + budget;
         while matches!(&result, Err(reason) if reason == BUSY) && Instant::now() < deadline {
             std::thread::sleep(RETRY_INTERVAL);
-            // Server 放开之后又建起来的会话（期间有窗口拿到焦点，或者另一个写者恢复了会话）要再请求一次 Server 才放开。TIP 和 Linux、macOS 的宿主一样一直看着租约，所以只再问 Server。
-            #[cfg(windows)]
-            if let Some(release) = &mut self.lease {
-                let _ = release.ask_server_again();
-            }
             result = attempt();
         }
         result
-    }
-}
-
-/// The Windows Server's release, asked for over its auxiliary pipe with the UTF-16LE message `DictionaryQuiesce` and given back with `DictionaryResume` (`platforms/windows/common/AuxMessage.h`). It answers "OK" only once its sessions really are gone, so that reply, not a write getting through, is what makes the exclusive lock safe to take. It gives the sessions back by itself 30 seconds after the last `DictionaryQuiesce`, so a writer that dies mid-import cannot leave input off for longer, and a long one renews the release before each request.
-#[cfg(any(windows, test))]
-pub mod server {
-    /// Server 的辅助管道名，不带 `\\.\pipe\` 前缀和版本后缀；与 `shared/contracts/windows_ipc.h` 的 `FANY_IME_AUX_NAMED_PIPE` 一致。
-    pub const PIPE_BASE_NAME: &str = "FanyImeAuxNamedPipe";
-
-    /// `edition` 的 Server 的辅助管道：每个版本都带 `.<id>` 后缀，例如 full 是 `\\.\pipe\FanyImeAuxNamedPipe.full`。几个版本同时安装时，词库维护只让本版本的 Server 放开会话。
-    pub fn pipe_name(edition: &crate::edition::Edition) -> Option<String> {
-        edition
-            .windows()
-            .map(|identity| identity.pipe_name(PIPE_BASE_NAME))
-    }
-
-    pub fn message(verb: &str) -> Vec<u8> {
-        verb.encode_utf16().flat_map(u16::to_le_bytes).collect()
-    }
-
-    /// The Server writes UTF-16LE "OK" and nothing else.
-    pub fn answered(reply: &[u8]) -> bool {
-        reply == b"O\x00K\x00"
-    }
-
-    /// Send `verb` and wait for the Server's answer. No pipe means no Server and so no sessions to release. Any other failure to reach it, a refused connection included, is reported rather than taken for release: going ahead would only meet the lock.
-    #[cfg(windows)]
-    pub fn ask(verb: &str) -> std::io::Result<()> {
-        use std::io::{Read, Write};
-        /// Every instance of the pipe is serving another client.
-        const ERROR_PIPE_BUSY: i32 = 231;
-        // 本进程所在安装包的版本（Server 目录里的 edition.json）。声明坏了时报错，而不是去叫 full 的 Server 放开会话。
-        let name = crate::edition::Edition::of_windows_package()
-            .ok()
-            .and_then(pipe_name)
-            .ok_or_else(|| {
-                std::io::Error::other("the package declares an edition this build does not know")
-            })?;
-        let mut attempt = 0;
-        let mut pipe = loop {
-            match std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&name)
-            {
-                Ok(pipe) => break pipe,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-                Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY) && attempt < 4 => {
-                    attempt += 1;
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                Err(error) => return Err(error),
-            }
-        };
-        pipe.write_all(&message(verb))?;
-        let mut reply = [0_u8; 8];
-        let read = pipe.read(&mut reply)?;
-        if answered(&reply[..read]) {
-            Ok(())
-        } else {
-            Err(std::io::Error::other(
-                "the input method server did not release its sessions",
-            ))
-        }
-    }
-
-    #[cfg(windows)]
-    pub struct ServerRelease(());
-
-    #[cfg(windows)]
-    impl ServerRelease {
-        /// The user directory is where the Linux and macOS lease goes; the Server needs no path.
-        pub fn acquire(_user_data: &std::path::Path) -> std::io::Result<Self> {
-            ask("DictionaryQuiesce")?;
-            Ok(Self(()))
-        }
-
-        pub fn publish(&mut self) -> std::io::Result<()> {
-            ask("DictionaryQuiesce")
-        }
-    }
-
-    #[cfg(windows)]
-    impl Drop for ServerRelease {
-        /// Resume whatever happened: input without sessions because an import failed would be worse than the failure itself.
-        fn drop(&mut self) {
-            let _ = ask("DictionaryResume");
-        }
-    }
-
-    /// Windows 上一次维护的放开。Server 只能放开它自己进程里的会话；每个用着输入法的应用进程里，TIP 还从同一份 runtime-options.json 建了一个宿主会话（`platforms/windows/tsf`），它同样以共享方式持有词库锁，Server 管不到。所以这里同时写下 Linux 和 macOS 宿主看的那份租约，TIP 在偏好定时器上看到它就放开自己的宿主会话（`platforms/windows/common/DictionaryQuiesceLease.h`），租约撤掉后重建。只问 Server 时独占锁永远拿不到，设置页的新增、导入和清除学习数据都以 `dictionary_busy` 结束（#9434）。
-    ///
-    /// 租约写不下时照旧只问 Server：那只是回到以前的行为，不该因此连 Server 也不放开。字段按声明顺序放下：先撤租约，TIP 开始重建，再让 Server 恢复。
-    #[cfg(windows)]
-    pub struct WindowsRelease {
-        lease: Option<super::Lease>,
-        server: ServerRelease,
-    }
-
-    #[cfg(windows)]
-    impl WindowsRelease {
-        pub fn acquire(user_data: &std::path::Path) -> std::io::Result<Self> {
-            let lease = super::Lease::acquire(user_data).ok();
-            Ok(Self {
-                server: ServerRelease::acquire(user_data)?,
-                lease,
-            })
-        }
-
-        /// 每个请求之前续期：租约和 Server 的放开都有 30 秒上限。
-        pub fn publish(&mut self) -> std::io::Result<()> {
-            let lease = self.lease.as_mut().map_or(Ok(()), super::Lease::publish);
-            self.server.publish().and(lease)
-        }
-
-        /// 重试间隙只再问一次 Server：在这期间重新建起的会话要再叫一次才放开，TIP 一直看着租约，用不着每 50 毫秒重写一遍。
-        pub fn ask_server_again(&mut self) -> std::io::Result<()> {
-            self.server.publish()
-        }
     }
 }
 
@@ -865,27 +736,6 @@ mod tests {
             || Err(BUSY.to_owned()),
         );
         assert_eq!(silent.get(), 0);
-    }
-
-    #[test]
-    fn the_windows_server_is_spoken_to_in_utf16() {
-        assert_eq!(
-            server::pipe_name(crate::edition::Edition::full()).unwrap(),
-            r"\\.\pipe\FanyImeAuxNamedPipe.full"
-        );
-        assert_eq!(
-            server::pipe_name(crate::edition::Edition::by_id("wubi").unwrap()).unwrap(),
-            r"\\.\pipe\FanyImeAuxNamedPipe.wubi"
-        );
-        assert_eq!(server::message("DictionaryResume")[..4], *b"D\x00i\x00");
-        assert_eq!(
-            server::message("DictionaryQuiesce").len(),
-            2 * "DictionaryQuiesce".len()
-        );
-        assert!(server::answered(b"O\x00K\x00"));
-        for reply in [&b""[..], b"O\x00", b"OK", b"O\x00K\x00\n\x00"] {
-            assert!(!server::answered(reply));
-        }
     }
 
     #[test]

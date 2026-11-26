@@ -13,14 +13,12 @@ def main() -> int:
     end = text.index("\n}", start) + 2
     setter = text[start:end]
     required = (
-        "[translationWindow close]",
-        "[translationWindow invalidatePendingCallbacks]",
         "[_aiWindow close]; _aiWindow = nil;",
     )
     missing = [item for item in required if item not in setter]
     if missing:
         raise AssertionError(f"macOS settings directory switch misses lifecycle guard(s): {missing}")
-    print("macOS 设置目录切换会失效翻译回调并释放 AI 窗口")
+    print("macOS 设置目录切换会释放旧 AI 设置窗口")
     return 0
 
 

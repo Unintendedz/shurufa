@@ -1,3 +1,4 @@
+#import "../settings/TestPreferenceSuite.h"
 #import "../../src/input/InputController.mm"
 #import "VoiceCueFixture.h"
 #import "VoiceClientFixture.h"
@@ -598,7 +599,7 @@ int main(int argc, char **argv) {
             MSIMEFocusedController = nil;
             source.transcript(@"汉语", YES);
             assert([owner.copiedText isEqual:@"漢語"]);
-            [outputDefaults removePersistentDomainForName:outputSuite];
+            MSIMERemoveTestPreferenceSuite(outputDefaults, outputSuite);
             puts("PASS persistent: traditional insertion and clipboard");
             [owner setValue:origin forKey:@"activeClient"];
             [owner toggleVoiceInput:nil];

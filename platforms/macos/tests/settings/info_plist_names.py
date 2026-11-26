@@ -21,8 +21,8 @@ import re
 import sys
 from pathlib import Path
 
-# Where the identifier is consumed, and the file types that can hold it.
-CONSUMER_ROOTS = ("crates", "apps/desktop/src-tauri/src", "platforms/macos/src", "platforms/macos/tests")
+# 标识符在源码与测试中的消费位置。
+CONSUMER_ROOTS = ("crates", "platforms/macos/src", "platforms/macos/tests")
 CONSUMER_SUFFIXES = {".rs", ".m", ".mm", ".h", ".cpp", ".swift"}
 # Identifier-shaped literals belonging to this input method. Narrow enough to leave test defaults
 # domains alone; the settings bundle and its runtime state now share app.msime.macos.

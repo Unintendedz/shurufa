@@ -8,8 +8,6 @@
 #import "../settings/RuntimeOptions.h"
 #import "../settings/RuntimeOptionsRefresh.h"
 #import "../settings/AppearancePreferences.h"
-#import "../core/FloatingToolbarPanel.h"
-#import "../core/UpdateController.h"
 #import "MSIMEClientSession.h"
 #import "../candidate/CandidateSkin.h"
 #import "../voice/VoiceAudioMuter.h"
@@ -341,38 +339,9 @@ int main(int argc, const char *argv[]) {
                     if (!MSIMEEditionIsShurufa()) [preferences resetRememberedInputModes];
                     [preferences resetAllRuntimeInputState];
                     MSIMEResetSystemInputModeState(MSIMESharedSystemInputModeState());
-                    if (!MSIMEEditionIsShurufa()) [[MSIMEFloatingToolbarPanel sharedPanel] deactivateForInputSourceSwitch];
                     // 切到 ABC 等别的输入源后，菜单栏状态项不能留着一个过期的「中」；切回来时 activateServer: 的同步会按当前模式重新放上。焦点在客户端之间移动不会走到这里，所以 deactivateServer: 不隐藏它。
                     [[MSIMEInputModeStatusItem sharedItem] hide];
-                    // 用户刚离开水杉，这时装后台下好的更新不会打断打字：进程退出，切回来时系统从新 bundle 拉起（UpdateController.mm）。
-                    if (MSIMEUpdateHostUsesSparkle(NSBundle.mainBundle)) [[MSIMEUpdateController sharedController] installDownloadedUpdateIfReady];
                 }];
-        // 带 feed 的发布包在这里启动 Sparkle，它才会按 SUScheduledCheckInterval 在后台检查和下载；没有 feed 的构建不创建更新控制器，「检查更新…」用到时再建。
-        // 先在后台队列读出偏好里的更新通道（update_channel），回到主线程再带着它创建控制器：Sparkle 启动后安排的第一次检查就取用户所选通道的 appcast，读偏好文件也不占用处理按键的主线程。偏好读不出来时按稳定版。之后的通道变化由 InputController 读偏好时交给控制器。
-        if (MSIMEUpdateHostUsesSparkle(NSBundle.mainBundle)) {
-            NSString *updatePreferences = [startupPreferences isKindOfClass:NSString.class] && [startupPreferences isAbsolutePath]
-                ? [startupPreferences copy] : nil;
-            dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-                id channel = nil;
-                if (updatePreferences) {
-                    NSDictionary *snapshot = [MSIMEClientSession loadPreferencesInDirectory:updatePreferences error:nil];
-                    NSDictionary *preferences = [snapshot[@"preferences"] isKindOfClass:NSDictionary.class] ? snapshot[@"preferences"] : nil;
-                    channel = preferences[@"update_channel"];
-                }
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    MSIMEUpdateController *updates = [MSIMEUpdateController sharedControllerWithUpdateChannelPreference:channel];
-                    // 切换输入源和离开电脑时都先看用户手上有没有没完成的东西，有就这次不装（UpdateController.h）。
-                    updates.unfinishedWork = ^BOOL {
-                        return MSIMEInputControllerHasUnfinishedInput() || MSIMEUpdateWindowsHoldUserWork(NSApp.windows);
-                    };
-                    // 从不切走水杉的用户，在熄屏、切走登录会话或半小时没有任何输入时装后台下好的更新（UpdateController.h）。闲置时长取整个登录会话的输入，不只是打给水杉的按键。
-                    [updates installDownloadedUpdateWhenAwayWithWorkspaceCenter:NSWorkspace.sharedWorkspace.notificationCenter
-                                                                      idleClock:^CFTimeInterval {
-                                                                          return CGEventSourceSecondsSinceLastEventType(kCGEventSourceStateCombinedSessionState, kCGAnyInputEventType);
-                                                                      }];
-                });
-            });
-        }
         [NSApp run];
         [sourceMonitor stop];
         msime_client_release_process_cache();

@@ -860,7 +860,7 @@ mod tests {
         );
     }
 
-/// F7 (test_input_session.cpp:1204-1217).
+    /// F7 (test_input_session.cpp:1204-1217).
     #[test]
     fn a_journal_that_is_a_directory_fails() {
         let dir = frequency_fixture();

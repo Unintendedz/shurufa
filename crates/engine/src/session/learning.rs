@@ -971,10 +971,7 @@ mod tests {
 
     #[test]
     fn shuangpin_persists_its_picks() {
-        let fixture = Fixture::new(
-            &[("ni'hao", "你好", 200), ("ni'hao", "拟好", 100)],
-            &[],
-        );
+        let fixture = Fixture::new(&[("ni'hao", "你好", 200), ("ni'hao", "拟好", 100)], &[]);
         let options = frequency(FrequencyAdjustmentMode::Pin, 1, 1);
         {
             let mut session = fixture.session(|o| {

@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # Shurufa 本地门禁脚本（纯 macOS 单产品）：
-#   scripts/verify-local.sh --quick   快速门禁（决策笔记 + 源码编译检查 + macOS 原生构建）
-#   scripts/verify-local.sh           完整验证（含 Rust 单元测试、Clippy 与 macOS CTest）
+#   scripts/verify-local.sh --quick   快速门禁（决策笔记 + 文本契约 + 工作区编译检查 + macOS 原生构建）
+#   scripts/verify-local.sh           完整验证（含 Rust 单元测试、Clippy 与全量 macOS CTest）
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
+
+if [[ -d "/opt/homebrew/opt/python@3.14/bin" ]]; then
+  export PATH="/opt/homebrew/opt/python@3.14/bin:$PATH"
+fi
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target/macos-cargo}"
 
 quick=0
 for argument in "$@"; do
@@ -28,16 +33,15 @@ node .agents/skills/write-notes-like-deepseek/scripts/verify-agent-note-tree.ts
 node .agents/skills/write-notes-like-deepseek/scripts/verify-agent-note-format.ts
 node .agents/skills/write-notes-like-deepseek/scripts/verify-archived-agent-notes.ts
 
-note "conflict markers & tracked symlinks"
-python3 scripts/test-conflict-markers.py
-python3 scripts/test-tracked-symlinks.py
+note "contract checks"
+bash scripts/run-checks.sh
 
 note "compile: rust workspace"
 cargo check --workspace
 
 if [[ -d "$MSIME_MACOS_BUILD" ]]; then
   note "compile: macos host"
-  CARGO_TARGET_DIR="$root/target/macos-cargo" cargo build --release -p msime-host-api --locked
+  cargo build --release -p msime-host-api --locked
   cmake --build "$MSIME_MACOS_BUILD" --target MSIMEClientInputMethod --parallel "$MSIME_BUILD_JOBS"
 fi
 
@@ -53,9 +57,9 @@ note "clippy"
 cargo clippy --workspace --lib --no-deps -- -D warnings -A clippy::chunks_exact_to_as_chunks
 
 if [[ -d "$MSIME_MACOS_BUILD" ]]; then
-  note "macos core tests"
-  cmake --build "$MSIME_MACOS_BUILD" --target neural-service-ipc-test shared-uninstaller-test --parallel "$MSIME_BUILD_JOBS"
-  ctest --test-dir "$MSIME_MACOS_BUILD" -R "neural-service-ipc|shared-uninstaller|text-client|smart-punctuation-shadow" --output-on-failure
+  note "macos ctest"
+  cmake --build "$MSIME_MACOS_BUILD" --parallel "$MSIME_BUILD_JOBS"
+  ctest --test-dir "$MSIME_MACOS_BUILD" -E '^(textstream-real|textstream-protocol)$' --parallel 4 --output-on-failure
 fi
 
 printf '\nverification passed\n'

@@ -52,7 +52,7 @@ int main() {
         form.savedPatch = nil;
         [form recordHotkey:nil];
         Deliver(NSEventTypeKeyDown,9,NSEventModifierFlagControl | NSEventModifierFlagOption,window);
-        assert(([form.savedPatch[@"macos_hotkey"] isEqual:@{@"key_code":@9,@"modifiers":@3}]));
+        assert(([form.savedPatch[@"macos_hotkey"] isEqual:@{@"key_code":@9,@"modifiers":@3,@"right_modifiers":@0}]));
         form.savedPatch = nil;
         [form recordHotkey:nil];
         Deliver(NSEventTypeKeyDown,53,0,window);

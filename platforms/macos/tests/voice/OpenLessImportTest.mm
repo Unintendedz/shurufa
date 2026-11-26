@@ -1,3 +1,4 @@
+#import "../settings/TestPreferenceSuite.h"
 #import "../../src/voice/OpenLessImport.h"
 #import "../../src/voice/VoiceProviderSettingsKeys.h"
 #import <Security/Security.h>
@@ -96,7 +97,7 @@ int main() {
         NSMutableDictionary *incomplete = [plan mutableCopy];
         [incomplete removeObjectForKey:@"apiKey"];
         assert(![MSIMEOpenLessImport applyPlan:incomplete toDefaults:defaults error:&error]);
-        [defaults removePersistentDomainForName:suite];
+        MSIMERemoveTestPreferenceSuite(defaults, suite);
 
         // 钥匙串读取：用另一个 service 名下的假条目。读不到条目时报错而不是返回空。
         NSString *service = [@"app.msime.test.openless." stringByAppendingString:NSUUID.UUID.UUIDString];

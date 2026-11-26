@@ -93,8 +93,7 @@ static void CheckMenu(NSMenu *menu, id controller) {
         @"selectChineseMode:", @"selectEnglishMode:", @"toggleDedicatedEnglishMode:", @"",
         @"toggleTraditionalOutput:", @"toggleFullWidthInput:", @"toggleChinesePunctuation:", @"toggleCandidateTranslations:", @"",
         @"*", @"*", @"",
-        @"toggleFloatingToolbar:", @"showEmoji:", @"showCloudClipboard:", @"showCloudDictionary:", @"showScreenKeyboard:", @"showHandwriting:",
-        @"showVoicePanel", @"", @"showAppearance:", @"showAbout:"
+        @"showEmoji:", @"showHandwriting:", @"showVoicePanel", @"", @"showAppearance:", @"showAbout:"
     ];
     assert(menu.numberOfItems == (NSInteger)actions.count && !menu.autoenablesItems);
     for (NSUInteger index = 0; index < actions.count; ++index) {
@@ -390,7 +389,6 @@ static void CheckMenu(NSMenu *menu, id controller) {
 // Plays secure event input, which is window-server state a test cannot turn on. Left at NO it also keeps a test from inheriting the machine's state: a locked screen or another process's password field turns it on for everyone.
 @property(nonatomic) BOOL secureInput;
 @property(nonatomic) NSUInteger paletteCalls;
-@property(nonatomic) NSUInteger screenKeyboardCalls;
 @property(nonatomic) NSUInteger restartCalls;
 @property(nonatomic) NSUInteger terminationCalls;
 @end
@@ -643,7 +641,6 @@ static void TestKeyLatencyIsLoggedWithoutTheKey() {
 }
 - (BOOL)secureEventInputActive { return self.secureInput; }
 - (void)showSystemCharacterPalette { ++self.paletteCalls; }
-- (void)showScreenKeyboard:(id)sender { (void)sender; ++self.screenKeyboardCalls; }
 - (void)restartCurrentInputMethod { ++self.restartCalls; }
 - (void)terminateCurrentInputMethod { ++self.terminationCalls; }
 @end
@@ -824,28 +821,24 @@ static void TestSharedPunctuation() {
     NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
     MSIMEAppearancePreferences *prefs = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults];
     ModeController *controller = [ModeController alloc];
-    MSIMEFloatingToolbarPanel *toolbar = [[MSIMEFloatingToolbarPanel alloc] init];
     [controller setValue:prefs forKey:@"appearance"];
-    [controller setValue:toolbar forKey:@"toolbar"];
     NSButton *toggle = (id)PreferenceControl(prefs, @selector(punctuationChanged:));
-    NSButton *toolbarToggle = [toolbar valueForKey:@"punctuationButton"];
     __block NSUInteger saves = 0;
     id observer = [NSNotificationCenter.defaultCenter addObserverForName:MSIMEAppearanceDidChangeNotification object:prefs queue:nil usingBlock:^(NSNotification *note) { (void)note; ++saves; }];
     for (NSNumber *enabled in @[@NO, @YES, @NO]) {
         [controller applySharedToolbarPreferences:@{@"chinese_punctuation": enabled}];
         assert(prefs.chinesePunctuation == enabled.boolValue && toggle.state == (enabled.boolValue ? NSControlStateValueOn : NSControlStateValueOff));
-        assert([toolbarToggle.title isEqual:enabled.boolValue ? @"。" : @"."]);
-        assert([toolbarToggle.accessibilityLabel isEqual:enabled.boolValue ? @"切换到西文标点" : @"切换到中文标点"]);
+        assert(prefs.runtimeChinesePunctuation == enabled.boolValue);
         assert([[prefs sharedPreferencesByMerging:@{}][@"chinese_punctuation"] isEqual:enabled] && saves == 0);
     }
     assert([defaults objectForKey:@"MSIMEClientChinesePunctuation"] == nil);
     for (id invalid in @[NSNull.null, @1, @"true"]) {
         [controller applySharedToolbarPreferences:@{@"chinese_punctuation": invalid}];
-        assert(!prefs.chinesePunctuation && [toolbarToggle.title isEqual:@"."] && saves == 0);
+        assert(!prefs.chinesePunctuation && !prefs.runtimeChinesePunctuation && saves == 0);
     }
-    // The toolbar switches this app's punctuation only: nothing is saved and the settings checkbox keeps the starting value.
-    [controller floatingToolbarDidRequestTogglePunctuation:toolbar];
-    assert(prefs.runtimeChinesePunctuation && [toolbarToggle.title isEqual:@"。"] && saves == 0);
+    // 运行态标点切换只影响当前应用：不落盘，设置勾选框保持初始值。
+    [controller toggleChinesePunctuation:nil];
+    assert(prefs.runtimeChinesePunctuation && saves == 0);
     assert(!prefs.chinesePunctuation && toggle.state == NSControlStateValueOff);
     assert([defaults objectForKey:@"MSIMEClientChinesePunctuation"] == nil);
     assert([[prefs sharedPreferencesByMerging:@{}][@"chinese_punctuation"] isEqual:@NO]);
@@ -853,12 +846,12 @@ static void TestSharedPunctuation() {
     assert(reopened.chinesePunctuation && reopened.runtimeChinesePunctuation); // Nothing saved, so the built-in default.
     // Re-applying the same shared value keeps the toggle; a new one is a new starting value for every app.
     [controller applySharedToolbarPreferences:@{@"chinese_punctuation": @NO}];
-    assert(prefs.runtimeChinesePunctuation && [toolbarToggle.title isEqual:@"。"]);
+    assert(prefs.runtimeChinesePunctuation);
     [controller applySharedToolbarPreferences:@{@"chinese_punctuation": @YES}];
-    [controller floatingToolbarDidRequestTogglePunctuation:toolbar];
+    [controller toggleChinesePunctuation:nil];
     assert(!prefs.runtimeChinesePunctuation);
     [controller applySharedToolbarPreferences:@{@"chinese_punctuation": @NO}];
-    assert(!prefs.chinesePunctuation && !prefs.runtimeChinesePunctuation && [toolbarToggle.title isEqual:@"."] && saves == 0);
+    assert(!prefs.chinesePunctuation && !prefs.runtimeChinesePunctuation && saves == 0);
     [NSNotificationCenter.defaultCenter removeObserver:observer];
     MSIMERemoveTestPreferenceSuite(defaults, suite);
 }
@@ -932,10 +925,7 @@ static void TestSharedTraditionalOutput() {
     NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
     MSIMEAppearancePreferences *prefs = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults];
     ModeController *controller = [ModeController alloc];
-    MSIMEFloatingToolbarPanel *toolbar = [[MSIMEFloatingToolbarPanel alloc] init];
     [controller setValue:prefs forKey:@"appearance"];
-    [controller setValue:toolbar forKey:@"toolbar"];
-    NSButton *toggle = [toolbar valueForKey:@"traditionalOutputButton"];
     __block NSUInteger saves = 0;
     id observer = [NSNotificationCenter.defaultCenter addObserverForName:MSIMEAppearanceDidChangeNotification object:prefs queue:nil usingBlock:^(NSNotification *note) { (void)note; ++saves; }];
     assert(!prefs.traditionalOutput);
@@ -944,7 +934,6 @@ static void TestSharedTraditionalOutput() {
     for (NSNumber *enabled in @[@YES, @NO, @YES]) {
         [controller applySharedToolbarPreferences:@{@"traditional_chinese_output":enabled}];
         assert(prefs.traditionalOutput == enabled.boolValue && saves == 0);
-        assert([toggle.title isEqual:enabled.boolValue ? @"繁" : @"简"]);
         assert([controller.menu itemAtIndex:4].state == (enabled.boolValue ? NSControlStateValueOn : NSControlStateValueOff));
         assert([[prefs cloudSettingsSnapshot][@"platform.macos.traditional_chinese_output"] isEqual:enabled]);
     }
@@ -1519,10 +1508,10 @@ static void TestPunctuation(NSUserDefaults *defaults, MSIMEAppearancePreferences
     const BOOL fullWidth = appearance.fullWidthInput;
     const BOOL traditional = appearance.traditionalOutput;
     session.failFinish = YES;
-    [controller floatingToolbarDidRequestTogglePunctuation:nil];
+    [controller toggleChinesePunctuation:nil];
     assert(appearance.runtimeChinesePunctuation && session.punctuationCalls == 0);
     session.failFinish = NO;
-    [controller floatingToolbarDidRequestTogglePunctuation:nil];
+    [controller toggleChinesePunctuation:nil];
     assert(session.lastCommand == MSIME_FINISH_COMPOSITION);
     assert([client.committed isEqual:@"测试"]);
     assert(!appearance.runtimeChinesePunctuation && !session.chinesePunctuation);
@@ -1532,7 +1521,7 @@ static void TestPunctuation(NSUserDefaults *defaults, MSIMEAppearancePreferences
     [controller prepareSession];
     assert(!session.chinesePunctuation);
     assert(appearance.englishMode == english && appearance.fullWidthInput == fullWidth && appearance.traditionalOutput == traditional);
-    [controller floatingToolbarDidRequestTogglePunctuation:nil];
+    [controller toggleChinesePunctuation:nil];
     assert(appearance.runtimeChinesePunctuation && session.chinesePunctuation);
     NSEvent *(^toggleEvent)(unsigned short, NSEventModifierFlags, BOOL) = ^NSEvent *(unsigned short key, NSEventModifierFlags flags, BOOL repeat) {
         return [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:flags timestamp:0 windowNumber:0 context:nil characters:@"." charactersIgnoringModifiers:@"." isARepeat:repeat keyCode:key];
@@ -2144,7 +2133,7 @@ static void TestCharacterSetShortcut(void) {
     assert(!hud.visible);
     [controller selectTraditionalOutput:nil];
     assert(hud.visible && [hud.displayedText isEqual:@"繁"]);
-    [controller floatingToolbarDidRequestToggleTraditionalOutput:nil];
+    [controller toggleTraditionalOutput:nil];
     assert(hud.visible && [hud.displayedText isEqual:@"简"]);
     [hud orderOut:nil];
     [controller setValue:nil forKey:@"activeClient"];
@@ -2189,7 +2178,7 @@ static void TestInputStateHUDs() {
     shown(@"全角");
     assert([controller handleEvent:ModeKey(49, ctrlShift, YES) client:client]);
     assert(!hud.visible);
-    [controller floatingToolbarDidRequestToggleFullWidth:nil];
+    [controller toggleFullWidthInput:nil];
     shown(@"半角");
     [controller toggleFullWidthInput:nil];
     shown(@"全角");
@@ -2200,7 +2189,7 @@ static void TestInputStateHUDs() {
     [controller toggleChinesePunctuation:nil];
     shown(@"中文标点");
     prefs.punctuationLock = @"chinese";
-    [controller floatingToolbarDidRequestTogglePunctuation:nil];
+    [controller toggleChinesePunctuation:nil];
     assert(!hud.visible && prefs.runtimeChinesePunctuation);
     prefs.punctuationLock = @"follow";
     [controller setValue:@{@"editing_text": @"synthetic", @"candidates": @[]} forKey:@"view"];
@@ -2840,7 +2829,6 @@ static void TestShurufaSystemSourceAuthority() {
     Method base = class_getInstanceMethod(IMKInputController.class, @selector(activateServer:));
     IMP original = method_setImplementation(base, (IMP)ShurufaSyntheticActivation);
     [controller activateServer:first];
-    assert(![controller valueForKey:@"toolbar"]);
     DrainMainQueue();
     assert(first.selectedModes.count == 0 && !appearance.englishMode);
     [appearance applySharedInputPreferences:legacy];
@@ -3284,31 +3272,6 @@ static void TestOptInSchemeModes() {
 
     [NSFileManager.defaultManager removeItemAtPath:dictionaries error:nil];
     MSIMERemoveTestPreferenceSuite(defaults, suite);
-}
-
-static void TestFloatingToolbarMenuToggle(MSIMEAppearancePreferences *appearance) {
-    ModeController *controller = [ModeController alloc];
-    [controller setValue:appearance forKey:@"appearance"];
-    appearance.floatingToolbarEnabled = YES;
-
-    NSMenu *menu = [controller menu];
-    NSMenuItem *item = nil;
-    for (NSMenuItem *candidate in menu.itemArray)
-        if (candidate.action == @selector(toggleFloatingToolbar:)) { item = candidate; break; }
-    assert(item && [item.title isEqual:@"悬浮工具栏"]);
-    assert(item.state == NSControlStateValueOn);
-
-    // Choosing it turns the toolbar off, and the menu built next says so.
-    [controller toggleFloatingToolbar:item];
-    assert(!appearance.floatingToolbarEnabled);
-    NSMenuItem *again = nil;
-    for (NSMenuItem *candidate in [controller menu].itemArray)
-        if (candidate.action == @selector(toggleFloatingToolbar:)) { again = candidate; break; }
-    assert(again && again.state == NSControlStateValueOff);
-
-    // And back on, which is the same preference the settings page reads.
-    [controller toggleFloatingToolbar:again];
-    assert(appearance.floatingToolbarEnabled);
 }
 
 // IMK gives each text input client its own controller and candidate window. A controller whose client went away without a matching deactivateServer: must not leave its last frame on screen once another controller shows candidates or takes focus.
@@ -5089,46 +5052,6 @@ static void TestSmartPunctuationPreferences() {
     [defaults removePersistentDomainForName:suite];
 }
 
-static void TestScreenKeyboardShortcut(MSIMEAppearancePreferences *appearance) {
-    ModeController *controller = [ModeController alloc];
-    ShortcutClient *client = [ShortcutClient new];
-    [controller setValue:appearance forKey:@"appearance"];
-    [controller setValue:[ShortcutSession new] forKey:@"session"];
-    [controller setValue:client forKey:@"activeClient"];
-    const BOOL previousEnglishMode = appearance.englishMode;
-    const NSEventModifierFlags chord = NSEventModifierFlagControl |
-        NSEventModifierFlagShift | NSEventModifierFlagCommand;
-
-    appearance.englishMode = NO;
-    assert([controller handleEvent:ModeKey(40, chord, NO) client:client]);
-    assert(controller.screenKeyboardCalls == 1);
-    assert([controller handleEvent:ModeKey(40, chord, YES) client:client]);
-    assert(controller.screenKeyboardCalls == 1);
-    assert([controller handleEvent:ModeKey(40, chord | NSEventModifierFlagCapsLock, NO) client:client]);
-    assert(controller.screenKeyboardCalls == 2);
-
-    appearance.englishMode = YES;
-    assert([controller handleEvent:ModeKey(40, chord, NO) client:client]);
-    assert(controller.screenKeyboardCalls == 3);
-    for (NSNumber *modifiers in @[
-        @(chord & ~NSEventModifierFlagControl),
-        @(chord & ~NSEventModifierFlagShift),
-        @(chord & ~NSEventModifierFlagCommand),
-        @(chord | NSEventModifierFlagOption)
-    ]) {
-        assert(![controller handleEvent:ModeKey(40, modifiers.unsignedIntegerValue, NO) client:client]);
-        assert(controller.screenKeyboardCalls == 3);
-    }
-    assert(![controller handleEvent:ModeKey(39, chord, NO) client:client]);
-    assert(controller.screenKeyboardCalls == 3);
-    // Dvorak：K 在美式布局的 V 位置（keyCode 9），物理 K 键打出 t。
-    assert([controller handleEvent:LayoutKey(9, @"K", chord) client:client]);
-    assert(controller.screenKeyboardCalls == 4);
-    assert(![controller handleEvent:LayoutKey(40, @"T", chord) client:client]);
-    assert(controller.screenKeyboardCalls == 4);
-    appearance.englishMode = previousEnglishMode;
-}
-
 static void TestMaintenanceShortcuts(MSIMEAppearancePreferences *appearance) {
     ModeController *controller = [ModeController alloc];
     ShortcutClient *client = [ShortcutClient new];
@@ -5189,30 +5112,6 @@ static void RecordBaseDeactivation(id object, SEL selector, id sender) {
     (void)object; (void)selector; (void)sender; ++baseDeactivationCalls;
 }
 
-@interface DeactivationToolbar : NSObject
-@property(nonatomic) NSUInteger calls;
-@end
-@implementation DeactivationToolbar
-- (void)deactivateForDelegate:(id)delegate { (void)delegate; ++self.calls; }
-- (void)updateEnglishInputMode:(BOOL)englishInputMode
-         englishCandidateMode:(BOOL)englishCandidateMode
-                        scheme:(NSString *)scheme
-                   schemeTitle:(NSString *)schemeTitle
-                      capsLock:(BOOL)capsLock
-          chinesePunctuationEnabled:(BOOL)chinesePunctuationEnabled
-                   fullWidthEnabled:(BOOL)fullWidthEnabled
-    traditionalChineseOutputEnabled:(BOOL)traditionalChineseOutputEnabled {
-    (void)englishInputMode;
-    (void)englishCandidateMode;
-    (void)scheme;
-    (void)schemeTitle;
-    (void)capsLock;
-    (void)chinesePunctuationEnabled;
-    (void)fullWidthEnabled;
-    (void)traditionalChineseOutputEnabled;
-}
-@end
-
 static void TestStaleClientDeactivation() {
     NSString *suite = [@"msime.deactivation." stringByAppendingString:NSUUID.UUID.UUIDString];
     NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
@@ -5221,7 +5120,6 @@ static void TestStaleClientDeactivation() {
     ShortcutClient *oldClient = [ShortcutClient new], *current = [ShortcutClient new];
     ShortcutSession *session = [ShortcutSession new];
     TestCandidatePanel *panel = [TestCandidatePanel new], *keymap = [TestCandidatePanel new];
-    DeactivationToolbar *toolbar = [DeactivationToolbar new];
     NSTimer *timer = [NSTimer timerWithTimeInterval:1 repeats:YES block:^(NSTimer *unused) { (void)unused; }];
     NSDictionary *view = @{@"focused":@YES, @"editing_text":@"test", @"candidates":@[]};
     [controller setValue:prefs forKey:@"appearance"];
@@ -5229,7 +5127,6 @@ static void TestStaleClientDeactivation() {
     [controller setValue:session forKey:@"session"];
     [controller setValue:panel forKey:@"panel"];
     [controller setValue:keymap forKey:@"keymapPanel"];
-    [controller setValue:toolbar forKey:@"toolbar"];
     [controller setValue:timer forKey:@"preferencesTimer"];
     [controller setValue:view forKey:@"view"];
     panel.visible = keymap.visible = YES;
@@ -5249,7 +5146,7 @@ static void TestStaleClientDeactivation() {
         assert([[controller valueForKey:@"view"] isEqual:view]);
         assert([current.marked isEqual:@"test"] && current.committed == nil);
         assert(panel.visible && keymap.visible && timer.valid);
-        assert(session.focusCalls == 0 && toolbar.calls == 0 && baseDeactivationCalls == 0);
+        assert(session.focusCalls == 0 && baseDeactivationCalls == 0);
     }
     // The current client's pending tap must survive an unrelated deactivation.
     assert([controller handleEvent:up client:current] && prefs.englishMode);
@@ -5259,10 +5156,9 @@ static void TestStaleClientDeactivation() {
     assert([controller valueForKey:@"activeClient"] == nil);
     assert([controller valueForKey:@"preferencesTimer"] == nil && !timer.valid);
     assert(!panel.visible && !keymap.visible && current.marked.length == 0);
-    // A focus-out is the reference's ClientSuspended: the floating toolbar keeps its owner and stays visible, and only an input-source switch (or the controller going away) releases it.
-    assert(session.focusCalls == 1 && toolbar.calls == 0 && baseDeactivationCalls == 1);
+    assert(session.focusCalls == 1 && baseDeactivationCalls == 1);
     [controller deactivateServer:current];
-    assert(session.focusCalls == 1 && toolbar.calls == 0 && baseDeactivationCalls == 1);
+    assert(session.focusCalls == 1 && baseDeactivationCalls == 1);
     method_setImplementation(base, original);
     MSIMERemoveTestPreferenceSuite(defaults, suite);
 }
@@ -5781,63 +5677,70 @@ static void TestPreferenceClientGeneration() {
     }
 }
 
-// 记录控制器释放时在哪个线程收起浮动工具栏。真实的工具栏是 NSPanel，在后台线程 orderOut: 会让 AppKit 直接终止进程。
-@interface ThreadRecordingToolbar : NSObject
-@property(atomic) NSUInteger deactivations;
-@property(atomic) BOOL deactivatedOffMain;
+// 记录控制器释放时所在的线程，避免后台读取或异步重启回调在非主线程触发 dealloc。
+@interface ThreadDeallocRecorder : NSObject
+@property(atomic) NSUInteger deallocations;
+@property(atomic) BOOL deallocatedOffMain;
 @property(atomic) NSUInteger completions;
 @end
-@implementation ThreadRecordingToolbar
-- (void)deactivateForDelegate:(id)delegate {
-    (void)delegate;
-    if (!NSThread.isMainThread) self.deactivatedOffMain = YES;
-    self.deactivations = self.deactivations + 1;
-}
+@implementation ThreadDeallocRecorder
 @end
 
-// 偏好读取完成时把次数记到工具栏桩上：控制器释放后它自己的计数读不到。
 @interface DroppedPreferencesController : AsyncPreferencesController
+@property(nonatomic, strong) ThreadDeallocRecorder *deallocRecorder;
 @end
 @implementation DroppedPreferencesController
 - (void)completePreferenceLoad:(NSDictionary *)snapshot error:(NSError *)error generation:(uint64_t)generation
                        session:(MSIMEClientSession *)session client:(id)client {
     (void)snapshot; (void)error; (void)generation; (void)session; (void)client;
-    ThreadRecordingToolbar *toolbar = [self valueForKey:@"toolbar"];
-    toolbar.completions = toolbar.completions + 1;
+    self.deallocRecorder.completions = self.deallocRecorder.completions + 1;
+}
+- (void)dealloc {
+    if (!NSThread.isMainThread) self.deallocRecorder.deallocatedOffMain = YES;
+    self.deallocRecorder.deallocations = self.deallocRecorder.deallocations + 1;
 }
 @end
 
-// IMK 放掉控制器时，后台的偏好读取可能还握着它。最后一个强引用若在读取线程上释放，dealloc 就在那条线程上收起浮动工具栏，AppKit 以「Must only be used from the main thread」终止输入法进程（0.52.0 的崩溃报告，#6667）。
+// IMK 放掉控制器时，后台的偏好读取可能还握着它：完成块按弱引用捕获，读取返回后经 MSIMEReleaseControllerOnMain 交回主线程析构，绝不在后台线程释放，也不再触发完成回调。
 static void DrainMainQueue();
 static void TestPreferenceReadDoesNotDeallocControllerOffMain() {
-    ThreadRecordingToolbar *toolbar = [ThreadRecordingToolbar new];
+    ThreadDeallocRecorder *recorder = [ThreadDeallocRecorder new];
     ControlledPreferenceRead *read = [ControlledPreferenceRead new];
     read.snapshot = @{@"preferences":@{}};
     @autoreleasepool {
         DroppedPreferencesController *controller = [DroppedPreferencesController alloc];
         controller.reads = @[read];
         controller.appliedPreferences = [NSMutableArray array];
+        controller.deallocRecorder = recorder;
         [controller setValue:[ShortcutClient new] forKey:@"activeClient"];
         [controller setValue:@"/synthetic-preferences" forKey:@"preferencesDirectory"];
-        [controller setValue:toolbar forKey:@"toolbar"];
         [controller reloadPreferences];
         assert(dispatch_semaphore_wait(read.started, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC)) == 0);
     }
-    // 主线程这一侧的引用已全部放掉，读取还在进行：此后控制器只由后台读取持有。这里不再碰控制器本身，免得主线程上多出一个自动释放的引用把它留到读取之后。
-    assert(toolbar.deactivations == 0);
+    assert(recorder.deallocations == 0);
     dispatch_semaphore_signal(read.released);
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:2.0];
+    while (recorder.deallocations == 0 && deadline.timeIntervalSinceNow > 0) {
+        [NSRunLoop.currentRunLoop runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+    }
     SettleWindowLayout();
-    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:2];
-    while (toolbar.deactivations == 0 && deadline.timeIntervalSinceNow > 0)
-        [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.005]];
-    assert(toolbar.deactivations == 1);
-    assert(!toolbar.deactivatedOffMain);
-    // 释放排在完成块之前：完成块按弱引用取控制器，取不到就不应用这份偏好，和读取开始前控制器就已释放时一样。
     DrainMainQueue();
-    assert(toolbar.completions == 0);
+    assert(recorder.deallocations == 1);
+    assert(!recorder.deallocatedOffMain);
+    assert(recorder.completions == 0);
 }
 
-// 打开设置应用的完成回调由 NSWorkspace 在并发队列上调用并释放。它持有的回退块若强引用控制器，IMK 在设置应用启动期间放掉控制器时，最后一次释放就落在那条队列上。这里把 NSWorkspace 换成只收下完成回调的桩，再在后台队列上放掉它。
+// 异步重启完成回调由 NSWorkspace 在并发队列上释放，持有弱引用可防止控制器在并发队列销毁。
+@interface RestartDeallocTrackingController : MSIMEInputController
+@property(nonatomic, strong) ThreadDeallocRecorder *deallocRecorder;
+@end
+@implementation RestartDeallocTrackingController
+- (void)dealloc {
+    if (!NSThread.isMainThread) self.deallocRecorder.deallocatedOffMain = YES;
+    self.deallocRecorder.deallocations = self.deallocRecorder.deallocations + 1;
+}
+@end
+
 static void TestDesktopLaunchDoesNotDeallocControllerOffMain() {
     Method locate = class_getInstanceMethod(NSWorkspace.class, @selector(URLForApplicationWithBundleIdentifier:));
     Method open = class_getInstanceMethod(NSWorkspace.class, @selector(openApplicationAtURL:configuration:completionHandler:));
@@ -5851,32 +5754,22 @@ static void TestDesktopLaunchDoesNotDeallocControllerOffMain() {
         // 调用方传进来的是栈上的块，按 id 收下只会 retain 不会拷贝，要显式 copy。
         pendingHandler = [handler copy];
     }));
-    void (^launches[])(MSIMEInputController *) = {
-        ^(MSIMEInputController *controller) { [controller showDictionary:nil]; },
-        ^(MSIMEInputController *controller) { [controller restartCurrentInputMethod]; },
-    };
-    for (auto launch : launches) {
-        ThreadRecordingToolbar *toolbar = [ThreadRecordingToolbar new];
-        @autoreleasepool {
-            MSIMEInputController *controller = [MSIMEInputController alloc];
-            [controller setValue:toolbar forKey:@"toolbar"];
-            launch(controller);
-        }
-        assert(pendingHandler);
-        // 设置应用还在启动，主线程这一侧已经放掉控制器，再转一圈主队列，让主线程上自动释放的引用都先放掉。
-        DrainMainQueue();
-        dispatch_semaphore_t released = dispatch_semaphore_create(0);
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-            pendingHandler = nil;
-            dispatch_semaphore_signal(released);
-        });
-        assert(dispatch_semaphore_wait(released, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) == 0);
-        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:2];
-        while (toolbar.deactivations == 0 && deadline.timeIntervalSinceNow > 0)
-            [NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.005]];
-        assert(toolbar.deactivations == 1);
-        assert(!toolbar.deactivatedOffMain);
+    ThreadDeallocRecorder *recorder = [ThreadDeallocRecorder new];
+    @autoreleasepool {
+        RestartDeallocTrackingController *controller = [RestartDeallocTrackingController alloc];
+        controller.deallocRecorder = recorder;
+        [controller restartCurrentInputMethod];
     }
+    assert(pendingHandler);
+    DrainMainQueue();
+    dispatch_semaphore_t released = dispatch_semaphore_create(0);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        pendingHandler = nil;
+        dispatch_semaphore_signal(released);
+    });
+    assert(dispatch_semaphore_wait(released, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) == 0);
+    assert(recorder.deallocations == 1);
+    assert(!recorder.deallocatedOffMain);
     method_setImplementation(locate, originalLocate);
     method_setImplementation(open, originalOpen);
 }
@@ -7758,13 +7651,13 @@ static void TestPerApplicationPunctuationAndWidth() {
     session.nextTransition = nil;
 
     // A Chinese/English switch resolves punctuation from the new mode (SyncPunctuationWithImeMode); width is independent of the mode.
-    [controller floatingToolbarDidRequestTogglePunctuation:nil];
+    [controller toggleChinesePunctuation:nil];
     assert(prefs.runtimeChinesePunctuation);
     [controller setEnglishInputMode:YES];
     assert(prefs.englishMode && !prefs.runtimeChinesePunctuation && prefs.runtimeFullWidthInput);
     [controller setEnglishInputMode:NO]; // Back to Chinese: the saved starting value.
     assert(!prefs.englishMode && prefs.runtimeChinesePunctuation);
-    [controller floatingToolbarDidRequestTogglePunctuation:nil];
+    [controller toggleChinesePunctuation:nil];
     assert(!prefs.runtimeChinesePunctuation);
     [controller setEnglishInputMode:NO]; // Not a switch, so the toggle stays.
     assert(!prefs.runtimeChinesePunctuation);
@@ -7900,9 +7793,9 @@ static void TestEnglishModePunctuationAndWidthOutput() {
     assert([controller handleEvent:toggle client:client]);
     assert(prefs.runtimeChinesePunctuation && [defaults objectForKey:@"MSIMEClientChinesePunctuation"] == nil);
     assert([type(comma) isEqual:@"，"]);
-    [controller floatingToolbarDidRequestTogglePunctuation:nil];
+    [controller toggleChinesePunctuation:nil];
     assert(!prefs.runtimeChinesePunctuation && type(comma) == nil);
-    [controller floatingToolbarDidRequestTogglePunctuation:nil];
+    [controller toggleChinesePunctuation:nil];
     assert([type(comma) isEqual:@"，"]);
     [controller setEnglishInputMode:NO];
     [controller setEnglishInputMode:YES]; // The round trip drops the English-mode choice.
@@ -7913,11 +7806,11 @@ static void TestEnglishModePunctuationAndWidthOutput() {
     prefs.punctuationLock = @"english";
     [controller setEnglishInputMode:YES];
     assert([controller handleEvent:toggle client:client] && !prefs.runtimeChinesePunctuation);
-    [controller floatingToolbarDidRequestTogglePunctuation:nil];
+    [controller toggleChinesePunctuation:nil];
     assert(!prefs.runtimeChinesePunctuation && type(comma) == nil);
     prefs.punctuationLock = @"chinese";
     assert([controller handleEvent:toggle client:client] && prefs.runtimeChinesePunctuation);
-    [controller floatingToolbarDidRequestTogglePunctuation:nil];
+    [controller toggleChinesePunctuation:nil];
     assert(prefs.runtimeChinesePunctuation && [type(comma) isEqual:@"，"]);
     [controller setEnglishInputMode:NO];
 
@@ -8138,14 +8031,11 @@ static void TestGlassInputModeHUD(BOOL visual) {
     ModeController *controller = [ModeController alloc];
     ShortcutClient *client = [ShortcutClient new];
     client.caret = NSMakeRect(700, 500, 2, 24);
-    MSIMEFloatingToolbarPanel *toolbar = [MSIMEFloatingToolbarPanel new];
-    [toolbar setFrameAutosaveName:@""];
     [controller setValue:appearance forKey:@"appearance"];
     [controller setValue:client forKey:@"activeClient"];
-    [controller setValue:toolbar forKey:@"toolbar"];
     [controller applySharedToolbarPreferences:@{@"global_theme":@"system", @"input_mode_hud":@YES, @"theme":@"system"}];
     MSIMEInputModeHUDPanel *hud = MSIMEInputModeHUDPanel.sharedPanel;
-    assert(toolbar.liquidGlassEnabled && hud.liquidGlassEnabled);
+    assert(hud.liquidGlassEnabled);
     [appearance applySharedInputPreferences:@{@"keybindings":@{@"switch_language_shift":@YES}}];
     appearance.englishMode = NO;
     for (NSNumber *english in @[@YES, @NO]) {
@@ -8178,7 +8068,7 @@ static void TestGlassInputModeHUD(BOOL visual) {
     assert([controller handleEvent:TapEvent(NSEventTypeFlagsChanged, 56, 0, 3.1) client:client]);
     assert(appearance.englishMode && !hud.visible);
     [controller applySharedToolbarPreferences:@{@"global_theme":@"paper"}];
-    assert(!toolbar.liquidGlassEnabled && !hud.liquidGlassEnabled);
+    assert(!hud.liquidGlassEnabled);
     assert([hud valueForKey:@"glassBackground"] == nil);
     [hud orderOut:nil];
     [controller setValue:nil forKey:@"activeClient"];
@@ -8215,17 +8105,16 @@ static void TestInputMode(NSUserDefaults *defaults, MSIMEAppearancePreferences *
     CheckMenu(menu, controller);
     assert([menu itemAtIndex:0].state == NSControlStateValueOn);
     assert([menu itemAtIndex:1].state == NSControlStateValueOff);
-    assert(menu.numberOfItems == 22);
-    assert([[menu itemAtIndex:12].title isEqual:@"悬浮工具栏"]);
-    NSArray<NSString *> *toolTitles = @[@"水杉表情面板…", @"云剪贴板…", @"云词库…", @"水杉屏幕键盘…", @"手写输入…", @"开始/结束语音输入"];
-    NSArray<NSString *> *toolActions = @[@"showEmoji:", @"showCloudClipboard:", @"showCloudDictionary:", @"showScreenKeyboard:", @"showHandwriting:", @"showVoicePanel"];
+    assert(menu.numberOfItems == 18);
+    NSArray<NSString *> *toolTitles = @[@"水杉表情面板…", @"手写输入…", @"开始/结束语音输入"];
+    NSArray<NSString *> *toolActions = @[@"showEmoji:", @"showHandwriting:", @"showVoicePanel"];
     for (NSUInteger index = 0; index < toolTitles.count; ++index) {
-        NSMenuItem *tool = [menu itemAtIndex:13 + index];
+        NSMenuItem *tool = [menu itemAtIndex:12 + index];
         assert([tool.title isEqual:toolTitles[index]] && tool.action == NSSelectorFromString(toolActions[index]));
     }
-    assert([menu itemAtIndex:19].separatorItem);
-    assert([[menu itemAtIndex:20].title isEqual:@"水杉输入法设置…"] && [menu itemAtIndex:20].action == @selector(showAppearance:));
-    assert([[menu itemAtIndex:21].title isEqual:@"关于水杉输入法…"] && [menu itemAtIndex:21].action == @selector(showAbout:));
+    assert([menu itemAtIndex:15].separatorItem);
+    assert([[menu itemAtIndex:16].title isEqual:@"水杉输入法设置…"] && [menu itemAtIndex:16].action == @selector(showAppearance:));
+    assert([[menu itemAtIndex:17].title isEqual:@"关于水杉输入法…"] && [menu itemAtIndex:17].action == @selector(showAbout:));
     // Simplified output is the off state of the one 繁体输出 toggle.
     const BOOL traditionalOutput = appearance.traditionalOutput;
     appearance.traditionalOutput = NO;
@@ -8544,9 +8433,6 @@ show_selected_bar = true
     assert([loaded.customCandidateSkin isEqual:@"synthetic"] && [loaded resolvedSkinForDark:NO].candidateSkin == "synthetic");
     NSDictionary *before = [[controller valueForKey:@"view"] copy];
     [controller setValue:external forKey:@"appearance"];
-    MSIMEFloatingToolbarPanel *toolbar = [MSIMEFloatingToolbarPanel new];
-    [toolbar setFrameAutosaveName:@""];
-    [controller setValue:toolbar forKey:@"toolbar"];
     MetasequoiaSkinSettingsView *cards = (id)[external skinSettingsView];
     NSArray<NSSwitch *> *skinSwitches = [cards valueForKey:@"switches"];
     assert([skinSwitches.lastObject.identifier isEqual:@"synthetic"]);
@@ -8565,13 +8451,9 @@ show_selected_bar = true
         for (NSString *theme in @[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]) {
             panel.appearance = [NSAppearance appearanceNamed:theme];
             [controller appearanceChanged:nil];
-            [toolbar applyThemePreferences:@{@"theme": [theme isEqual:NSAppearanceNameDarkAqua] ? @"dark" : @"light"}];
-            NSColor *toolbarFill = [[toolbar valueForKey:@"chrome"] valueForKey:@"fillColor"];
-            // The toolbar derives from the candidate palette of the theme on screen (THEME_CONTRACT §3), the package's colours included.
             const BOOL dark = [theme isEqual:NSAppearanceNameDarkAqua];
             const auto toolbarTokens = [external toolbarSkinForDark:dark];
-            assert([toolbarFill isEqual:SkinColor(toolbarTokens.surface)]);
-            assert([toolbarFill isEqual:SkinColor([external resolvedSkinForDark:dark].tokens.surface)]);
+            assert([SkinColor(toolbarTokens.surface) isEqual:SkinColor([external resolvedSkinForDark:dark].tokens.surface)]);
             MSIMECandidateChromeView *chrome = (id)panel.contentView;
             MSIMECandidateDecorationView *decoration = (id)chrome.subviews.lastObject;
             assert([decoration isKindOfClass:MSIMECandidateDecorationView.class] && decoration.image);
@@ -8704,9 +8586,6 @@ background = "#F4F8FF"
     assert([styled resolvedSkinForDark:YES].decorationPath.find("character.png") != std::string::npos);
     NSDictionary *before = [[controller valueForKey:@"view"] copy];
     [controller setValue:styled forKey:@"appearance"];
-    MSIMEFloatingToolbarPanel *toolbar = [MSIMEFloatingToolbarPanel new];
-    [toolbar setFrameAutosaveName:@""];
-    [controller setValue:toolbar forKey:@"toolbar"];
     styled.vertical = NO;
     for (NSString *theme in @[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]) {
         const BOOL dark = [theme isEqual:NSAppearanceNameDarkAqua];
@@ -8739,12 +8618,9 @@ background = "#F4F8FF"
         assert(inside.blueComponent > .8 && inside.blueComponent - inside.redComponent > .5 && inside.blueComponent - inside.greenComponent > .5);
         NSColor *corner = [[bitmap colorAtX:0 y:bitmap.pixelsHigh - 1] colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
         assert(corner.alphaComponent < .5);
-        // The toolbar takes the package's toolbar radius and colours, never its card radius.
-        [toolbar applyThemePreferences:@{@"theme": dark ? @"dark" : @"light"}];
-        NSView *toolbarChrome = [toolbar valueForKey:@"chrome"];
+        // 皮肤包中的 [toolbar] 圆角和底色仍在皮肤解析模型中保留并独立于候选卡圆角。
         const auto toolbarTokens = [styled toolbarSkinForDark:dark];
-        assert(toolbarTokens.radius == 5.0f && toolbarChrome.layer.cornerRadius == 5.0);
-        assert([[toolbarChrome valueForKey:@"fillColor"] isEqual:SkinColor(toolbarTokens.surface)]);
+        assert(toolbarTokens.radius == 5.0f);
         NSColor *expectedFill = dark ? [NSColor colorWithSRGBRed:0x14 / 255.0 green:0x1B / 255.0 blue:0x33 / 255.0 alpha:1]
                                      : [NSColor colorWithSRGBRed:0xF4 / 255.0 green:0xF8 / 255.0 blue:0xFF / 255.0 alpha:1];
         assert([SkinColor(toolbarTokens.surface) isEqual:expectedFill]);
@@ -8824,9 +8700,6 @@ static void TestSkinSlotsPerMode(MSIMEInputController *controller, HiddenCandida
     assert(lightDecoration && darkDecoration && lightDecoration != darkDecoration);
     assert(lightBackground && darkBackground && lightBackground != darkBackground);
     [controller setValue:slots forKey:@"appearance"];
-    MSIMEFloatingToolbarPanel *toolbar = [MSIMEFloatingToolbarPanel new];
-    [toolbar setFrameAutosaveName:@""];
-    [controller setValue:toolbar forKey:@"toolbar"];
     slots.vertical = NO;
     for (NSString *theme in @[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]) {
         const BOOL dark = [theme isEqual:NSAppearanceNameDarkAqua];
@@ -11086,34 +10959,10 @@ static void TestHighlightedTranslationScope() {
     [[MSIMETranslationCache sharedCache] clear];
 }
 
-@interface SettingsRouteWorkspace : NSWorkspace
-@property BOOL installed;
-@property(strong) NSWorkspaceOpenConfiguration *configuration;
-@property(copy) void (^completion)(NSRunningApplication *, NSError *);
-@end
-@implementation SettingsRouteWorkspace
-- (NSURL *)URLForApplicationWithBundleIdentifier:(NSString *)identifier {
-    assert([identifier isEqual:@"app.msime.macos"]);
-    return self.installed ? [NSURL fileURLWithPath:@"/synthetic/Settings.app"] : nil;
-}
-- (void)openApplicationAtURL:(NSURL *)url configuration:(NSWorkspaceOpenConfiguration *)configuration
-          completionHandler:(void (^)(NSRunningApplication *, NSError *))completion {
-    assert([url.path isEqual:@"/synthetic/Settings.app"]);
-    self.configuration = configuration; self.completion = completion;
-}
-@end
-@interface RoutedAppearancePreferences : MSIMEAppearancePreferences
-@property(strong) SettingsRouteWorkspace *testWorkspace;
-@end
-@implementation RoutedAppearancePreferences
-- (NSWorkspace *)desktopSettingsWorkspace { return self.testWorkspace; }
-@end
-
 static void TestCandidateTranslationPreference() {
     NSString *suite = [@"msime.gloss.preference." stringByAppendingString:NSUUID.UUID.UUIDString];
     NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:suite];
-    RoutedAppearancePreferences *prefs = [[RoutedAppearancePreferences alloc] initWithDefaults:defaults];
-    prefs.testWorkspace = [SettingsRouteWorkspace new];
+    MSIMEAppearancePreferences *prefs = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults];
     NSButton *toggle = (id)PreferenceControl(prefs, @selector(candidateTranslationsChanged:));
     NSButton *offlineToggle = (id)PreferenceControl(prefs, @selector(candidateEnglishGlossChanged:));
     assert(prefs.candidateTranslations && toggle.state == NSControlStateValueOn);
@@ -11178,39 +11027,14 @@ static void TestCandidateTranslationPreference() {
     NSDictionary *loaded = [MSIMEClientSession loadPreferencesInDirectory:root error:&error];
     assert(loaded && !error && [loaded[@"preferences"][@"candidate_translations"] isEqual:@NO]);
     [prefs setTranslationPreferencesDirectory:root];
-    NSControl *translationEntry = PreferenceControl(prefs, @selector(showTranslationSettings:));
-    assert(translationEntry);
-    prefs.testWorkspace.installed = YES;
-    [NSApp sendAction:translationEntry.action to:translationEntry.target from:translationEntry];
-    assert([prefs.testWorkspace.configuration.arguments isEqual:@[@"--route=settings:expression"]]);
-    prefs.testWorkspace.completion(NSRunningApplication.currentApplication, nil);
-    assert(![prefs valueForKey:@"translationWindow"]);
     NSControl *aiEntry = PreferenceControl(prefs, @selector(showAISettings:));
     [NSApp sendAction:aiEntry.action to:aiEntry.target from:aiEntry];
-    assert([prefs.testWorkspace.configuration.arguments isEqual:@[@"--route=settings:ai"]]);
-    prefs.testWorkspace.completion(NSRunningApplication.currentApplication, nil);
-    assert(![prefs valueForKey:@"aiWindow"]);
-    NSControl *skinEntry = PreferenceControl(prefs, @selector(showSkinCatalog:));
-    [NSApp sendAction:skinEntry.action to:skinEntry.target from:skinEntry];
-    assert([prefs.testWorkspace.configuration.arguments isEqual:@[@"--route=settings:skin"]]);
-    prefs.testWorkspace.completion(NSRunningApplication.currentApplication, nil);
-    // The native fallback is the 皮肤 page rather than a window of its own, so a launch that
-    // succeeded must leave the window on the page it was already showing.
-    assert([[prefs valueForKey:@"selectedPageIndex"] integerValue] == 0);
-    // A failed asynchronous launch still reaches the existing native editor.
-    [NSApp sendAction:aiEntry.action to:aiEntry.target from:aiEntry];
-    prefs.testWorkspace.completion(nil, [NSError errorWithDomain:@"SyntheticLaunchFailure" code:1 userInfo:nil]);
     SettleWindowLayout();
-    NSDate *launchDeadline = [NSDate dateWithTimeIntervalSinceNow:2];
-    while (![prefs valueForKey:@"aiWindow"] && launchDeadline.timeIntervalSinceNow > 0)
-        [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.005]];
     NSWindowController *aiWindow = [prefs valueForKey:@"aiWindow"];
     assert(aiWindow.window.visible); [aiWindow close];
-    prefs.testWorkspace.installed = NO;
-    [NSApp sendAction:translationEntry.action to:translationEntry.target from:translationEntry];
-    NSWindowController *translationWindow = [prefs valueForKey:@"translationWindow"];
-    assert(translationWindow.window.visible);
-    [translationWindow close];
+    NSControl *skinEntry = PreferenceControl(prefs, @selector(showSkinCatalog:));
+    [NSApp sendAction:skinEntry.action to:skinEntry.target from:skinEntry];
+    assert([[prefs valueForKey:@"selectedPageIndex"] integerValue] > 0);
     [NSNotificationCenter.defaultCenter removeObserver:observer];
     MSIMERemoveTestPreferenceSuite(defaults, suite);
     MSIMEAppearancePreferences *fresh = [[MSIMEAppearancePreferences alloc] initWithDefaults:defaults];
@@ -14090,7 +13914,6 @@ int main(int argc, char **argv) {
         @autoreleasepool { TestSessionOptions(); }
         @autoreleasepool { TestDiagnosticLogConfiguredBeforeSession(); }
         @autoreleasepool { TestKeypadDecimal(appearance); }
-        @autoreleasepool { TestFloatingToolbarMenuToggle(appearance); }
         @autoreleasepool { TestCandidatePanelSingleOwner(); }
         @autoreleasepool { TestGlossArrivalRedrawsOnlyTheCard(appearance); }
         @autoreleasepool { TestNestedApplyKeepsTheNewerView(appearance); }
@@ -14107,7 +13930,6 @@ int main(int argc, char **argv) {
         @autoreleasepool { TestKeypadOperators(appearance); }
         @autoreleasepool { TestSmartPunctuationPreferences(); }
         @autoreleasepool { TestSharedCharacterWidth(); }
-        @autoreleasepool { TestScreenKeyboardShortcut(appearance); }
         @autoreleasepool { TestMaintenanceShortcuts(appearance); }
         @autoreleasepool { TestShortcutLetterFollowsKeyboardLayout(); }
         @autoreleasepool { TestPunctuation(defaults, appearance); }

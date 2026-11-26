@@ -42,21 +42,11 @@ NOTICE_CHANNELS = {
     "platforms/macos/CMakeLists.txt": "macOS: the input method bundle's Resources/Licenses",
     "platforms/macos/resources/Licenses/THIRD_PARTY_NOTICES.txt": "macOS: the notice overview",
     "platforms/macos/tests/settings/bundle_contents.py": "macOS: the built bundle check",
-    "platforms/linux/CMakeLists.txt": "Linux: the installed notices",
-    "platforms/linux/data/THIRD_PARTY_NOTICES.txt": "Linux: the notice overview",
-    "platforms/windows/Collect-Notices.ps1": "Windows: the notice collection the installer ships",
-    "platforms/windows/Notices.md": "Windows: the notice collection's documentation",
-    "platforms/android/build-native.sh": "Android: the native notices both APKs package as assets/native-notices",
-    "platforms/harmony/stage-resources.sh": "HarmonyOS: the licences staged into the HAP",
-    "platforms/ios/project.yml": "iOS: the app's bundled resources",
-    "platforms/ios/tests/settings/ProjectConfigurationTests.py": "iOS: the project configuration test",
     "docs/third-party.md": "the repository's third-party index",
 }
 # 总览写明每份文本覆盖什么，所以还要写出固定提交。
 OVERVIEWS = (
     "platforms/macos/resources/Licenses/THIRD_PARTY_NOTICES.txt",
-    "platforms/linux/data/THIRD_PARTY_NOTICES.txt",
-    "platforms/windows/Collect-Notices.ps1",
     "docs/third-party.md",
 )
 # 样例：分组码 → (组名, 头几个符号, 符号数)。数目变了说明上游分组动过，要人工复核。

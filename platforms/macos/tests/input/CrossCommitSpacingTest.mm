@@ -45,7 +45,6 @@
 - (void)reportKeyToLifecycle:(NSEvent *)event { (void)event; }
 - (void)renderCandidates {}
 - (void)synchronizeCandidateServices {}
-- (void)refreshFloatingToolbarState {}
 @end
 
 static SpacingClient *Client(NSString *document) {

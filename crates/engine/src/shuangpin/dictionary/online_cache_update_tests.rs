@@ -81,9 +81,8 @@ fn cached_online_update_avoids_page_clones() {
                 let key = before.sentence_cache_key("ni");
                 before.series_cache.insert(key.clone(), original.clone());
                 after.series_cache.insert(key.clone(), original.clone());
-                let (expected, old_count) = count(|| {
-                    before.frozen_insert_word_to_series_cache("ni", &batch, batch_source)
-                });
+                let (expected, old_count) =
+                    count(|| before.frozen_insert_word_to_series_cache("ni", &batch, batch_source));
                 let (actual, new_count) =
                     count(|| after.insert_word_to_series_cache("ni", &batch, batch_source));
                 assert_eq!(actual, expected);

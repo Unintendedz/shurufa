@@ -119,11 +119,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             symbol_at.map_or("-".to_owned(), |at| at.to_string()),
             first_page.join(" ")
         );
-        if snapshot
-            .candidates
-            .first()
-            .is_some_and(|entry| entry.source == EMOJI && probe.symbols.contains(&entry.text.as_str()))
-        {
+        if snapshot.candidates.first().is_some_and(|entry| {
+            entry.source == EMOJI && probe.symbols.contains(&entry.text.as_str())
+        }) {
             failures.push(format!("{}: 符号占了首位", probe.input));
         }
         let expected = probe.required || name_at.is_some();

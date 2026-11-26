@@ -821,8 +821,7 @@ impl InputSession {
                     now_unix,
                 );
             }
-            let pinned =
-                item.pinned_first || pinned_word.as_deref() == Some(item.word.as_str());
+            let pinned = item.pinned_first || pinned_word.as_deref() == Some(item.word.as_str());
 
             let exact_literal_dict = !folded_raw.is_empty()
                 && item.source.is_dictionary()

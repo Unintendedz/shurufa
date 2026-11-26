@@ -3,7 +3,6 @@
 //! Same `mod tests` as before, so `use super::*` still names the parent.
 
 use super::*;
-use msime_client_core::host_surface::compiled_input_schemes;
 use sha2::{Digest, Sha256};
 
 // Keep relative-path fixtures on the checkout's volume while allowing /source to be read-only in the Linux container.
@@ -8486,54 +8485,54 @@ fn engine_schemes_follow_the_documents_edition() {
     let both = SchemeSet::of(&[SchemeType::Quanpin, SchemeType::Shuangpin]);
     assert_eq!(enabled(None), SchemeSet::ALL);
     assert_eq!(enabled(Some("full")), SchemeSet::ALL);
-    assert_eq!(enabled(Some("pinyin")), both);
     assert_eq!(enabled(Some("shurufa")), both);
 }
 
-/// 回退到的方案在 full 是全拼，在别的版本是该版本的默认方案；能跑的上一次中文方案仍然优先。
+/// 回退到的方案在 `full` 和 `shurufa` 均优先沿用可用方案并在不可用时回退至默认方案。
 #[test]
 fn the_fallback_scheme_is_the_edition_default() {
     use msime_client_core::preferences::ChineseScheme;
-    let wubi = Edition::by_id("wubi").unwrap();
-    let offered = msime_client_core::host_surface::offered_input_schemes(wubi);
-    for (scheme, last) in [
-        (InputScheme::Quanpin, None),
-        (InputScheme::Quanpin, Some(ChineseScheme::Quanpin)),
-        (InputScheme::Shuangpin, Some(ChineseScheme::Shuangpin)),
-        (InputScheme::Japanese, Some(ChineseScheme::Quanpin)),
-        (InputScheme::Cantonese, Some(ChineseScheme::Zhuyin)),
+    let shurufa = Edition::by_id("shurufa").unwrap();
+    let offered = msime_client_core::host_surface::offered_input_schemes(shurufa);
+    for (scheme, last, expected) in [
+        (InputScheme::Wubi, None, InputScheme::Quanpin),
+        (
+            InputScheme::Wubi,
+            Some(ChineseScheme::Shuangpin),
+            InputScheme::Shuangpin,
+        ),
+        (
+            InputScheme::Japanese,
+            Some(ChineseScheme::Quanpin),
+            InputScheme::Quanpin,
+        ),
+        (
+            InputScheme::Cantonese,
+            Some(ChineseScheme::Zhuyin),
+            InputScheme::Quanpin,
+        ),
     ] {
         let preferences = Preferences {
             scheme,
             last_chinese_scheme: last,
             ..Preferences::default()
         };
-        let (effective, diagnostic) = effective_scheme(&preferences, &offered, wubi.default_scheme);
-        assert_eq!(effective, InputScheme::Wubi, "{scheme:?} after {last:?}");
+        let (effective, diagnostic) =
+            effective_scheme(&preferences, &offered, shurufa.default_scheme);
+        assert_eq!(effective, expected, "{scheme:?} after {last:?}");
         assert!(diagnostic.unwrap().contains("does not offer"));
-        let (full, _) = effective_scheme(
-            &preferences,
-            compiled_input_schemes(),
-            Edition::full().default_scheme,
-        );
-        let expected = if compiled_input_schemes().contains(&scheme) {
-            scheme
-        } else {
-            InputScheme::Quanpin
-        };
-        assert_eq!(full, expected, "{scheme:?} after {last:?}");
     }
-    let wubi_preferences = Preferences {
-        scheme: InputScheme::Wubi,
+    let shuangpin_preferences = Preferences {
+        scheme: InputScheme::Shuangpin,
         ..Preferences::default()
     };
     assert_eq!(
-        effective_scheme(&wubi_preferences, &offered, wubi.default_scheme),
-        (InputScheme::Wubi, None)
+        effective_scheme(&shuangpin_preferences, &offered, shurufa.default_scheme),
+        (InputScheme::Shuangpin, None)
     );
 }
 
-/// full 准备出的文档没有 `edition` 键，与引入版本之前相同；每个版本第一次准备时都把此刻读到的偏好写成第一份偏好文件（full 是默认偏好，五笔版是五笔、混拼打开），之后不再覆盖用户的修改。
+/// `full` 准备出的文档没有 `edition` 键；`shurufa` 显式写下 `edition` 并写入其首启偏好默认值，之后不覆盖用户修改。
 #[test]
 fn prepared_options_record_only_a_non_full_edition_and_seed_its_first_preferences() {
     let root = tempfile::tempdir().unwrap();
@@ -8557,31 +8556,37 @@ fn prepared_options_record_only_a_non_full_edition_and_seed_its_first_preference
     assert!(!full_state.join(Edition::STATE_RECORD_FILE).exists());
     assert!(HostOptions::from_document(full.clone()).is_some());
 
-    let wubi = Edition::by_id("wubi").unwrap();
-    let wubi_state = root.path().join("wubi");
-    let prepared = prepare(&wubi_state, wubi);
-    assert_eq!(prepared["edition"], "wubi");
-    assert_eq!(prepared["preferences"]["scheme"], "wubi");
-    assert_eq!(prepared["preferences"]["last_chinese_scheme"], "wubi");
-    assert_eq!(prepared["preferences"]["wubi_mixed_pinyin"], true);
-    let options = HostOptions::from_document(prepared).unwrap();
-    assert_eq!(options.edition().id, "wubi");
-    assert_eq!(options.into_engine_options().scheme, 2);
-
-    // 平台宿主经 C 接口按目录读偏好，不知道版本；第一次读到的已经是五笔版的默认值。
-    let stored = PreferencesStore::new(&wubi_state).load().unwrap();
-    assert_eq!(stored.revision, 1);
-    assert_eq!(stored.preferences, Preferences::for_edition(wubi));
-    assert!(stored.preferences.wubi_mixed_pinyin);
-
-    // 用户关掉混拼之后再准备（例如升级后），不会被版本默认值改回去。
-    let mut off = stored.preferences.clone();
-    off.wubi_mixed_pinyin = false;
-    PreferencesStore::new(&wubi_state).save(1, off).unwrap();
-    let again = prepare(&wubi_state, wubi);
-    assert_eq!(again["preferences"]["wubi_mixed_pinyin"], false);
+    let shurufa = Edition::by_id("shurufa").unwrap();
+    let shurufa_state = root.path().join("shurufa");
+    let prepared = prepare(&shurufa_state, shurufa);
+    assert_eq!(prepared["edition"], "shurufa");
+    assert_eq!(prepared["preferences"]["scheme"], "quanpin");
     assert_eq!(
-        PreferencesStore::new(&wubi_state).load().unwrap().revision,
+        prepared["preferences"]["voice_input"]["polish_context_aware"],
+        true
+    );
+    let options = HostOptions::from_document(prepared).unwrap();
+    assert_eq!(options.edition().id, "shurufa");
+    assert_eq!(options.into_engine_options().scheme, 0);
+
+    // 平台宿主经 C 接口按目录读偏好，第一次读到的已经是 `shurufa` 的默认值。
+    let stored = PreferencesStore::new(&shurufa_state).load().unwrap();
+    assert_eq!(stored.revision, 1);
+    assert_eq!(stored.preferences, Preferences::for_edition(shurufa));
+
+    // 用户关掉相关设置之后再准备，不会被版本默认值改回去。
+    let mut updated = stored.preferences.clone();
+    updated.candidate_page_size = 7;
+    PreferencesStore::new(&shurufa_state)
+        .save(1, updated)
+        .unwrap();
+    let again = prepare(&shurufa_state, shurufa);
+    assert_eq!(again["preferences"]["candidate_page_size"], 7);
+    assert_eq!(
+        PreferencesStore::new(&shurufa_state)
+            .load()
+            .unwrap()
+            .revision,
         2
     );
 }
@@ -8615,267 +8620,43 @@ fn a_journal_that_is_not_a_database_does_not_stop_the_host_from_preparing() {
     assert_eq!(moved, 1);
 }
 
-/// 平台宿主经 C 接口只按目录读写偏好，不知道版本：五笔版的偏好文件损坏或被删掉之后，修复和读取回到的仍是五笔版的默认值（准备宿主时记在状态目录里的版本），不是 full 的。
+/// 平台宿主经 C 接口按目录读写偏好：非 `full` 状态目录在配置损坏或缺失后恢复为该目录记录的 `shurufa` 默认值。
 #[test]
 #[cfg(not(target_os = "android"))]
 fn the_c_abi_repairs_and_reloads_a_non_full_state_root_to_its_own_defaults() {
     let root = tempfile::tempdir().unwrap();
     let resources = root.path().join("resources");
     let specification = synthetic_desktop_lock(&resources);
-    let wubi = Edition::by_id("wubi").unwrap();
-    let state = root.path().join("wubi");
-    prepare_shipped_host_configuration(&resources, &state, &specification, &[], wubi).unwrap();
+    let shurufa = Edition::by_id("shurufa").unwrap();
+    let state = root.path().join("shurufa");
+    prepare_shipped_host_configuration(&resources, &state, &specification, &[], shurufa).unwrap();
     assert_eq!(
         Edition::recorded_in(&state).map(|e| e.id.as_str()),
-        Some("wubi")
+        Some("shurufa")
     );
     let path = state.to_str().unwrap();
     let document = state.join("config.json");
 
-    // 写到一半断电：修复后的文件是五笔版的默认偏好，混拼是开的。
+    // 写到一半断电：修复后的文件回到 `shurufa` 默认偏好。
     std::fs::write(&document, "{\"format_version\":1,").unwrap();
     let repaired = read(unsafe { msime_client_recover_preferences(path.as_ptr(), path.len()) });
     assert_eq!(repaired["value"]["recovered"], true, "{repaired}");
     let restored: Preferences =
         serde_json::from_value(repaired["value"]["snapshot"]["preferences"].clone()).unwrap();
-    assert_eq!(restored, Preferences::for_edition(wubi));
-    assert!(restored.wubi_mixed_pinyin);
+    assert_eq!(restored, Preferences::for_edition(shurufa));
+    assert!(!restored.quanpin_helpcode.enabled);
 
-    // 用户删掉了偏好文件：读到的同样是五笔版的默认值。
+    // 用户删掉了偏好文件：读到的同样是 `shurufa` 的默认值。
     std::fs::remove_file(&document).unwrap();
     let loaded = read(unsafe { msime_client_load_preferences(path.as_ptr(), path.len()) });
     assert_eq!(loaded["value"]["revision"], 0);
     assert_eq!(
         serde_json::from_value::<Preferences>(loaded["value"]["preferences"].clone()).unwrap(),
-        Preferences::for_edition(wubi)
+        Preferences::for_edition(shurufa)
     );
 }
 
-/// 按 `edition` 的资源锁合成一个资源目录：文件名取自真实的版本锁，内容是小 fixture，清单按实际内容计算长度与 SHA-256。`msime-pinyin.db` 带 `nihao` 的拼音行，`msime-wubi.db` 带 `wq` 的五笔行（与词库发布的拆分布局相同，准备代次时并回工作主词库），`msime-english.db` 带一个英文词，`msime-bigram.bin`、`msime-trigram.bin` 不是合法的表（Engine 会当作没有表），其余文件只要存在。
-fn synthetic_edition_lock(edition: &Edition, resources: &Path) -> ResourceSet {
-    std::fs::create_dir_all(resources).unwrap();
-    let pinned = edition.resource_set().unwrap();
-    let artifacts = pinned
-        .artifacts
-        .iter()
-        .map(|artifact| {
-            let path = resources.join(&artifact.name);
-            match artifact.name.as_str() {
-                "msime-pinyin.db" => rusqlite::Connection::open(&path)
-                    .unwrap()
-                    .execute_batch(
-                        "CREATE TABLE tbl_2_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);
-                         INSERT INTO tbl_2_n VALUES('ni''hao','nh','你好',100),('ni''hao','nh','拟好',80);
-                         CREATE TABLE quick_parases(key TEXT,value TEXT,weight INTEGER);
-                         CREATE INDEX idx_quick_parases_key_weight ON quick_parases(key,weight DESC);",
-                    )
-                    .unwrap(),
-                "msime-wubi.db" => rusqlite::Connection::open(&path)
-                    .unwrap()
-                    .execute_batch(
-                        "CREATE TABLE wubi86(key TEXT,value TEXT,weight INTEGER);
-                         INSERT INTO wubi86 VALUES('wq','你',100),('wqvb','你好',90);",
-                    )
-                    .unwrap(),
-                "msime-english.db" => rusqlite::Connection::open(&path)
-                    .unwrap()
-                    .execute_batch(
-                        "CREATE TABLE english_words(word TEXT,display TEXT,weight INTEGER);
-                         INSERT INTO english_words VALUES('hello','hello',900);",
-                    )
-                    .unwrap(),
-                "msime-others.db" => rusqlite::Connection::open(&path)
-                    .unwrap()
-                    .execute_batch("CREATE TABLE fixture(value TEXT);")
-                    .unwrap(),
-                "msime-dictionary-manifest.json" => std::fs::write(&path, b"{}").unwrap(),
-                other => std::fs::write(&path, other.as_bytes()).unwrap(),
-            }
-            let bytes = std::fs::read(&path).unwrap();
-            msime_client_core::resources::Artifact {
-                name: artifact.name.clone(),
-                url: format!("https://example.invalid/{}", artifact.name),
-                sha256: hex::encode(Sha256::digest(&bytes)),
-                size: bytes.len() as u64,
-            }
-        })
-        .collect();
-    ResourceSet {
-        source_commit: "a".repeat(40),
-        artifacts,
-    }
-}
-
-/// 五笔版的锁接受一个没有日文词典和整句模型的资源目录，同一个目录按 full 的文件清单校验会失败；准备出的配置里临时日文是关的，其余本地模式照常。下载来的日文词典也打不开五笔版的临时日文。
-/// 用五笔版的资源集准备出的宿主默认就是五笔混拼：`nihao` 由全拼给出「你好」，`wq` 由五笔码表给出「你」。
-/// 日文、越南文和藏文版用各自的资源集准备宿主：资源目录只有核心资源（日文版另有日文词典），没有 msime-pinyin.db、n-gram 表和整句模型，按 full 的清单校验不过。准备出的代次里没有 msime-pinyin.db；第一次运行的偏好就是本版本唯一的方案；即使偏好写着全拼（例如从 full 同步来的），Engine 跑的仍是本版本的方案，也只构造这一个方案。
-/// 没有中文词库的版本里，词库工具只管英文词：英文词照常添加、列出、改权重和删除，重新准备代次后还在；拼音、五笔和快捷短语的编辑和导入直接说明本版本没有中文词库，列表是空的；候选查询说明本版本没有拼音和五笔，什么也不写。
-#[test]
-#[cfg(not(target_os = "android"))]
-fn dictionary_tools_keep_only_english_words_without_the_chinese_dictionary() {
-    let root = tempfile::tempdir().unwrap();
-    let japanese = Edition::by_id("japanese").unwrap();
-    let resources = root.path().join("resources");
-    let specification = synthetic_edition_lock(japanese, &resources);
-    let state = root.path().join("state");
-    let prepare = || -> Value {
-        serde_json::from_str(
-            &prepare_shipped_host_configuration(
-                &resources,
-                &state,
-                &specification,
-                ON_DEMAND_ARTIFACTS,
-                japanese,
-            )
-            .unwrap(),
-        )
-        .unwrap()
-    };
-    let prepared = prepare();
-    let options = DictionaryOptions::from_host_document(prepared.clone()).unwrap();
-    let new_word = |code: &str, word: &str| NewWord {
-        code: Some(code.into()),
-        word: word.into(),
-        weight: None,
-    };
-
-    edit_dictionary_word(
-        &options,
-        &WordEdit::Add(WordKind::English, new_word("zzfixture", "Zzfixture")),
-        "add-english",
-    )
-    .unwrap();
-    let listed = |options: &DictionaryOptions| {
-        dictionary_words(options, WordKind::English, "", false, 0, 10)
-            .unwrap()
-            .words
-    };
-    let words = listed(&options);
-    assert_eq!(words.len(), 1, "{words:?}");
-    assert_eq!(words[0].code, "zzfixture");
-    assert_eq!(words[0].word, "Zzfixture");
-    assert!(!words[0].bundled);
-    edit_dictionary_word(
-        &options,
-        &WordEdit::SetWeight {
-            kind: WordKind::English,
-            code: "zzfixture".into(),
-            word: "Zzfixture".into(),
-            weight: 77,
-        },
-        "weigh-english",
-    )
-    .unwrap();
-    assert_eq!(listed(&options)[0].weight, 77);
-
-    // 拼音、五笔和快捷短语在这里无处可存：编辑、导入都直接说明原因。
-    let refused = crate::NO_CHINESE_DICTIONARY;
-    assert_eq!(
-        edit_dictionary_word(
-            &options,
-            &WordEdit::Add(WordKind::Pinyin, new_word("ni'hao", "你好")),
-            "add-pinyin",
-        )
-        .unwrap_err(),
-        refused
-    );
-    assert_eq!(
-        edit_dictionary_word(
-            &options,
-            &WordEdit::Remove {
-                kind: WordKind::Wubi,
-                code: "wq".into(),
-                word: "你".into(),
-            },
-            "remove-wubi",
-        )
-        .unwrap_err(),
-        refused
-    );
-    assert_eq!(
-        import_dictionary_words(
-            &options,
-            WordKind::Wubi98,
-            &[new_word("wq", "你")],
-            "import-wubi"
-        )
-        .unwrap_err(),
-        refused
-    );
-    assert_eq!(
-        edit_user_quick_phrase(
-            &options,
-            &QuickPhraseEdit::Add(QuickPhrase {
-                code: "dh".into(),
-                text: "电话".into(),
-            }),
-            "add-quick",
-        )
-        .unwrap_err(),
-        refused
-    );
-    let quick = user_quick_phrases(&options, "", 0, 10).unwrap();
-    assert!(quick.phrases.is_empty() && !quick.has_more);
-    for kind in [WordKind::Pinyin, WordKind::Wubi, WordKind::Wubi98] {
-        assert!(dictionary_words(&options, kind, "ni", true, 0, 10)
-            .unwrap()
-            .words
-            .is_empty());
-    }
-
-    // 英文词可以批量导入。
-    let imported = import_dictionary_words(
-        &options,
-        WordKind::English,
-        &[
-            new_word("zzother", "Zzother"),
-            new_word("zzfixture", "Zzfixture"),
-        ],
-        "import-english",
-    )
-    .unwrap();
-    assert_eq!((imported.added, imported.existing), (1, 1));
-    assert!(imported.rejected.is_empty(), "{:?}", imported.rejected);
-
-    // 候选查询只认拼音和五笔，本版本两样都没有。
-    assert_eq!(
-        lookup_candidates(&options, None, "ka", 5).unwrap_err(),
-        "candidates can only be looked up in pinyin, double pinyin or wubi"
-    );
-    assert_eq!(
-        lookup_candidates(&options, Some(LookupScheme::Quanpin), "nihao", 5).unwrap_err(),
-        "this edition does not offer that scheme"
-    );
-
-    // 重新准备已有的代次会再回放一次日志：英文词还在，代次里仍然没有 msime-pinyin.db。
-    let again = prepare();
-    assert_eq!(again["dictionaries"], prepared["dictionaries"]);
-    let dictionaries = PathBuf::from(again["dictionaries"].as_str().unwrap());
-    assert!(!dictionaries.join("msime-pinyin.db").exists());
-    let options = DictionaryOptions::from_host_document(again).unwrap();
-    let words = listed(&options);
-    assert_eq!(
-        words
-            .iter()
-            .map(|word| (word.code.as_str(), word.weight))
-            .collect::<Vec<_>>(),
-        [("zzfixture", 77), ("zzother", 10)]
-    );
-    edit_dictionary_word(
-        &options,
-        &WordEdit::Remove {
-            kind: WordKind::English,
-            code: "zzother".into(),
-            word: "Zzother".into(),
-        },
-        "remove-english",
-    )
-    .unwrap();
-    assert_eq!(listed(&options).len(), 1);
-}
-
-/// Linux 的 Fcitx5 只有一个进程，两个版本的插件会把宿主库加载进同一个进程（`RTLD_LOCAL` 下各自一份，但也可能被系统合并成一份）。这里在同一个进程、同一个线程里同时开着 full 和五笔版两个状态目录的会话，交替输入、选词和更新偏好，确认它们互不影响：方案各按各的版本，学习只写进自己的用户词库，一边更新偏好不改另一边的会话。进程级的静态缓存要么按路径做键（词库连接、n-gram、整句模型、用户日志），要么与状态目录无关（单位换算的 rink 上下文、拼音音节表），所以两个状态目录可以并存。
-/// 刷新按文档记录的版本的锁比较代次：五笔版的文档停在五笔锁的代次上就是最新的，不会被当成过期重新准备；记成 full 的代次则要重新准备（这里资源目录是空的，所以准备失败）。
+/// 刷新按文档记录的版本的锁比较代次：`shurufa` 文档停在自身锁的代次时直接跳过，使用过期的 `full` 代次时重新准备失败。
 #[test]
 fn refresh_compares_the_generation_of_the_documents_edition() {
     let directory = tempfile::tempdir().unwrap();
@@ -8883,7 +8664,7 @@ fn refresh_compares_the_generation_of_the_documents_edition() {
     std::fs::create_dir(&resources).unwrap();
     let state = directory.path().join("state");
     std::fs::create_dir(&state).unwrap();
-    let wubi = Edition::by_id("wubi").unwrap();
+    let shurufa = Edition::by_id("shurufa").unwrap();
     let document = |generation: String| {
         json!({
             "api_version": 1,
@@ -8892,13 +8673,13 @@ fn refresh_compares_the_generation_of_the_documents_edition() {
             "cache": state.join("cache"),
             "dictionaries": state.join("user").join("dictionaries").join(generation),
             "preferences_directory": state,
-            "preferences": Preferences::for_edition(wubi),
-            "edition": "wubi",
+            "preferences": Preferences::for_edition(shurufa),
+            "edition": "shurufa",
         })
     };
     let options = state.join("runtime-options.json");
 
-    let current = document(wubi.resource_set().unwrap().generation().unwrap());
+    let current = document(shurufa.resource_set().unwrap().generation().unwrap());
     std::fs::write(&options, serde_json::to_vec(&current).unwrap()).unwrap();
     assert!(!refresh_host_options(&options).unwrap());
     assert_eq!(

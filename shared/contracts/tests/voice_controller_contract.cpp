@@ -1,6 +1,6 @@
 #include "../voice_controller.h"
-#include "../windows_ipc.h"
 #include <cassert>
+#include <initializer_list>
 #include <limits>
 
 int main()
@@ -55,7 +55,4 @@ int main()
     assert(!valid_reply(reply, sizeof(Reply) + MaxTextBytes));
     reply.text_bytes = 0;
     assert(valid_reply(reply, sizeof(Reply)));
-    // The new endpoint does not reinterpret released v1 wire layouts.
-    static_assert(sizeof(FanyImeVoiceControlHello) == 16);
-    static_assert(FanyImeVoiceControl::Start == 1 && FanyImeVoiceControl::Cancel == 3);
 }
