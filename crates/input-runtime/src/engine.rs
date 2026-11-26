@@ -171,6 +171,20 @@ pub trait InputEngine {
             "Candidate removal is unsupported".into(),
         ))
     }
+    fn fix_candidate_position(
+        &mut self,
+        _index: usize,
+        _position: u8,
+    ) -> Result<EngineResult, RuntimeError> {
+        Err(RuntimeError::Engine(
+            "Candidate position fixing is unsupported".into(),
+        ))
+    }
+    fn clear_candidate_position(&mut self, _index: usize) -> Result<EngineResult, RuntimeError> {
+        Err(RuntimeError::Engine(
+            "Candidate position clearing is unsupported".into(),
+        ))
+    }
     fn select_edge(
         &mut self,
         index: usize,
@@ -304,6 +318,18 @@ impl InputEngine for Session {
     }
     fn remove_candidate(&mut self, index: usize) -> Result<EngineResult, RuntimeError> {
         Session::remove_candidate(self, index).map_err(|e| RuntimeError::Engine(e.to_string()))
+    }
+    fn fix_candidate_position(
+        &mut self,
+        index: usize,
+        position: u8,
+    ) -> Result<EngineResult, RuntimeError> {
+        Session::fix_candidate_position(self, index, position)
+            .map_err(|e| RuntimeError::Engine(e.to_string()))
+    }
+    fn clear_candidate_position(&mut self, index: usize) -> Result<EngineResult, RuntimeError> {
+        Session::clear_candidate_position(self, index)
+            .map_err(|e| RuntimeError::Engine(e.to_string()))
     }
     fn finish(&mut self, index: usize) -> Result<EngineResult, RuntimeError> {
         Session::finish(self, index).map_err(|error| RuntimeError::Engine(error.to_string()))

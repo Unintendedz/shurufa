@@ -288,6 +288,7 @@ impl InputSession {
         item.source = CandidateSource::Generated;
         item.sentence_association = true;
         item.pinned_first = false;
+        item.fixed_position = 0;
         item.fuzzy = false;
         // 改字后仍要按原候选的纠错来源消费全部原始按键。
         let diagnostic = self.learn_conversion_sentence(&item);

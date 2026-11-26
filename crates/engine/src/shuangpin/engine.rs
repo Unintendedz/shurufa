@@ -185,7 +185,6 @@ impl ShuangpinEngine {
         self.dictionary.clear_online_candidates(source);
     }
 
-    #[cfg(test)]
     pub fn find_candidate(&self, key: &str, value: &str) -> Option<WordItem> {
         self.dictionary.find_candidate(key, value)
     }

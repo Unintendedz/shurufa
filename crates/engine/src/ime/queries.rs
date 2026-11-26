@@ -466,7 +466,7 @@ pub(crate) fn default_quick_phrase_slot(
 
 /// 槽位计数的普通候选（`counts_toward_quick_phrase_slot`，quick_phrase_query.cpp:123-143）：置顶到首位的行、快捷短语自己和混输/在线/联系人行都不算。
 pub(crate) fn counts_toward_quick_phrase_slot(item: &WordItem) -> bool {
-    if item.pinned_first {
+    if item.pinned_first || item.fixed_position > 0 {
         return false;
     }
     !matches!(
@@ -723,7 +723,10 @@ pub(crate) fn keep_expressive_rows_off_the_lead(list: &mut [WordItem]) {
     let Some(word) = list
         .iter()
         .position(|item| {
-            !expressive(item) && !item.pinned_first && !item.source.takes_online_seat()
+            !expressive(item)
+                && !item.pinned_first
+                && item.fixed_position == 0
+                && !item.source.takes_online_seat()
         })
         .or_else(|| list.iter().position(|item| !expressive(item)))
     else {

@@ -6355,3 +6355,99 @@ fn real_runtime_commit_candidate_commits_slot0_and_learns_injected_beam_phrase()
     type_characters(&mut runtime, "aili");
     assert_eq!(runtime.view().candidates[0].text, "爱梨");
 }
+
+#[test]
+fn real_runtime_fixed_candidate_positions_1_to_5_move_and_clear_cleanly() {
+    let directory = private_tempdir();
+    let sql = "\
+         CREATE TABLE metadata(name TEXT PRIMARY KEY,value TEXT) WITHOUT ROWID;\
+         INSERT INTO metadata VALUES('format_version','1');\
+         CREATE TABLE tbl_1_c(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_1_c VALUES('chu','c','处',5000);\
+         CREATE TABLE tbl_1_f(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_1_f VALUES('fa','f','发',5000);\
+         CREATE TABLE tbl_2_c(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_2_c VALUES\
+            ('chu''fa','cf','出发',9000),\
+            ('chu''fa','cf','处罚',8000),\
+            ('chu''fa','cf','初发',7000),\
+            ('chu''fa','cf','触发',6000),\
+            ('chu''fa','cf','处方',5000);";
+    let mut options = real_engine_options(directory.path());
+    options.learning = true;
+    rusqlite::Connection::open(
+        std::path::Path::new(&options.dictionaries).join(msime_engine::assets::MAIN_DICTIONARY),
+    )
+    .unwrap()
+    .execute_batch(sql)
+    .unwrap();
+
+    let session = msime_engine::host::Session::new(&options).unwrap();
+    let mut runtime = Runtime::new(session, 6).unwrap();
+    runtime.focus(true).unwrap();
+
+    type_characters(&mut runtime, "chufa");
+    let fang_id = runtime
+        .view()
+        .candidates
+        .iter()
+        .find(|c| c.text == "处方")
+        .unwrap()
+        .id;
+
+    // 1. 先置顶到第 1 位，再改固定到第 3 位，必须同步清理第 1 位鬼影且稳居第 3 位。
+    let pinned_view = runtime
+        .dispatch(Action::PinCandidate(fang_id))
+        .unwrap()
+        .view;
+    assert_eq!(pinned_view.candidates[0].text, "处方");
+    assert_eq!(pinned_view.candidates[0].fixed_position, Some(1));
+
+    let fixed_3_view = runtime
+        .dispatch(Action::FixCandidatePosition(
+            pinned_view.candidates[0].id,
+            3,
+        ))
+        .unwrap()
+        .view;
+    assert_eq!(fixed_3_view.candidates[2].text, "处方");
+    assert_eq!(fixed_3_view.candidates[2].fixed_position, Some(3));
+    assert_ne!(fixed_3_view.candidates[0].text, "处方");
+
+    // 2. 同时固定第 5 位（触发 -> 席位 4），验证重打拼音仍精确保留第 3 位与第 5 位。
+    let chufa_id = fixed_3_view
+        .candidates
+        .iter()
+        .find(|c| c.text == "触发")
+        .unwrap()
+        .id;
+    let fixed_5_view = runtime
+        .dispatch(Action::FixCandidatePosition(chufa_id, 5))
+        .unwrap()
+        .view;
+    assert_eq!(fixed_5_view.candidates[2].text, "处方");
+    assert_eq!(fixed_5_view.candidates[2].fixed_position, Some(3));
+    assert_eq!(fixed_5_view.candidates[4].text, "触发");
+    assert_eq!(fixed_5_view.candidates[4].fixed_position, Some(5));
+
+    runtime.dispatch(Action::Command(Command::Cancel)).unwrap();
+    type_characters(&mut runtime, "chufa");
+    let retyped = runtime.view();
+    assert_eq!(retyped.candidates[2].text, "处方");
+    assert_eq!(retyped.candidates[2].fixed_position, Some(3));
+    assert_eq!(retyped.candidates[4].text, "触发");
+    assert_eq!(retyped.candidates[4].fixed_position, Some(5));
+
+    // 3. 取消固定后恢复自然排位且不再带 fixed_position。
+    let cleared = runtime
+        .dispatch(Action::ClearCandidatePosition(retyped.candidates[2].id))
+        .unwrap()
+        .view;
+    assert!(cleared
+        .candidates
+        .iter()
+        .find(|c| c.text == "处方")
+        .is_some_and(|c| c.fixed_position.is_none()));
+    assert_eq!(cleared.candidates[4].text, "触发");
+    assert_eq!(cleared.candidates[4].fixed_position, Some(5));
+}

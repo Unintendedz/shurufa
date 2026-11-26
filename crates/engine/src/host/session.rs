@@ -144,8 +144,16 @@ impl Session {
                 .get(index)
                 .copied()
                 .unwrap_or(false);
-            let pinned_first =
-                candidate.pinned_first || pinned_word.as_deref() == Some(candidate.word.as_str());
+            let fixed_position = if candidate.fixed_position > 0 {
+                candidate.fixed_position
+            } else if candidate.pinned_first
+                || pinned_word.as_deref() == Some(candidate.word.as_str())
+            {
+                1
+            } else {
+                0
+            };
+            let pinned_first = fixed_position == 1;
             let static_evidence = candidate.static_evidence();
             let keyboard_runner_up = candidate.keyboard_runner_up;
             let code = candidate.pinyin.into_string();
@@ -156,6 +164,7 @@ impl Session {
             entry.corrected = corrected;
             entry.answers_key = answers_key;
             entry.pinned_first = pinned_first;
+            entry.fixed_position = fixed_position;
             entry.tier0_gram_log_prob =
                 static_evidence.map(|ev| ev.log_prob_milli_nats as f64 / 1000.0);
             entry.static_evidence = static_evidence;
@@ -392,6 +401,21 @@ impl Session {
 
     pub fn remove_candidate(&mut self, index: usize) -> Result<EngineResult> {
         Ok(result_for(self.inner.remove(index)))
+    }
+
+    /// 将候选固定到第 `1..=5` 位；超出范围返回 `INVALID_CANDIDATE_POSITION`。
+    pub fn fix_candidate_position(&mut self, index: usize, position: u8) -> Result<EngineResult> {
+        if !(1..=5).contains(&position) {
+            return Err(EngineError::invalid(
+                diagnostics::INVALID_CANDIDATE_POSITION,
+            ));
+        }
+        Ok(result_for(self.inner.fix_position(index, position)))
+    }
+
+    /// 取消候选的固定排位或手动置顶。
+    pub fn clear_candidate_position(&mut self, index: usize) -> Result<EngineResult> {
+        Ok(result_for(self.inner.clear_position(index)))
     }
 
     pub fn select_edge(&mut self, index: usize, edge: CandidateEdge) -> Result<EngineResult> {

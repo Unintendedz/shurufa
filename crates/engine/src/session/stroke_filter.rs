@@ -436,7 +436,10 @@ impl InputSession {
                 if eligible && kept_sentences < sentence_limit {
                     kept_sentences += 1;
                     item.keyboard_runner_up = false;
-                    if !item.pinned_first && index >= exact_dictionary_lead {
+                    if !item.pinned_first
+                        && item.fixed_position == 0
+                        && index >= exact_dictionary_lead
+                    {
                         promoted.push(item);
                         continue;
                     }

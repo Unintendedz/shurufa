@@ -229,6 +229,7 @@ fn read_prefix_rows_at(
                         candidate.source = CandidateSource::EnglishDictionary;
                         candidate.scheme = Default::default();
                         candidate.pinned_first = false;
+                        candidate.fixed_position = 0;
                         candidate.fuzzy = false;
                         candidate.corrected_from.clear();
                         candidate.sentence_association = false;

@@ -74,13 +74,24 @@ pub fn delete_dictionary_candidate(
     )?;
     let mut removed_context = Vec::new();
     if pinyin {
-        // A removed word is no longer pinned anywhere.
+        // 被删除的词条不再出现在任意上下文的置顶或固定排位记录中。
         transaction.execute(
             &format!("DELETE FROM {JOURNAL_ALIAS}.pinned_candidates WHERE value=?1"),
             params![value],
         )?;
+        transaction.execute(
+            &format!("DELETE FROM {JOURNAL_ALIAS}.fixed_candidate_positions WHERE value=?1"),
+            params![value],
+        )?;
         // A removed word should not keep steering sentences through the context it was typed in.
         removed_context = delete_personal_ngram_word(&transaction, JOURNAL_ALIAS, value)?;
+    } else {
+        transaction.execute(
+            &format!(
+                "DELETE FROM {JOURNAL_ALIAS}.fixed_candidate_positions WHERE entry_key=?1 AND value=?2"
+            ),
+            params![key, value],
+        )?;
     }
     transaction.commit()?;
     if pinyin {

@@ -119,6 +119,14 @@ impl ProviderRegistry {
         self.reset_pinyin_caches();
     }
 
+    pub fn find_candidate(&self, scheme: SchemeType, key: &str, value: &str) -> Option<WordItem> {
+        match scheme {
+            SchemeType::Quanpin => self.quanpin.as_ref()?.find_candidate(key, value),
+            SchemeType::Shuangpin => self.shuangpin.as_ref()?.find_candidate(key, value),
+            _ => None,
+        }
+    }
+
     pub fn cache_dynamic_candidates_for_request(
         &mut self,
         request: &QueryRequest,

@@ -1031,7 +1031,7 @@ mod tests {
         assert!(streamed(&empty).is_empty());
     }
 
-    /// 会话打开暂存代次时读取回放后的词库与选词计数，调权后的 `拟好` 排在首位，已删除的 `你好` 不再出现；空暂存则还原静态资源中的 `你好`。
+    /// 会话打开暂存代次时读取回放后的词库与固定排位日志，固定在第 1 位的 `拟蒿` 居首，已删除的 `你好` 不再出现；空暂存则还原静态资源中的 `你好`。
     #[test]
     fn a_session_on_a_staged_generation_offers_its_candidates() {
         use crate::session::{Session, SessionOptions};
@@ -1054,7 +1054,7 @@ mod tests {
         let restored = words(stage(&resources, &root.path().join("restored"), records()).unwrap());
         assert_eq!(
             restored.first().map(String::as_str),
-            Some("拟好"),
+            Some("拟蒿"),
             "{restored:?}"
         );
         assert!(!restored.iter().any(|word| word == "你好"), "{restored:?}");

@@ -165,6 +165,22 @@ impl Session {
         self.input.remove_candidate(index)
     }
 
+    /// 将词典或英文候选固定在第 `1..=5` 位；超出范围时返回未处理。
+    pub fn fix_position(&mut self, index: usize, position: u8) -> KeyResult {
+        if !self.prediction.rows.is_empty() || !(1..=5).contains(&position) {
+            return KeyResult::unhandled();
+        }
+        self.input.set_candidate_position(index, position)
+    }
+
+    /// 取消指定候选的固定排位，并同步清除手动置顶。
+    pub fn clear_position(&mut self, index: usize) -> KeyResult {
+        if !self.prediction.rows.is_empty() {
+            return KeyResult::unhandled();
+        }
+        self.input.set_candidate_position(index, 0)
+    }
+
     pub fn finish(&mut self, first_index: usize) -> KeyResult {
         self.prediction.clear();
         self.input.finish_composition(first_index)

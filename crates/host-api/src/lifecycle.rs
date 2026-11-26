@@ -139,9 +139,11 @@ impl InputClass {
                 }
                 Command::Cancel => Self::Cancel,
             },
-            Action::ResetCache | Action::PinCandidate(_) | Action::RemoveCandidate(_) => {
-                Self::Other
-            }
+            Action::ResetCache
+            | Action::PinCandidate(_)
+            | Action::RemoveCandidate(_)
+            | Action::FixCandidatePosition(_, _)
+            | Action::ClearCandidatePosition(_) => Self::Other,
         }
     }
 }

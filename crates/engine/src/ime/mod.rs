@@ -264,6 +264,10 @@ impl ImeSession {
         self.registry.has_dictionary_reranker(scheme)
     }
 
+    pub fn find_candidate(&self, scheme: SchemeType, key: &str, value: &str) -> Option<WordItem> {
+        self.registry.find_candidate(scheme, key, value)
+    }
+
     pub(crate) fn pick_dictionary_homophone(
         &mut self,
         scheme: SchemeType,

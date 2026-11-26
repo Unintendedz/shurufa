@@ -2974,6 +2974,8 @@ static void TestShurufaCompositionPolicy() {
     assert([controller handleEvent:provisionalSpace client:client]);
     assert(session.lastCommand == MSIME_COMMIT_CANDIDATE && session.selectCalls == 0);
     // 非 Provisional 态下面板代次落后时，仍保持身份栅栏拒绝错选。
+    panel.visible = YES;
+    [panel setValue:content forKey:@"contentView"];
     NSDictionary *stalePresented = @{@"focused":@YES,@"session":@1,@"generation":@2,@"provisional":@NO,
         @"editing_text":@"nihao",@"scheme":@0,
         @"candidates":@[@{@"text":@"你好",@"highlighted":@YES,@"id":@{@"session":@1,@"generation":@2,@"index":@0}}]};
@@ -12860,11 +12862,14 @@ int main(int argc, char **argv) {
         assert(layoutPanel.level == MSIMECandidateWindowLevel());
         if ([candidateMenuDelegate respondsToSelector:@selector(menuDidClose:)]) [candidateMenuDelegate menuDidClose:candidateMenu];
         assert(layoutPanel.level == MSIMECandidateWindowLevel());
-        assert(candidateMenu.numberOfItems == 2);
+        assert(candidateMenu.numberOfItems == 3);
         assert([[candidateMenu itemAtIndex:0].title isEqual:@"置顶"]);
-        assert([[candidateMenu itemAtIndex:1].title isEqual:@"删除"]);
-        assert([[candidateMenu itemAtIndex:1].keyEquivalent isEqual:@"2"]);
-        assert([candidateMenu itemAtIndex:1].keyEquivalentModifierMask == deleteModifiers);
+        assert([[candidateMenu itemAtIndex:1].title isEqual:@"固定排位"]);
+        assert([[candidateMenu itemAtIndex:2].title isEqual:@"删除"]);
+        assert([[candidateMenu itemAtIndex:2].keyEquivalent isEqual:@"2"]);
+        assert([candidateMenu itemAtIndex:2].keyEquivalentModifierMask == deleteModifiers);
+        NSMenu *positionMenu = [candidateMenu itemAtIndex:1].submenu;
+        assert(positionMenu.numberOfItems == 7 && [positionMenu itemAtIndex:5].separatorItem);
         // 置顶只记在 Engine 里。旧版本在 `MSIMEClientPinnedCandidates` 里另记一份、画的时候把置顶词挪到第一格，高亮却留在 Engine 的首选上；
         // 学习数据清除后两份对不上，打 you 时第二格的「又」一直亮着、空格上屏的也是它。留着的旧记录不能再改顺序或菜单。
         [NSUserDefaults.standardUserDefaults setObject:@{@"ce'shi": @[@"布局"]} forKey:@"MSIMEClientPinnedCandidates"];
@@ -12879,7 +12884,10 @@ int main(int argc, char **argv) {
         [controller renderCandidates];
         clickCandidate = (id)PageButton(layoutPanel.contentView, 1);
         candidateMenu = [clickCandidate menuForEvent:rightClick];
-        NSArray *operations = @[[candidateMenu itemAtIndex:0], [candidateMenu itemAtIndex:1]];
+        positionMenu = [candidateMenu itemAtIndex:1].submenu;
+        NSMutableArray *operations = [NSMutableArray arrayWithObjects:[candidateMenu itemAtIndex:0], [candidateMenu itemAtIndex:2], nil];
+        [operations addObjectsFromArray:[positionMenu.itemArray subarrayWithRange:NSMakeRange(0, 5)]];
+        [operations addObject:[positionMenu itemAtIndex:6]];
         for (NSMenuItem *operation in operations) {
             NSUInteger calls = session.maintenanceCalls;
             [NSApp sendAction:operation.action to:operation.target from:operation];
@@ -12892,14 +12900,14 @@ int main(int argc, char **argv) {
         // renderCandidates rebuilds the buttons, so everything captured from the previous panel is stale.
         clickCandidate = (id)PageButton(layoutPanel.contentView, 1);
         candidateMenu = [clickCandidate menuForEvent:rightClick];
-        assert(clickCandidate && candidateMenu.numberOfItems == 2);
+        assert(clickCandidate && candidateMenu.numberOfItems == 3);
         NSMenuItem *retainedOperation = [candidateMenu itemAtIndex:0];
         NSDictionary *validContext = retainedOperation.representedObject;
         NSUInteger maintenanceCalls = session.maintenanceCalls;
         // 被拒绝的菜单操作不派发，也不报告。
         const NSUInteger menuKeys = session.keys.count;
         const NSInteger validTag = retainedOperation.tag;
-        for (NSInteger unknownTag : {-1, 2, 3, 10, 16}) {
+        for (NSInteger unknownTag : {-1, 3, 10, 16}) {
             retainedOperation.tag = unknownTag;
             [controller candidateMenuAction:retainedOperation];
         }
@@ -12927,8 +12935,14 @@ int main(int argc, char **argv) {
         assert(session.maintenanceCalls == maintenanceCalls && session.keys.count == menuKeys);
         for (NSString *text in @[@"中", @"𠀀", @"测试"]) {
             NSMenu *menu = [controller menuForCandidate:@{@"id":clickCandidate.candidateID, @"text":text}];
-            assert(menu.numberOfItems == ([text isEqual:@"测试"] ? 2 : 1));
+            assert(menu.numberOfItems == ([text isEqual:@"测试"] ? 3 : 2));
         }
+        NSMenu *checkedMenu = [controller menuForCandidate:@{@"id":clickCandidate.candidateID, @"text":@"测试", @"fixed_position":@3}];
+        NSMenu *checkedSubmenu = [checkedMenu itemAtIndex:1].submenu;
+        for (NSInteger pos = 0; pos < 5; ++pos) {
+            assert([checkedSubmenu itemAtIndex:pos].state == (pos == 2 ? NSControlStateValueOn : NSControlStateValueOff));
+        }
+        assert([checkedSubmenu itemAtIndex:6].enabled);
         NSDictionary *validClickID = clickCandidate.candidateID;
         NSUInteger selectedCalls = session.selectCalls;
         // 让上次报告的字段属性作废：指针点选和按键一样，先比较属性、变了先报告。

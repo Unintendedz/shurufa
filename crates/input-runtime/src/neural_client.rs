@@ -1394,6 +1394,7 @@ PYEOF
                 })
                 .collect(),
             pinned_first_index: None,
+            pinned_seats: Vec::new(),
             beam_width: 4,
             max_beam_results: 4,
             enable_constrained_decode: true,

@@ -21,7 +21,9 @@ use crate::user_dictionary::overlay::{
     AppScope,
 };
 use crate::user_dictionary::positions::{
-    is_pinned_candidate, pinned_candidate_for, record_pinned_candidate, rehome_online_candidates,
+    apply_fixed_positions_with_state, clear_fixed_position_with_pin_context, is_pinned_candidate,
+    pinned_candidate_for, record_pinned_candidate_with_position_context,
+    set_fixed_position_with_pin_context,
 };
 use crate::user_dictionary::ranking::candidate_dictionary_key;
 use crate::user_dictionary::removal::delete_dictionary_candidate;
@@ -53,6 +55,7 @@ pub(super) fn clone_candidate_rows(source: &[WordItem], destination: &mut Vec<Wo
         target.source = item.source;
         target.scheme = item.scheme;
         target.pinned_first = item.pinned_first;
+        target.fixed_position = item.fixed_position;
         target.fuzzy = item.fuzzy;
         target.corrected_from.clone_from(&item.corrected_from);
         target.sentence_association = item.sentence_association;
@@ -412,10 +415,59 @@ impl InputSession {
     }
 
     pub(super) fn apply_candidate_positions(&mut self, items: &mut Vec<WordItem>) {
-        rehome_online_candidates(items, false);
+        let regular = self.local_mode == LocalInputMode::None && !self.dedicated_english;
+        let has_english =
+            self.dedicated_english || self.local_mode == LocalInputMode::TemporaryEnglish;
+        let journal = self.journal_path();
+        let journal_exists = journal.try_exists().unwrap_or(false);
+        if !journal_exists && !items.iter().any(|item| item.source.takes_online_seat()) {
+            return;
+        }
+        let include_missing = regular && self.engine.request().raw_input.len() == 1;
+        if regular {
+            let context = self.position_context(false);
+            let scheme = self.scheme();
+            let engine = &self.engine;
+            let mut finder = |key: &str, word: &str| engine.find_candidate(scheme, key, word);
+            apply_fixed_positions_with_state(
+                journal,
+                context.as_ref(),
+                items,
+                include_missing,
+                Some(&mut finder),
+                false,
+                journal_exists,
+            );
+        } else if self.local_mode == LocalInputMode::SuperJianpin {
+            let context = self.position_context(false);
+            apply_fixed_positions_with_state(
+                journal,
+                context.as_ref(),
+                items,
+                false,
+                None,
+                false,
+                journal_exists,
+            );
+        }
+        if has_english
+            || items
+                .iter()
+                .any(|item| item.source == CandidateSource::EnglishDictionary)
+        {
+            let context = self.position_context(true);
+            apply_fixed_positions_with_state(
+                journal,
+                context.as_ref(),
+                items,
+                false,
+                None,
+                true,
+                journal_exists,
+            );
+        }
     }
 
-    #[allow(dead_code)]
     pub(super) fn position_context(&self, english: bool) -> Cow<'_, str> {
         let request = self.engine.request();
         if english {
@@ -468,6 +520,58 @@ impl InputSession {
         Some(found.unwrap_or(displayed))
     }
 
+    /// 设定或取消候选的第 `1..=5` 位固定排位（`position == 0` 取消固定，同步清除手动置顶）。
+    pub(super) fn set_candidate_position(&mut self, index: usize, position: u8) -> KeyResult {
+        if self.conversion.is_some() || self.date_time_menu_page.is_some() || position > 5 {
+            return KeyResult::unhandled();
+        }
+        let Some(selected) = self.candidates().get(index) else {
+            return KeyResult::unhandled();
+        };
+        if !self.is_editable_source(selected) {
+            return KeyResult::unhandled();
+        }
+        let english = selected.source == CandidateSource::EnglishDictionary;
+        let context = self.position_context(english);
+        let key = if english || selected.canonical_pinyin.is_empty() {
+            &selected.pinyin
+        } else {
+            &selected.canonical_pinyin
+        };
+        if context.is_empty() || key.is_empty() {
+            return KeyResult::unhandled();
+        }
+        let pin_context = (!english
+            && self.local_mode == LocalInputMode::None
+            && !self.dedicated_english
+            && self.scheme().is_pinyin())
+        .then(|| self.pinyin_ranking_context());
+        let journal = self.journal_path();
+        let written = if position == 0 {
+            clear_fixed_position_with_pin_context(
+                journal,
+                context.as_ref(),
+                pin_context.as_deref(),
+                key,
+                &selected.word,
+            )
+        } else {
+            set_fixed_position_with_pin_context(
+                journal,
+                context.as_ref(),
+                pin_context.as_deref(),
+                key,
+                &selected.word,
+                position,
+            )
+        };
+        if written.is_err() {
+            return KeyResult::handled()
+                .with_diagnostic(Some(diagnostics::POSITION_NOT_PERSISTED.to_owned()));
+        }
+        KeyResult::handled().with_diagnostic(self.refresh_after_candidate_change())
+    }
+
     pub(super) fn pin_candidate(&mut self, index: usize) -> KeyResult {
         if self.conversion.is_some() || self.date_time_menu_page.is_some() {
             return KeyResult::unhandled();
@@ -495,9 +599,10 @@ impl InputSession {
             && self.local_mode == LocalInputMode::None
             && !self.dedicated_english
             && self.scheme().is_pinyin()
-            && record_pinned_candidate(
+            && record_pinned_candidate_with_position_context(
                 self.journal_path(),
                 &self.pinyin_ranking_context(),
+                Some(self.position_context(false).as_ref()),
                 &selected_word,
             )
             .is_err()
@@ -585,7 +690,6 @@ impl InputSession {
             mixed_enabled,
         );
         self.insert_inline_date_time(&mut mixed);
-        self.apply_candidate_positions(&mut mixed);
         if self.cloud_candidates_enabled
             && self
                 .online_query()
@@ -597,7 +701,14 @@ impl InputSession {
                 )
             })
         {
-            let position = 1.min(mixed.len());
+            let mut position = 1.min(mixed.len());
+            while position < mixed.len()
+                && (mixed[position].fixed_position > 0
+                    || mixed[position].pinned_first
+                    || mixed[position].source == CandidateSource::Contact)
+            {
+                position += 1;
+            }
             mixed.insert(
                 position,
                 WordItem::new(
@@ -609,6 +720,8 @@ impl InputSession {
                 ),
             );
         }
+        // 在线占位（CloudPending）与云/AI 行统一交由固定排位规则就位，避免后插把第 2–5 位固定词右移挤离目标席位。
+        self.apply_candidate_positions(&mut mixed);
         if self.single_character_only && scheme.filters_to_single_characters() {
             mixed.retain(|item| !is_han_phrase(&item.word));
         }
@@ -828,7 +941,14 @@ impl InputSession {
             if extra_hiatus > 0 {
                 channel_log_prob += -0.6 * (extra_hiatus as f64);
             }
-            let pinned = item.pinned_first || pinned_word.as_deref() == Some(item.word.as_str());
+            let fixed_position = if item.fixed_position > 0 {
+                item.fixed_position
+            } else if item.pinned_first || pinned_word.as_deref() == Some(item.word.as_str()) {
+                1
+            } else {
+                0
+            };
+            let pinned = fixed_position > 0;
 
             let exact_literal_dict = !folded_raw.is_empty()
                 && item.source.is_dictionary()
@@ -849,6 +969,7 @@ impl InputSession {
                 exact_span,
                 exact_literal_dict,
                 pinned,
+                fixed_position,
             });
         }
 

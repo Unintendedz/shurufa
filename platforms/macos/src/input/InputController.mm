@@ -10766,6 +10766,20 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
     ApplyMetasequoiaMenuTheme(menu, [self resolvedMenuThemePreferences]);
     // 置顶只记在 Engine 里（`pinned_candidates`），宿主没有自己的一份可查，和 Linux 一样始终是「置顶」。
     [menu addItem:item(@"置顶", 0)];
+    NSMenuItem *fixed = [[NSMenuItem alloc] initWithTitle:@"固定排位" action:nil keyEquivalent:@""];
+    NSMenu *positions = [[NSMenu alloc] initWithTitle:@"固定排位"];
+    positions.autoenablesItems = NO;
+    ApplyMetasequoiaMenuTheme(positions, [self resolvedMenuThemePreferences]);
+    const NSInteger currentFixed = MSIMEStrictInteger(candidate[@"fixed_position"], 0);
+    for (NSInteger position = 1; position <= 5; ++position) {
+        NSMenuItem *entry = item([NSString stringWithFormat:@"第 %ld 位", (long)position], 10 + position);
+        if (currentFixed == position) entry.state = NSControlStateValueOn;
+        [positions addItem:entry];
+    }
+    [positions addItem:NSMenuItem.separatorItem];
+    [positions addItem:item(@"取消固定", 2)];
+    fixed.submenu = positions;
+    [menu addItem:fixed];
     // Windows hides deletion for one Unicode scalar, including supplementary Han.
     if ([text isKindOfClass:NSString.class] && [text lengthOfBytesUsingEncoding:NSUTF32LittleEndianStringEncoding] / 4 > 1) {
         NSMenuItem *remove = item(@"删除", 1);
@@ -10788,14 +10802,19 @@ static const char *MSIMEMotionPresetName(msime::mac::SkinAnimationPreset preset)
     if (!MSIMECurrentCandidateIdentity(identifier, _viewState)) return;
     uint64_t generation = 0; NSUInteger index = 0;
     if (!MSIMEStrictUnsignedInteger(identifier[@"generation"], &generation) || !MSIMEStrictUnsignedIntegerValue(identifier[@"index"], &index)) return;
-    // 菜单项只有置顶与删除（0-1），其余标签不派发，也就不报告。
-    if (item.tag != 0 && item.tag != 1) return;
+    // 菜单项包含置顶、删除、取消固定（0-2）和固定排位（11-15），其余标签不派发，也就不报告。
+    if ((item.tag < 0 || item.tag > 2) && (item.tag < 11 || item.tag > 15)) return;
     // 候选右键菜单的这几项都是指针操作引起的派发，和点选候选一样先开一轮，见 msime_client.h 的顺序契约。
     [self reportPointerToLifecycle];
     NSError *error = nil;
-    NSDictionary *result = item.tag == 0
-        ? [_session pinGeneration:generation index:index error:&error]
-        : [_session removeGeneration:generation index:index error:&error];
+    NSDictionary *result = nil;
+    switch (item.tag) {
+        case 0: result = [_session pinGeneration:generation index:index error:&error]; break;
+        case 1: result = [_session removeGeneration:generation index:index error:&error]; break;
+        case 2: result = [_session clearPositionGeneration:generation index:index error:&error]; break;
+        default:
+            result = [_session fixGeneration:generation index:index position:(uint8_t)(item.tag - 10) error:&error];
+    }
     if (result) [self apply:result];
     else if (error) NSBeep();
 }

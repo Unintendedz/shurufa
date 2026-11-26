@@ -434,7 +434,6 @@ impl ShuangpinDictionary {
         });
     }
 
-    #[cfg(test)]
     pub fn find_candidate(&self, key: &str, value: &str) -> Option<WordItem> {
         self.database
             .find_weight(key, value)

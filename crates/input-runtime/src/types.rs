@@ -23,7 +23,7 @@ pub struct Candidate {
     /// True when Engine corrected the typed spelling for this candidate.
     pub corrected: bool,
     pub highlighted: bool,
-    /// 用户显式置顶的 1-based 固定席位（Slice 3 起仅保留 `Some(1)` 表示置顶到第 1 位）。
+    /// 用户显式固定的 1-based 候选排位（`Some(1..=5)`，同时兼容旧置顶 `Some(1)`）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fixed_position: Option<u8>,
     /// 「仅当前高亮」的候选词翻译生效时，高亮这一行要留出译文的位置，回答还没到也留。

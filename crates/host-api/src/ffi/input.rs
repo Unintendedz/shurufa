@@ -676,6 +676,42 @@ pub extern "C" fn msime_client_remove_candidate(
     )
 }
 
+#[no_mangle]
+pub extern "C" fn msime_client_fix_candidate_position(
+    handle: u64,
+    generation: u64,
+    index: usize,
+    position: u8,
+) -> *mut c_char {
+    dispatch(
+        handle,
+        Action::FixCandidatePosition(
+            CandidateId {
+                session: handle,
+                generation,
+                index,
+            },
+            position,
+        ),
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn msime_client_clear_candidate_position(
+    handle: u64,
+    generation: u64,
+    index: usize,
+) -> *mut c_char {
+    dispatch(
+        handle,
+        Action::ClearCandidatePosition(CandidateId {
+            session: handle,
+            generation,
+            index,
+        }),
+    )
+}
+
 /// Copy every cached Engine candidate only when a host opens an expanded panel.
 #[no_mangle]
 pub extern "C" fn msime_client_all_candidates(handle: u64) -> *mut c_char {

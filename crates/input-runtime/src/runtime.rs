@@ -24,6 +24,8 @@ pub enum Action {
     SelectEdge(CandidateId, CandidateEdge),
     PinCandidate(CandidateId),
     RemoveCandidate(CandidateId),
+    FixCandidatePosition(CandidateId, u8),
+    ClearCandidatePosition(CandidateId),
     SelectHighlighted,
     Finish,
     FinishOnFocusLoss,
@@ -956,6 +958,7 @@ impl<E: InputEngine> Runtime<E> {
         let mut candidates =
             Vec::with_capacity(self.cached.candidates.len().min(max_neural_candidates));
         let mut pinned_first_index: Option<usize> = None;
+        let mut pinned_seats: Vec<(usize, usize)> = Vec::new();
         let mut seen_texts: std::collections::HashSet<String> =
             std::collections::HashSet::with_capacity(max_neural_candidates);
         let mut base_idx = 0usize;
@@ -968,6 +971,32 @@ impl<E: InputEngine> Runtime<E> {
             if current_base_idx >= 64 {
                 break;
             }
+            let eng_idx = match entry.origin {
+                CandidateOrigin::EngineRow(idx) => Some(idx),
+                CandidateOrigin::InjectedBeam | CandidateOrigin::ProjectedEmoji { .. } => None,
+            };
+            let meta = eng_idx.and_then(|i| engine_meta.as_ref().and_then(|m| m.candidates.get(i)));
+            let fixed_pos = if entry.effective_fixed_position() > 0 {
+                entry.effective_fixed_position()
+            } else {
+                meta.map_or(0, |m| {
+                    if m.fixed_position > 0 {
+                        m.fixed_position
+                    } else if m.pinned {
+                        1
+                    } else {
+                        0
+                    }
+                })
+            };
+            if fixed_pos > 0 {
+                // L4 固定/置顶席位不发往前缀树，统一记录目标席位交由融合层原地锁死。
+                if fixed_pos == 1 && pinned_first_index.is_none() {
+                    pinned_first_index = Some(current_base_idx);
+                }
+                pinned_seats.push((current_base_idx, usize::from(fixed_pos - 1)));
+                continue;
+            }
             if candidates.len() >= max_neural_candidates {
                 continue;
             }
@@ -978,11 +1007,6 @@ impl<E: InputEngine> Runtime<E> {
             let text = entry.text.clone();
             let pinyin = entry.code.clone();
             let char_count = text.chars().count();
-            let eng_idx = match entry.origin {
-                CandidateOrigin::EngineRow(idx) => Some(idx),
-                CandidateOrigin::InjectedBeam | CandidateOrigin::ProjectedEmoji { .. } => None,
-            };
-            let meta = eng_idx.and_then(|i| engine_meta.as_ref().and_then(|m| m.candidates.get(i)));
 
             let (
                 stat_log_prob,
@@ -998,7 +1022,7 @@ impl<E: InputEngine> Runtime<E> {
                     m.user_log_prob,
                     m.exact_span,
                     m.exact_literal_dict,
-                    m.pinned || entry.pinned_first,
+                    m.pinned || entry.pinned_first || entry.fixed_position > 0,
                 )
             } else {
                 let stat = entry
@@ -1017,14 +1041,21 @@ impl<E: InputEngine> Runtime<E> {
                 let exact = entry.answers_key
                     && char_count > 0
                     && (primary_syllables == 0 || char_count <= primary_syllables + 1);
-                (stat, channel, user, exact, false, entry.pinned_first)
+                (
+                    stat,
+                    channel,
+                    user,
+                    exact,
+                    false,
+                    entry.pinned_first || entry.fixed_position > 0,
+                )
             };
 
             if pinned {
-                // 手动置顶仅保留首位 0；忽略其余多出项以保持单真源不变量。
                 if pinned_first_index.is_none() {
                     pinned_first_index = Some(current_base_idx);
                 }
+                pinned_seats.push((current_base_idx, 0));
                 continue;
             }
             if !exact_span {
@@ -1077,6 +1108,7 @@ impl<E: InputEngine> Runtime<E> {
             syllable_paths,
             candidates,
             pinned_first_index,
+            pinned_seats,
             beam_width: DEFAULT_BEAM_WIDTH,
             max_beam_results: DEFAULT_MAX_BEAM_RESULTS,
             enable_constrained_decode: true,
@@ -1511,7 +1543,10 @@ impl<E: InputEngine> Runtime<E> {
             source: entry.source,
             corrected: entry.corrected,
             highlighted,
-            fixed_position: entry.pinned_first.then_some(1),
+            fixed_position: {
+                let pos = entry.effective_fixed_position();
+                (pos > 0).then_some(pos)
+            },
             translation_reserved: reserve_translation && highlighted,
             translation,
             translation_runs,
@@ -2286,10 +2321,11 @@ impl<E: InputEngine> Runtime<E> {
                 order[seat] = index;
             }
         }
-        let Some(order) = order else {
+        let Some(mut order) = order else {
             self.online_order_scratch = order_scratch;
             return false;
         };
+        preserve_fixed_seats_in_order(&snapshot.candidates, &mut order);
         debug_assert_eq!(order.len(), count);
         if order.len() != count || order.iter().enumerate().all(|(seat, index)| seat == *index) {
             self.online_order_scratch = order;
@@ -2373,8 +2409,20 @@ impl<E: InputEngine> Runtime<E> {
         if let Some(engine_meta) = self.engine.neural_v2_metadata() {
             for entry in &mut self.cached.candidates {
                 if let CandidateOrigin::EngineRow(idx) = entry.origin {
-                    if engine_meta.candidates.get(idx).is_some_and(|m| m.pinned) {
-                        entry.pinned_first = true;
+                    if let Some(meta) = engine_meta.candidates.get(idx) {
+                        let fixed_pos = if meta.fixed_position > 0 {
+                            meta.fixed_position
+                        } else if meta.pinned {
+                            1
+                        } else {
+                            0
+                        };
+                        if fixed_pos > 0 && entry.fixed_position == 0 {
+                            entry.fixed_position = fixed_pos;
+                        }
+                        if fixed_pos == 1 {
+                            entry.pinned_first = true;
+                        }
                     }
                 }
             }
@@ -2398,14 +2446,14 @@ impl<E: InputEngine> Runtime<E> {
         let Some(mut order) = runner_up_order(snapshot.scheme, &order_rows(snapshot)) else {
             return false;
         };
-        // 若首位被用户显式置顶，绝不允许整句读法后移挤走首位。
-        let pinned_first = snapshot.candidates.first().is_some_and(|c| c.pinned_first)
-            || self
-                .engine
-                .neural_v2_metadata()
-                .and_then(|m| m.candidates.get(self.engine_index(0)).map(|c| c.pinned))
-                .unwrap_or(false);
-        if pinned_first && order.first().copied() != Some(0) {
+        // 全部 L4 固定/置顶席位不得被次选整句后移逻辑挤离指定位置。
+        let pinned_first_meta = self
+            .engine
+            .neural_v2_metadata()
+            .and_then(|m| m.candidates.get(self.engine_index(0)).map(|c| c.pinned))
+            .unwrap_or(false);
+        preserve_fixed_seats_in_order(&snapshot.candidates, &mut order);
+        if pinned_first_meta && order.first().copied() != Some(0) {
             if let Some(pos) = order.iter().position(|&idx| idx == 0) {
                 order[..=pos].rotate_right(1);
             }
@@ -2750,7 +2798,9 @@ impl<E: InputEngine> Runtime<E> {
         if let Action::Select(id)
         | Action::SelectEdge(id, _)
         | Action::PinCandidate(id)
-        | Action::RemoveCandidate(id) = &action
+        | Action::RemoveCandidate(id)
+        | Action::FixCandidatePosition(id, _)
+        | Action::ClearCandidatePosition(id) = &action
         {
             let start = (self.highlighted / self.page_size) * self.page_size;
             if id.session != self.session
@@ -2910,7 +2960,11 @@ impl<E: InputEngine> Runtime<E> {
                 pick = Some((SelectionHow::AnyCandidate, id.index));
                 self.select_seat(id.index)
             }
-            Action::SelectEdge(id, _) | Action::PinCandidate(id) | Action::RemoveCandidate(id)
+            Action::SelectEdge(id, _)
+            | Action::PinCandidate(id)
+            | Action::RemoveCandidate(id)
+            | Action::FixCandidatePosition(id, _)
+            | Action::ClearCandidatePosition(id)
                 if self.is_projected_emoji(id.index) || self.is_neural_injected(id.index) =>
             {
                 Ok(empty_result(true))
@@ -2923,6 +2977,12 @@ impl<E: InputEngine> Runtime<E> {
             Action::RemoveCandidate(id) => {
                 self.engine.remove_candidate(self.engine_index(id.index))
             }
+            Action::FixCandidatePosition(id, position) => self
+                .engine
+                .fix_candidate_position(self.engine_index(id.index), position),
+            Action::ClearCandidatePosition(id) => self
+                .engine
+                .clear_candidate_position(self.engine_index(id.index)),
             Action::SelectHighlighted
                 if self.cached.spelling_symbols.as_bytes().contains(&b' ') =>
             {
@@ -3076,4 +3136,59 @@ fn sanitize_surrounding_context(text: &str) -> std::borrow::Cow<'_, str> {
         cleaned.drain(..cut);
     }
     std::borrow::Cow::Owned(cleaned)
+}
+
+/// 保持排列 `order`（新座位 -> 旧座位）中所有 L4 固定/置顶席位（`effective_fixed_position() > 0`）稳坐目标席位 `pos - 1`，
+/// 其余未固定行按 `order` 原先的相对顺序顺流填入空余席位，杜绝次选降位或在线槽位重排挤离用户固定位置。
+fn preserve_fixed_seats_in_order(candidates: &[CandidateEntry], order: &mut [usize]) {
+    let count = order.len();
+    if count < 2
+        || candidates.len() != count
+        || candidates
+            .iter()
+            .all(|entry| entry.effective_fixed_position() == 0)
+    {
+        return;
+    }
+    let mut fixed_entries: Vec<(usize, usize)> = Vec::new();
+    for (old_idx, entry) in candidates.iter().enumerate() {
+        let pos = entry.effective_fixed_position();
+        if pos > 0 {
+            let target = usize::from(pos - 1).min(count - 1);
+            fixed_entries.push((target, old_idx));
+        }
+    }
+    fixed_entries.sort_by_key(|&(target, old_idx)| (target, old_idx));
+    let mut reserved: Vec<Option<usize>> = vec![None; count];
+    for (target, old_idx) in fixed_entries {
+        let mut seat = target;
+        while seat < count && reserved[seat].is_some() {
+            seat += 1;
+        }
+        if seat >= count {
+            if let Some(free) = reserved.iter().position(|entry| entry.is_none()) {
+                seat = free;
+            } else {
+                continue;
+            }
+        }
+        reserved[seat] = Some(old_idx);
+    }
+    let unpinned: Vec<usize> = order
+        .iter()
+        .copied()
+        .filter(|&old_idx| {
+            candidates
+                .get(old_idx)
+                .is_none_or(|entry| entry.effective_fixed_position() == 0)
+        })
+        .collect();
+    let mut unpinned_iter = unpinned.into_iter();
+    for (seat, slot) in order.iter_mut().enumerate() {
+        if let Some(old_idx) = reserved[seat] {
+            *slot = old_idx;
+        } else if let Some(old_idx) = unpinned_iter.next() {
+            *slot = old_idx;
+        }
+    }
 }

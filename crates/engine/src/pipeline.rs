@@ -192,6 +192,8 @@ pub struct CandidateEntry {
     pub corrected: bool,
     pub answers_key: bool,
     pub pinned_first: bool,
+    /// L4 硬约束：用户显式固定的 1-based 候选排位（`0` 表示未固定，`1..=5` 锁定最终下标 `pos - 1`）。
+    pub fixed_position: u8,
     pub deletable: bool,
     pub channel_log_prob: f64,
     pub tier0_gram_log_prob: Option<f64>,
@@ -222,6 +224,7 @@ impl CandidateEntry {
             corrected: false,
             answers_key: false,
             pinned_first: false,
+            fixed_position: 0,
             deletable,
             channel_log_prob: 0.0,
             tier0_gram_log_prob: None,
@@ -230,6 +233,18 @@ impl CandidateEntry {
             static_evidence: None,
             keyboard_runner_up: false,
             origin: CandidateOrigin::default(),
+        }
+    }
+
+    /// 返回生效中的 1-based 固定排位（`fixed_position > 0` 优先，其次 `pinned_first` 映射为 `1`）。
+    #[inline]
+    pub fn effective_fixed_position(&self) -> u8 {
+        if self.fixed_position > 0 {
+            self.fixed_position
+        } else if self.pinned_first {
+            1
+        } else {
+            0
         }
     }
 
@@ -330,6 +345,7 @@ impl PurePresenter {
                 kind: entry.kind.to_slot_kind(),
                 answers_key: entry.answers_key,
                 pinned_first: entry.pinned_first,
+                fixed_position: entry.effective_fixed_position(),
             })
             .collect();
         let budget = SlotBudget {
@@ -418,7 +434,7 @@ mod tests {
     }
 
     #[test]
-    fn pure_presenter_projects_emoji_without_displacing_pinned_first() {
+    fn pure_presenter_projects_emoji_without_displacing_pinned_or_fixed_seats() {
         let mut pinned = CandidateEntry::new("麻", "ma", 0);
         pinned.answers_key = true;
         pinned.pinned_first = true;
@@ -426,8 +442,9 @@ mod tests {
         second.answers_key = true;
         let mut third = CandidateEntry::new("码", "ma", 0);
         third.answers_key = true;
-        let mut fourth = CandidateEntry::new("吗", "ma", 0);
+        let mut fourth = CandidateEntry::new("嘛", "ma", 0);
         fourth.answers_key = true;
+        fourth.fixed_position = 4;
         let mut fifth = CandidateEntry::new("妈", "ma", 0);
         fifth.answers_key = true;
         let mut sixth = CandidateEntry::new("马", "ma", 0);
@@ -449,6 +466,8 @@ mod tests {
         assert_eq!(presented[1].text, "大笑");
         assert_eq!(presented[2].kind, CandidateKind::ProjectedEmoji);
         assert_eq!(presented[2].text, "😂");
+        assert_eq!(presented[3].text, "嘛");
+        assert_eq!(presented[3].fixed_position, 4);
         assert!(matches!(
             presented[2].origin,
             CandidateOrigin::ProjectedEmoji { ref anchor_word, .. } if anchor_word == "大笑"

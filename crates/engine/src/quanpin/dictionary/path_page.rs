@@ -100,6 +100,7 @@ fn ordinary_row(row: &WordItem, reading: &str) -> bool {
         source,
         scheme,
         pinned_first,
+        fixed_position,
         fuzzy,
         corrected_from,
         sentence_association,
@@ -112,6 +113,7 @@ fn ordinary_row(row: &WordItem, reading: &str) -> bool {
         && *source == CandidateSource::Database
         && *scheme == SchemeType::Quanpin
         && !*pinned_first
+        && *fixed_position == 0
         && !fuzzy
         && corrected_from.is_empty()
         && !sentence_association

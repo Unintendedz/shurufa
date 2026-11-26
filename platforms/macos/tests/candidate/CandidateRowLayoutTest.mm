@@ -2861,7 +2861,7 @@ int main(int argc, char **argv)
         NSEvent *rightClick = [NSEvent mouseEventWithType:NSEventTypeRightMouseDown location:NSZeroPoint modifierFlags:0
                                                timestamp:0 windowNumber:0 context:nil eventNumber:1 clickCount:1 pressure:1];
         NSMenu *menu = [menuRow menuForEvent:rightClick];
-        assert(menu && menu.numberOfItems == 2);
+        assert(menu && menu.numberOfItems == 3);
         assert([menuRow menuForEvent:rightClick] == menu);
         [controller renderCandidates];
         assert([menuRow menuForEvent:rightClick] == nil);

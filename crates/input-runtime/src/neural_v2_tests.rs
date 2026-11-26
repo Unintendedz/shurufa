@@ -363,3 +363,81 @@ fn runtime_presentation_phase_controls_provisional_view_flush_and_slot0_lock() {
     assert!(out.slot0_locked);
     assert_eq!(runtime.view().candidates[0].text, "整了血铅");
 }
+
+#[test]
+fn fixed_seats_1_2_3_5_survive_unified_scorer_beam_and_emoji_projection() {
+    let mut engine = StubNeuralEngine::composing(
+        "ma",
+        "ma",
+        &[
+            ("思考", true, Some(-6_000)),
+            ("固二", true, Some(-6_100)),
+            ("固三", true, Some(-6_200)),
+            ("马", true, Some(-3_000)),
+            ("固五", true, Some(-6_300)),
+            ("麻", true, Some(-4_000)),
+            ("吗", true, Some(-4_500)),
+        ],
+    );
+    engine.snapshot.candidates[0].fixed_position = 1;
+    engine.snapshot.candidates[0].pinned_first = true;
+    engine.snapshot.candidates[1].fixed_position = 2;
+    engine.snapshot.candidates[2].fixed_position = 3;
+    engine.snapshot.candidates[4].fixed_position = 5;
+
+    let mut runtime = Runtime::new(engine, 6).unwrap();
+    runtime.focused = true;
+    runtime.set_neural_v2_enabled(true);
+    runtime.set_inline_emoji_projection(true, None);
+    runtime.set_surrounding_context("刚才");
+
+    let req = runtime
+        .take_neural_request()
+        .expect("未固定候选应正常触发神经请求");
+    assert_eq!(req.pinned_first_index, Some(0));
+    assert_eq!(req.pinned_seats, vec![(0, 0), (1, 1), (2, 2), (3, 4)]);
+    // 固定席位不再送往神经打分。
+    assert_eq!(req.candidates.len(), 3);
+
+    let resp = NeuralDecodeResponse {
+        ok: true,
+        session: req.session,
+        generation: req.generation,
+        candidate_scores: vec![
+            NeuralScoredCandidate {
+                text: "吗".into(),
+                neural_log_prob: -10.0,
+            },
+            NeuralScoredCandidate {
+                text: "麻".into(),
+                neural_log_prob: -11.0,
+            },
+            NeuralScoredCandidate {
+                text: "马".into(),
+                neural_log_prob: -12.0,
+            },
+        ],
+        beam_candidates: vec![NeuralBeamCandidate {
+            text: "码".into(),
+            path_index: 0,
+            neural_log_prob: -0.5,
+            token_count: 1,
+        }],
+    };
+    let out = runtime.apply_neural_response(&resp, true);
+    assert!(out.applied && out.moved);
+
+    let view = runtime.view();
+    assert_eq!(view.candidates[0].text, "思考");
+    assert_eq!(view.candidates[0].fixed_position, Some(1));
+    assert_eq!(view.candidates[1].text, "固二");
+    assert_eq!(view.candidates[1].fixed_position, Some(2));
+    assert_eq!(view.candidates[2].text, "固三");
+    assert_eq!(view.candidates[2].fixed_position, Some(3));
+    assert_eq!(view.candidates[3].text, "🤔");
+    assert_eq!(view.candidates[3].fixed_position, None);
+    assert_eq!(view.candidates[4].text, "固五");
+    assert_eq!(view.candidates[4].fixed_position, Some(5));
+    assert_eq!(view.candidates[5].text, "码");
+    assert_eq!(view.candidates[5].fixed_position, None);
+}

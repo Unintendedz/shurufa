@@ -123,7 +123,7 @@ static void TestEngineMaintenance() {
     sqlite3 *database = nullptr;
     assert(sqlite3_open([[options[@"dictionaries"] stringByAppendingPathComponent:@"msime-pinyin.db"] fileSystemRepresentation], &database) == SQLITE_OK);
     assert(sqlite3_exec(database, "CREATE TABLE tbl_2_n(key TEXT,jp TEXT,value TEXT,weight INTEGER);"
-        "INSERT INTO tbl_2_n VALUES('ni''hao','nh','你好',10000),('ni''hao','nh','拟好',9000);", nullptr, nullptr, nullptr) == SQLITE_OK);
+        "INSERT INTO tbl_2_n VALUES('ni''hao','nh','你好',10000),('ni''hao','nh','拟好',9000),('ni''hao','nh','泥好',8000);", nullptr, nullptr, nullptr) == SQLITE_OK);
     assert(sqlite3_close(database) == SQLITE_OK);
     assert(sqlite3_open([[options[@"dictionaries"] stringByAppendingPathComponent:@"msime-english.db"] fileSystemRepresentation], &database) == SQLITE_OK);
     assert(sqlite3_exec(database, "CREATE TABLE english_words(word TEXT,display TEXT,weight INTEGER);"
@@ -248,6 +248,15 @@ static void TestEngineMaintenance() {
     NSDictionary *result = [session pinGeneration:generation index:index error:&error];
     assert(result && !error && [result[@"handled"] boolValue]);
     assert([result[@"view"][@"candidates"][0][@"text"] isEqual:@"拟好"]);
+    NSDictionary *pinnedId = result[@"view"][@"candidates"][0][@"id"];
+    result = [session fixGeneration:[pinnedId[@"generation"] unsignedLongLongValue] index:[pinnedId[@"index"] unsignedIntegerValue] position:3 error:&error];
+    assert(result && !error && [result[@"handled"] boolValue]);
+    assert([result[@"view"][@"candidates"][2][@"text"] isEqual:@"拟好"]);
+    assert([result[@"view"][@"candidates"][2][@"fixed_position"] isEqual:@3]);
+    NSDictionary *fixedId = result[@"view"][@"candidates"][2][@"id"];
+    result = [session clearPositionGeneration:[fixedId[@"generation"] unsignedLongLongValue] index:[fixedId[@"index"] unsignedIntegerValue] error:&error];
+    assert(result && !error && [result[@"handled"] boolValue]);
+    assert(![result[@"view"][@"candidates"][2][@"text"] isEqual:@"拟好"] || !result[@"view"][@"candidates"][2][@"fixed_position"]);
     identifier = MaintenanceCandidate(session);
     result = [session removeGeneration:[identifier[@"generation"] unsignedLongLongValue] index:[identifier[@"index"] unsignedIntegerValue] error:&error];
     assert(result && !error && [result[@"handled"] boolValue] && !MaintenanceCandidate(session));

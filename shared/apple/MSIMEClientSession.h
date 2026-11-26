@@ -69,6 +69,8 @@ typedef void (^MSIMEVoiceProviderPhase)(NSUInteger phase);
 - (nullable NSDictionary *)selectAnyCandidateGeneration:(uint64_t)generation index:(NSUInteger)index error:(NSError **)error;
 - (nullable NSDictionary *)pinGeneration:(uint64_t)generation index:(NSUInteger)index error:(NSError **)error;
 - (nullable NSDictionary *)removeGeneration:(uint64_t)generation index:(NSUInteger)index error:(NSError **)error;
+- (nullable NSDictionary *)fixGeneration:(uint64_t)generation index:(NSUInteger)index position:(uint8_t)position error:(NSError **)error;
+- (nullable NSDictionary *)clearPositionGeneration:(uint64_t)generation index:(NSUInteger)index error:(NSError **)error;
 - (nullable NSDictionary<NSString *, id> *)viewWithError:(NSError **)error;
 /// 零拷贝 C 结构体视图与转换快照（指针借用会话内部缓冲，有效至同一会话下一次视图或派发调用）。
 - (nullable const ShurufaViewSnapshot *)viewSnapshotWithError:(NSError **)error;
