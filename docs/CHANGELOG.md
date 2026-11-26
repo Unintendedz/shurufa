@@ -2,6 +2,13 @@
 
 Shurufa 从水杉输入法 tag `fork-point/msime-2026-10-27` 分出来之后的改动，按 `git log` 整理。没有版本号，也不发版：`main` 上的最新提交就是我在用的那一版。更早的历史是水杉的，见上游仓库。
 
+## 2026-11-26
+
+- **自造词学习闭环修复、轻量 `Tab` 笔画筛选恢复与第 1–5 位固定排位重构**：
+  - **打通自造词与神经束候选学习闭环**：消除 `InputSession` 独立的第二条 `QuanpinEngine` 连接造成的双连接缓存脑裂，改为统一复用 `ProviderRegistry::quanpin_mut()` 并统一执行 `reset_all_caches()`；在自组/造词写库及 `InjectedBeam`（含 `Action::Command(Command::CommitCandidate)` 与分段前缀 `locked_prefix` 拼接）提交后同步记录 `personal_selection_events` 与 `last_overlay_learning`（保持 5 秒紧接退格回滚）；对静态首位 `< 500` 的弱先验键放开单次自造词即时首槽召回，不降低高频核心词 `1.8` 次防劫持门槛。
+  - **在纯 macOS 统一流水线上恢复轻量 `Tab` 笔画与偏旁部件筛选**：基于 `scripts/fetch_stroke_dictionary.py` 随包内置 `msime-stroke.db`（`Contents/Resources/language-dictionaries/`）及引擎内置 `chaizi` 拆字表，恢复全拼/双拼 `Tab` 笔画（`h/s/p/n/z/d/x`）与部件首字母/全拼/俗称辅助筛选；激活筛选期间（`preedit` 含 `｜`）自动挂起 Tier 1 神经重排与内联 Emoji 投影，退出即恢复。
+  - **重构并恢复第 1–5 位固定排位（与 L4 席位锁一致）**：贯穿 `WordItem`、`CandidateEntry`、`UnifiedScorer`、`SlotAllocator`、`PurePresenter`、`Runtime`、`host-api`（`msime_client_fix_candidate_position` / `msime_client_clear_candidate_position`）及 macOS 原生候选右键子菜单（`固定排位` → `第 1..5 位` 勾选态 + `取消固定`）；实现 `fixed_candidate_positions` 与 `pinned_candidates` 双向同步以防第 1 槽残影，统一槽位分配器让云候选、`CloudPending`、`AiSuggestion`、内联 Emoji 与神经注入候选绕行全部 L4 固定席位。
+
 ## 2026-11-25 — 11-26
 
 - **纯 macOS 单产品减法与三段单向候选管线收敛**：

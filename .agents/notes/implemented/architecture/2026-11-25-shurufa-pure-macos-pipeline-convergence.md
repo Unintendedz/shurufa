@@ -18,15 +18,15 @@ Status: implemented
 ### 1. 仓库、资源与输入表面物理收敛
 
 - **单平台单产品**：物理移除 `platforms/{windows,linux,android,ios,harmony}`、`apps/`、`packages/ui`、`plugins/`、`fuzz/` 及多余 crates，保留纯 macOS 所需的 `crates/{client-base,client-core,client-providers,client-services,engine,host-api,input-runtime,path-trust}`、`platforms/macos` 与 `ShurufaNeuralService`；将 `shared/contracts/editions.json` 收窄为 `["full", "shurufa"]` 并移除跨平台契约与门禁脚本。
-- **输入能力精确白名单**：仅保留**全拼 + 双拼、简繁转换、基本中文标点与全半角、中文组字下的英文单词自动补全（`msime-english.db`）、精选内联 Emoji 投影（`msime-others.db`，可开关）、小写 `v` 数字与算式计算、个人学习闭环（含 5 秒退格回滚、15 秒改错自动学词、个人词表）、本地/云端语音输入与润色**。
-- **移除边缘筛选与旧模型包袱**：彻底移除五笔/日语/韩语/粤语/注音/越南语/藏文/笔画输入方案，移除 `Tab` 笔画筛选（`msime-stroke.db`）与 8 套全拼辅助码表（`resources/helpcodes/`），移除任意槽位固定 `fixed_position = 2..9`（仅保留「置顶到第 1 位」与「删除/屏蔽词条」），彻底移除 `sentence-model.safetensors`（4.5MB）、`sentence-model-desktop.safetensors`（25MB）及 `chinese_ime_lm` 依赖。
+- **输入表面收敛与轻量刚需能力保留**：仅保留**全拼 + 双拼、简繁转换、基本中文标点与全半角、中文组字下的英文单词自动补全（`msime-english.db`）、精选内联 Emoji 投影（`msime-others.db`，可开关）、小写 `v` 数字与算式计算、全拼/双拼下基于随包 `msime-stroke.db` 与内置拆字表的轻量 `Tab` 笔画（`h/s/p/n/z/d/x`）与偏旁部件筛选、个人学习闭环（含 5 秒退格回滚、15 秒改错自动学词、自造词闭环、个人词表）、固定排位（第 1–5 位 + 取消固定）与置顶/删除、本地/云端语音输入与润色**。
+- **移除其余多平台与非拼音/旧模型包袱**：彻底移除五笔/日语/韩语/粤语/注音/越南语/藏文/独立笔画输入方案，移除 8 套全拼辅助码表（`resources/helpcodes/`），彻底移除 `sentence-model.safetensors`（4.5MB）、`sentence-model-desktop.safetensors`（25MB）及 `chinese_ime_lm` 依赖。（注：2026-11-26 已在统一流水线上单独恢复轻量 `Tab` 笔画与部件筛选及第 1–5 位固定排位，详见 [全拼、双拼的 Tab 笔画与部件筛选](../feature/2026-11-04-tab-stroke-filter.md) 与 [自造词双连接缓存一致性与神经束候选学习闭环](../bug-fix/2026-11-26-self-made-phrase-cache-and-learning-loop.md)。）
 
 ### 2. 光标现场快照与 `RecallPool → UnifiedScorer → PurePresenter` 单向管线
 
 - **一等不可变输入 `CursorSnapshot`**：会话在组字开始或光标移动时原子绑定 `CursorSnapshot { left_text, right_text, locked_prefix, app_bundle_id, is_secure_field }`。长句分段选词采用**段内暂存前缀（退格可反悔拆回拼音）**，模型与搭配查表看到的左上下文统一为 `left_text + locked_prefix`，使剩余未选拼音 100% 走同一条单向管线并自然推进 `Qwen3-0.6B` KV-Cache；端侧 `ShurufaNeuralEngine` 将左 Token Healing、右单字前缀边际化与句中右侧前瞻收口为统一的双端边界评分算子 $\log P(Y \mid C_{\text{left}}, C_{\text{right}})$。
-- **Stage 1 — 纯召回池 `RecallPool<CandidateEntry>`**：彻底废除 `IndexRemap` 与 `usize::MAX` 假下标。引擎输入 `(RemainingKeys, EffectiveLeftContext)` 只产出带 64 位稳定 `CandidateId` 与结构化证据（`SpanKind`、`TypoEvidence`、词库先验、`.gram` 搭配分、个人学习先验、`is_pinned_top`）的候选集合，**召回层严禁计算展示座位下标**。
+- **Stage 1 — 纯召回池 `RecallPool<CandidateEntry>`**：彻底废除 `IndexRemap` 与 `usize::MAX` 假下标。引擎输入 `(RemainingKeys, EffectiveLeftContext)` 只产出带 64 位稳定 `CandidateId` 与结构化证据（`SpanKind`、`TypoEvidence`、词库先验、`.gram` 搭配分、个人学习先验、`pinned_first`、`fixed_position`）的候选集合，**召回层严禁计算展示座位下标**；激活 `Tab` 笔画/部件筛选时挂起 Tier 1 神经重排请求，避免外部神经分打乱过滤窗口。
 - **Stage 2 — 唯一同构打分器 `UnifiedScorer`**：全仓仅保留唯一三参数对数线性目标函数。当 `neural_scores == None`（同步 Tier 0 或无 GGUF 回退）时以万象 `.gram` 局部搭配分作为零延迟 LM 项；当 `neural_scores == Some`（异步 Tier 1 回包）时替换为 `Qwen3-0.6B` 双端条件对数概率。错拼信道代价、精确字面词保护与非成词拆字先验全仓只写一份。
-- **Stage 3 — 唯一纯函数排座器 `PurePresenter`**：单一无状态纯函数输入 `&[ScoredCandidate]`，一次性完成：`pinned_top` 锁第 0 槽 → 等跨度候选前段连续排座与首页纠错限流（`Provisional` 未获神经分前精确字面词守第 0 槽）→ 精选内联 Emoji 锚定投影 → 前缀词 / 英文补全（首页上限 3 席）/ 单字。选词、置顶、屏蔽与学习回流一律按稳定 `CandidateId` 寻址。
+- **Stage 3 — 唯一纯函数排座器 `PurePresenter`**：单一无状态纯函数输入 `&[ScoredCandidate]`，一次性完成：`L4` 固定排位（第 `1..=5` 位，且与 `pinned_candidates` 双向同步防第 1 槽残影，所有后续投影与云/AI/神经融合作业围绕已锁定席位绕行）→ 等跨度候选前段连续排座与首页纠错限流（`Provisional` 未获神经分前精确字面词守第 0 槽）→ 精选内联 Emoji 锚定投影 → 前缀词 / 英文补全（首页上限 3 席）/ 单字。选词、固定排位、置顶、屏蔽与学习回流一律按稳定 `CandidateId` 寻址。
 
 ### 3. 纯 Rust 托管神经 UDS 客户端、两阶段状态机与强类型 C ABI
 
@@ -39,7 +39,8 @@ Status: implemented
 
 - [Shurufa v2 统一概率词格与端侧 Metal 两阶段神经解码架构](../../implemented/architecture/2026-11-24-shurufa-v2-probabilistic-neural-ime.md)：保留其统一概率词格、`Qwen3-0.6B-Base` 进程外 Metal 服务、BPE 边界概率模型与退格负反馈学习内核；将其嫁接在旧平行快照与 ObjC++ 定时器上的多段原地洗牌骨架升级为纯 Rust 单向三段管线与 Rust 原生 UDS 两阶段状态机。
 - [Shurufa 候选词决策链五层重构与分阶段演进](../../proposed/architecture/2026-11-20-shurufa-candidate-pipeline-redesign.md) 及 [Stage 3 单遍 4.5MB 神经复用、停顿首选锁定与语境同音标定](../../implemented/architecture/2026-11-20-stage3-single-pass-scorer-and-settled-lock.md)：清退其中过渡期保留的 4.5MB / 25MB `chinese_ime_lm` 模型与双层重排，彻底收口至单一 `UnifiedScorer` 与 `PurePresenter`。
-- [Shurufa 对齐系统拼音的输入边界](../../implemented/simplification/2026-10-29-shurufa-system-pinyin.md)：在其运行时收窄基础上，进一步物理删除非 macOS 平台、非拼音方案、`Tab` 笔画筛选、全拼辅助码表与 `fixed_position = 2..9`。
+- [Shurufa 对齐系统拼音的输入边界](../../implemented/simplification/2026-10-29-shurufa-system-pinyin.md)：在其运行时收窄基础上，物理删除非 macOS 平台、非拼音方案与辅助码表；`Tab` 笔画筛选（轻量随包版）与第 1–5 位固定排位后续在统一流水线上重新规范恢复。
+- [全拼、双拼的 Tab 笔画与部件筛选](../feature/2026-11-04-tab-stroke-filter.md) 与 [自造词双连接缓存一致性与神经束候选学习闭环](../bug-fix/2026-11-26-self-made-phrase-cache-and-learning-loop.md)：记录纯 macOS 统一流水线落地后补充恢复的 `Tab` 笔画/部件筛选、第 1–5 位固定排位不变量，以及单一 `ProviderRegistry` 缓存 + 弱先验升格 + `InjectedBeam` 学习闭环修复。
 - [Stage 1 落地纯函数 SlotAllocator 与重排后精选内联 Emoji 投影](../../implemented/feature/2026-11-20-shurufa-slot-allocator-and-inline-emoji.md) 与 [Shurufa 中文输入下的英文单词自动补全](../../implemented/feature/2026-11-17-shurufa-english-word-autocomplete.md)：保留内联 Emoji 与英文自动补全产品行为，合并入 `PurePresenter` 并废除 `IndexRemap` 下标折算。
 
 ## Alternatives considered
@@ -61,7 +62,7 @@ Status: implemented
 
 ## Consequences
 
-- 仓库收敛为纯 macOS 单产品形态（仅剩 `crates/` 8 个 Rust crate、`platforms/macos` 与 `ShurufaNeuralService`），移除全部非 macOS 平台、Tauri/React 壳、脚本插件、非拼音方案、`Tab` 笔画筛选、辅助码表及 4.5MB/25MB 旧模型。
+- 仓库收敛为纯 macOS 单产品形态（仅剩 `crates/` 8 个 Rust crate、`platforms/macos` 与 `ShurufaNeuralService`），移除全部非 macOS 平台、Tauri/React 壳、脚本插件、非拼音方案、辅助码表及 4.5MB/25MB 旧模型；全拼/双拼保留轻量 `Tab` 笔画与部件筛选（`msime-stroke.db` 随包分发）及 L4 第 1–5 位固定排位。
 - 候选生成与重排完全经由 `CursorSnapshot → RecallPool → UnifiedScorer → PurePresenter` 与稳定 `CandidateId` 运行；`ShurufaNeuralService` 的 UDS 通信、空闲预热、`Provisional → Presented` 微窗口与槽 0 硬锁、暖机快敲空格有界等待均由纯 Rust 会话层托管。
 - `crates/host-api` 暴露零拷贝 `ShurufaViewSnapshot` 结构体供 `InputController.mm` 热路径只读消费；设置存储收敛为单一 `~/Library/Application Support/Shurufa/config.json`，并通过幂等首次迁移保留既有用户的双拼方案、简繁/标点开关、内联 Emoji、本地神经/万象搭配开关与语音服务配置。
 - 本决策默认 macOS 为唯一宿主目标，`scripts/run-checks.sh` 与 `scripts/verify-local.sh` 不再保留多平台交叉构建阶段，只以本地 Rust 门禁、文本契约、macOS CTest 与 `convert_eval` 评测作为持续护栏；所有内迁与裁剪期间，既有用户数据目录（学习事件日志、个人词库、语音存档与模型包）保持兼容只读迁移。

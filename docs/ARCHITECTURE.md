@@ -26,8 +26,8 @@ crates/engine                                         纯 Rust 输入内核（Cu
 - **`crates/host-api`**：统一 C ABI 边界（`crates/host-api/include/msime_client.h`），为按键、翻页与选词热路径暴露只读零拷贝结构体 `ShurufaViewSnapshot`（`shurufa_session_view`、`shurufa_session_poll_neural`、`shurufa_session_flush_provisional_neural`）以及异步重绘唤醒回调注册，同时承接配置读写、个人词库管理与语音/AI 辅助接口。
 - **`crates/input-runtime`**：纯 Rust 会话编排层。负责托管 `ShurufaNeuralService` 子进程生命周期与私有 UDS 二进制帧通信（`neural_client.rs`）、`50 ms` 空闲上文 prefill 防抖、独立定时器线程驱动的 `PresentationPhase::Provisional → PresentationPhase::Presented` 状态机（`~28 ms` 微窗口延迟绘制与面板绘出后槽 0 硬锁）、热态快敲空格有界等待，以及按稳定 `CandidateId` 驱动候选分页和退格负反馈学习闭环。
 - **`crates/engine`**：纯 Rust 输入算法内核，围绕不可变 `CursorSnapshot` 执行 `RecallPool → UnifiedScorer → PurePresenter` 三段单向函数式管线（`crates/engine/src/pipeline.rs`）：
-  - **支持能力**：仅覆盖全拼与双拼、OpenCC 简繁转换、基本中文标点与全半角、中文组字下的英文单词自动补全（`msime-english.db`）、精选内联 Emoji 投影（`slot_allocator.rs` / `emoji_mru.rs`）、小写 `v` 数字与算式计算、万象 `.gram` 语法搭配与个人学习闭环。
-  - **三段单向流**：`RecallPool` 只做多源召回与证据收集，严禁计算显示座次；`UnifiedScorer` 持有唯一三参数对数线性目标函数（无神经回包时用 `.gram` 局部搭配分，有回包时替换为 `Qwen3-0.6B` 双边界概率）；`PurePresenter` 作为无状态纯函数一次性完成槽 0 置顶保护、首页纠错限流、内联 Emoji 锚定、英文补全上限（最多 3 席）与单字排座，所有动作通过 64 位稳定 `CandidateId` 寻址。
+  - **支持能力**：仅覆盖全拼与双拼、OpenCC 简繁转换、基本中文标点与全半角、全拼/双拼轻量 `Tab` 笔画与偏旁部件筛选（依托随包 `msime-stroke.db` 与内置 `chaizi` 表）、中文组字下的英文单词自动补全（`msime-english.db`）、精选内联 Emoji 投影（`slot_allocator.rs` / `emoji_mru.rs`）、小写 `v` 数字与算式计算、第 1–5 位固定排位（`fixed_candidate_positions` 与 `pinned_candidates` 双向同步）、万象 `.gram` 语法搭配与个人学习闭环。
+  - **三段单向流**：`RecallPool` 只做多源召回与证据收集，严禁计算显示座次；`UnifiedScorer` 持有唯一三参数对数线性目标函数（无神经回包时用 `.gram` 局部搭配分，有回包时替换为 `Qwen3-0.6B` 双边界概率；`Tab` 笔画/部件筛选激活即 `preedit` 含 `｜` 期间暂停 Tier 1 神经重排与内联 Emoji 投影）；`PurePresenter` 作为无状态纯函数一次性完成第 1–5 位 L4 固定席位与置顶保护（云/AI 候选、次选让位及神经融合均围绕已锁席位绕行）、首页纠错限流、内联 Emoji 锚定、英文补全上限（最多 3 席）与单字排座，所有动作通过 64 位稳定 `CandidateId` 寻址。
 - **平行支撑 crate**：
   - `crates/client-base`：文件锁、原子写入、OpenCC 简繁转换等离线基础能力；
   - `crates/client-core`：以单一 `~/Library/Application Support/Shurufa/config.json` 作为唯一配置真源（兼容首次从旧偏好幂等导入），以及固定资源清单校验；
@@ -46,7 +46,7 @@ crates/engine                                         纯 Rust 输入内核（Cu
 
 ## 固定资源与许可证
 
-- **版本与核心资源锁**：`shared/contracts/editions.json` 收敛为 `["full", "shurufa"]`，随包桌面资源由 `resources/editions/shurufa.lock.json` 固定校验并在构建时通过 `platforms/macos/stage-resources.sh` 装配。
+- **版本与核心资源锁**：`shared/contracts/editions.json` 收敛为 `["full", "shurufa"]`，随包桌面资源由 `resources/editions/shurufa.lock.json` 固定校验并在构建时通过 `platforms/macos/stage-resources.sh` 装配；轻量笔画词库 `msime-stroke.db`（及许可证 `msime-rime_stroke_LICENSE.txt`）由 `scripts/fetch_stroke_dictionary.py` 拉取并装入 `Shurufa.app/Contents/Resources/language-dictionaries/`，旧 4.5 MB / 25 MB `safetensors` 模型仍保持移除。
 - **OpenCC 简繁转换表**：由 `resources/opencc.lock.json` 固定 7 份表及许可证校验，`client-base/build.rs` 通过 `scripts/fetch_opencc.py` 在 `target/opencc/<commit>/` 缓存准备并内嵌，支持 `MSIME_OPENCC_OFFLINE=1` 离线构建。
 - **符号与第三方声明**：`crates/engine/src/local/symbol_groups.tsv` 随仓库提交并受 `scripts/test-symbol-groups.py` 校验；所有内嵌与按需下载组件（OpenCC、SCOWL、symphonia、sherpa-onnx、TextStream/MLX、`Qwen3-0.6B`、万象 `.gram` 等）的来源、固定提交与许可证全文须同步登记在 `platforms/macos/resources/Licenses/THIRD_PARTY_NOTICES.txt` 与 [third-party.md](third-party.md)，网络与隐私边界见 [cloud-candidates.md](cloud-candidates.md)。
 
