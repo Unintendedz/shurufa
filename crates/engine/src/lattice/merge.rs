@@ -15,8 +15,8 @@ use crate::types::{CandidateSource, WordItem};
 
 // 短句子合并直接扫描已有行，避免默认小批次为临时哈希表分配堆内存。
 const SMALL_SENTENCE_MERGE: usize = 64;
-/// 双音节输入下排在整句网格之前的精确双字词典行上限（与首页 6 格对齐），确保带语境的 `[1, 1]` 拆字读法紧随第 6 槽稳进神经融合池。
-const MAX_LEADING_EXACT_TWO_SYLLABLE_DICT: usize = 6;
+/// 双音节输入下排在整句网格之前的精确双字词典行上限（5 席精确词 + 第 6 席 `[1, 1]` 拆字正好填满 6 格首页），同时确保常见拆字与单字稳进前排。
+const MAX_LEADING_EXACT_TWO_SYLLABLE_DICT: usize = 5;
 
 /// 判断单个片段是否为合法拼音声母（含单字母声母与 `zh`/`ch`/`sh`）。
 fn is_pinyin_initial(segment: &str) -> bool {
@@ -312,7 +312,7 @@ fn merge_decoded_paths(
         generated_block_linear(candidates, paths, typed_pinyin, options)
     };
     if !block.is_empty() {
-        let at = whole_sentence_insert_position(candidates, syllables);
+        let at = whole_sentence_insert_position_with_options(candidates, syllables, options);
         candidates.splice(at..at, block);
     }
     typo
@@ -429,14 +429,28 @@ fn canonical_matches_segments(canonical_pinyin: &str, syllables: &[String]) -> b
 
 /// 统计位于整句词网格之前的领跑词典精确命中行数。
 pub fn whole_sentence_insert_position(candidates: &[WordItem], syllables: &[String]) -> usize {
+    whole_sentence_insert_position_with_options(candidates, syllables, &LatticeOptions::default())
+}
+
+pub(crate) fn whole_sentence_insert_position_with_options(
+    candidates: &[WordItem],
+    syllables: &[String],
+    options: &LatticeOptions<'_>,
+) -> usize {
     if syllables.is_empty() {
         return 0;
     }
     let n = syllables.len();
+    let defer_unmeasured_with_gram = (3..=4).contains(&n)
+        && !options.preceding_context.is_empty()
+        && options.collocation_scorer.is_some();
     let count = candidates
         .iter()
         .take_while(|item| {
-            item.source.is_dictionary()
+            !(defer_unmeasured_with_gram
+                && item.source == CandidateSource::Database
+                && item.weight == 100)
+                && item.source.is_dictionary()
                 && if item.canonical_pinyin.is_empty() || item.fuzzy {
                     covers_all_syllables(item, n)
                 } else {

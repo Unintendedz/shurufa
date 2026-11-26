@@ -115,6 +115,29 @@ impl ProviderRegistry {
         }
     }
 
+    /// 只读查询给定拼音方案在 `.gram` 模型上的搭配净增益。
+    pub fn query_collocation_bonus(
+        &self,
+        scheme: SchemeType,
+        context_tail: &str,
+        word: &str,
+        is_rear: bool,
+    ) -> Option<f64> {
+        match scheme {
+            SchemeType::Quanpin => {
+                self.quanpin
+                    .as_ref()?
+                    .query_collocation_bonus(context_tail, word, is_rear)
+            }
+            SchemeType::Shuangpin => {
+                self.shuangpin
+                    .as_ref()?
+                    .query_collocation_bonus(context_tail, word, is_rear)
+            }
+            _ => None,
+        }
+    }
+
     pub fn reset_all_caches(&mut self) {
         self.reset_pinyin_caches();
     }

@@ -3299,7 +3299,7 @@ fn candidate_texts(runtime: &mut Runtime<Fixture>) -> Vec<String> {
 }
 
 #[test]
-fn a_long_sentence_keeps_three_readings_together_on_the_first_page() {
+fn a_long_sentence_keeps_four_readings_together_on_the_first_page() {
     let mut runtime = lattice_runtime(&[
         ("根据官方新闻稿", 8),
         ("根据", 0),
@@ -3340,8 +3340,8 @@ fn the_kept_readings_follow_the_first_one_wherever_it_sits() {
             "通过虚开发票",
             "通过需开发票",
             "通过虚开发飘",
-            "通过需开发飘",
             "跟",
+            "通过需开发飘",
         ]
     );
 }
@@ -3407,9 +3407,9 @@ fn only_readings_that_answer_the_whole_key_are_counted() {
         candidate_texts(&mut mixed_widths),
         [
             "根据官方词",
+            "根据官方辞",
             "跟据方圆",
             "跟聚芳园",
-            "根据官方辞",
             "根据词",
             "根剧",
             "跟居",

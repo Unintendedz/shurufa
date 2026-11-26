@@ -66,3 +66,4 @@ Status: implemented
 - 候选生成与重排完全经由 `CursorSnapshot → RecallPool → UnifiedScorer → PurePresenter` 与稳定 `CandidateId` 运行；`ShurufaNeuralService` 的 UDS 通信、空闲预热、`Provisional → Presented` 微窗口与槽 0 硬锁、暖机快敲空格有界等待均由纯 Rust 会话层托管。
 - `crates/host-api` 暴露零拷贝 `ShurufaViewSnapshot` 结构体供 `InputController.mm` 热路径只读消费；设置存储收敛为单一 `~/Library/Application Support/Shurufa/config.json`，并通过幂等首次迁移保留既有用户的双拼方案、简繁/标点开关、内联 Emoji、本地神经/万象搭配开关与语音服务配置。
 - 本决策默认 macOS 为唯一宿主目标，`scripts/run-checks.sh` 与 `scripts/verify-local.sh` 不再保留多平台交叉构建阶段，只以本地 Rust 门禁、文本契约、macOS CTest 与 `convert_eval` 评测作为持续护栏；所有内迁与裁剪期间，既有用户数据目录（学习事件日志、个人词库、语音存档与模型包）保持兼容只读迁移。
+- 后续演进：基于 `RecallPool -> UnifiedScorer` 的 `has_lexical_head` / `2+1+1` 首词多样性排座、混淆网络算子 C2 `[1, 1] -> [1, 1]` 与 `70 ms` Provisional 窗口见 [多音节候选首词多样性、商业级分段前缀直达与生僻字尾收敛](./2026-11-26-candidate-diversity-and-prefix-hierarchy.md)。

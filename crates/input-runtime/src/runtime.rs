@@ -954,7 +954,11 @@ impl<E: InputEngine> Runtime<E> {
             .filter(|piece| !piece.is_empty())
             .count();
 
-        let max_neural_candidates = DEFAULT_MAX_NEURAL_CANDIDATES;
+        let max_neural_candidates = if primary_syllables == 1 {
+            24
+        } else {
+            DEFAULT_MAX_NEURAL_CANDIDATES
+        };
         let mut candidates =
             Vec::with_capacity(self.cached.candidates.len().min(max_neural_candidates));
         let mut pinned_first_index: Option<usize> = None;
@@ -968,7 +972,7 @@ impl<E: InputEngine> Runtime<E> {
             }
             let current_base_idx = base_idx;
             base_idx += 1;
-            if current_base_idx >= 64 {
+            if current_base_idx >= 128 {
                 break;
             }
             let eng_idx = match entry.origin {
@@ -1012,17 +1016,21 @@ impl<E: InputEngine> Runtime<E> {
                 stat_log_prob,
                 channel_log_prob,
                 user_log_prob,
+                collocation_log_prob,
                 exact_span,
                 exact_literal_dict,
                 pinned,
+                has_lexical_head,
             ) = if let Some(m) = meta {
                 (
                     m.stat_log_prob,
                     m.channel_log_prob,
                     m.user_log_prob,
+                    m.collocation_log_prob,
                     m.exact_span,
                     m.exact_literal_dict,
                     m.pinned || entry.pinned_first || entry.fixed_position > 0,
+                    m.has_lexical_head,
                 )
             } else {
                 let stat = entry
@@ -1045,9 +1053,11 @@ impl<E: InputEngine> Runtime<E> {
                     stat,
                     channel,
                     user,
+                    0.0,
                     exact,
                     false,
                     entry.pinned_first || entry.fixed_position > 0,
+                    entry.lexical_head,
                 )
             };
 
@@ -1076,7 +1086,9 @@ impl<E: InputEngine> Runtime<E> {
                 stat_log_prob,
                 channel_log_prob,
                 user_log_prob,
+                collocation_log_prob,
                 pinned,
+                has_lexical_head,
             });
         }
 

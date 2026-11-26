@@ -2546,9 +2546,9 @@ struct NeuralEngine::Impl {
             req_single_syl = parsed_paths[0].syllables[0];
             req_single_is_bare = !parsed_paths[0].is_complete;
         }
-        // 按句长自适应控制前缀树上限：短中句满额收容 16 条（承接全部 1-Span 混淆网络扰动），
-        // 14+ 音节超长句保留 14 条以兼顾长句混淆网络召回与低延迟窗口。
-        const size_t cand_cap = (primary_n >= 14) ? 14 : 16;
+        // 按句长自适应控制前缀树上限：单音节允许 24 条以覆盖同音常字；
+        // 中短句收容 16 条（承接全部 1-Span 混淆网络扰动）；14+ 音节超长句保留 14 条以兼顾召回与时延。
+        const size_t cand_cap = (primary_n == 1) ? 24 : ((primary_n >= 14) ? 14 : 16);
 
         std::vector<std::string> unique_cands;
         std::unordered_set<std::string> seen_cands;

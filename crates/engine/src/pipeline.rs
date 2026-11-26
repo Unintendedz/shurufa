@@ -201,6 +201,8 @@ pub struct CandidateEntry {
     pub user_log_prob: f64,
     pub static_evidence: Option<StaticEvidence>,
     pub keyboard_runner_up: bool,
+    /// 首词是否源自词典或多字词汇边界（`source.is_dictionary()` 或首词长 `>= 2`），供首屏区分词汇首词与散字起手。
+    pub lexical_head: bool,
     pub origin: CandidateOrigin,
 }
 
@@ -232,6 +234,7 @@ impl CandidateEntry {
             user_log_prob: 0.0,
             static_evidence: None,
             keyboard_runner_up: false,
+            lexical_head: false,
             origin: CandidateOrigin::default(),
         }
     }

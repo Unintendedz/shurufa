@@ -189,6 +189,9 @@ impl InputSession {
             Some(order) => {
                 clone_candidate_rows(&decoded, &mut reranked);
                 order.reorder(&mut reranked);
+                if let Some((start, win)) = self.find_single_char_prefix_promote(&reranked) {
+                    reranked[start..=win].rotate_right(1);
+                }
                 self.mixed_candidates = self.mixed_from(reranked);
                 self.ranking_candidates = Some(self.mixed_from(decoded));
                 self.personal_reranked = true;
@@ -197,6 +200,15 @@ impl InputSession {
                 if let Some(promote) = self.contextual_dictionary_promote(&decoded) {
                     clone_candidate_rows(&decoded, &mut reranked);
                     reranked[..=promote].rotate_right(1);
+                    if let Some((start, win)) = self.find_single_char_prefix_promote(&reranked) {
+                        reranked[start..=win].rotate_right(1);
+                    }
+                    self.mixed_candidates = self.mixed_from(reranked);
+                    self.ranking_candidates = Some(self.mixed_from(decoded));
+                    self.personal_reranked = true;
+                } else if let Some((start, win)) = self.find_single_char_prefix_promote(&decoded) {
+                    clone_candidate_rows(&decoded, &mut reranked);
+                    reranked[start..=win].rotate_right(1);
                     self.mixed_candidates = self.mixed_from(reranked);
                     self.ranking_candidates = Some(self.mixed_from(decoded));
                     self.personal_reranked = true;
@@ -235,8 +247,17 @@ impl InputSession {
                 }))
     }
 
+    #[inline]
+    fn item_reading(item: &WordItem) -> &str {
+        if item.canonical_pinyin.is_empty() {
+            item.pinyin.as_str()
+        } else {
+            item.canonical_pinyin.as_str()
+        }
+    }
+
     fn contextual_dictionary_promote(&mut self, decoded: &[WordItem]) -> Option<usize> {
-        const HOMOPHONE_SCAN_WINDOW: usize = 32;
+        const HOMOPHONE_SCAN_WINDOW: usize = 48;
         if self.local_mode != LocalInputMode::None
             || self.dedicated_english
             || self.prefix_active
@@ -246,15 +267,8 @@ impl InputSession {
         {
             return None;
         }
-        fn reading_of(item: &WordItem) -> &str {
-            if item.canonical_pinyin.is_empty() {
-                item.pinyin.as_str()
-            } else {
-                item.canonical_pinyin.as_str()
-            }
-        }
         let first = decoded.first()?;
-        let reading = reading_of(first);
+        let reading = Self::item_reading(first);
         if first.source != CandidateSource::Database
             || !first.scheme.is_pinyin()
             || first.fuzzy
@@ -305,7 +319,7 @@ impl InputSession {
                 && item.scheme == scheme
                 && !item.fuzzy
                 && item.corrected_from.is_empty()
-                && reading_of(item) == reading
+                && Self::item_reading(item) == reading
                 && item.word.chars().count() == characters
                 && self.selection_completes_composition(item)
                 && self.reading_answers_key(item)
@@ -336,6 +350,84 @@ impl InputSession {
             effective_weights.as_deref(),
         )?;
         (best > 0).then_some(indices[best])
+    }
+
+    /// 多音节输入时，若 `.gram` 存在强上下文约束（如 `"还真是" + xian...`），
+    /// 将首音节主单字切片中最契合上文的单字提至单字前缀首位。
+    fn find_single_char_prefix_promote(&mut self, items: &[WordItem]) -> Option<(usize, usize)> {
+        const PREFIX_SCAN_WINDOW: usize = 48;
+        if self.local_mode != LocalInputMode::None
+            || self.dedicated_english
+            || self.prefix_active
+            || self.caret_edit.active
+            || self.has_literal_input()
+            || !self.engine.has_han_rescoring_context()
+        {
+            return None;
+        }
+        let scheme = self.scheme();
+        if !scheme.is_pinyin() || !self.engine.has_dictionary_reranker(scheme) {
+            return None;
+        }
+        let first_syl = {
+            let seg = self.pinyin_segmentation();
+            let mut parts = seg.split('\'').filter(|s| !s.is_empty());
+            let first = parts.next()?;
+            parts.next()?;
+            if !crate::pinyin::syllables::is_intact(first) {
+                return None;
+            }
+            first.to_owned()
+        };
+        let first_idx = items.iter().position(|item| {
+            item.source == CandidateSource::Database
+                && item.scheme == scheme
+                && !item.fuzzy
+                && item.corrected_from.is_empty()
+                && item.word.chars().count() == 1
+                && !self.selection_completes_composition(item)
+                && Self::item_reading(item) == first_syl
+        })?;
+        let first = &items[first_idx];
+        let journal = self.journal_path();
+        let context = self.pinyin_ranking_context();
+        if first.pinned_first
+            || is_pinned_candidate(journal, &context, &first.word)
+            || is_pinned_candidate(journal, &first_syl, &first.word)
+        {
+            return None;
+        }
+        let mut refs = [first; crate::lattice::octagram::MAX_RERANK_PATHS];
+        let mut indices = [first_idx; crate::lattice::octagram::MAX_RERANK_PATHS];
+        let mut count = 1usize;
+        for (offset, item) in items[first_idx + 1..]
+            .iter()
+            .take(PREFIX_SCAN_WINDOW - 1)
+            .enumerate()
+        {
+            if item.source == CandidateSource::Database
+                && item.scheme == scheme
+                && !item.fuzzy
+                && item.corrected_from.is_empty()
+                && item.word.chars().count() == 1
+                && !self.selection_completes_composition(item)
+                && Self::item_reading(item) == first_syl
+            {
+                refs[count] = item;
+                indices[count] = first_idx + 1 + offset;
+                count += 1;
+                if count == crate::lattice::octagram::MAX_RERANK_PATHS {
+                    break;
+                }
+            }
+        }
+        if count < 2 {
+            return None;
+        }
+        let best = self
+            .engine
+            .pick_dictionary_homophone(scheme, &refs[..count], None)?;
+        (best > 0).then_some((first_idx, indices[best]))
     }
 
     pub(super) fn ranking_list(&self) -> &[WordItem] {
@@ -722,6 +814,7 @@ impl InputSession {
         }
         // 在线占位（CloudPending）与云/AI 行统一交由固定排位规则就位，避免后插把第 2–5 位固定词右移挤离目标席位。
         self.apply_candidate_positions(&mut mixed);
+        self.prune_multi_syllable_tail(&mut mixed);
         if self.single_character_only && scheme.filters_to_single_characters() {
             mixed.retain(|item| !is_han_phrase(&item.word));
         }
@@ -749,6 +842,94 @@ impl InputSession {
             }
         }
         mixed
+    }
+
+    /// 多音节常规拼音输入时收敛尾部长尾噪声：
+    /// 1) 剔除混音切分漏出的非首主音节单字（如 `xianzhezhishi` 中 `xi` 下的 `洗/西`，保留 `xi'an` 等多字词）；
+    /// 2) 首音节主单字超过 24 枚时清理 `weight <= 0` 的零权重生僻字并封顶 64 枚，避免候选翻百余页；
+    /// 3) 将非词典合成整句封顶 12 条。置顶/固定/用户词及笔画筛选与单字模式均完整保留。
+    fn prune_multi_syllable_tail(&self, items: &mut Vec<WordItem>) {
+        if self.local_mode != LocalInputMode::None
+            || self.dedicated_english
+            || self.prefix_active
+            || self.caret_edit.active
+            || self.single_character_only
+            || self.stroke_filter.is_some()
+        {
+            return;
+        }
+        let scheme = self.scheme();
+        if !scheme.is_pinyin() {
+            return;
+        }
+        let seg = self.pinyin_segmentation();
+        let first_syl = {
+            let mut parts = seg.split('\'').filter(|s| !s.is_empty());
+            let Some(first) = parts.next() else {
+                return;
+            };
+            if parts.next().is_none() || !crate::pinyin::syllables::is_intact(first) {
+                return;
+            }
+            first
+        };
+        const HEAD_SINGLE_KEEP: usize = 24;
+        const MAX_PRIMARY_SINGLE_CHARS: usize = 64;
+        const MAX_GENERATED_SENTENCES: usize = 16;
+
+        let primary_single_total = items
+            .iter()
+            .filter(|item| {
+                !item.pinned_first
+                    && item.fixed_position == 0
+                    && item.source == CandidateSource::Database
+                    && item.scheme == scheme
+                    && !item.fuzzy
+                    && item.corrected_from.is_empty()
+                    && item.word.chars().count() == 1
+                    && !self.selection_completes_composition(item)
+                    && Self::item_reading(item) == first_syl
+            })
+            .count();
+        let prune_rare_singles = primary_single_total > HEAD_SINGLE_KEEP;
+
+        let mut primary_single_kept = 0usize;
+        let mut generated_sentences_kept = 0usize;
+        items.retain(|item| {
+            if item.pinned_first
+                || item.fixed_position > 0
+                || item.source == CandidateSource::UserDatabase
+                || !item.scheme.is_pinyin()
+            {
+                return true;
+            }
+            if item.sentence_association && !item.source.is_dictionary() {
+                if generated_sentences_kept >= MAX_GENERATED_SENTENCES {
+                    return false;
+                }
+                generated_sentences_kept += 1;
+                return true;
+            }
+            if item.source == CandidateSource::Database
+                && !item.fuzzy
+                && item.corrected_from.is_empty()
+                && item.word.chars().count() == 1
+                && !self.selection_completes_composition(item)
+            {
+                let reading = Self::item_reading(item);
+                if reading != first_syl {
+                    return false;
+                }
+                if prune_rare_singles
+                    && ((primary_single_kept >= HEAD_SINGLE_KEEP && item.weight <= 0)
+                        || primary_single_kept >= MAX_PRIMARY_SINGLE_CHARS)
+                {
+                    return false;
+                }
+                primary_single_kept += 1;
+            }
+            true
+        });
     }
 
     fn insert_inline_date_time(&self, items: &mut Vec<WordItem>) {
@@ -814,6 +995,11 @@ impl InputSession {
             .filter(|&c| c != '\'')
             .map(|c| c.to_ascii_lowercase())
             .collect();
+        let scheme = self.scheme();
+        let han_clause = self.engine.rescoring_han_clause();
+        let mut tail_buf = String::with_capacity(32);
+        const MAX_COLLOCATION_EVAL_ITEMS: usize = 24;
+        let mut collocation_eval_count = 0usize;
         let items = self.candidates();
         let has_exact_literal_dict = !folded_raw.is_empty()
             && items.iter().take(8).any(|item| {
@@ -899,7 +1085,7 @@ impl InputSession {
                 );
             }
 
-            let stat_log_prob = if let Some(ev) = item.static_evidence() {
+            let mut stat_log_prob = if let Some(ev) = item.static_evidence() {
                 Some(ev.log_prob_milli_nats as f64 / 1000.0)
             } else if item.source.is_dictionary() {
                 if (word_chars >= 3 && item.weight == 100)
@@ -918,6 +1104,60 @@ impl InputSession {
             } else {
                 None
             };
+
+            let mut collocation_log_prob = 0.0;
+            if collocation_eval_count < MAX_COLLOCATION_EVAL_ITEMS
+                && exact_span
+                && item.corrected_from.is_empty()
+                && !item.fuzzy
+            {
+                collocation_eval_count += 1;
+                if item.source.is_dictionary() {
+                    if !han_clause.is_empty() {
+                        if let Some(bonus) = self
+                            .engine
+                            .query_collocation_bonus(scheme, han_clause, &item.word, true)
+                        {
+                            let capped = bonus.min(12.0);
+                            if capped > 0.0 {
+                                stat_log_prob = stat_log_prob.map(|s| s + capped);
+                                collocation_log_prob = 0.28 * capped;
+                            }
+                        }
+                    }
+                } else if matches!(
+                    item.source,
+                    CandidateSource::Generated | CandidateSource::Collocation
+                ) && word_chars >= 2
+                {
+                    if let Some(last_word) = item.sentence_words.last() {
+                        let prefix_in_cand =
+                            item.word.strip_suffix(last_word.as_str()).unwrap_or("");
+                        let prefix_chars = prefix_in_cand.chars().count();
+                        let tail_str = if prefix_chars >= 5 || han_clause.is_empty() {
+                            crate::text::last_characters(prefix_in_cand, 5)
+                        } else {
+                            let clause_tail =
+                                crate::text::last_characters(han_clause, 5 - prefix_chars);
+                            tail_buf.clear();
+                            tail_buf.push_str(clause_tail);
+                            tail_buf.push_str(prefix_in_cand);
+                            tail_buf.as_str()
+                        };
+                        if !tail_str.is_empty() {
+                            if let Some(bonus) = self
+                                .engine
+                                .query_collocation_bonus(scheme, tail_str, last_word, true)
+                            {
+                                let capped = bonus.min(12.0);
+                                if capped > 0.0 {
+                                    collocation_log_prob = 0.28 * capped;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
 
             let mut channel_log_prob = 0.0;
             if !item.corrected_from.is_empty() {
@@ -962,14 +1202,23 @@ impl InputSession {
                     .map(|c| c.to_ascii_lowercase())
                     .eq(folded_raw.chars());
 
+            let has_lexical_head = extra_hiatus == 0
+                && (item.source.is_dictionary()
+                    || item
+                        .sentence_words
+                        .first()
+                        .is_some_and(|w| w.chars().count() >= 2));
+
             candidates.push(crate::neural_v2::EngineNeuralCandidateMeta {
                 stat_log_prob,
+                collocation_log_prob,
                 channel_log_prob,
                 user_log_prob,
                 exact_span,
                 exact_literal_dict,
                 pinned,
                 fixed_position,
+                has_lexical_head,
             });
         }
 

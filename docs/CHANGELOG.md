@@ -4,6 +4,11 @@ Shurufa 从水杉输入法 tag `fork-point/msime-2026-10-27` 分出来之后的�
 
 ## 2026-11-26
 
+- **多音节候选首词多样性、分段前缀直达与生僻字尾收敛**：
+  - **词网格中间列防垄断与混淆网络 `[1, 1] -> [1, 1]` 联合重解码（`decode.rs`、`merge.rs`、`quanpin/dictionary.rs`）**：引入中间列按父假设单字出边上限 `PER_PARENT_DEST_CAP = 8`、`terminal_beam = 224`、末列 `[1, 1, ...]` 限流与 `MULTI_CHAR_HEAD_RESCUE_LIMIT = 3` 多字首词保底通道、`build_multi_head_seed_anchor` 首词种子锚点、算子 C2 相邻单字 `[1, 1] -> [1, 1]` 双向 `.gram` 联合重解码及多样性保护的前 6 上浮机制；3–4 字带汉字上文与 `.gram` 时后置 `weight == 100` 未测频占位词并修复 `has_exact_literal_dict_leader` 防止误纠行篡夺首位；实机「`还真是` + `xianzhezhishi`」在 Tier 0/Tier 1 首页同时呈献「`贤者之石`」与前缀「`闲着`/`贤者`」，`shurufa-spoken-v1.tsv` `immediate_top1 / top6` 达 `0.750 / 0.917`、`sentences-v2.tsv` 达 `0.599 / 0.837`。
+  - **Tier 0/Tier 1 对齐 `4+2` (`2+1+1`) 首词多样性与第 2–4 页 `24` 席前缀直达（`ordering.rs`、`neural_v2.rs`、`host/session.rs`）**：传递排除隔音膨胀的 `lexical_head` / `has_lexical_head` 标记，统一由 `2+1+1` 3 遍选拔保障首页至少涵盖 2 种以上不同多字词首词读法，同时扩展 `MAX_RERANK_PATHS = 24` 与第 2–4 页 `24` 席前缀短词/常用单字（双音节精确词阈值收敛为 `4` 并在前 8 席后穿插 6 个常用单字）；单音节 `cand_cap = 24`（`ShurufaNeuralEngine.cpp` 同步）并上调 `NEURAL_PROVISIONAL_WINDOW` 至 `70 ms`（`MAX_FAST_SPACE_WAIT = 55 ms`）以避免热态 16 候选 Metal 推理提前锁槽 0。
+  - **多音节尾部净化（`session/candidates.rs`）**：非 `Tab` 笔画筛选且非单字模式下，剔除多音节非主切分隔音单字与 `weight <= 0` 扩展区古汉字并收敛合成整句上限为 `16`（「`还真是` + `xianzhezhishi`」总页数由 `184` 页压至 `15` 页 / `89` 项）。
+
 - **自造词学习闭环修复、轻量 `Tab` 笔画筛选恢复与第 1–5 位固定排位重构**：
   - **打通自造词与神经束候选学习闭环**：消除 `InputSession` 独立的第二条 `QuanpinEngine` 连接造成的双连接缓存脑裂，改为统一复用 `ProviderRegistry::quanpin_mut()` 并统一执行 `reset_all_caches()`；在自组/造词写库及 `InjectedBeam`（含 `Action::Command(Command::CommitCandidate)` 与分段前缀 `locked_prefix` 拼接）提交后同步记录 `personal_selection_events` 与 `last_overlay_learning`（保持 5 秒紧接退格回滚）；对静态首位 `< 500` 的弱先验键放开单次自造词即时首槽召回，不降低高频核心词 `1.8` 次防劫持门槛。
   - **在纯 macOS 统一流水线上恢复轻量 `Tab` 笔画与偏旁部件筛选**：基于 `scripts/fetch_stroke_dictionary.py` 随包内置 `msime-stroke.db`（`Contents/Resources/language-dictionaries/`）及引擎内置 `chaizi` 拆字表，恢复全拼/双拼 `Tab` 笔画（`h/s/p/n/z/d/x`）与部件首字母/全拼/俗称辅助筛选；激活筛选期间（`preedit` 含 `｜`）自动挂起 Tier 1 神经重排与内联 Emoji 投影，退出即恢复。

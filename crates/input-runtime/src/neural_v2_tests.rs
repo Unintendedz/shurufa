@@ -441,3 +441,57 @@ fn fixed_seats_1_2_3_5_survive_unified_scorer_beam_and_emoji_projection() {
     assert_eq!(view.candidates[5].text, "码");
     assert_eq!(view.candidates[5].fixed_position, None);
 }
+
+#[test]
+fn runtime_take_neural_request_scans_past_64_for_deferred_sentences_and_allows_24_for_single_syllable(
+) {
+    let mut rows: Vec<(&str, bool, Option<i64>)> = vec![
+        ("闲着只是", true, Some(-10_000)),
+        ("闲着之时", true, Some(-10_100)),
+        ("闲着之事", true, Some(-10_200)),
+    ];
+    for _ in 0..24 {
+        rows.push(("闲着", false, Some(-9_500)));
+    }
+    let extra_prefixes: Vec<String> = (0..45).map(|i| format!("前缀{i}")).collect();
+    for p in &extra_prefixes {
+        rows.push((p.as_str(), false, Some(-12_000)));
+    }
+    rows.push(("贤者之石", true, Some(-8_500)));
+
+    let mut engine = StubNeuralEngine::composing("xianzhezhishi", "xian'zhe'zhi'shi", &rows);
+    for entry in &mut engine.snapshot.candidates {
+        entry.source = CandidateSource::Database as u8;
+    }
+    let mut runtime = Runtime::new(engine, 6).unwrap();
+    runtime.focused = true;
+    runtime.set_neural_v2_enabled(true);
+    runtime.set_surrounding_context("还真是");
+
+    let req = runtime.take_neural_request().expect("应生成请求");
+    assert!(
+        req.candidates.iter().any(|c| c.text == "贤者之石"),
+        "下标超过 64 的顺延等跨度候选应仍在 128 扫描窗内被收录: {:?}",
+        req.candidates.iter().map(|c| &c.text).collect::<Vec<_>>()
+    );
+
+    let single_cands: Vec<String> = (0..26)
+        .map(|i| char::from_u32(0x4E00 + i).unwrap().to_string())
+        .collect();
+    let single_rows: Vec<(&str, bool, Option<i64>)> = single_cands
+        .iter()
+        .map(|s| (s.as_str(), true, Some(-5_000)))
+        .collect();
+    let mut single_engine = StubNeuralEngine::composing("shi", "shi", &single_rows);
+    for entry in &mut single_engine.snapshot.candidates {
+        entry.source = CandidateSource::Database as u8;
+    }
+    let mut single_runtime = Runtime::new(single_engine, 6).unwrap();
+    single_runtime.focused = true;
+    single_runtime.set_neural_v2_enabled(true);
+    single_runtime.set_surrounding_context("还真是贤者之");
+    let single_req = single_runtime
+        .take_neural_request()
+        .expect("单音节有上文应发往神经池");
+    assert_eq!(single_req.candidates.len(), 24);
+}

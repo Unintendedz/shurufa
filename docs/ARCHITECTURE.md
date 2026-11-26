@@ -24,10 +24,10 @@ crates/engine                                         纯 Rust 输入内核（Cu
 
 - **`platforms/macos`**：macOS IMKit 原生宿主（`Shurufa.app`）与进程内原生 AppKit 设置窗口（`platforms/macos/src/settings/`）。宿主只负责接收 `IMKInputController` 键盘事件、读取系统辅助功能上下文、采集麦克风音频，并将 `ShurufaViewSnapshot` 渲染为候选面板；宿主不持有候选分页影子状态，不直接操作神经网络套接字或调度重排定时器。
 - **`crates/host-api`**：统一 C ABI 边界（`crates/host-api/include/msime_client.h`），为按键、翻页与选词热路径暴露只读零拷贝结构体 `ShurufaViewSnapshot`（`shurufa_session_view`、`shurufa_session_poll_neural`、`shurufa_session_flush_provisional_neural`）以及异步重绘唤醒回调注册，同时承接配置读写、个人词库管理与语音/AI 辅助接口。
-- **`crates/input-runtime`**：纯 Rust 会话编排层。负责托管 `ShurufaNeuralService` 子进程生命周期与私有 UDS 二进制帧通信（`neural_client.rs`）、`50 ms` 空闲上文 prefill 防抖、独立定时器线程驱动的 `PresentationPhase::Provisional → PresentationPhase::Presented` 状态机（`~28 ms` 微窗口延迟绘制与面板绘出后槽 0 硬锁）、热态快敲空格有界等待，以及按稳定 `CandidateId` 驱动候选分页和退格负反馈学习闭环。
+- **`crates/input-runtime`**：纯 Rust 会话编排层。负责托管 `ShurufaNeuralService` 子进程生命周期与私有 UDS 二进制帧通信（`neural_client.rs`）、`50 ms` 空闲上文 prefill 防抖、独立定时器线程驱动的 `PresentationPhase::Provisional → PresentationPhase::Presented` 状态机（`~70 ms` 微窗口延迟绘制与面板绘出后槽 0 硬锁）、热态快敲空格有界等待（`55 ms`）、非游离候选 `128` 扫描窗 / 单音节 `24` 候选神经入池，以及按稳定 `CandidateId` 驱动候选分页和退格负反馈学习闭环。
 - **`crates/engine`**：纯 Rust 输入算法内核，围绕不可变 `CursorSnapshot` 执行 `RecallPool → UnifiedScorer → PurePresenter` 三段单向函数式管线（`crates/engine/src/pipeline.rs`）：
   - **支持能力**：仅覆盖全拼与双拼、OpenCC 简繁转换、基本中文标点与全半角、全拼/双拼轻量 `Tab` 笔画与偏旁部件筛选（依托随包 `msime-stroke.db` 与内置 `chaizi` 表）、中文组字下的英文单词自动补全（`msime-english.db`）、精选内联 Emoji 投影（`slot_allocator.rs` / `emoji_mru.rs`）、小写 `v` 数字与算式计算、第 1–5 位固定排位（`fixed_candidate_positions` 与 `pinned_candidates` 双向同步）、万象 `.gram` 语法搭配与个人学习闭环。
-  - **三段单向流**：`RecallPool` 只做多源召回与证据收集，严禁计算显示座次；`UnifiedScorer` 持有唯一三参数对数线性目标函数（无神经回包时用 `.gram` 局部搭配分，有回包时替换为 `Qwen3-0.6B` 双边界概率；`Tab` 笔画/部件筛选激活即 `preedit` 含 `｜` 期间暂停 Tier 1 神经重排与内联 Emoji 投影）；`PurePresenter` 作为无状态纯函数一次性完成第 1–5 位 L4 固定席位与置顶保护（云/AI 候选、次选让位及神经融合均围绕已锁席位绕行）、首页纠错限流、内联 Emoji 锚定、英文补全上限（最多 3 席）与单字排座，所有动作通过 64 位稳定 `CandidateId` 寻址。
+  - **三段单向流**：`RecallPool` 负责多源召回、多音节生僻古汉字/非主切分单字收尾净化（`MAX_GENERATED_SENTENCES = 16`、首音节常用单字上限 `64`）与 `lexical_head` 元数据采集（排除隔音膨胀切分）；`UnifiedScorer` 持有唯一三参数对数线性目标函数（无神经回包时由 `ordering.rs` 配合 `.gram` 与 `PER_PARENT_DEST_CAP = 8` / 多锚点混淆网络及算子 C2 `[1, 1] -> [1, 1]` 执行 `4+2` 读法配额 + `2+1+1` 成词首词多样性排座，有回包时由 `neural_v2.rs` 融合 `Qwen3-0.6B` 双边界概率并在第 2–4 页衔接 `24` 席前缀区；`Tab` 笔画/部件筛选激活即 `preedit` 含 `｜` 期间暂停 Tier 1 神经重排与内联 Emoji 投影）；`PurePresenter` 作为无状态纯函数一次性完成第 1–5 位 L4 固定席位与置顶保护（云/AI 候选、次选让位及神经融合均围绕已锁席位绕行）、首页纠错限流、内联 Emoji 锚定、英文补全上限（最多 3 席）与单字排座，所有动作通过 64 位稳定 `CandidateId` 寻址。
 - **平行支撑 crate**：
   - `crates/client-base`：文件锁、原子写入、OpenCC 简繁转换等离线基础能力；
   - `crates/client-core`：以单一 `~/Library/Application Support/Shurufa/config.json` 作为唯一配置真源（兼容首次从旧偏好幂等导入），以及固定资源清单校验；
@@ -40,7 +40,7 @@ crates/engine                                         纯 Rust 输入内核（Cu
 ## 不能打破的架构不变量
 
 1. **算法与排座唯一权威在 `crates/engine`**：组词、错拼惩罚、搭配打分与展示排座一律留在 `crates/engine`，禁止在 `crates/input-runtime` 或 Objective-C++ 宿主层复制组词规则、重建第二套候选列表或按显示数组下标回写状态。
-2. **异步时序与槽 0 硬锁唯一权威在 `crates/input-runtime`**：`~28 ms` `Provisional` 防闪窗、`Presented` 后硬锁槽 0（迟到神经回包只重排槽 `1..`）、暖机快敲空格有界等待全部由 Rust 运行时状态机控制，宿主 UI 只能轮询 `ShurufaViewSnapshot` 并按回调重绘。
+2. **异步时序与槽 0 硬锁唯一权威在 `crates/input-runtime`**：`~70 ms` `Provisional` 防闪窗、`Presented` 后硬锁槽 0（迟到神经回包只重排槽 `1..`）、暖机快敲空格有界等待（`55 ms`）全部由 Rust 运行时状态机控制，宿主 UI 只能轮询 `ShurufaViewSnapshot` 并按回调重绘。
 3. **配置唯一真源为 `config.json`**：设置面板与输入法在同一 `Shurufa.app` 进程内运行，通过 `client-core` 读写单一 `config.json`，不再维护双存储合并监听或跨进程 IPC；`client-*` 支撑 crate 不反向依赖 `engine` 或 AppKit。
 4. **原生宿主与引擎之间的静态边界**：所有新增或修改的 C ABI 结构（`msime_client.h`）、云候选超时预算（`client-core::cloud::candidates`）及偏好键值对变更，均须通过 `scripts/test-*.py` 文本契约检查验证。
 

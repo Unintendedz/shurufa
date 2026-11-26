@@ -109,6 +109,17 @@ impl QuanpinEngine {
             .pick_dictionary_homophone(items, context, effective_weights)
     }
 
+    /// 只读查询全拼 `.gram` 语法模型在给定前文尾窗上的搭配净增益。
+    pub fn query_collocation_bonus(
+        &self,
+        context_tail: &str,
+        word: &str,
+        is_rear: bool,
+    ) -> Option<f64> {
+        self.dictionary
+            .query_collocation_bonus(context_tail, word, is_rear)
+    }
+
     pub fn knows_han_char(&self, han: &str) -> bool {
         self.dictionary.knows_han_char(han)
     }

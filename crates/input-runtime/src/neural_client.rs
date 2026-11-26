@@ -27,15 +27,15 @@ pub const NEURAL_FRAME_HEADER_BYTES: usize = 16;
 pub const NEURAL_MAX_FRAME_PAYLOAD_BYTES: usize = 512 * 1024;
 pub const NEURAL_FLAG_OK: u16 = 1 << 0;
 
-/// 无感防闪延迟绘制窗口（约 `~28 ms`）。
-pub const NEURAL_PROVISIONAL_WINDOW: Duration = Duration::from_millis(28);
+/// 无感防闪延迟绘制窗口（约 `~70 ms`，覆盖 16 候选前缀树 Stage A 与短句受限束搜索 Stage B 端侧热推理耗时）。
+pub const NEURAL_PROVISIONAL_WINDOW: Duration = Duration::from_millis(70);
 /// 空闲上文 Prefill 防抖延迟。
 pub const NEURAL_PREFILL_DEBOUNCE: Duration = Duration::from_millis(50);
 
 const AVAILABILITY_CACHE_TTL: Duration = Duration::from_secs(5);
 const COLD_LOAD_TIMEOUT: Duration = Duration::from_secs(3);
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(1500);
-const MAX_FAST_SPACE_WAIT: Duration = Duration::from_millis(35);
+const MAX_FAST_SPACE_WAIT: Duration = Duration::from_millis(55);
 const BACKOFF_BASE: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
 const HEALTHY_UPTIME_RESET: Duration = Duration::from_secs(60);
@@ -1390,7 +1390,9 @@ PYEOF
                     stat_log_prob: Some(-12.0),
                     channel_log_prob: 0.0,
                     user_log_prob: 0.0,
+                    collocation_log_prob: 0.0,
                     pinned: false,
+                    has_lexical_head: false,
                 })
                 .collect(),
             pinned_first_index: None,
@@ -1517,9 +1519,9 @@ PYEOF
     }
 
     #[test]
-    fn slow_reply_triggers_28ms_provisional_deadline_wakeup_before_late_result() {
+    fn slow_reply_triggers_provisional_deadline_wakeup_before_late_result() {
         let dir = tempfile::tempdir().unwrap();
-        let helper = write_mock_service_script(dir.path(), 90);
+        let helper = write_mock_service_script(dir.path(), 140);
         let (tx, rx) = mpsc::channel();
         let wakeup: NeuralWakeupFn = Arc::new(move |sid, gen| {
             let _ = tx.send((sid, gen, Instant::now()));
@@ -1535,7 +1537,7 @@ PYEOF
             },
             Some(wakeup),
         );
-        // 先 Health 确保进程已启动并完成冷建联，避免启动耗时混入 90 ms 测量。
+        // 先 Health 确保进程已启动并完成冷建联，避免启动耗时混入 140 ms 测量。
         assert!(client.check_health_sync(Duration::from_secs(3)).is_some());
         while rx.try_recv().is_ok() {}
 
@@ -1543,13 +1545,13 @@ PYEOF
         let req = dummy_request(21, &["整了血铅", "挣了些钱"]);
         assert!(client.enqueue_decode(1, &req, NEURAL_PROVISIONAL_WINDOW));
 
-        // 第一次唤醒应在 ~28 ms 到期时触发，此时解码仍在飞行中（take_completed_decode == None）。
+        // 第一次唤醒应在 ~70 ms 到期时触发，此时解码仍在飞行中（take_completed_decode == None）。
         let (sid1, gen1, t1) = rx.recv_timeout(Duration::from_secs(1)).unwrap();
         assert_eq!((sid1, gen1), (1, 21));
-        assert!(t1.duration_since(started) >= Duration::from_millis(20));
+        assert!(t1.duration_since(started) >= Duration::from_millis(55));
         assert!(client.take_completed_decode(1, 21).is_none());
 
-        // 第二次唤醒应在 90 ms 后携带完成结果到来。
+        // 第二次唤醒应在 140 ms 后携带完成结果到来。
         let (sid2, gen2, _) = rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!((sid2, gen2), (1, 21));
         let done = client

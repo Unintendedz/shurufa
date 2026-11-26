@@ -130,6 +130,15 @@ impl Session {
         let value = self.inner.snapshot_for_host();
         let count = value.candidates.len();
         let pinned_word = self.inner.pinned_candidate_word();
+        let primary_seg = if !value.normalized_segmentation.is_empty() {
+            &value.normalized_segmentation
+        } else {
+            &value.raw_segmentation
+        };
+        let primary_syllables = primary_seg
+            .split('\'')
+            .filter(|piece| !piece.is_empty())
+            .count();
         let mut raw_entries = Vec::with_capacity(count);
         let mut annotations = value.candidate_annotations.into_iter();
         for (index, candidate) in value.candidates.into_iter().enumerate() {
@@ -156,6 +165,22 @@ impl Session {
             let pinned_first = fixed_position == 1;
             let static_evidence = candidate.static_evidence();
             let keyboard_runner_up = candidate.keyboard_runner_up;
+            let hiatus_expanded = candidate.extra_syllables > 0
+                || (primary_syllables > 0
+                    && candidate.corrected_from.is_empty()
+                    && !candidate.canonical_pinyin.is_empty()
+                    && candidate
+                        .canonical_pinyin
+                        .split('\'')
+                        .filter(|piece| !piece.is_empty())
+                        .count()
+                        > primary_syllables);
+            let lexical_head = !hiatus_expanded
+                && (candidate.source.is_dictionary()
+                    || candidate
+                        .sentence_words
+                        .first()
+                        .is_some_and(|w| w.chars().count() >= 2));
             let code = candidate.pinyin.into_string();
             let text = candidate.word.into_string();
             let mut entry = crate::CandidateEntry::new(text, code, source);
@@ -169,6 +194,7 @@ impl Session {
                 static_evidence.map(|ev| ev.log_prob_milli_nats as f64 / 1000.0);
             entry.static_evidence = static_evidence;
             entry.keyboard_runner_up = keyboard_runner_up;
+            entry.lexical_head = lexical_head;
             // 在召回池去重与后续重排之前绑定底层原始行号，确保选词/置顶/删除永远命中真实引擎条目。
             entry.origin = crate::CandidateOrigin::EngineRow(index);
             raw_entries.push(entry);

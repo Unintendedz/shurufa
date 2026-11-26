@@ -66,6 +66,10 @@ fn remove_manual_delimiters_cow(raw: &str) -> Cow<'_, str> {
     }
 }
 
+fn delimiter_free_len(segmented: &str) -> usize {
+    segmented.bytes().filter(|&b| b != b'\'').count()
+}
+
 fn remove_delimiters(segmented: &str) -> String {
     let mut result = String::with_capacity(segmented.len());
     result.extend(segmented.chars().filter(|c| *c != '\''));
@@ -214,7 +218,7 @@ pub(super) fn build_quanpin_autocorrect_display<'a>(request: &'a QueryRequest) -
 impl InputSession {
     fn selected_quanpin_length(selected: &WordItem) -> usize {
         if selected.corrected_from.is_empty() {
-            remove_delimiters(&selected.pinyin).len()
+            delimiter_free_len(&selected.pinyin)
         } else {
             selected.corrected_from.len()
         }
@@ -282,7 +286,7 @@ impl InputSession {
             let base = resolve_shuangpin_composition_base(request, self.shuangpin_profile());
             let word_length = count_han_chars(&selected.word) * 2;
             let total = base.effective_raw_input.len();
-            let mut consumed = remove_delimiters(&selected.pinyin).len();
+            let mut consumed = delimiter_free_len(&selected.pinyin);
             if consumed == 0 || consumed > total {
                 consumed = word_length.min(total);
             }

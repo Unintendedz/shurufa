@@ -137,21 +137,29 @@ pub struct NeuralCandidateInput {
     /// 个人词库/习惯对数先验增益（无个人偏好时为 0.0）。
     #[serde(default)]
     pub user_log_prob: f64,
+    /// `.gram` 语料搭配模型给出的标定后对数增益证据（无命中或未启用时为 0.0）。
+    #[serde(default)]
+    pub collocation_log_prob: f64,
     /// L4 硬约束：是否被用户显式固定位置或置顶。
     #[serde(default)]
     pub pinned: bool,
+    /// 首词是否源自词典或多字词汇边界（`>= 2` 字），用于首屏 `2+1+1` 优先放行多字词法首词。
+    #[serde(default)]
+    pub has_lexical_head: bool,
 }
 
 /// 引擎会话侧为单条候选提供的权威元数据（按引擎原始候选顺序对齐）。
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct EngineNeuralCandidateMeta {
     pub stat_log_prob: Option<f64>,
+    pub collocation_log_prob: f64,
     pub channel_log_prob: f64,
     pub user_log_prob: f64,
     pub exact_span: bool,
     pub exact_literal_dict: bool,
     pub pinned: bool,
     pub fixed_position: u8,
+    pub has_lexical_head: bool,
 }
 
 /// 引擎会话侧为当前组字态提取的 Tier 1 辅助元数据。
@@ -430,6 +438,8 @@ struct ScoredCompetitor {
     text: String,
     total_score: f64,
     is_typo: bool,
+    is_unmeasured_dict: bool,
+    has_lexical_head: bool,
 }
 
 /// 纯函数统一概率融合与排座：
@@ -563,11 +573,13 @@ pub fn fuse_neural_response(
 
     // 5. 跨来源静态先验分桶相对归一：
     //    `Database/UserDatabase` 与 `Lattice(Generated/Collocation/NeuralKeyboard)` 的原始绝对偏移不同
-    //    （后者含 `.gram` 边常数偏移），按来源桶各自减去桶内最大值并截断至 `[-10.0, 0.0]`，
-    //    彻底消灭跨来源加性常数错位；未测频词典占位条目（`stat_log_prob == None`）给予温和中性相对先验 `-1.5`，
-    //    而未进入 Tier 0 词网格主束的 `UniqueBeam` 独有候选按已观测 Tier 0 下界钳位至 `[-6.5, -3.5]`，
+    //    （后者含 `.gram` 边常数偏移），按来源桶各自减去桶内最大值并在 `[-8.0, 0.0]` 后采用 `0.5` 斜率软尾压缩至 `[-20.0, 0.0]`，
+    //    彻底消灭跨来源加性常数错位并保留头部强搭配词与常规低频词之间的静态分差；未测频词典占位条目（`stat_log_prob == None`）
+    //    给予温和中性相对先验 `-1.5`，而未进入 Tier 0 词网格主束的 `UniqueBeam` 独有候选按已观测 Tier 0 下界钳位至 `[-6.5, -3.5]`，
     //    既杜绝束搜索次优路径凭虚高静态分反超在池真词，又让强神经语境优势的真实 OOV 词稳定翻盘。
-    const STAT_REL_FLOOR: f64 = -10.0;
+    const STAT_REL_KNEE: f64 = -8.0;
+    const STAT_REL_TAIL_SLOPE: f64 = 0.5;
+    const STAT_REL_FLOOR: f64 = -20.0;
     const NEUTRAL_STAT_REL: f64 = -1.5;
     const BEAM_OOV_STAT_REL_CEILING: f64 = -3.5;
     const BEAM_OOV_STAT_REL_FLOOR: f64 = -6.5;
@@ -602,6 +614,7 @@ pub fn fuse_neural_response(
     //     缺乏语境证据佐证错拼，对错拼候选额外施加 `-2.5 nats` 信道边际：常规字面词不被无条件高频邻键词劫持首位，
     //     而有上文语义佐证（如 `他是个好 + naizi -> 孩子*`）或空上文生僻碰撞大额先验差仍可正常救回。
     const BASE_NON_LEXICAL_SPLIT_PENALTY: f64 = -1.8;
+    const COLLOCATION_SPLIT_EXEMPT_THRESHOLD: f64 = 1.5;
     const BARE_INITIAL_SPLIT_EXTRA_PER_SYLLABLE: f64 = -1.2;
     const SINGLE_CHAR_TYPO_ENTROPY_COMP: f64 = -4.8;
     const EMPTY_CONTEXT_EXACT_LITERAL_TYPO_PENALTY: f64 = -2.5;
@@ -610,17 +623,19 @@ pub fn fuse_neural_response(
         .split('\'')
         .filter(|piece| !piece.is_empty() && !is_intact(piece))
         .count();
-    let primary_syllable_count = request
-        .syllable_paths
-        .first()
-        .map(|p| p.syllables.len())
-        .unwrap_or_else(|| {
-            request
-                .segmentation
-                .split('\'')
-                .filter(|piece| !piece.is_empty())
-                .count()
-        });
+    let seg_syllables = request
+        .segmentation
+        .split('\'')
+        .filter(|piece| !piece.is_empty())
+        .count();
+    let primary_syllable_count = if seg_syllables > 0 {
+        seg_syllables
+    } else {
+        request
+            .syllable_paths
+            .first()
+            .map_or(0, |p| p.syllables.len())
+    };
     let has_any_context =
         !request.context.trim().is_empty() || !request.right_context.trim().is_empty();
     let mut exact_dict_len_mask: u8 = 0;
@@ -632,13 +647,15 @@ pub fn fuse_neural_response(
             if c.char_count == 1 {
                 has_single_char_exact_dict = true;
             }
-            if (2..=4).contains(&c.char_count) {
+            // 未测频占位条目（`weight == 100`，`stat_log_prob == None`）不代表已成词先验，
+            // 避免它对真正有搭配证据的 `.gram`/Tier 0 切分施加 `-1.8 nats` 虚假罚分。
+            if (2..=4).contains(&c.char_count) && c.stat_log_prob.is_some() {
                 exact_dict_len_mask |= 1u8 << c.char_count;
             }
-            if c.char_count >= 2 {
+            if c.char_count >= 2 && c.stat_log_prob.is_some() {
                 has_multi_char_exact_dict = true;
             }
-            if c.exact_literal_dict {
+            if c.exact_literal_dict && (c.char_count == 1 || c.stat_log_prob.is_some()) {
                 has_verified_exact_literal_dict = true;
             }
         }
@@ -667,7 +684,13 @@ pub fn fuse_neural_response(
                 } else {
                     lattice_max.unwrap_or(s)
                 };
-                (s - bucket_max).clamp(STAT_REL_FLOOR, 0.0)
+                let diff = (s - bucket_max).min(0.0);
+                if diff >= STAT_REL_KNEE {
+                    diff
+                } else {
+                    (STAT_REL_KNEE + STAT_REL_TAIL_SLOPE * (diff - STAT_REL_KNEE))
+                        .max(STAT_REL_FLOOR)
+                }
             }
             None => NEUTRAL_STAT_REL,
         };
@@ -678,6 +701,7 @@ pub fn fuse_neural_response(
         let non_lexical_split_penalty = if has_same_len_exact_dict
             && !is_dict_bucket(cand.source)
             && cand.channel_log_prob == 0.0
+            && cand.collocation_log_prob < COLLOCATION_SPLIT_EXEMPT_THRESHOLD
         {
             BASE_NON_LEXICAL_SPLIT_PENALTY
                 + BARE_INITIAL_SPLIT_EXTRA_PER_SYLLABLE * (bare_initial_count.min(3) as f64)
@@ -699,6 +723,7 @@ pub fn fuse_neural_response(
             + non_lexical_split_penalty
             + shorter_typo_len_comp
             + empty_ctx_typo_adj
+            + cand.collocation_log_prob
             + weights.lambda_neural * (*neural_lp)
             + weights.lambda_stat * rel_stat
             + weights.lambda_user * cand.user_log_prob;
@@ -710,6 +735,8 @@ pub fn fuse_neural_response(
             text: cand.text.clone(),
             total_score: total,
             is_typo: cand.channel_log_prob <= -2.0,
+            is_unmeasured_dict: is_dict_bucket(cand.source) && cand.stat_log_prob.is_none(),
+            has_lexical_head: cand.has_lexical_head,
         });
     }
 
@@ -740,6 +767,8 @@ pub fn fuse_neural_response(
             text,
             total_score: total,
             is_typo: channel_lp <= -2.0,
+            is_unmeasured_dict: false,
+            has_lexical_head: false,
         });
     }
 
@@ -801,6 +830,98 @@ pub fn fuse_neural_response(
         competitors = reordered;
     }
 
+    if primary_syllable_count >= 3 && competitors.len() > 2 {
+        // 3+ 音节整句首页前 4 席启用三遍 `2+1+1` 首词多样性选拔：
+        // 榜首非纠错首词至多占 2 席（保住中后段同音消歧如 `充个点/充个电`、`在一起/再一起`），
+        // 第 0 遍优先纳入 12.0 nats 竞争窗口内的多字词法异首词（未测频占位词用 6.0 nats），
+        // 第 1 遍补入竞争性散字起手异首词，第 2 遍无配额兜底填满 4 席整句 + 2 席前缀。
+        const FRONT_DIVERSE_SEATS: usize = 4;
+        const FRONT_DIVERSITY_MARGIN_NATS: f64 = 12.0;
+        const UNMEASURED_DICT_DIVERSITY_MARGIN_NATS: f64 = 6.0;
+        let head_key_for = |text: &str| -> (char, Option<char>) {
+            let count = text.chars().count();
+            let mut chars = text.chars();
+            let first = chars.next().unwrap_or('\0');
+            let second = if count >= 4 { chars.next() } else { None };
+            (first, second)
+        };
+        let top_score = competitors[0].total_score;
+        let min_score = top_score - FRONT_DIVERSITY_MARGIN_NATS;
+        let leader_key = head_key_for(&competitors[0].text);
+        let leader_cap = if competitors[0].is_typo {
+            1usize
+        } else {
+            2usize
+        };
+        let n_comp = competitors.len();
+        let mut head_counts: HashMap<(char, Option<char>), usize> =
+            HashMap::with_capacity(FRONT_DIVERSE_SEATS);
+        let mut diverse_front: Vec<ScoredCompetitor> = Vec::with_capacity(FRONT_DIVERSE_SEATS);
+        let mut typos_in_front = 0usize;
+
+        let mut opts: Vec<Option<ScoredCompetitor>> = competitors.into_iter().map(Some).collect();
+        for pass in 0usize..3usize {
+            if diverse_front.len() >= FRONT_DIVERSE_SEATS {
+                break;
+            }
+            for slot in &mut opts {
+                if diverse_front.len() >= FRONT_DIVERSE_SEATS {
+                    break;
+                }
+                let Some(comp_ref) = slot.as_ref() else {
+                    continue;
+                };
+                let key = head_key_for(&comp_ref.text);
+                let is_leader = key == leader_key;
+                let req_min = if comp_ref.is_unmeasured_dict {
+                    top_score - UNMEASURED_DICT_DIVERSITY_MARGIN_NATS
+                } else {
+                    min_score
+                };
+                if pass == 0 {
+                    if !is_leader
+                        && (!comp_ref.total_score.is_finite()
+                            || comp_ref.total_score < req_min
+                            || !comp_ref.has_lexical_head)
+                    {
+                        continue;
+                    }
+                } else if pass == 1
+                    && (is_leader
+                        || !comp_ref.total_score.is_finite()
+                        || comp_ref.total_score < req_min
+                        || comp_ref.has_lexical_head)
+                {
+                    continue;
+                }
+                let cap_for_key = if pass == 2 {
+                    usize::MAX
+                } else if is_leader {
+                    leader_cap
+                } else {
+                    1
+                };
+                if comp_ref.is_typo && has_exact_literal_dict_any && typos_in_front >= 1 {
+                    continue;
+                }
+                if head_counts.get(&key).copied().unwrap_or(0) >= cap_for_key {
+                    continue;
+                }
+                if let Some(owned) = slot.take() {
+                    if owned.is_typo {
+                        typos_in_front += 1;
+                    }
+                    *head_counts.entry(key).or_insert(0) += 1;
+                    diverse_front.push(owned);
+                }
+            }
+        }
+        let mut reordered = Vec::with_capacity(n_comp);
+        reordered.extend(diverse_front);
+        reordered.extend(opts.into_iter().flatten());
+        competitors = reordered;
+    }
+
     // 若要求锁槽 0 且原槽 0 在竞争集合中，将其牢牢固定在竞争列表首位，其余席位按融合分升序更新。
     if effective_lock_slot_0 && slot0_eligible {
         if let Some(pos) = competitors
@@ -814,7 +935,7 @@ pub fn fuse_neural_response(
     }
 
     // 7. 统一 L4 固定/置顶席位约束与等跨度无损回填：
-    //    先对全部未固定行执行等跨度前 4 连续排座与束搜索溢出回填，再把每个 L4 固定/置顶行精确合入其目标席位，
+    //    先对全部未固定行执行等跨度连续排座与束搜索溢出回填，再把每个 L4 固定/置顶行精确合入其目标席位，
     //    保证用户固定在位置 `k`（1..=5）或置顶（`pinned_first`）的候选绝不被神经重排、非等跨度顺延或束注入挤离原位。
     let mut pinned_index_set: HashSet<usize> = HashSet::new();
     let mut raw_pinned: Vec<(usize, usize)> = Vec::new();
@@ -919,9 +1040,7 @@ pub fn fuse_neural_response(
             .iter()
             .rposition(|idx| exact_slot_set.contains(idx))
             .unwrap_or(0);
-        // 保证首页前 4 席未固定等跨度主候选连续呈现，
-        // 防止长词续写（如 `淡饭粗茶`/`淡饭黄齑`/`单反相机`）楔入首页中间把真实等跨度词（如 `但凡`）挤到第 2 页；
-        // L4 固定席位已提前剔除并独立锁位，绝不会被误判为续写词顺延。
+        // 首页保留前 4 席未固定等跨度主候选连续呈现，随后紧接 2 个前缀词或单字，与 Tier 0 `4+2` 结构严格一致。
         let front_exact_count = exact_slots.len().min(4);
         let contiguous_front_end =
             (first_exact_pos + front_exact_count).min(unpinned_base_indices.len());
@@ -1088,7 +1207,9 @@ mod tests {
             stat_log_prob,
             channel_log_prob: 0.0,
             user_log_prob: 0.0,
+            collocation_log_prob: 0.0,
             pinned: false,
+            has_lexical_head: true,
         }
     }
 
@@ -1946,5 +2067,310 @@ mod tests {
         assert_eq!(infill_out.top1_text.as_deref(), Some("现"));
         assert_eq!(neural_right_context_window("\n下一行"), "");
         assert_eq!(neural_right_context_window("   \t\r\n下一行"), "");
+    }
+
+    #[test]
+    fn unmeasured_dict_placeholder_skips_split_penalty_and_keeps_four_diverse_sentences_before_prefixes(
+    ) {
+        let mut s_idle1 = sample_candidate(0, "闲着只是", true, Some(-10.0));
+        s_idle1.source = CandidateSource::Generated as u8;
+        let mut s_idle2 = sample_candidate(1, "闲着之时", true, Some(-10.1));
+        s_idle2.source = CandidateSource::Generated as u8;
+        let mut s_idle3 = sample_candidate(2, "闲着之事", true, Some(-10.2));
+        s_idle3.source = CandidateSource::Generated as u8;
+
+        let mut p_idle = sample_candidate(3, "闲着", false, Some(-9.5));
+        p_idle.source = CandidateSource::Database as u8;
+        let mut p_sage = sample_candidate(4, "贤者", false, Some(-10.5));
+        p_sage.source = CandidateSource::Database as u8;
+        let mut p_phil = sample_candidate(5, "先哲", false, Some(-11.0));
+        p_phil.source = CandidateSource::Database as u8;
+
+        // 模拟未测频 `Database` 占位词条目 `先哲之石`（`weight == 100`，`stat_log_prob = None`）
+        // 以及由 `.gram` 撑起的 `贤者之石`（`Collocation`，不应被占位词施加 `-1.8` 罚分）。
+        let mut phil_stone = sample_candidate(6, "先哲之石", true, None);
+        phil_stone.source = CandidateSource::Database as u8;
+        phil_stone.exact_literal_dict = true;
+        let mut sage_stone = sample_candidate(7, "贤者之石", true, Some(-10.3));
+        sage_stone.source = CandidateSource::Collocation as u8;
+
+        let mut req = base_request(vec![
+            s_idle1, s_idle2, s_idle3, p_idle, p_sage, p_phil, phil_stone, sage_stone,
+        ]);
+        req.context = "还真是".into();
+        req.raw_input = "xianzhezhishi".into();
+        req.segmentation = "xian'zhe'zhi'shi".into();
+        req.syllable_paths = vec![NeuralSyllablePath {
+            syllables: vec!["xian".into(), "zhe".into(), "zhi".into(), "shi".into()],
+            channel_log_prob: 0.0,
+            is_complete: true,
+        }];
+        let resp = NeuralDecodeResponse {
+            ok: true,
+            session: 1,
+            generation: 10,
+            candidate_scores: vec![
+                NeuralScoredCandidate {
+                    text: "闲着只是".into(),
+                    neural_log_prob: -19.8,
+                },
+                NeuralScoredCandidate {
+                    text: "闲着之时".into(),
+                    neural_log_prob: -19.9,
+                },
+                NeuralScoredCandidate {
+                    text: "闲着之事".into(),
+                    neural_log_prob: -20.0,
+                },
+                NeuralScoredCandidate {
+                    text: "先哲之石".into(),
+                    neural_log_prob: -29.0,
+                },
+                NeuralScoredCandidate {
+                    text: "贤者之石".into(),
+                    neural_log_prob: -20.3,
+                },
+            ],
+            beam_candidates: vec![],
+        };
+        let out = fuse_neural_response(8, &req, &resp, NeuralFusionWeights::default(), false);
+        assert_eq!(out.top1_text.as_deref(), Some("闲着只是"));
+        let seat_indices: Vec<usize> = out
+            .seats
+            .iter()
+            .map(|s| match *s {
+                FusedSeat::Existing { index, .. } => index,
+                FusedSeat::InjectedBeam { .. } => usize::MAX,
+            })
+            .collect();
+        // 前 4 席按 `2+1+1` 配额先保留榜首首词至多 2 席（`0: 闲着只是`, `1: 闲着之时`）并晋升多字词法异首词（`7: 贤者之石`）与兜底（`2: 闲着之事`），
+        // 第 5–6 席紧接露出前缀词 `3: 闲着`, `4: 贤者`。
+        assert_eq!(&seat_indices[..4], &[0, 1, 7, 2]);
+        assert_eq!(&seat_indices[4..6], &[3, 4]);
+    }
+
+    #[test]
+    fn collocation_evidence_rescues_sage_stone_hierarchy_while_preserving_danfan() {
+        // 1. `还真是贤者 + zhishi`：带 `.gram` 认证搭配的 `[1, 1]` 拆字 `之石`（`collocation_log_prob = 2.88`）
+        //    免受非词典 `-1.8` 罚分并稳居首页前 4 席。
+        let mut zhishi_only = sample_candidate(0, "只是", true, Some(-6.3));
+        zhishi_only.source = CandidateSource::Database as u8;
+        zhishi_only.pinyin = "zhi'shi".into();
+        let mut zhishi_know = sample_candidate(1, "知识", true, Some(-7.3));
+        zhishi_know.source = CandidateSource::Database as u8;
+        zhishi_know.pinyin = "zhi'shi".into();
+        let mut zhishi_time = sample_candidate(2, "之时", true, Some(-7.35));
+        zhishi_time.source = CandidateSource::Database as u8;
+        zhishi_time.pinyin = "zhi'shi".into();
+        let mut zhishi_stone = sample_candidate(3, "之石", true, Some(-8.6));
+        zhishi_stone.source = CandidateSource::Collocation as u8;
+        zhishi_stone.pinyin = "zhi'shi".into();
+        zhishi_stone.collocation_log_prob = 2.88;
+
+        let mut req1 = base_request(vec![zhishi_only, zhishi_know, zhishi_time, zhishi_stone]);
+        req1.context = "还真是贤者".into();
+        req1.raw_input = "zhishi".into();
+        req1.segmentation = "zhi'shi".into();
+        req1.syllable_paths = vec![NeuralSyllablePath {
+            syllables: vec!["zhi".into(), "shi".into()],
+            channel_log_prob: 0.0,
+            is_complete: true,
+        }];
+        let resp1 = NeuralDecodeResponse {
+            ok: true,
+            session: 1,
+            generation: 10,
+            candidate_scores: vec![
+                NeuralScoredCandidate {
+                    text: "只是".into(),
+                    neural_log_prob: -8.22,
+                },
+                NeuralScoredCandidate {
+                    text: "知识".into(),
+                    neural_log_prob: -9.53,
+                },
+                NeuralScoredCandidate {
+                    text: "之时".into(),
+                    neural_log_prob: -9.79,
+                },
+                NeuralScoredCandidate {
+                    text: "之石".into(),
+                    neural_log_prob: -12.33,
+                },
+            ],
+            beam_candidates: vec![],
+        };
+        let out1 = fuse_neural_response(4, &req1, &resp1, NeuralFusionWeights::default(), false);
+        let top4_texts: Vec<usize> = out1
+            .seats
+            .iter()
+            .take(4)
+            .filter_map(|s| match *s {
+                FusedSeat::Existing { index, .. } => Some(index),
+                FusedSeat::InjectedBeam { .. } => None,
+            })
+            .collect();
+        assert!(
+            top4_texts.contains(&3),
+            "带 .gram 认证的「之石」应稳居前 4 席: {top4_texts:?}"
+        );
+
+        // 2. `还真是贤者之 + shi`：单字 `石` 在注入 `.gram` 搭配分与软尾压缩后稳居 #1。
+        let mut shi_stone = sample_candidate(0, "石", true, Some(-6.34 + 10.29));
+        shi_stone.source = CandidateSource::Database as u8;
+        shi_stone.pinyin = "shi".into();
+        shi_stone.collocation_log_prob = 2.88;
+        let mut shi_teacher = sample_candidate(1, "师", true, Some(-5.75));
+        shi_teacher.source = CandidateSource::Database as u8;
+        shi_teacher.pinyin = "shi".into();
+
+        let mut req2 = base_request(vec![shi_stone, shi_teacher]);
+        req2.context = "还真是贤者之".into();
+        req2.raw_input = "shi".into();
+        req2.segmentation = "shi".into();
+        req2.syllable_paths = vec![NeuralSyllablePath {
+            syllables: vec!["shi".into()],
+            channel_log_prob: 0.0,
+            is_complete: true,
+        }];
+        let resp2 = NeuralDecodeResponse {
+            ok: true,
+            session: 1,
+            generation: 10,
+            candidate_scores: vec![
+                NeuralScoredCandidate {
+                    text: "石".into(),
+                    neural_log_prob: -9.10,
+                },
+                NeuralScoredCandidate {
+                    text: "师".into(),
+                    neural_log_prob: -4.15,
+                },
+            ],
+            beam_candidates: vec![],
+        };
+        let out2 = fuse_neural_response(2, &req2, &resp2, NeuralFusionWeights::default(), false);
+        assert_eq!(out2.top1_text.as_deref(), Some("石"));
+
+        // 3. `"" + danfan`（无搭配增益的纯散字 `但反`）仍受 `-1.8` 结构罚分约束，`但凡` 稳居 #1。
+        let mut dan_fan_word = sample_candidate(0, "但凡", true, Some(-6.8));
+        dan_fan_word.source = CandidateSource::Database as u8;
+        dan_fan_word.pinyin = "dan'fan".into();
+        let mut dan_fan_split = sample_candidate(1, "但反", true, Some(-8.0));
+        dan_fan_split.source = CandidateSource::Generated as u8;
+        dan_fan_split.pinyin = "dan'fan".into();
+        dan_fan_split.collocation_log_prob = 0.0;
+
+        let mut req3 = base_request(vec![dan_fan_word, dan_fan_split]);
+        req3.context.clear();
+        req3.raw_input = "danfan".into();
+        req3.segmentation = "dan'fan".into();
+        req3.syllable_paths = vec![NeuralSyllablePath {
+            syllables: vec!["dan".into(), "fan".into()],
+            channel_log_prob: 0.0,
+            is_complete: true,
+        }];
+        let resp3 = NeuralDecodeResponse {
+            ok: true,
+            session: 1,
+            generation: 10,
+            candidate_scores: vec![
+                NeuralScoredCandidate {
+                    text: "但凡".into(),
+                    neural_log_prob: -12.0,
+                },
+                NeuralScoredCandidate {
+                    text: "但反".into(),
+                    neural_log_prob: -11.5,
+                },
+            ],
+            beam_candidates: vec![],
+        };
+        let out3 = fuse_neural_response(2, &req3, &resp3, NeuralFusionWeights::default(), false);
+        assert_eq!(out3.top1_text.as_deref(), Some("但凡"));
+
+        // 4. `还真是 + xianzhezhishi`：按 Tier 0 `4+2` 输入顺序排列（前 4 整句 + 前缀「闲着」「贤者」+ 第 5 整句），
+        //    `4+2` 首词多样性窗口（12.0 nats）在首位 -17.19 与「贤者之石」-27.48 相距 10.29 nats 时，
+        //    仍将「贤者之石」(6) 拉入首页前 4 整句，同时第 5-6 格保留前缀「闲着」(4)「贤者」(5)。
+        let mut s_xiang = sample_candidate(0, "想着只是", true, Some(-0.522));
+        s_xiang.source = CandidateSource::Collocation as u8;
+        s_xiang.pinyin = "xian'zhe'zhi'shi".into();
+        s_xiang.collocation_log_prob = 2.80;
+        s_xiang.has_lexical_head = false;
+        let mut s_xian1 = sample_candidate(1, "闲着只是", true, Some(-9.676));
+        s_xian1.source = CandidateSource::Generated as u8;
+        s_xian1.pinyin = "xian'zhe'zhi'shi".into();
+        let mut s_xian2 = sample_candidate(2, "现这只是", true, Some(-6.430));
+        s_xian2.source = CandidateSource::Generated as u8;
+        s_xian2.pinyin = "xian'zhe'zhi'shi".into();
+        s_xian2.collocation_log_prob = 2.23;
+        s_xian2.has_lexical_head = false;
+        let mut s_xian3 = sample_candidate(3, "闲着之时", true, Some(-9.900));
+        s_xian3.source = CandidateSource::Generated as u8;
+        s_xian3.pinyin = "xian'zhe'zhi'shi".into();
+        let mut p_xianzhe1 = sample_candidate(4, "闲着", false, Some(-9.500));
+        p_xianzhe1.source = CandidateSource::Database as u8;
+        p_xianzhe1.pinyin = "xian'zhe".into();
+        let mut p_xianzhe2 = sample_candidate(5, "贤者", false, Some(-10.300));
+        p_xianzhe2.source = CandidateSource::Database as u8;
+        p_xianzhe2.pinyin = "xian'zhe".into();
+        let mut s_xianzhe = sample_candidate(6, "贤者之石", true, Some(-21.580));
+        s_xianzhe.source = CandidateSource::Generated as u8;
+        s_xianzhe.pinyin = "xian'zhe'zhi'shi".into();
+        s_xianzhe.collocation_log_prob = 2.88;
+
+        let mut req4 = base_request(vec![
+            s_xiang, s_xian1, s_xian2, s_xian3, p_xianzhe1, p_xianzhe2, s_xianzhe,
+        ]);
+        req4.context = "还真是".into();
+        req4.raw_input = "xianzhezhishi".into();
+        req4.segmentation = "xian'zhe'zhi'shi".into();
+        req4.syllable_paths = vec![NeuralSyllablePath {
+            syllables: vec!["xian".into(), "zhe".into(), "zhi".into(), "shi".into()],
+            channel_log_prob: 0.0,
+            is_complete: true,
+        }];
+        let resp4 = NeuralDecodeResponse {
+            ok: true,
+            session: 1,
+            generation: 10,
+            candidate_scores: vec![
+                NeuralScoredCandidate {
+                    text: "想着只是".into(),
+                    neural_log_prob: -19.89,
+                },
+                NeuralScoredCandidate {
+                    text: "闲着只是".into(),
+                    neural_log_prob: -20.45,
+                },
+                NeuralScoredCandidate {
+                    text: "现这只是".into(),
+                    neural_log_prob: -26.37,
+                },
+                NeuralScoredCandidate {
+                    text: "闲着之时".into(),
+                    neural_log_prob: -21.00,
+                },
+                NeuralScoredCandidate {
+                    text: "贤者之石".into(),
+                    neural_log_prob: -25.27,
+                },
+            ],
+            beam_candidates: vec![],
+        };
+        let out4 = fuse_neural_response(7, &req4, &resp4, NeuralFusionWeights::default(), false);
+        let page1_indices: Vec<usize> = out4
+            .seats
+            .iter()
+            .take(6)
+            .filter_map(|s| match *s {
+                FusedSeat::Existing { index, .. } => Some(index),
+                FusedSeat::InjectedBeam { .. } => None,
+            })
+            .collect();
+        assert!(
+            page1_indices.contains(&6) && page1_indices.contains(&4) && page1_indices.contains(&5),
+            "首页前 6 格应同时包含「贤者之石」(6) 与前缀「闲着」(4)「贤者」(5): {page1_indices:?}"
+        );
     }
 }

@@ -64,8 +64,8 @@ impl Default for GramConfig {
 pub const MAX_ENCODED_UNICODE: usize = 8;
 /// 上下文语义保留的最大字符窗口。
 pub const CONTEXT_CHARACTERS: usize = 64;
-/// 词网格与多字同音词参与上文搭配比较的路径上限。
-pub const MAX_RERANK_PATHS: usize = 12;
+/// 词网格与多字同音词参与上文搭配比较的路径上限（覆盖高同音密度字如 `shi` 下高频常用字）。
+pub const MAX_RERANK_PATHS: usize = 24;
 
 /// 使用 `.gram` 语法搭配模型在多字同音词中挑选更契合 `context` 的候选下标。
 pub(crate) fn pick_collocation_homophone(

@@ -651,6 +651,23 @@ impl QuanpinDictionary {
         )
     }
 
+    /// 只读查询 `.gram` 语法模型在给定前文尾窗上的非负搭配净增益；未启用或权重非正时返回 `None`。
+    pub fn query_collocation_bonus(
+        &self,
+        context_tail: &str,
+        word: &str,
+        is_rear: bool,
+    ) -> Option<f64> {
+        let db = self.collocation_db.as_deref()?;
+        let weight = self.sentence_association.collocation_weight;
+        if weight <= 0.0 || word.is_empty() {
+            return None;
+        }
+        let config = &self.sentence_association.collocation_grammar;
+        let raw = db.query(context_tail, word, is_rear, config);
+        Some((weight * (raw - config.non_collocation_penalty)).max(0.0))
+    }
+
     /// 是否挂载了会读取上文语义的整句组件（非零权重的 `.gram` 搭配模型）。
     fn sentence_reads_context(&self) -> bool {
         self.has_dictionary_reranker()
@@ -2897,15 +2914,18 @@ fn is_strict_prefix_uncorrected(existing: &WordItem, raw: &str) -> bool {
 
 /// 判断候选列表首行是否为覆盖当前全部字面音节的精确词典整词。
 fn has_exact_literal_dict_leader(result: &[WordItem], segments: &[String]) -> bool {
-    result.first().is_some_and(|item| {
-        item.source.is_dictionary()
-            && item.corrected_from.is_empty()
-            && !item.canonical_pinyin.is_empty()
-            && item
-                .canonical_pinyin
-                .split('\'')
-                .eq(segments.iter().map(String::as_str))
-    })
+    result
+        .iter()
+        .find(|item| !(item.sentence_association && !item.source.is_dictionary()))
+        .is_some_and(|item| {
+            item.source.is_dictionary()
+                && item.corrected_from.is_empty()
+                && !item.canonical_pinyin.is_empty()
+                && item
+                    .canonical_pinyin
+                    .split('\'')
+                    .eq(segments.iter().map(String::as_str))
+        })
 }
 
 /// 从 2 音节词网格解码路径中收集前 8 条 `[1,1]` 拆字组合，供平等送入 Top-24/32 融合池。

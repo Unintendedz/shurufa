@@ -498,6 +498,23 @@ impl ShuangpinDictionary {
         )
     }
 
+    /// 只读查询 `.gram` 语法模型在给定前文尾窗上的非负搭配净增益；未启用或权重非正时返回 `None`。
+    pub fn query_collocation_bonus(
+        &self,
+        context_tail: &str,
+        word: &str,
+        is_rear: bool,
+    ) -> Option<f64> {
+        let db = self.collocation_db.as_deref()?;
+        let weight = self.sentence_association.collocation_weight;
+        if weight <= 0.0 || word.is_empty() {
+            return None;
+        }
+        let config = &self.sentence_association.collocation_grammar;
+        let raw = db.query(context_tail, word, is_rear, config);
+        Some((weight * (raw - config.non_collocation_penalty)).max(0.0))
+    }
+
     pub fn reset_cache(&mut self) {
         self.rows_cache.clear();
         self.series_cache.clear();

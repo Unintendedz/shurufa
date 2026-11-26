@@ -154,13 +154,14 @@ pub fn rerank_context(context: &str, window: usize, longest: usize) -> &str {
         .map_or("", |(start, _)| &context[start..])
 }
 
-/// 排序决策读取的一行候选：文字、来源序号（`CandidateSource`），是否回答整个按键串，是否是纠错后的读法。
+/// 排序决策读取的一行候选：文字、来源序号（`CandidateSource`），是否回答整个按键串，是否是纠错后的读法，是否拥有词汇首词。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OrderRow<'a> {
     pub text: &'a str,
     pub source: u8,
     pub answers_key: bool,
     pub corrected: bool,
+    pub lexical_head: bool,
 }
 
 /// 词网格的自然对数总分，保留整数毫 nat 与字数避免快照丢失精度。
@@ -322,6 +323,7 @@ impl<'a> OrderRowSource<'a> for ParallelOrderRows<'a> {
             source: self.sources[index],
             answers_key: self.answers_key[index],
             corrected: self.corrected[index],
+            lexical_head: true,
         }
     }
 }
@@ -351,6 +353,7 @@ impl<'a> OrderRowSource<'a> for CandidateOrderRows<'a> {
             source: entry.source,
             answers_key: entry.answers_key,
             corrected: entry.corrected,
+            lexical_head: entry.lexical_head,
         }
     }
 }
@@ -368,8 +371,16 @@ fn row_answers_key(scheme: u8, row: OrderRow<'_>) -> bool {
 
 const RUNNER_UP_MAX_MEAN_GAP_NATS: f64 = 3.8;
 const TWO_CHAR_SPLIT_FALLBACK_MAX_MEAN_NATS: f64 = -8.5;
-const EXPAND_FIFTH_READING_MAX_MEAN_GAP_NATS: f64 = 1.2;
 const TWO_CHAR_DEFERRED_PAGE_BUDGET: usize = 6;
+const TWO_CHAR_SINGLE_PREFIX_BUDGET: usize = 6;
+
+#[inline]
+fn reading_head_key(text: &str, width: usize) -> (char, Option<char>) {
+    let mut chars = text.chars();
+    let first = chars.next().unwrap_or('\0');
+    let second = if width >= 4 { chars.next() } else { None };
+    (first, second)
+}
 
 #[allow(clippy::too_many_arguments)]
 fn visit_runner_up_order(
@@ -379,10 +390,16 @@ fn visit_runner_up_order(
     front_limit: usize,
     expand_front_with_unused_keep: bool,
     deferred_front_limit: Option<usize>,
+    count_head_diversity: bool,
+    two_char_single_prefix_budget: usize,
     is_reading: &impl Fn(usize) -> bool,
     is_deferred_reading: &impl Fn(usize) -> bool,
     is_far_below_leader: &impl Fn(usize) -> bool,
     is_promoted_exact_non_reading: &impl Fn(usize) -> bool,
+    is_single_char_prefix: &impl Fn(usize) -> bool,
+    is_competitive_alt_head: &impl Fn(usize) -> bool,
+    is_lexical_head: &impl Fn(usize) -> bool,
+    head_key: &impl Fn(usize) -> (char, Option<char>),
     mut emit: impl FnMut(usize),
 ) {
     let primary_reading = |index: usize| is_reading(index) && !is_deferred_reading(index);
@@ -390,62 +407,199 @@ fn visit_runner_up_order(
     for index in 0..first_reading {
         emit(index);
     }
-    let mut kept_primary = 0;
-    for index in first_reading..count {
-        if primary_reading(index) && !is_far_below_leader(index) {
-            emit(index);
-            kept_primary += 1;
-            if kept_primary == keep {
-                break;
+
+    const MAX_KEEP_STACK: usize = 8;
+    let cap = keep.min(MAX_KEEP_STACK);
+    let mut admitted_readings = [usize::MAX; MAX_KEEP_STACK];
+    let mut admitted_len = 0usize;
+    let mut kept_primary = 0usize;
+    let mut kept_deferred = 0usize;
+
+    if cap > 0 {
+        if count_head_diversity {
+            let mut head_keys = [('\0', None::<char>); MAX_KEEP_STACK];
+            let mut head_counts = [0u8; MAX_KEEP_STACK];
+            let mut head_len = 0usize;
+            for index in 0..first_reading {
+                if is_promoted_exact_non_reading(index) {
+                    let key = head_key(index);
+                    if let Some(slot) = head_keys[..head_len].iter().position(|&k| k == key) {
+                        head_counts[slot] = head_counts[slot].saturating_add(1);
+                    } else if head_len < MAX_KEEP_STACK {
+                        head_keys[head_len] = key;
+                        head_counts[head_len] = 1;
+                        head_len += 1;
+                    }
+                }
+            }
+            let leader_head = head_key(first_reading);
+            let leader_head_cap: u8 = if first_reading == 0 && cap >= 3 { 2 } else { 1 };
+            for pass in 0u8..3u8 {
+                if kept_primary >= cap {
+                    break;
+                }
+                for index in first_reading..count {
+                    if !primary_reading(index)
+                        || is_far_below_leader(index)
+                        || admitted_readings[..admitted_len].contains(&index)
+                    {
+                        continue;
+                    }
+                    let key = head_key(index);
+                    let is_leader = key == leader_head;
+                    if pass == 0 {
+                        if !is_leader
+                            && (!is_competitive_alt_head(index) || !is_lexical_head(index))
+                        {
+                            continue;
+                        }
+                    } else if pass == 1
+                        && (is_leader || !is_competitive_alt_head(index) || is_lexical_head(index))
+                    {
+                        continue;
+                    }
+                    let max_for_key = if pass == 2 {
+                        u8::MAX
+                    } else if is_leader {
+                        leader_head_cap
+                    } else {
+                        1
+                    };
+                    let slot = head_keys[..head_len].iter().position(|&k| k == key);
+                    let existing = slot.map_or(0, |s| head_counts[s]);
+                    if existing >= max_for_key {
+                        continue;
+                    }
+                    if let Some(s) = slot {
+                        head_counts[s] = head_counts[s].saturating_add(1);
+                    } else if head_len < MAX_KEEP_STACK {
+                        head_keys[head_len] = key;
+                        head_counts[head_len] = 1;
+                        head_len += 1;
+                    }
+                    admitted_readings[admitted_len] = index;
+                    admitted_len += 1;
+                    kept_primary += 1;
+                    emit(index);
+                    if kept_primary == cap {
+                        break;
+                    }
+                }
+            }
+        } else {
+            for index in first_reading..count {
+                if primary_reading(index) && !is_far_below_leader(index) {
+                    admitted_readings[admitted_len] = index;
+                    admitted_len += 1;
+                    kept_primary += 1;
+                    emit(index);
+                    if kept_primary == cap {
+                        break;
+                    }
+                }
             }
         }
     }
-    let mut kept_deferred = 0;
-    if kept_primary < keep {
+    if admitted_len < cap {
         for index in first_reading..count {
-            if deferred_reading(index) && !is_far_below_leader(index) {
-                emit(index);
+            if deferred_reading(index)
+                && !is_far_below_leader(index)
+                && !admitted_readings[..admitted_len].contains(&index)
+            {
+                admitted_readings[admitted_len] = index;
+                admitted_len += 1;
                 kept_deferred += 1;
-                if kept_primary + kept_deferred == keep {
+                emit(index);
+                if admitted_len == cap {
                     break;
                 }
             }
         }
     }
+
     let kept_total = kept_primary + kept_deferred;
     let promote_exact_after_budget = kept_total == 0 && deferred_front_limit.is_some();
     let effective_front_limit = if kept_total == 0 {
         if let Some(limit) = deferred_front_limit {
             limit
         } else if expand_front_with_unused_keep {
-            front_limit + keep
+            front_limit + cap
         } else {
             front_limit
         }
     } else if expand_front_with_unused_keep {
-        front_limit + keep.saturating_sub(kept_total)
+        front_limit + cap.saturating_sub(kept_total)
     } else {
         front_limit
     };
-    let mut kept_front = 0;
+
+    const MAX_FRONT_STACK: usize = 32;
+    let mut front_admitted = [usize::MAX; MAX_FRONT_STACK];
+    let mut front_admitted_len = 0usize;
+    let mut kept_front = 0usize;
+    let prioritize_exact_before_prefixes = kept_total > 0 && deferred_front_limit.is_some();
+    if prioritize_exact_before_prefixes {
+        for index in (first_reading + 1)..count {
+            if is_reading(index) || !is_promoted_exact_non_reading(index) {
+                continue;
+            }
+            if kept_front < effective_front_limit {
+                emit(index);
+                if front_admitted_len < front_admitted.len() {
+                    front_admitted[front_admitted_len] = index;
+                    front_admitted_len += 1;
+                }
+                kept_front += 1;
+            }
+        }
+    }
     for index in (first_reading + 1)..count {
-        if is_reading(index) {
+        if is_reading(index) || front_admitted[..front_admitted_len].contains(&index) {
             continue;
         }
         if kept_front < effective_front_limit {
             emit(index);
+            if front_admitted_len < front_admitted.len() {
+                front_admitted[front_admitted_len] = index;
+                front_admitted_len += 1;
+            }
             kept_front += 1;
         } else if promote_exact_after_budget && is_promoted_exact_non_reading(index) {
             emit(index);
         }
     }
-    let mut primary_near_seen = 0;
-    for index in first_reading..count {
-        if primary_reading(index) && !is_far_below_leader(index) {
-            if primary_near_seen >= kept_primary {
-                emit(index);
+
+    const MAX_TWO_CHAR_SINGLE_STACK: usize = 6;
+    let mut admitted_single = [usize::MAX; MAX_TWO_CHAR_SINGLE_STACK];
+    let mut admitted_single_len = 0usize;
+    let single_cap = if kept_total > 0 {
+        two_char_single_prefix_budget.min(MAX_TWO_CHAR_SINGLE_STACK)
+    } else {
+        0
+    };
+    if single_cap > 0 {
+        for index in (first_reading + 1)..count {
+            if is_reading(index) || !is_single_char_prefix(index) {
+                continue;
             }
-            primary_near_seen += 1;
+            if front_admitted[..front_admitted_len].contains(&index) {
+                continue;
+            }
+            emit(index);
+            admitted_single[admitted_single_len] = index;
+            admitted_single_len += 1;
+            if admitted_single_len == single_cap {
+                break;
+            }
+        }
+    }
+
+    for index in first_reading..count {
+        if primary_reading(index)
+            && !is_far_below_leader(index)
+            && !admitted_readings[..admitted_len].contains(&index)
+        {
+            emit(index);
         }
     }
     for index in first_reading..count {
@@ -453,13 +607,12 @@ fn visit_runner_up_order(
             emit(index);
         }
     }
-    let mut deferred_near_seen = 0;
     for index in first_reading..count {
-        if deferred_reading(index) && !is_far_below_leader(index) {
-            if deferred_near_seen >= kept_deferred {
-                emit(index);
-            }
-            deferred_near_seen += 1;
+        if deferred_reading(index)
+            && !is_far_below_leader(index)
+            && !admitted_readings[..admitted_len].contains(&index)
+        {
+            emit(index);
         }
     }
     for index in first_reading..count {
@@ -467,16 +620,14 @@ fn visit_runner_up_order(
             emit(index);
         }
     }
-    let mut skipped_front = 0;
     for index in (first_reading + 1)..count {
         if is_reading(index) {
             continue;
         }
-        if skipped_front < effective_front_limit {
-            skipped_front += 1;
-            continue;
-        }
-        if promote_exact_after_budget && is_promoted_exact_non_reading(index) {
+        if front_admitted[..front_admitted_len].contains(&index)
+            || (promote_exact_after_budget && is_promoted_exact_non_reading(index))
+            || admitted_single[..admitted_single_len].contains(&index)
+        {
             continue;
         }
         emit(index);
@@ -490,8 +641,10 @@ pub fn runner_up_order<'a, R: OrderRowSource<'a> + ?Sized>(
     const SENTENCE_SYLLABLES: usize = 2;
     const LONG_SENTENCE_CHARACTERS: usize = 3;
     const SENTENCE_READINGS: usize = 4;
-    const FRONT_NON_READING_LIMIT: usize = 2;
-    const SHORT_FRONT_ROW_LIMIT: usize = 4;
+    const FRONT_NON_READING_LIMIT: usize = 24;
+    const SHORT_FRONT_ROW_LIMIT: usize = 3;
+    const ALT_HEAD_MAX_MEAN_GAP_NATS: f64 = 2.2;
+    const ALT_HEAD_ABS_FLOOR_MEAN_NATS: f64 = -5.8;
 
     if !reorders_candidates(scheme) {
         return None;
@@ -511,15 +664,26 @@ pub fn runner_up_order<'a, R: OrderRowSource<'a> + ?Sized>(
         is_sentence_source(index) && (!any_reading_answers_key || rows.get(index).answers_key)
     })?;
     let width = rows.get(first_reading).text.chars().count();
+    let full_len_dict_after_first = |index: usize| {
+        let row = rows.get(index);
+        index > first_reading
+            && width >= LONG_SENTENCE_CHARACTERS
+            && DICTIONARY_SOURCES.contains(&row.source)
+            && row.answers_key
+            && !row.corrected
+            && row.text.chars().count() == width
+    };
     let is_reading = |index: usize| {
+        let row = rows.get(index);
         if any_reading_answers_key {
-            rows.get(index).answers_key && is_sentence_source(index)
+            (row.answers_key && is_sentence_source(index)) || full_len_dict_after_first(index)
         } else {
-            SENTENCE_READING_SOURCES.contains(&rows.get(index).source)
-                && rows.get(index).text.chars().count() == width
+            (SENTENCE_READING_SOURCES.contains(&row.source) && row.text.chars().count() == width)
+                || full_len_dict_after_first(index)
         }
     };
-    let expand_front_with_unused_keep = width >= LONG_SENTENCE_CHARACTERS;
+    let count_head_diversity = width >= LONG_SENTENCE_CHARACTERS;
+    let expand_front_with_unused_keep = count_head_diversity;
     let defer_two_char_splits = width == SENTENCE_SYLLABLES
         && first_reading > 0
         && DICTIONARY_SOURCES.contains(&rows.get(0).source)
@@ -528,7 +692,9 @@ pub fn runner_up_order<'a, R: OrderRowSource<'a> + ?Sized>(
         defer_two_char_splits.then(|| TWO_CHAR_DEFERRED_PAGE_BUDGET.saturating_sub(first_reading));
 
     let defer_corrected = !rows.get(first_reading).corrected;
-    let is_deferred_reading = |index: usize| defer_corrected && rows.get(index).corrected;
+    let is_deferred_reading = |index: usize| {
+        (defer_corrected && rows.get(index).corrected) || full_len_dict_after_first(index)
+    };
     let first_reading_mean = rows
         .static_evidence(first_reading)
         .and_then(StaticEvidence::mean);
@@ -551,38 +717,41 @@ pub fn runner_up_order<'a, R: OrderRowSource<'a> + ?Sized>(
                 _ => false,
             }
     };
-    let expand_to_five_readings = if width >= LONG_SENTENCE_CHARACTERS {
-        let fifth_close = first_reading_mean.is_some_and(|leader| {
-            (first_reading..count)
-                .filter(|&idx| {
-                    is_reading(idx) && !is_deferred_reading(idx) && !far_below_leader(idx)
-                })
-                .nth(SENTENCE_READINGS)
-                .and_then(|idx| rows.static_evidence(idx).and_then(StaticEvidence::mean))
-                .is_some_and(|fifth| leader - fifth <= EXPAND_FIFTH_READING_MAX_MEAN_GAP_NATS)
-        });
-        let second_front_weak = ((first_reading + 1)..count)
-            .filter(|&idx| !is_reading(idx))
-            .nth(1)
-            .is_none_or(|idx| rows.get(idx).text.chars().count() <= 1);
-        fifth_close && second_front_weak
-    } else {
-        false
+    let is_competitive_alt_head = |index: usize| match (
+        first_reading_mean,
+        rows.static_evidence(index).and_then(StaticEvidence::mean),
+    ) {
+        (Some(leader), Some(candidate)) => {
+            leader - candidate <= ALT_HEAD_MAX_MEAN_GAP_NATS
+                || candidate >= ALT_HEAD_ABS_FLOOR_MEAN_NATS
+        }
+        _ => true,
     };
     let keep = if width >= LONG_SENTENCE_CHARACTERS {
-        SENTENCE_READINGS + usize::from(expand_to_five_readings)
+        SENTENCE_READINGS.saturating_sub(first_reading).max(1)
     } else {
         1
     };
     let front_limit = if width >= LONG_SENTENCE_CHARACTERS {
-        FRONT_NON_READING_LIMIT.saturating_sub(usize::from(expand_to_five_readings))
+        FRONT_NON_READING_LIMIT
     } else {
         SHORT_FRONT_ROW_LIMIT
+    };
+    let two_char_single_prefix_budget = if width == SENTENCE_SYLLABLES && count > 8 {
+        TWO_CHAR_SINGLE_PREFIX_BUDGET
+    } else {
+        0
     };
     let is_promoted_exact_non_reading = |index: usize| {
         let row = rows.get(index);
         DICTIONARY_SOURCES.contains(&row.source) && row.answers_key && !row.corrected
     };
+    let is_single_char_prefix = |index: usize| {
+        let row = rows.get(index);
+        row.text.chars().count() == 1 && !row.corrected
+    };
+    let is_lexical_head = |index: usize| rows.get(index).lexical_head;
+    let head_key = |index: usize| reading_head_key(rows.get(index).text, width);
 
     let mut output = 0;
     let mut identity = true;
@@ -593,10 +762,16 @@ pub fn runner_up_order<'a, R: OrderRowSource<'a> + ?Sized>(
         front_limit,
         expand_front_with_unused_keep,
         deferred_front_limit,
+        count_head_diversity,
+        two_char_single_prefix_budget,
         &is_reading,
         &is_deferred_reading,
         &far_below_leader,
         &is_promoted_exact_non_reading,
+        &is_single_char_prefix,
+        &is_competitive_alt_head,
+        &is_lexical_head,
+        &head_key,
         |index| {
             identity &= output == index;
             output += 1;
@@ -615,10 +790,16 @@ pub fn runner_up_order<'a, R: OrderRowSource<'a> + ?Sized>(
         front_limit,
         expand_front_with_unused_keep,
         deferred_front_limit,
+        count_head_diversity,
+        two_char_single_prefix_budget,
         &is_reading,
         &is_deferred_reading,
         &far_below_leader,
         &is_promoted_exact_non_reading,
+        &is_single_char_prefix,
+        &is_competitive_alt_head,
+        &is_lexical_head,
+        &head_key,
         |index| {
             order.push(index);
         },
@@ -640,6 +821,7 @@ mod tests {
             source,
             answers_key: true,
             corrected: false,
+            lexical_head: true,
         }
     }
 
@@ -781,7 +963,7 @@ mod tests {
     }
 
     #[test]
-    fn long_sentences_keep_four_readings_and_two_prefixes_and_can_expand_to_five_plus_one() {
+    fn long_sentences_keep_four_diverse_readings_and_front_prefixes() {
         let rows = [
             row("今天天气", LATTICE_SOURCE),
             row("今天", 0),
@@ -794,42 +976,40 @@ mod tests {
         ];
         assert_eq!(
             runner_up_order(0, &rows),
-            Some(vec![0, 2, 3, 4, 1, 5, 6, 7])
+            Some(vec![0, 2, 3, 4, 1, 5, 7, 6])
         );
-        let reordered: Vec<_> = [0, 2, 3, 4, 1, 5, 6, 7]
+        let reordered: Vec<_> = [0, 2, 3, 4, 1, 5, 7, 6]
             .iter()
             .map(|&idx| rows[idx])
             .collect();
         assert_eq!(runner_up_order(0, &reordered), None);
 
-        let expand_rows = [
-            row("今天天气", LATTICE_SOURCE),
-            row("今天", 0),
-            row("金天天气", LATTICE_SOURCE),
-            row("今天添气", LATTICE_SOURCE),
-            row("今添天气", LATTICE_SOURCE),
-            row("今", 0),
-            row("近天天气", LATTICE_SOURCE),
-            row("金", 0),
+        // 非纠错榜首（`闲着*`）保留至多 2 席兼顾中后段消歧，同时优先放行多字词法异首词（`贤者之石`），
+        // 散字 `[1, 1, 2]` 起手（`现这只是`）让位给多字词汇首词，第 5–6 席露出高频前缀词。
+        let mut dict_sentence = row("先哲之石", 0);
+        dict_sentence.answers_key = true;
+        let mut split_head_sentence = row("现这只是", LATTICE_SOURCE);
+        split_head_sentence.lexical_head = false;
+        let diverse_rows = [
+            row("闲着只是", LATTICE_SOURCE),
+            row("闲着之时", LATTICE_SOURCE),
+            split_head_sentence,
+            row("闲着之事", LATTICE_SOURCE),
+            row("闲着知识", LATTICE_SOURCE),
+            row("贤者之石", LATTICE_SOURCE),
+            dict_sentence,
+            row("闲着", 0),
+            row("贤者", 0),
+            row("先哲", 0),
+            row("闲", 0),
+            row("贤", 0),
         ];
-        let expand_scores = [
-            Some(StaticEvidence::new(-16_000, 4)),
-            None,
-            Some(StaticEvidence::new(-17_000, 4)),
-            Some(StaticEvidence::new(-18_000, 4)),
-            Some(StaticEvidence::new(-19_000, 4)),
-            None,
-            Some(StaticEvidence::new(-20_000, 4)),
-            None,
-        ];
-        let expand_scored = ScoredOrderRows::new(&expand_rows, &expand_scores);
-        let expand_order = runner_up_order(0, &expand_scored).expect("应动态扩展为 5+1");
-        assert_eq!(expand_order, vec![0, 2, 3, 4, 6, 1, 5, 7]);
-        let r_rows: Vec<_> = expand_order.iter().map(|&i| expand_rows[i]).collect();
-        let r_scores: Vec<_> = expand_order.iter().map(|&i| expand_scores[i]).collect();
-        let (again, allocs) = crate::ime::personal_rerank::allocations::count(|| {
-            runner_up_order(0, &ScoredOrderRows::new(&r_rows, &r_scores))
-        });
+        let diverse_order = runner_up_order(0, &diverse_rows)
+            .expect("首页前 4 整句应保中后段消歧、优先多字首词并保留前缀位");
+        assert_eq!(diverse_order, vec![0, 1, 5, 2, 7, 8, 9, 10, 11, 3, 4, 6]);
+        let r_rows: Vec<_> = diverse_order.iter().map(|&i| diverse_rows[i]).collect();
+        let (again, allocs) =
+            crate::ime::personal_rerank::allocations::count(|| runner_up_order(0, &r_rows));
         assert_eq!(again, None);
         assert_eq!(allocs, 0);
     }
@@ -848,7 +1028,7 @@ mod tests {
             row("丙", 0),
         ];
         let order = runner_up_order(0, &rows).expect("应重排神经/搭配次选与单字顺序");
-        assert_eq!(order, vec![0, 3, 4, 5, 1, 2, 6, 7, 8]);
+        assert_eq!(order, vec![0, 3, 4, 5, 1, 2, 7, 8, 6]);
         let reordered: Vec<_> = order.iter().map(|&index| rows[index]).collect();
         assert_eq!(runner_up_order(0, &reordered), None);
     }
@@ -893,8 +1073,34 @@ mod tests {
         .collect();
         assert_eq!(
             runner_up_order(0, &suffix_rows),
-            Some(vec![0, 1, 6, 7, 2, 3, 8, 4, 5])
+            Some(vec![0, 1, 6, 7, 2, 3, 4, 5, 8])
         );
+    }
+
+    #[test]
+    fn two_char_exact_dictionary_homophones_precede_longer_prefix_completions() {
+        let mut ext1 = row("他们的", 0);
+        ext1.answers_key = false;
+        let mut ext2 = row("他们是", 0);
+        ext2.answers_key = false;
+        let mut single = row("他", 0);
+        single.answers_key = false;
+        let rows = [
+            row("他们", 0),
+            row("他门", LATTICE_SOURCE),
+            ext1,
+            ext2,
+            row("她们", 0),
+            row("它们", 0),
+            single,
+        ];
+        let order = runner_up_order(0, &rows).expect("双音节精确词典同音词应排在 3 字前缀补全前");
+        assert_eq!(order, vec![0, 1, 4, 5, 2, 3, 6]);
+        let reordered: Vec<_> = order.iter().map(|&idx| rows[idx]).collect();
+        let (again, allocs) =
+            crate::ime::personal_rerank::allocations::count(|| runner_up_order(0, &reordered));
+        assert_eq!(again, None);
+        assert_eq!(allocs, 0);
     }
 
     #[test]
@@ -905,6 +1111,43 @@ mod tests {
             row("你", 0),
         ];
         assert_eq!(runner_up_order(0, &rows), Some(vec![0, 2, 1]));
+    }
+
+    #[test]
+    fn two_char_order_surfaces_single_char_prefixes_ahead_of_rare_tail() {
+        let mut s1 = row("之", 0);
+        s1.answers_key = false;
+        let mut s2 = row("知", 0);
+        s2.answers_key = false;
+        let mut s3 = row("直", 0);
+        s3.answers_key = false;
+        let rows = [
+            row("只是", 0),
+            row("知识", 0),
+            row("之时", 0),
+            row("知事", 0),
+            row("之石", LATTICE_SOURCE),
+            row("芝士", 0),
+            row("直视", 0),
+            row("智识", 0),
+            row("指示", 0),
+            row("志士", 0),
+            row("制式", 0),
+            row("支式", LATTICE_SOURCE),
+            s1,
+            s2,
+            s3,
+        ];
+        let order = runner_up_order(0, &rows).expect("双音节尾部应提前露出首字单字前缀");
+        assert_eq!(
+            order,
+            vec![0, 1, 2, 3, 4, 5, 6, 7, 12, 13, 14, 11, 8, 9, 10]
+        );
+        let reordered: Vec<_> = order.iter().map(|&idx| rows[idx]).collect();
+        let (again, allocs) =
+            crate::ime::personal_rerank::allocations::count(|| runner_up_order(0, &reordered));
+        assert_eq!(again, None);
+        assert_eq!(allocs, 0);
     }
 
     #[test]
@@ -943,8 +1186,8 @@ mod tests {
             row("乙甲甲", LATTICE_SOURCE),
             single,
         ];
-        let page_order = runner_up_order(0, &full_rows).expect("首页应优先保留四条未纠错整句");
-        assert_eq!(page_order, vec![0, 3, 4, 5, 2, 6, 1]);
+        let page_order = runner_up_order(0, &full_rows).expect("首页应优先保留四条多样未纠错整句");
+        assert_eq!(page_order, vec![0, 3, 5, 4, 2, 6, 1]);
         let reordered: Vec<_> = page_order.iter().map(|&idx| full_rows[idx]).collect();
         let (again, allocations) =
             crate::ime::personal_rerank::allocations::count(|| runner_up_order(0, &reordered));
@@ -974,26 +1217,26 @@ mod tests {
             prefix1,
             prefix2,
             prefix3,
+            row("许各院", LATTICE_SOURCE),
+            row("许哥原", LATTICE_SOURCE),
             char1,
             char2,
             char3,
-            row("许各院", LATTICE_SOURCE),
-            row("许哥原", LATTICE_SOURCE),
         ];
         let scores = [
             Some(StaticEvidence::new(-15_000, 3)),
             None,
             None,
             None,
-            None,
-            None,
-            None,
             Some(StaticEvidence::new(-30_500, 3)),
             Some(StaticEvidence::new(-30_400, 3)),
+            None,
+            None,
+            None,
         ];
         let scored = ScoredOrderRows::new(&rows, &scores);
         let order = runner_up_order(0, &scored).expect("悬殊落后的拼凑次选不应留在首屏");
-        assert_eq!(order, vec![0, 1, 2, 3, 4, 5, 7, 8, 6]);
+        assert_eq!(order, vec![0, 1, 2, 3, 6, 7, 8, 4, 5]);
 
         let reordered: Vec<_> = order.iter().map(|&idx| rows[idx]).collect();
         let reordered_scores: Vec<_> = order.iter().map(|&idx| scores[idx]).collect();

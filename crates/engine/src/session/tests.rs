@@ -6123,5 +6123,87 @@ fn shuangpin_composed_phrase_immediately_recalls_after_context_change() {
     assert_eq!(words(&session)[0], "你号");
 }
 
+#[test]
+fn multi_syllable_tail_pruning_keeps_common_prefixes_and_preserves_tab_filter_and_single_syllable()
+{
+    let mut sql = String::from(
+        "CREATE TABLE tbl_1_x(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         CREATE TABLE tbl_1_z(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         CREATE TABLE tbl_1_s(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         CREATE TABLE tbl_2_x(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         CREATE TABLE tbl_2_z(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_1_z VALUES('zhe','zh','着',5000000),('zhi','zh','之',5000000);\
+         INSERT INTO tbl_1_s VALUES('shi','sh','是',5000000);\
+         INSERT INTO tbl_2_x VALUES('xian''zhe','xzh','闲着',30000),('xian''zhe','xzh','贤者',15000),('xi''an','xa','西安',40000);\
+         INSERT INTO tbl_2_z VALUES('zhi''shi','zhsh','只是',900000);\
+         INSERT INTO tbl_1_x VALUES('xi','x','西',4000000),('xi','x','希',3000000)",
+    );
+    let pool: Vec<char> = (0x4E00u32..0x4E60u32)
+        .filter_map(char::from_u32)
+        .filter(|&c| c != '西' && c != '希')
+        .collect();
+    for (idx, ch) in pool.iter().take(72).enumerate() {
+        let wt = if idx < 30 {
+            10_000 - idx as i64 * 100
+        } else {
+            0
+        };
+        sql.push_str(&format!(",('xian','x','{ch}',{wt})"));
+    }
+    sql.push(';');
+
+    let fixture = Fixture::new(&sql);
+    let stroke_path = fixture.path().join("msime-stroke.db");
+    {
+        let conn = Connection::open(&stroke_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE metadata(name TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;\
+             CREATE TABLE syllables(syllable TEXT PRIMARY KEY) WITHOUT ROWID;\
+             CREATE TABLE entries(key TEXT NOT NULL, text TEXT NOT NULL, weight INTEGER NOT NULL, PRIMARY KEY(key, text)) WITHOUT ROWID;\
+             INSERT INTO metadata VALUES('format_version','1'),('license','LGPL-3.0-only');\
+             INSERT INTO syllables VALUES('h');",
+        )
+        .unwrap();
+    }
+    let mut session = fixture.session_with(|options| {
+        options.tab_stroke_filter = true;
+        options.stroke_dictionary = stroke_path.clone();
+    });
+
+    // 1. 多音节输入 `xianzhezhishi`：过滤混音非主音节单字（`xi -> 西/希`），保留 `weight > 0` 常用字并封顶 64 枚，同时保留 `西安` 等多字词。
+    type_text(&mut session, "xianzhezhishi");
+    let multi_words = words(&session);
+    assert!(!multi_words.iter().any(|w| w == "西" || w == "希"));
+    let xian_singles: Vec<&str> = multi_words
+        .iter()
+        .map(String::as_str)
+        .filter(|w| w.chars().count() == 1 && pool.contains(&w.chars().next().unwrap()))
+        .collect();
+    assert_eq!(
+        xian_singles.len(),
+        30,
+        "零权重长尾生僻字应被清理: {xian_singles:?}"
+    );
+
+    // 2. 按 Tab 开启笔画筛选时，必须恢复全量单字列表供生僻字按笔顺检索。
+    session.character(b'\t', false);
+    assert!(session.input.stroke_filter.is_some());
+    let tab_words = words(&session);
+    let tab_singles = tab_words
+        .iter()
+        .filter(|w| w.chars().count() == 1 && pool.contains(&w.chars().next().unwrap()))
+        .count();
+    assert_eq!(tab_singles, 72, "Tab 笔画筛选期必须保留全量 72 个同音单字");
+
+    // 3. 单音节 `xian` 保持全量单字不被误伤。
+    session.command(Command::Cancel);
+    type_text(&mut session, "xian");
+    let single_count = words(&session)
+        .iter()
+        .filter(|w| w.chars().count() == 1 && pool.contains(&w.chars().next().unwrap()))
+        .count();
+    assert_eq!(single_count, 72, "单音节输入必须完整保留 72 个单字");
+}
+
 mod caret_suffix;
 mod stroke_filter;

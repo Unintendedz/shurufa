@@ -203,6 +203,17 @@ impl ShuangpinEngine {
             .pick_dictionary_homophone(items, context, effective_weights)
     }
 
+    /// 只读查询双拼 `.gram` 语法模型在给定前文尾窗上的搭配净增益。
+    pub fn query_collocation_bonus(
+        &self,
+        context_tail: &str,
+        word: &str,
+        is_rear: bool,
+    ) -> Option<f64> {
+        self.dictionary
+            .query_collocation_bonus(context_tail, word, is_rear)
+    }
+
     pub fn reset_cache(&mut self) {
         self.dictionary.reset_cache();
         if let Some(fuzzy_dictionary) = &mut self.fuzzy_dictionary {

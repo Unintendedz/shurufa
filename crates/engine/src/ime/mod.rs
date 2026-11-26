@@ -282,6 +282,23 @@ impl ImeSession {
         )
     }
 
+    /// 返回当前保留在重排上文窗口内的连续汉字分句，供 `.gram` 搭配特征提取复用。
+    pub(crate) fn rescoring_han_clause(&self) -> &str {
+        crate::text::trailing_han_clause(&self.rescoring_context)
+    }
+
+    /// 只读查询 `.gram` 语法模型在给定前文尾窗上的搭配净增益。
+    pub(crate) fn query_collocation_bonus(
+        &self,
+        scheme: SchemeType,
+        context_tail: &str,
+        word: &str,
+        is_rear: bool,
+    ) -> Option<f64> {
+        self.registry
+            .query_collocation_bonus(scheme, context_tail, word, is_rear)
+    }
+
     pub(crate) fn quanpin_mut(&mut self) -> &mut QuanpinEngine {
         self.registry.quanpin_mut()
     }
