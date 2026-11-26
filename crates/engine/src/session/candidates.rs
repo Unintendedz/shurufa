@@ -96,6 +96,7 @@ impl InputSession {
 
     pub(super) fn update_mixed_candidates(&mut self) {
         self.merge_mixed_candidates();
+        self.apply_stroke_filter();
     }
 
     fn merge_mixed_candidates(&mut self) {
@@ -667,6 +668,7 @@ impl InputSession {
             || self.dedicated_english
             || self.prefix_active
             || self.caret_edit.active
+            || self.stroke_filter.is_some()
             || self.conversion.is_some()
             || !self.has_composition()
             || !self.scheme().is_pinyin()

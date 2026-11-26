@@ -27,6 +27,7 @@ if restricted:
 fi
 
 cargo build --release -p msime-host-api --locked
+python3 scripts/fetch_stroke_dictionary.py
 resources="$(cargo run --quiet -p msime-client-core --example install_resources --locked -- target/resources)"
 MSIME_EDITION=shurufa bash platforms/macos/stage-resources.sh "$resources"
 

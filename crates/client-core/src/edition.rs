@@ -487,10 +487,10 @@ mod tests {
                 neural_keyboard: false,
                 offline_glosses: false,
                 handwriting: false,
-                tab_stroke_filter: false,
+                tab_stroke_filter: true,
             }
         );
-        assert!(shurufa.language_dictionaries.is_empty());
+        assert_eq!(shurufa.language_dictionaries, ["msime-stroke.db"]);
         assert_eq!(shurufa.display_name.zh_hans, "Shurufa");
         assert_eq!(shurufa.display_name.en, "Shurufa");
         assert_eq!(shurufa.mcp_server_name(), "msime-shurufa");
@@ -543,7 +543,7 @@ mod tests {
             .filter(|edition| edition.features.tab_stroke_filter)
             .map(|edition| edition.id.as_str())
             .collect();
-        assert_eq!(offering, ["full"]);
+        assert_eq!(offering, ["full", "shurufa"]);
         for id in offering {
             let edition = Edition::by_id(id).unwrap();
             assert!(edition

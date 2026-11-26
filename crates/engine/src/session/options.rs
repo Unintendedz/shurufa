@@ -1,5 +1,7 @@
 //! `Session` 公共配置与快照类型。
 
+use std::path::PathBuf;
+
 use crate::paths::RuntimePaths;
 use crate::punctuation::PunctuationMarks;
 use crate::types::{
@@ -31,6 +33,10 @@ pub struct SessionOptions {
     pub first_page_rows: usize,
     pub single_character_only: bool,
     pub caret_edit_suffix: bool,
+    /// Tab 笔画与偏旁筛选（默认关）：全拼/双拼组字时按 Tab 进入筛选，`hspnzd`+`x` 按笔顺，其余小写字母按拆字部件。
+    pub tab_stroke_filter: bool,
+    /// `msime-stroke.db` 文件路径；空路径表示无可用笔画词库。
+    pub stroke_dictionary: PathBuf,
     pub fuzzy_pinyin: FuzzyPinyinOptions,
     pub frequency: FrequencyAdjustmentOptions,
     pub local_modes: LocalModeOptions,
@@ -69,6 +75,8 @@ impl SessionOptions {
             first_page_rows: DEFAULT_FIRST_PAGE_ROWS,
             single_character_only: false,
             caret_edit_suffix: false,
+            tab_stroke_filter: false,
+            stroke_dictionary: PathBuf::new(),
             fuzzy_pinyin: FuzzyPinyinOptions::default(),
             frequency: FrequencyAdjustmentOptions::default(),
             local_modes: LocalModeOptions::default(),

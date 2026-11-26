@@ -6124,3 +6124,4 @@ fn shuangpin_composed_phrase_immediately_recalls_after_context_change() {
 }
 
 mod caret_suffix;
+mod stroke_filter;

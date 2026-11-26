@@ -230,6 +230,8 @@ fn local_mode_resource_gates_preserve_unrelated_modes() {
         shuangpin_preedit_uses_raw: true,
         single_character_only: false,
         caret_edit_suffix: false,
+        tab_stroke_filter: false,
+        stroke_dictionary: String::new(),
         learning: false,
         decoupled_personal_learning: false,
         learn_english_on_enter: true,
@@ -303,6 +305,23 @@ fn local_mode_resource_gates_preserve_unrelated_modes() {
     assert!(options.local_date_time);
     assert!(options.local_quick_phrase);
     assert!(options.local_super_jianpin);
+
+    // Tab 笔画词库存在与缺失时的资源门控。
+    let parent_lang = root.path().join("language-dictionaries");
+    std::fs::create_dir_all(&parent_lang).unwrap();
+    let res_dir = root.path().join("EngineResources");
+    std::fs::create_dir_all(&res_dir).unwrap();
+    options.resources = res_dir.to_string_lossy().into_owned();
+    options.tab_stroke_filter = true;
+    apply_local_mode_resource_gates(&mut options, Edition::by_id("shurufa").unwrap());
+    assert!(!options.tab_stroke_filter);
+    assert!(options.stroke_dictionary.is_empty());
+
+    std::fs::write(parent_lang.join("msime-stroke.db"), b"fixture").unwrap();
+    options.tab_stroke_filter = true;
+    apply_local_mode_resource_gates(&mut options, Edition::by_id("shurufa").unwrap());
+    assert_eq!(options.tab_stroke_filter, cfg!(target_os = "macos"));
+    assert!(options.stroke_dictionary.ends_with("msime-stroke.db"));
 }
 
 #[test]

@@ -14,6 +14,7 @@ mod literal;
 mod online;
 pub mod options;
 mod prediction;
+mod stroke_filter;
 #[cfg(test)]
 mod tests;
 
@@ -299,7 +300,7 @@ impl Session {
             .unwrap_or_default();
         let segmented_preedit = (segmented_quanpin && input.scheme() == SchemeType::Quanpin)
             || (!self.shuangpin_preedit_uses_raw && input.scheme() == SchemeType::Shuangpin);
-        let preedit = if segmented_preedit
+        let mut preedit = if segmented_preedit
             && input.local_mode == LocalInputMode::None
             && !input.dedicated_english
         {
@@ -307,6 +308,10 @@ impl Session {
         } else {
             input.preedit()
         };
+        // Tab 笔画筛选的码只附加在预编辑后面，`editing_text` 与光标位置仍保留原拼音串。
+        if let Some(strokes) = input.stroke_filter_preedit() {
+            preedit.push_str(&strokes);
+        }
         SessionSnapshot {
             prediction: false,
             scheme: input.scheme(),

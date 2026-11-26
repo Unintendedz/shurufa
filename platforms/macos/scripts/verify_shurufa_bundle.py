@@ -33,7 +33,7 @@ assert "MSIMEBackend" not in linked
 assert (contents / "MacOS/shurufa-voice-local").is_file()
 assert (contents / "Helpers/ShurufaNeuralService").is_file()
 assert not (contents / "MacOS/msime-voice-local").exists()
-# 确认已剔除旧模型、五笔词库、笔画词库与辅助码表。
+# 确认已剔除旧模型、五笔词库与辅助码表，并随包带齐 Tab 笔画筛选词库 `msime-stroke.db`。
 engine_res = contents / "Resources/EngineResources"
 assert (engine_res / "msime-pinyin.db").is_file()
 assert (engine_res / "msime-english.db").is_file()
@@ -43,6 +43,9 @@ assert not (engine_res / "msime-wubi.db").exists()
 assert not (engine_res / "msime-stroke.db").exists()
 assert not (engine_res / "helpcodes").exists()
 assert not (contents / "Resources/settled-model").exists()
+lang_dicts = contents / "Resources/language-dictionaries"
+assert (lang_dicts / "msime-stroke.db").is_file()
+assert (lang_dicts / "msime-rime_stroke_LICENSE.txt").is_file()
 identity = json.loads(subprocess.check_output([str(executable), "--describe-host"], text=True))
 assert identity["bundle_id"] == identifier
 assert identity["preferences_domain"] == identifier

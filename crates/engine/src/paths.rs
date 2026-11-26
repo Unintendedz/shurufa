@@ -181,7 +181,6 @@ pub(crate) fn sqlite_read_only_path_no_follow(path: &Path) -> io::Result<PathBuf
 /// packaged language dictionaries, whose established contract permits an
 /// application supplied directory alias. They are opened read-only, so the
 /// link count follows [`sqlite_read_only_path_no_follow`].
-#[cfg(test)]
 pub(crate) fn sqlite_path_no_follow_allow_parent_symlinks(path: &Path) -> io::Result<PathBuf> {
     sqlite_path_no_follow_with_parent_policy(path, false, true)
 }

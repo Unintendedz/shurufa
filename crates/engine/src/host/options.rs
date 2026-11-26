@@ -112,6 +112,10 @@ pub struct EngineOptions {
     pub first_page_rows: usize,
     pub single_character_only: bool,
     pub caret_edit_suffix: bool,
+    /// Tab 笔画与偏旁筛选（`SessionOptions::tab_stroke_filter`）。
+    pub tab_stroke_filter: bool,
+    /// `msime-stroke.db` 的绝对路径；为空表示没有可用笔画词库。
+    pub stroke_dictionary: String,
 }
 
 pub fn prepare_options(
@@ -150,6 +154,8 @@ pub fn prepare_options_for(
         shuangpin_preedit_uses_raw: true,
         single_character_only: false,
         caret_edit_suffix: false,
+        tab_stroke_filter: false,
+        stroke_dictionary: String::new(),
         learning: false,
         decoupled_personal_learning: false,
         learn_english_on_enter: true,
@@ -228,6 +234,8 @@ pub fn session_options(options: &EngineOptions) -> Result<SessionOptions> {
     session.shuangpin_preedit_uses_raw = options.shuangpin_preedit_uses_raw;
     session.single_character_only = options.single_character_only;
     session.caret_edit_suffix = options.caret_edit_suffix;
+    session.tab_stroke_filter = options.tab_stroke_filter;
+    session.stroke_dictionary = PathBuf::from(&options.stroke_dictionary);
     session.learning = options.learning;
     session.decoupled_personal_learning = options.decoupled_personal_learning;
     session.learn_english_on_enter = options.learn_english_on_enter;

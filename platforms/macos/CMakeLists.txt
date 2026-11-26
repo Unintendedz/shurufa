@@ -194,6 +194,9 @@ configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/msime-engin
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/Administrative-divisions-of-China-WTFPL.txt" "${MSIME_LEGAL_DIRECTORY}/Administrative-divisions-of-China-WTFPL.txt" COPYONLY)
 # 语法模型查询逻辑的移植声明随引擎分发。
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/librime-octagram-BSD-3-Clause.txt" "${MSIME_LEGAL_DIRECTORY}/librime-octagram-BSD-3-Clause.txt" COPYONLY)
+# Tab 偏旁筛选内嵌的拆字表（kfcd/chaizi CC BY 3.0）与笔画词库（rime-stroke LGPL 3.0）许可声明随包分发。
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/kfcd-chaizi-CC-BY-3.0.txt" "${MSIME_LEGAL_DIRECTORY}/kfcd-chaizi-CC-BY-3.0.txt" COPYONLY)
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/rime-stroke-LGPL-3.0.txt" "${MSIME_LEGAL_DIRECTORY}/rime-stroke-LGPL-3.0.txt" COPYONLY)
 # 符号模式（S 模式）的分组码表来自 rime-wanxiang 的 wanxiang_symbols.yaml（CC BY 4.0）；第 3(a) 条要求分发改编数据时附上署名、许可证地址和改动说明，这份文件就是。
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/rime-wanxiang-CC-BY-4.0.txt" "${MSIME_LEGAL_DIRECTORY}/rime-wanxiang-CC-BY-4.0.txt" COPYONLY)
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/../../resources/licenses/Unicode-License-V3.txt" "${MSIME_LEGAL_DIRECTORY}/Unicode-License-V3.txt" COPYONLY)
@@ -318,6 +321,14 @@ foreach(resource IN LISTS MSIME_SHURUFA_RESOURCE_FILES)
   target_sources(MSIMEClientInputMethod PRIVATE "${resource}")
   set_source_files_properties("${resource}" PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/EngineResources/${directory}")
 endforeach()
+# Tab 笔画筛选（版本表 features.tab_stroke_filter）读 msime-stroke.db；host-api 在 EngineResources 旁边的 language-dictionaries 里找它，许可证随数据一起走。
+set(MSIME_SHURUFA_LANGUAGES "${CMAKE_CURRENT_SOURCE_DIR}/../../target/macos/language-dictionaries")
+if(NOT EXISTS "${MSIME_SHURUFA_LANGUAGES}/msime-stroke.db" OR NOT EXISTS "${MSIME_SHURUFA_LANGUAGES}/msime-rime_stroke_LICENSE.txt")
+  message(FATAL_ERROR "Stage msime-stroke.db and its licence (scripts/fetch_stroke_dictionary.py, then stage-resources.sh) before configuring the Shurufa bundle")
+endif()
+file(GLOB MSIME_SHURUFA_LANGUAGE_FILES CONFIGURE_DEPENDS "${MSIME_SHURUFA_LANGUAGES}/*")
+target_sources(MSIMEClientInputMethod PRIVATE ${MSIME_SHURUFA_LANGUAGE_FILES})
+set_source_files_properties(${MSIME_SHURUFA_LANGUAGE_FILES} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources/language-dictionaries")
 # 本地流式识别（TextStream）：输入法 spawn Contents/Resources/textstream/shurufa-textstream，它在自身目录里找 worker；install-runtime.sh 随包，由设置窗口调用，把 Python 运行环境和模型装进用户的 Application Support。
 set(MSIME_TEXTSTREAM_FILES shurufa-textstream textstream_worker.py install-runtime.sh requirements.lock LICENSE-TextStream)
 foreach(MSIME_TEXTSTREAM_FILE IN LISTS MSIME_TEXTSTREAM_FILES)

@@ -47,9 +47,11 @@
         "neural_keyboard": false,
         "offline_glosses": false,
         "handwriting": false,
-        "tab_stroke_filter": false
+        "tab_stroke_filter": true
       },
-      "language_dictionaries": [],
+      "language_dictionaries": [
+        "msime-stroke.db"
+      ],
       "platforms": {
         "macos": {
           "input_method_bundle_id": "dev.shurufa.inputmethod.Shurufa",

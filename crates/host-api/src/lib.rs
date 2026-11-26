@@ -295,7 +295,7 @@ fn apply_shurufa_input_policy(preferences: &mut Preferences, edition: &Edition) 
     preferences.navigation.mouse_wheel = true;
 }
 
-fn apply_local_mode_resource_gates(options: &mut EngineOptions, _edition: &Edition) {
+fn apply_local_mode_resource_gates(options: &mut EngineOptions, edition: &Edition) {
     let resources = std::path::Path::new(&options.resources);
     let has_emoji_catalog = resources.join("msime-others.db").is_file();
     let has_english_dictionary = resources.join("msime-english.db").is_file();
@@ -303,6 +303,20 @@ fn apply_local_mode_resource_gates(options: &mut EngineOptions, _edition: &Editi
     options.local_kaomoji &= has_emoji_catalog;
     options.local_temporary_english &= has_english_dictionary;
     options.sentence_association.neural_keyboard = false;
+    if options.stroke_dictionary.is_empty() {
+        if let Some(stroke_db) = resources
+            .parent()
+            .map(|dir| dir.join("language-dictionaries").join("msime-stroke.db"))
+            .filter(|path| path.is_file())
+            .and_then(|path| path.to_str().map(str::to_owned))
+        {
+            options.stroke_dictionary = stroke_db;
+        }
+    }
+    options.tab_stroke_filter &= cfg!(target_os = "macos")
+        && edition.features.tab_stroke_filter
+        && !options.stroke_dictionary.is_empty()
+        && std::path::Path::new(&options.stroke_dictionary).is_file();
 }
 
 fn punctuation_lock_code(lock: msime_client_core::preferences::PunctuationLock) -> u8 {
@@ -718,6 +732,8 @@ impl HostSession {
         options.shuangpin_preedit_uses_raw = preferences.shuangpin_preedit_uses_raw;
         options.single_character_only = preferences.single_character_only;
         options.caret_edit_suffix = caret_edit_suffix_applies(&preferences);
+        options.tab_stroke_filter =
+            self.edition.features.tab_stroke_filter && preferences.tab_stroke_filter;
         options.learning = preferences.learning;
         options.decoupled_personal_learning = self.edition.id == "shurufa";
         options.next_word_prediction =
@@ -1396,6 +1412,9 @@ impl HostOptions {
             shuangpin_preedit_uses_raw: self.preferences.shuangpin_preedit_uses_raw,
             single_character_only: self.preferences.single_character_only,
             caret_edit_suffix: caret_edit_suffix_applies(&self.preferences),
+            tab_stroke_filter: edition.features.tab_stroke_filter
+                && self.preferences.tab_stroke_filter,
+            stroke_dictionary: String::new(),
             learning: self.preferences.learning,
             decoupled_personal_learning: edition.id == "shurufa",
             learn_english_on_enter: self.preferences.enter_learns_english_word,

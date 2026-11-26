@@ -28,4 +28,11 @@ while IFS= read -r artifact; do
 done <<< "$artifacts"
 
 cargo run --quiet -p msime-client-core --example verify_resources --locked -- ${edition_flags[@]+"${edition_flags[@]}"} "$destination" >/dev/null
+stroke_source="${2:-$repo_root/target/language-dictionaries}"
+if [ -f "$stroke_source/msime-stroke.db" ] && [ -f "$stroke_source/msime-rime_stroke_LICENSE.txt" ]; then
+  stroke_dest="$repo_root/target/macos/language-dictionaries"
+  mkdir -p "$stroke_dest"
+  cp "$stroke_source/msime-stroke.db" "$stroke_dest/msime-stroke.db"
+  cp "$stroke_source/msime-rime_stroke_LICENSE.txt" "$stroke_dest/msime-rime_stroke_LICENSE.txt"
+fi
 echo "macOS resources staged for $edition: $destination"

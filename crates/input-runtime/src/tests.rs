@@ -3681,6 +3681,8 @@ fn real_engine_options(root: &std::path::Path) -> msime_engine::host::EngineOpti
         shuangpin_preedit_uses_raw: true,
         single_character_only: false,
         caret_edit_suffix: false,
+        tab_stroke_filter: false,
+        stroke_dictionary: String::new(),
         learning: false,
         decoupled_personal_learning: false,
         learn_english_on_enter: true,

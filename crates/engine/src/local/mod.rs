@@ -1,6 +1,7 @@
 //! Shift+letter local modes (core-session.md §10, overlays.md §8.1): Unicode code points, date and time, quick phrases, emoji, kaomoji, symbols and super jianpin, plus the emoji / kaomoji / symbol catalog the host's picker pages through. Quick phrase and jianpin read the generation's `msime-pinyin.db`; emoji and kaomoji read the resource `msime-others.db`. The expression (`V`), command (`/`) and mention (`@`) modes compute their rows from the input, the clock and host-supplied tables, and read nothing from disk. 拆字反查（`C`）与符号模式（`S`）查编进引擎的表，同样不读磁盘。
 
 pub mod catalog;
+pub(crate) mod chaizi;
 pub mod command;
 pub mod database;
 pub mod date_time;

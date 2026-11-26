@@ -132,6 +132,8 @@ impl InputSession {
 
     /// 选中第 `index` 条并上屏或推进组字。
     pub(super) fn commit(&mut self, index: usize) -> KeyResult {
+        // 选中候选即结束当前 Tab 筛选，剩余未选拼音（若有）恢复未筛选视图。
+        self.stroke_filter = None;
         if self.caret_edit.active && self.conversion.is_none() && self.date_time_menu_page.is_none()
         {
             if let Some(result) = self.commit_caret_edit(index) {

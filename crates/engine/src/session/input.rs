@@ -10,6 +10,7 @@ use super::clock::Clock;
 use super::conversion::ConversionEdit;
 use super::online::OnlineRequestGuard;
 use super::options::SessionOptions;
+use super::stroke_filter::{StrokeDictionary, StrokeFilter};
 use crate::assets;
 use crate::diagnostics;
 use crate::error::{EngineError, Result};
@@ -108,6 +109,12 @@ pub(super) struct InputSession {
     pub shuangpin_preedit_uses_raw: bool,
     pub single_character_only: bool,
     pub conversion: Option<ConversionEdit>,
+    /// Tab 笔画与偏旁筛选开关（`SessionOptions::tab_stroke_filter`）。
+    pub tab_stroke_filter: bool,
+    /// `msime-stroke.db` 文件路径；首次按 Tab 时只读打开。
+    pub stroke_dictionary_path: PathBuf,
+    pub stroke_dictionary: Option<StrokeDictionary>,
+    pub stroke_filter: Option<StrokeFilter>,
 }
 
 impl InputSession {
@@ -176,6 +183,10 @@ impl InputSession {
             shuangpin_preedit_uses_raw: options.shuangpin_preedit_uses_raw,
             single_character_only: options.single_character_only,
             conversion: None,
+            tab_stroke_filter: options.tab_stroke_filter,
+            stroke_dictionary_path: options.stroke_dictionary.clone(),
+            stroke_dictionary: None,
+            stroke_filter: None,
             journal_path: journal,
             paths,
         };
@@ -223,7 +234,9 @@ impl InputSession {
         self.punctuation.clear_quote_undo();
         self.last_overlay_learning = None;
         self.exit_date_time_menu();
-        let result = self.dispatch_character(value, shift_only);
+        let result = self
+            .stroke_filter_character(value)
+            .unwrap_or_else(|| self.dispatch_character(value, shift_only));
         self.uppercase_passthrough = value.is_ascii_uppercase() && !result.handled;
         result
     }
@@ -408,6 +421,9 @@ impl InputSession {
             self.exit_date_time_menu();
         }
         self.end_uppercase_run();
+        if let Some(result) = self.stroke_filter_command(command) {
+            return result;
+        }
         if !self.has_composition() {
             match command {
                 Command::Backspace => {
@@ -623,6 +639,9 @@ impl InputSession {
     pub fn spelling_symbols(&self) -> String {
         let mut symbols = self.base_spelling_symbols();
         symbols.extend(self.literal_spelling_symbols());
+        if self.stroke_filter_takes_tab() {
+            symbols.push('\t');
+        }
         symbols
     }
 
@@ -842,6 +861,7 @@ impl InputSession {
         self.mixed_candidates.clear();
         self.personal_reranked = false;
         self.ranking_candidates = None;
+        self.stroke_filter = None;
         self.engine.reset();
     }
 
