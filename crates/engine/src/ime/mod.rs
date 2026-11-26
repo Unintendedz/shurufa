@@ -1,5 +1,6 @@
 //! `ImeSession`：持有当前激活的拼音方案与候选提供者注册表，负责逐键构建请求与候选查询。
 
+pub(crate) mod code_switch;
 pub mod online_batch;
 pub mod personal_rerank;
 pub mod queries;

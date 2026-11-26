@@ -54,6 +54,7 @@ pub struct CandidateQueries {
     paths: RuntimePaths,
     profile: &'static ShuangpinProfile,
     english: Option<EnglishDictionary>,
+    code_switch: crate::ime::code_switch::CodeSwitchDecoder,
     /// The host's command table, usable rows only.
     command_table: Vec<CommandTableEntry>,
     /// 宿主交来的插件指令，原样保留：指令表一换就要按新表重新过滤。
@@ -74,6 +75,7 @@ impl CandidateQueries {
             paths: paths.clone(),
             profile,
             english: None,
+            code_switch: crate::ime::code_switch::CodeSwitchDecoder::default(),
             command_table: Vec::new(),
             requested_plugin_commands: Vec::new(),
             plugin_commands: Vec::new(),
@@ -424,6 +426,26 @@ impl CandidateQueries {
             && !english_rows.is_empty()
             && is_unsegmentable(shuangpin))
         .then_some(prefix);
+        // 无模式句内中英同轨混输：仅在全拼、常规模式、5..=40 字节纯小写、整段全拼不可切且非完整英文单词时触发。
+        let exact_whole_english = english_rows.iter().any(|row| row.pinyin == prefix);
+        let code_switch_rows = if english.mixed_candidates
+            && english_may_lead
+            && scheme == SchemeType::Quanpin
+            && lowercase_ascii
+            && (crate::ime::code_switch::MIN_CODE_SWITCH_INPUT_LEN
+                ..=crate::ime::code_switch::MAX_CODE_SWITCH_INPUT_LEN)
+                .contains(&prefix.len())
+            && !exact_whole_english
+            && is_unsegmentable(shuangpin)
+        {
+            let paths = self.paths.clone();
+            let mut decoder = std::mem::take(&mut self.code_switch);
+            let rows = decoder.generate(prefix, &paths, self.english_dictionary());
+            self.code_switch = decoder;
+            rows
+        } else {
+            Vec::new()
+        };
         // 3～4 字母的不可拆小写前缀不抢中文首选，首页在可选精确匹配之外最多跟进 2 条补全词。
         let first_page_count = if short_unsegmentable_prefix {
             let exact_slot =
@@ -432,7 +454,7 @@ impl CandidateQueries {
         } else {
             english.first_page_count
         };
-        insert_mixed_rows_with_japanese(
+        let mut merged = insert_mixed_rows_with_japanese(
             candidates,
             english_rows,
             emoji_rows,
@@ -442,8 +464,49 @@ impl CandidateQueries {
             japanese,
             first_page_count,
             first_page_rows,
-        )
+        );
+        if !code_switch_rows.is_empty() {
+            insert_code_switch_rows(&mut merged, code_switch_rows, prefix);
+        }
+        merged
     }
+}
+
+/// 将句内中英混输候选插入已排好序的候选列表中：
+/// 保留前置固定/置顶/在线云候选及匹配完整输入的用户短语后，把最优混输句置于首位，其余备选置入优先席位之后。
+fn insert_code_switch_rows(
+    candidates: &mut Vec<WordItem>,
+    code_switch_rows: Vec<WordItem>,
+    prefix: &str,
+) {
+    let unique: Vec<WordItem> = code_switch_rows
+        .into_iter()
+        .filter(|row| !candidates.iter().any(|existing| existing.word == row.word))
+        .collect();
+    let mut iter = unique.into_iter();
+    let Some(first) = iter.next() else {
+        return;
+    };
+    let lead_slot = candidates
+        .iter()
+        .position(|item| {
+            !item.pinned_first
+                && item.fixed_position == 0
+                && !matches!(
+                    item.source,
+                    CandidateSource::CloudSuggestion
+                        | CandidateSource::CloudPending
+                        | CandidateSource::AiSuggestion
+                        | CandidateSource::AiPending
+                )
+                && !(item.source == CandidateSource::UserDatabase && item.pinyin == prefix)
+        })
+        .unwrap_or(candidates.len());
+    candidates.insert(lead_slot, first);
+    let next_slot = priority_slot(candidates)
+        .max(lead_slot + 1)
+        .min(candidates.len());
+    candidates.splice(next_slot..next_slot, iter);
 }
 
 /// 没有学习记录时整组快捷短语的默认槽位（组前面有几个计位候选），#9702：追加在全部普通候选之后，高频码的短语会落到十几页之外。记每页 `P = max(first_page_rows, 1)` 个、计位的普通候选 `N` 个、短语 `phrases` 条：`N < P` 时返回 `None`，整组照旧接在普通候选之后；否则首页让出 `k = max(min(phrases, ⌊P/2⌋), 1)` 格，槽位是 `max(P - k, 1)`。首页至少留下前一半普通候选，首选永远是普通候选；整组连在一起，放不下的接在下一页开头。
@@ -2541,5 +2604,259 @@ mod tests {
                 "internet",
             ]
         );
+    }
+
+    #[test]
+    fn mixed_places_inline_codeswitch_sentences_and_canonical_dev_terms_at_lead() {
+        let dir = tempfile::tempdir().unwrap();
+        let eng_path = dir.path().join(assets::ENGLISH_DICTIONARY);
+        crate::ensure_english_schema(&eng_path).unwrap();
+        let eng_conn = Connection::open(&eng_path).unwrap();
+        eng_conn
+            .execute_batch(
+                "INSERT INTO english_words VALUES
+                   ('chatgpt', 'ChatGPT', 0),
+                   ('github', 'GitHub', 0),
+                   ('deepseek', 'deepseek', 0),
+                   ('pytorch', 'pytorch', 0),
+                   ('review', 'review', 339067778);",
+            )
+            .unwrap();
+        drop(eng_conn);
+
+        let py_path = dir.path().join(assets::MAIN_DICTIONARY);
+        let py_conn = Connection::open(&py_path).unwrap();
+        py_conn
+            .execute_batch(
+                "CREATE TABLE tbl_1_w(key TEXT, jp TEXT, value TEXT, weight INTEGER);
+                 INSERT INTO tbl_1_w VALUES('wo','w','我',90000000);
+                 CREATE TABLE tbl_1_s(key TEXT, jp TEXT, value TEXT, weight INTEGER);
+                 INSERT INTO tbl_1_s VALUES('shi','s','是',50000000);
+                 CREATE TABLE tbl_1_y(key TEXT, jp TEXT, value TEXT, weight INTEGER);
+                 INSERT INTO tbl_1_y VALUES('yong','y','用',40000000);
+                 CREATE TABLE tbl_1_h(key TEXT, jp TEXT, value TEXT, weight INTEGER);
+                 INSERT INTO tbl_1_h VALUES('he','h','和',60000000);
+                 CREATE TABLE tbl_1_b(key TEXT, jp TEXT, value TEXT, weight INTEGER);
+                 INSERT INTO tbl_1_b VALUES('bang','b','帮',25000000);
+                 CREATE TABLE tbl_1_z(key TEXT, jp TEXT, value TEXT, weight INTEGER);
+                 INSERT INTO tbl_1_z VALUES('zhe','z','这',60000000);
+                 CREATE TABLE tbl_1_g(key TEXT, jp TEXT, value TEXT, weight INTEGER);
+                 INSERT INTO tbl_1_g VALUES('ge','g','个',70000000);
+                 CREATE TABLE tbl_2_s(key TEXT, jp TEXT, value TEXT, weight INTEGER);
+                 INSERT INTO tbl_2_s VALUES('shi''yong','sy','使用',40000000);
+                 CREATE TABLE tbl_2_b(key TEXT, jp TEXT, value TEXT, weight INTEGER);
+                 INSERT INTO tbl_2_b VALUES('bang''wo','bw','帮我',35000000);
+                 CREATE TABLE tbl_2_z(key TEXT, jp TEXT, value TEXT, weight INTEGER);
+                 INSERT INTO tbl_2_z VALUES('zhe''ge','zg','这个',55000000);",
+            )
+            .unwrap();
+        drop(py_conn);
+
+        let paths = RuntimePaths {
+            dictionaries: dir.path().to_owned(),
+            ..RuntimePaths::default()
+        };
+        let mut queries = CandidateQueries::new(&paths, default_profile());
+        let eng_opts = EnglishInputOptions {
+            mixed_candidates: true,
+            minimum_prefix: 5,
+            first_page_count: 3,
+            short_prefix_completion: true,
+        };
+
+        for (prefix, fallback, expected) in [
+            ("chatgpt", "查", "ChatGPT"),
+            ("macos", "吗", "macOS"),
+            ("github", "给", "GitHub"),
+            ("deepseek", "的", "DeepSeek"),
+            ("pytorch", "批", "PyTorch"),
+            ("woshiyongmacos", "我使用", "我使用macOS"),
+            ("woshiyongmacoshegithub", "我使用", "我使用macOS和GitHub"),
+            ("bangworeviewzhegepr", "帮我", "帮我review这个PR"),
+        ] {
+            let list = queries.mixed(
+                vec![WordItem::new(
+                    prefix,
+                    fallback,
+                    100,
+                    CandidateSource::Fallback,
+                    "",
+                )],
+                prefix,
+                SchemeType::Quanpin,
+                eng_opts,
+                MixedExpressiveOptions::default(),
+                false,
+                LocalInputMode::None,
+                true,
+                true,
+                None,
+                9,
+                true,
+            );
+            assert_eq!(list[0].word, expected, "prefix={prefix} list={list:?}");
+        }
+
+        // 3 字母短前缀 `mlx` 不抢中文首选，但从规范表稳居第 2 位。
+        let mlx = queries.mixed(
+            vec![WordItem::new(
+                "mlx",
+                "吗",
+                100,
+                CandidateSource::Fallback,
+                "",
+            )],
+            "mlx",
+            SchemeType::Quanpin,
+            eng_opts,
+            MixedExpressiveOptions::default(),
+            false,
+            LocalInputMode::None,
+            true,
+            true,
+            None,
+            9,
+            true,
+        );
+        assert_eq!(words(&mlx), vec!["吗", "MLX"]);
+
+        // 纯中文合法全拼输入零干扰。
+        let pure_zh = queries.mixed(
+            vec![WordItem::new(
+                "wo'shi'yong",
+                "我使用",
+                1000,
+                CandidateSource::Generated,
+                "wo'shi'yong",
+            )],
+            "woshiyong",
+            SchemeType::Quanpin,
+            eng_opts,
+            MixedExpressiveOptions::default(),
+            false,
+            LocalInputMode::None,
+            true,
+            true,
+            None,
+            9,
+            true,
+        );
+        assert_eq!(words(&pure_zh), vec!["我使用"]);
+    }
+
+    #[test]
+    fn real_resources_session_handles_canonical_dev_terms_and_inline_codeswitch() {
+        let Some(resources) =
+            std::env::var_os("MSIME_EVAL_RESOURCES").map(std::path::PathBuf::from)
+        else {
+            eprintln!("real_resources_session_handles_canonical_dev_terms_and_inline_codeswitch: skipped, MSIME_EVAL_RESOURCES is not set");
+            return;
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths {
+            resources: resources.clone(),
+            user_data: temp.path().to_owned(),
+            cache: temp.path().to_owned(),
+            dictionaries: resources,
+        };
+        let mut options = crate::session::SessionOptions::new(paths);
+        options.mixed_candidates = true;
+        options.english = EnglishInputOptions {
+            mixed_candidates: true,
+            minimum_prefix: 5,
+            first_page_count: 3,
+            short_prefix_completion: true,
+        };
+        options.learning = false;
+        options.autocorrect_types = crate::types::autocorrect_type::TRANSPOSITION
+            | crate::types::autocorrect_type::NEIGHBOR;
+        options.first_page_rows = 9;
+
+        let mut session = crate::session::Session::new(options).expect("session");
+        let query_top = |session: &mut crate::session::Session, input: &str| {
+            session.command(crate::types::Command::Cancel);
+            for byte in input.bytes() {
+                session.character(byte, false);
+            }
+            let snap = session.snapshot();
+            let top: Vec<String> = snap
+                .candidates
+                .iter()
+                .take(6)
+                .map(|c| c.word.to_string())
+                .collect();
+            (snap, top)
+        };
+
+        for (input, expected_top1) in [
+            ("chatgpt", "ChatGPT"),
+            ("macos", "macOS"),
+            ("github", "GitHub"),
+            ("deepseek", "DeepSeek"),
+            ("pytorch", "PyTorch"),
+            ("woshiyongmacos", "我使用macOS"),
+            ("woshiyongmacoshegithub", "我使用macOS和GitHub"),
+            ("bangworeviewzhegepr", "帮我review这个PR"),
+        ] {
+            let (snap, top) = query_top(&mut session, input);
+            assert_eq!(
+                top.first().map(String::as_str),
+                Some(expected_top1),
+                "input={input} top={top:?}"
+            );
+            // 验证经过 runner_up_order（若重排）后首选依然不被降格。
+            if let Some(order) =
+                crate::ordering::runner_up_order(snap.scheme as u8, &SessionOrderRows(&snap))
+            {
+                assert_eq!(
+                    top[order[0]], expected_top1,
+                    "runner_up_order moved slot 0 for {input}: order={order:?} top={top:?}"
+                );
+            }
+            let commit = session.select(0);
+            assert_eq!(commit.commit.as_deref(), Some(expected_top1));
+        }
+
+        // 短词 `mlx` 出现于首页优先英文槽位；`pr` 精确命中 PR。
+        let (_, mlx_top) = query_top(&mut session, "mlx");
+        assert!(mlx_top.contains(&"MLX".to_string()), "mlx_top={mlx_top:?}");
+        let (_, pr_top) = query_top(&mut session, "pr");
+        assert!(pr_top.contains(&"PR".to_string()), "pr_top={pr_top:?}");
+
+        // 不破坏普通英文与纯汉字拼音。
+        for (input, expected_word) in [
+            ("review", "review"),
+            ("apple", "apple"),
+            ("nihao", "你好"),
+            ("woshiyong", "我使用"),
+            ("zhegegongneng", "这个功能"),
+        ] {
+            let (_, top) = query_top(&mut session, input);
+            assert!(
+                top.first().map(String::as_str) == Some(expected_word)
+                    || top.contains(&expected_word.to_string()),
+                "input={input} top={top:?}"
+            );
+        }
+        session.command(crate::types::Command::Cancel);
+    }
+
+    struct SessionOrderRows<'a>(&'a crate::session::SessionSnapshot);
+
+    impl<'a> crate::ordering::OrderRowSource<'a> for SessionOrderRows<'a> {
+        fn len(&self) -> usize {
+            self.0.candidates.len()
+        }
+
+        fn get(&self, index: usize) -> crate::ordering::OrderRow<'a> {
+            let c = &self.0.candidates[index];
+            crate::ordering::OrderRow {
+                text: c.word.as_str(),
+                source: self.0.candidate_sources[index] as u8,
+                answers_key: self.0.candidate_answers_key[index],
+                corrected: !c.corrected_from.is_empty(),
+                lexical_head: false,
+            }
+        }
     }
 }
