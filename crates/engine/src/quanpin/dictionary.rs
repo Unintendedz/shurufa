@@ -2166,7 +2166,13 @@ impl QuanpinDictionary {
             leading_dict
         };
 
-        let mut pooled: Vec<(WordItem, bool)> = Vec::new();
+        struct DagPooledCandidate {
+            item: WordItem,
+            score_milli: i64,
+            dict_weight: Option<i64>,
+        }
+
+        let mut pooled: Vec<DagPooledCandidate> = Vec::new();
         {
             let association = self.sentence_association.clone();
             let has_collocation =
@@ -2197,19 +2203,26 @@ impl QuanpinDictionary {
             let lattice_spans = &mut self.lattice_span_cache;
             for (cut, relative_channel_delta) in &candidate_cuts {
                 let joined = join_segments(cut);
-                let mut push_candidate = |item: WordItem, is_exact_dict: bool| {
-                    if let Some((existing, existing_exact)) = pooled
-                        .iter_mut()
-                        .find(|(existing, _)| existing.word == item.word)
-                    {
-                        if item.weight > existing.weight {
-                            *existing = item;
+                let mut push_candidate =
+                    |item: WordItem, score_milli: i64, dict_weight: Option<i64>| {
+                        if let Some(existing) = pooled
+                            .iter_mut()
+                            .find(|existing| existing.item.word == item.word)
+                        {
+                            let merged_dict_weight = existing.dict_weight.or(dict_weight);
+                            if score_milli > existing.score_milli {
+                                existing.item = item;
+                                existing.score_milli = score_milli;
+                            }
+                            existing.dict_weight = merged_dict_weight;
+                        } else {
+                            pooled.push(DagPooledCandidate {
+                                item,
+                                score_milli,
+                                dict_weight,
+                            });
                         }
-                        *existing_exact |= is_exact_dict;
-                    } else {
-                        pooled.push((item, is_exact_dict));
-                    }
-                };
+                    };
 
                 let exact_rows =
                     database.query_exact_segmentations_keyed_flat(std::slice::from_ref(cut), 4);
@@ -2221,18 +2234,19 @@ impl QuanpinDictionary {
                             * (col_scorer(preceding, &row.value, true)
                                 + options.collocation_edge_offset);
                     }
+                    let score_milli = (score * 1000.0) as i64;
                     let word = row.value;
                     let mut item = WordItem::new(
                         joined.clone(),
                         word.clone(),
-                        (score * 1000.0) as i64,
+                        score_milli,
                         CandidateSource::Generated,
                         row.key,
                     );
                     item.sentence_association = true;
                     item.sentence_words = vec![word];
                     item.corrected_from = folded.as_str().into();
-                    push_candidate(item, true);
+                    push_candidate(item, score_milli, Some(row.weight));
                 }
 
                 let mut lookup = |span: &[String]| {
@@ -2243,18 +2257,18 @@ impl QuanpinDictionary {
                     .take(4)
                 {
                     let score = path.log_prob + *relative_channel_delta;
-                    let is_exact_single = path.words.len() == 1;
+                    let score_milli = (score * 1000.0) as i64;
                     let mut item = WordItem::new(
                         joined.clone(),
                         path.sentence,
-                        (score * 1000.0) as i64,
+                        score_milli,
                         CandidateSource::Generated,
                         path.key,
                     );
                     item.sentence_association = true;
                     item.sentence_words = path.words;
                     item.corrected_from = folded.as_str().into();
-                    push_candidate(item, is_exact_single);
+                    push_candidate(item, score_milli, None);
                 }
             }
         }
@@ -2262,7 +2276,7 @@ impl QuanpinDictionary {
         if pooled.is_empty() {
             return;
         }
-        pooled.sort_by_key(|(item, _)| std::cmp::Reverse(item.weight));
+        pooled.sort_by_key(|entry| std::cmp::Reverse(entry.score_milli));
         pooled.truncate(8);
 
         let best_sentence_weight = result[insert_at..]
@@ -2274,37 +2288,43 @@ impl QuanpinDictionary {
         let mut alt_sentences: Vec<WordItem> = Vec::new();
         let mut deferred_two_char_dict: Vec<WordItem> = Vec::new();
 
-        for (mut item, is_exact_dict) in pooled {
+        for mut entry in pooled {
             if result[..insert_at]
                 .iter()
-                .any(|existing| existing.word == item.word)
+                .any(|existing| existing.word == entry.item.word)
             {
                 continue;
             }
             if let Some(existing_idx) = result[insert_at..]
                 .iter()
-                .position(|existing| existing.word == item.word)
+                .position(|existing| existing.word == entry.item.word)
             {
                 let abs_idx = insert_at + existing_idx;
-                if result[abs_idx].sentence_association && result[abs_idx].weight >= item.weight {
+                if result[abs_idx].sentence_association
+                    && result[abs_idx].weight >= entry.score_milli
+                {
                     continue;
                 }
                 result.remove(abs_idx);
             }
             // 两音节清洗整词存在前排直拼基准（如 `fanan -> 发难`、`xianan -> 先按`）时，
-            // 若吞音实词（如 `犯难`/`险难`）分值未压过首条 `[1,1]` 拆字句，以 `Database` 行紧随首读法后入前页，避免被单字埋没；
+            // 若吞音实词（如 `犯难`/`险难`）分值未压过首条 `[1,1]` 拆字句，恢复原始词典正权重 `raw_weight`
+            // 并以 `Database` 行紧随首读法后入前页（满足下游 Tier 1/叠加层的正词频不变量）；
             // 若如 `kunan -> 困难` 自身压过 `[1,1]` 拆字，则保留为 `sentence_association` 顺位占据 `#3`。
-            if primary_segments.len() == 2 && is_exact_dict && item.weight < best_sentence_weight {
-                let mean_nats = (item.weight as f64 / 1000.0) / 2.0;
-                if mean_nats >= -10.0 && deferred_two_char_dict.len() < 2 {
-                    item.source = CandidateSource::Database;
-                    item.sentence_association = false;
-                    item.sentence_words.clear();
-                    deferred_two_char_dict.push(item);
+            if primary_segments.len() == 2 && entry.score_milli < best_sentence_weight {
+                if let Some(raw_weight) = entry.dict_weight {
+                    let mean_nats = (entry.score_milli as f64 / 1000.0) / 2.0;
+                    if mean_nats >= -10.0 && deferred_two_char_dict.len() < 2 {
+                        entry.item.source = CandidateSource::Database;
+                        entry.item.weight = raw_weight;
+                        entry.item.sentence_association = false;
+                        entry.item.sentence_words.clear();
+                        deferred_two_char_dict.push(entry.item);
+                    }
+                    continue;
                 }
-            } else {
-                alt_sentences.push(item);
             }
+            alt_sentences.push(entry.item);
         }
 
         if !alt_sentences.is_empty() {
@@ -3501,6 +3521,7 @@ mod chime_regression_tests {
         fixture.insert("dong'huan", "动换", 3_480);
 
         let mut dict = QuanpinDictionary::new(&fixture.paths);
+        dict.sentence_alternatives = true;
         dict.sentence_association = SentenceAssociationOptions {
             word_lattice: true,
             ..SentenceAssociationOptions::default()
@@ -3518,18 +3539,26 @@ mod chime_regression_tests {
         fixture.insert("nuan", "暖", 300_000);
         fixture.insert("hua", "花", 800_000);
         fixture.insert("kai", "开", 900_000);
-        // 2. 2 音节清洗基线保持直拼首屈，同时吞音词进入前排
+        // 2. 2 音节清洗基线保持直拼首屈，同时吞音词进入前排（按 `Z1 = 5e8` 量级模拟真实单字与双字频差）
         fixture.insert("fa'nan", "发难", 13_505);
         fixture.insert("fan'an", "翻案", 5_690);
         fixture.insert("fan'nan", "犯难", 6_680);
-        fixture.insert("fa", "发", 3_000_000);
-        fixture.insert("nan", "难", 1_200_000);
-        fixture.insert("han", "汗", 500_000);
+        fixture.insert("fa", "发", 50_000_000);
+        fixture.insert("fan", "范", 30_000_000);
+        fixture.insert("nan", "难", 20_000_000);
+        fixture.insert("nan", "南", 18_000_000);
+        fixture.insert("han", "汗", 8_000_000);
         fixture.insert("xian'an", "先按", 15_130);
         fixture.insert("xia'nan", "峡南", 5);
         fixture.insert("xian'nan", "险难", 1_175);
-        fixture.insert("xi", "西", 2_000_000);
-        fixture.insert("xia", "下", 2_500_000);
+        fixture.insert("xian", "先", 40_000_000);
+        fixture.insert("xi", "西", 40_000_000);
+        fixture.insert("xia", "下", 30_000_000);
+        fixture.insert("an", "安", 25_000_000);
+        fixture.insert("ku'nan", "苦难", 85_145);
+        fixture.insert("kun'nan", "困难", 500_397);
+        fixture.insert("ku", "苦", 1_000_000);
+        fixture.insert("kun", "困", 500_000);
         fixture.insert("ben'neng", "本能", 123_955);
         fixture.insert("ben", "本", 2_000_000);
         fixture.insert("ceng", "层", 500_000);
@@ -3540,6 +3569,7 @@ mod chime_regression_tests {
         fixture.insert("shuang'pin", "双拼", 10_570);
 
         let mut dict = QuanpinDictionary::new(&fixture.paths);
+        dict.sentence_alternatives = true;
         dict.sentence_association = SentenceAssociationOptions {
             word_lattice: true,
             ..SentenceAssociationOptions::default()
@@ -3565,18 +3595,31 @@ mod chime_regression_tests {
             "{chun_clean:?}"
         );
 
-        let fan = query_words(&mut dict, "fanan", ALL_TYPES);
-        assert_eq!(fan.first().map(String::as_str), Some("发难"), "{fan:?}");
-        assert!(
-            fan.iter().take(7).any(|w| w == "犯难"),
-            "fanan 前排应包含 犯难: {fan:?}"
-        );
+        let fan_items = dict.query("fanan", "", ALL_TYPES, NO_FUZZY);
+        assert_eq!(fan_items.first().map(|r| r.word.as_str()), Some("发难"));
+        let fan_deferred = fan_items
+            .iter()
+            .take(7)
+            .find(|r| r.word == "犯难")
+            .unwrap_or_else(|| panic!("fanan 前排应包含 犯难: {fan_items:?}"));
+        assert_eq!(fan_deferred.source, CandidateSource::Database);
+        assert_eq!(fan_deferred.weight, 6_680);
 
-        let xian = query_words(&mut dict, "xianan", ALL_TYPES);
-        assert_eq!(xian.first().map(String::as_str), Some("先按"), "{xian:?}");
+        let xian_items = dict.query("xianan", "", ALL_TYPES, NO_FUZZY);
+        assert_eq!(xian_items.first().map(|r| r.word.as_str()), Some("先按"));
+        let xian_deferred = xian_items
+            .iter()
+            .take(9)
+            .find(|r| r.word == "险难")
+            .unwrap_or_else(|| panic!("xianan 前排应包含 险难: {xian_items:?}"));
+        assert_eq!(xian_deferred.source, CandidateSource::Database);
+        assert_eq!(xian_deferred.weight, 1_175);
+
+        let ku_items = dict.query("kunan", "", ALL_TYPES, NO_FUZZY);
+        assert_eq!(ku_items.first().map(|r| r.word.as_str()), Some("苦难"));
         assert!(
-            xian.iter().take(9).any(|w| w == "险难"),
-            "xianan 前排应包含 险难: {xian:?}"
+            ku_items.iter().take(4).any(|r| r.word == "困难"),
+            "kunan 前排应包含 困难: {ku_items:?}"
         );
 
         let ben = query_words(&mut dict, "beneng", ALL_TYPES);
