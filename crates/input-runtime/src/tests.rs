@@ -6285,3 +6285,71 @@ fn real_engine_pin_to_first_block_and_locked_prefix_backspace_rollback() {
     type_characters(&mut runtime, "chufalou");
     assert!(runtime.view().candidates.iter().any(|c| c.text == "出发楼"));
 }
+
+#[test]
+fn real_runtime_commit_candidate_commits_slot0_and_learns_injected_beam_phrase() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut options = real_engine_options(directory.path());
+    options.learning = true;
+    options.decoupled_personal_learning = true;
+    let mut sql = String::from(
+        "CREATE TABLE tbl_1_a(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_1_a VALUES('ai','a','爱',1516399);\
+         CREATE TABLE tbl_1_l(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_1_l VALUES('li','l','里',7329328),('li','l','梨',767900);\
+         CREATE TABLE tbl_2_a(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_2_a VALUES('ai''li','al','艾里',2),('ai''li','al','艾丽',1);\
+         CREATE TABLE tbl_3_a(key TEXT, jp TEXT, value TEXT, weight INTEGER);",
+    );
+    for idx in 0..25 {
+        let third = (b'a' + (idx as u8 % 26)) as char;
+        sql.push_str(&format!(
+            "INSERT INTO tbl_3_a VALUES('ai''li''{third}','al{third}','艾词{idx}',{});",
+            5000 - idx * 50
+        ));
+    }
+    rusqlite::Connection::open(
+        std::path::Path::new(&options.dictionaries).join(msime_engine::assets::MAIN_DICTIONARY),
+    )
+    .unwrap()
+    .execute_batch(&sql)
+    .unwrap();
+
+    let session = msime_engine::host::Session::new(&options).unwrap();
+    let mut runtime = Runtime::new(session, 6).unwrap();
+    runtime.focus(true).unwrap();
+    runtime.set_neural_v2_enabled(true);
+    runtime.set_surrounding_context("刚才");
+
+    // 1. 输入 `aili`，由受限束搜索将“爱梨”注入并排至呈现第 0 位。
+    type_characters(&mut runtime, "aili");
+    let req = runtime.take_neural_request().expect("应生成 NeuralV2 请求");
+    let resp = msime_engine::neural_v2::NeuralDecodeResponse {
+        ok: true,
+        session: req.session,
+        generation: req.generation,
+        candidate_scores: vec![msime_engine::neural_v2::NeuralScoredCandidate {
+            text: "艾里".into(),
+            neural_log_prob: -18.0,
+        }],
+        beam_candidates: vec![msime_engine::neural_v2::NeuralBeamCandidate {
+            text: "爱梨".into(),
+            path_index: 0,
+            neural_log_prob: -1.0,
+            token_count: 2,
+        }],
+    };
+    let applied = runtime.apply_neural_response(&resp, false);
+    assert!(applied.applied);
+    assert_eq!(runtime.view().candidates[0].text, "爱梨");
+
+    // 2. 通过 Command::CommitCandidate 提交首选：必须上屏呈现第 0 位的“爱梨”而非原 EngineRow(0)“艾里”。
+    let committed = runtime
+        .dispatch(Action::Command(Command::CommitCandidate))
+        .unwrap();
+    assert_eq!(committed.commit.as_deref(), Some("爱梨"));
+
+    // 3. 紧接着不经过任何二次神经响应重打 `aili`，“爱梨”已入个人词库并直接处于第 0 位。
+    type_characters(&mut runtime, "aili");
+    assert_eq!(runtime.view().candidates[0].text, "爱梨");
+}

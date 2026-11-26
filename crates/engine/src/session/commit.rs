@@ -6,7 +6,6 @@ use crate::diagnostics;
 use crate::error::Result;
 use crate::pinyin::segment::{join_segments, split_segments};
 use crate::pinyin::syllables::normalize_umlaut_aliases;
-use crate::quanpin::QuanpinEngine;
 use crate::text::count_utf8_chars;
 use crate::types::{
     CandidateEdge, CandidateSource, KeyResult, LocalInputMode, PersonalDictionaryKind, WordItem,
@@ -299,14 +298,12 @@ impl InputSession {
         pinyin: &str,
         word: &str,
     ) -> Result<()> {
-        self.canonical_phrase_engine()
-            .create_word_from_canonical_pinyin(pinyin, word)
-    }
-
-    pub(super) fn canonical_phrase_engine(&mut self) -> &mut QuanpinEngine {
-        let paths = &self.paths;
-        self.canonical_phrase_engine
-            .get_or_insert_with(|| QuanpinEngine::new(paths))
+        self.engine
+            .create_word_from_canonical_pinyin(pinyin, word)?;
+        // 新词写入共享词库连接后立即清全拼/双拼查询缓存并记入个人叠加层，保证下一键同码即可召回。
+        self.reset_cache();
+        self.record_learned_phrase_overlay(pinyin, word);
+        Ok(())
     }
 
     pub(super) fn record_context_into(

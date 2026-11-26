@@ -766,10 +766,33 @@ impl InputSession {
                     || exact_alt_seg
                     || (word_chars <= span_ceiling && canonical_syllables <= span_ceiling));
 
+            let mut user_log_prob = if item.source == CandidateSource::UserDatabase {
+                crate::neural_v2::DEFAULT_USER_DICTIONARY_LOG_PRIOR
+            } else {
+                0.0
+            };
+            if self.decoupled_personal_learning
+                && !rank_context.is_empty()
+                && item.source.is_dictionary()
+            {
+                user_log_prob += personal_cache_log_bonus(
+                    journal,
+                    &rank_context,
+                    &item.word,
+                    AppScope::General,
+                    now_unix,
+                );
+            }
+
             let stat_log_prob = if let Some(ev) = item.static_evidence() {
                 Some(ev.log_prob_milli_nats as f64 / 1000.0)
             } else if item.source.is_dictionary() {
-                if word_chars >= 3 && item.weight == 100 {
+                if (word_chars >= 3 && item.weight == 100)
+                    || (self.decoupled_personal_learning
+                        && word_chars >= 2
+                        && item.weight < 500
+                        && user_log_prob > 0.0)
+                {
                     None
                 } else {
                     Some(crate::neural_v2::dictionary_unified_stat_log_prob(
@@ -802,24 +825,6 @@ impl InputSession {
                 });
             if extra_hiatus > 0 {
                 channel_log_prob += -0.6 * (extra_hiatus as f64);
-            }
-
-            let mut user_log_prob = if item.source == CandidateSource::UserDatabase {
-                crate::neural_v2::DEFAULT_USER_DICTIONARY_LOG_PRIOR
-            } else {
-                0.0
-            };
-            if self.decoupled_personal_learning
-                && !rank_context.is_empty()
-                && item.source.is_dictionary()
-            {
-                user_log_prob += personal_cache_log_bonus(
-                    journal,
-                    &rank_context,
-                    &item.word,
-                    AppScope::General,
-                    now_unix,
-                );
             }
             let pinned = item.pinned_first || pinned_word.as_deref() == Some(item.word.as_str());
 

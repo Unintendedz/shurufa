@@ -20,7 +20,6 @@ use crate::local::url;
 use crate::local::GENERATED_MODE_INPUT_LIMIT;
 use crate::paths::RuntimePaths;
 use crate::punctuation::PunctuationPolicy;
-use crate::quanpin::QuanpinEngine;
 use crate::shuangpin::custom::session_profile;
 use crate::shuangpin::ShuangpinProfile;
 use crate::time::Instant;
@@ -108,7 +107,6 @@ pub(super) struct InputSession {
     pub caret_edit: CaretEdit,
     pub shuangpin_preedit_uses_raw: bool,
     pub single_character_only: bool,
-    pub canonical_phrase_engine: Option<QuanpinEngine>,
     pub conversion: Option<ConversionEdit>,
 }
 
@@ -177,7 +175,6 @@ impl InputSession {
             caret_edit: CaretEdit::default(),
             shuangpin_preedit_uses_raw: options.shuangpin_preedit_uses_raw,
             single_character_only: options.single_character_only,
-            canonical_phrase_engine: None,
             conversion: None,
             journal_path: journal,
             paths,
@@ -858,9 +855,6 @@ impl InputSession {
 
     pub fn reset_cache(&mut self) {
         self.engine.reset_cache();
-        if let Some(engine) = self.canonical_phrase_engine.as_mut() {
-            engine.reset_cache();
-        }
         self.prefix_query_input.clear();
         self.caret_edit.prefix_input.clear();
     }

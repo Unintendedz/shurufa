@@ -253,7 +253,8 @@ impl InputSession {
         edit.pins.push(pin);
         edit.pins.sort_by_key(|pin| pin.start);
         let converted = self
-            .canonical_phrase_engine()
+            .engine
+            .quanpin_mut()
             .convert_pinned(&edit.syllables, &edit.pins);
         edit.segments = if converted.is_empty() {
             overlay_pins(&edit.segments, &edit.pins)
@@ -336,7 +337,7 @@ impl InputSession {
             let current = edit.text_between(focus, focus + natural);
             let current_key = edit.syllables[focus..focus + natural].join("'");
             push(&mut edit.rows, current, &current_key, 0);
-            let engine = self.canonical_phrase_engine();
+            let engine = self.engine.quanpin_mut();
             for length in lengths {
                 let span = &edit.syllables[focus..focus + length];
                 let key = span.join("'");

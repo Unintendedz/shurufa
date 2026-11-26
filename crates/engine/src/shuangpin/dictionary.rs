@@ -187,11 +187,9 @@ impl ShuangpinDictionary {
         } else {
             cache_key
         };
-        if self.rows_cache.get_ref_by(key).is_some() {
-            self.reset_cache_if_database_changed();
-            if let Some(cached) = self.rows_cache.get_ref_by(key) {
-                return cached.clone();
-            }
+        self.reset_cache_if_database_changed();
+        if let Some(cached) = self.rows_cache.get_ref_by(key) {
+            return cached.clone();
         }
         let rows = self.query_rows(pure, segmentation);
         self.rows_cache.insert(key.to_owned(), rows.clone());
@@ -209,12 +207,12 @@ impl ShuangpinDictionary {
             .sentence_reads_context()
             .then(|| self.sentence_cache_key(rows_key));
         self.drop_personal_scored_results();
+        self.reset_cache_if_database_changed();
         let cache_hit = match key.as_ref() {
             Some(key) => self.series_cache.get_ref(key).is_some(),
             None => self.series_cache.get_ref_by(rows_key).is_some(),
         };
         if cache_hit {
-            self.reset_cache_if_database_changed();
             let cached = match key.as_ref() {
                 Some(key) => self.series_cache.get_ref(key),
                 None => self.series_cache.get_ref_by(rows_key),

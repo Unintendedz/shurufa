@@ -6006,4 +6006,121 @@ fn single_char_personal_learning_keeps_leader_while_contested_words_confirm_on_s
     assert_eq!(words(&session)[0], "出发");
 }
 
+#[test]
+fn quanpin_composed_phrase_immediately_recalls_across_context_shift_and_weak_stubs() {
+    let mut sql = String::from(
+        "CREATE TABLE tbl_1_a(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_1_a VALUES('ai','a','爱',1516399);\
+         CREATE TABLE tbl_1_l(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_1_l VALUES('li','l','里',7329328),('li','l','梨',767900);\
+         CREATE TABLE tbl_2_a(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_2_a VALUES('ai''li','al','艾里',2),('ai''li','al','艾丽',1);\
+         CREATE TABLE tbl_3_a(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         CREATE TABLE tbl_4_a(key TEXT, jp TEXT, value TEXT, weight INTEGER);",
+    );
+    for idx in 0..25 {
+        let third = (b'a' + (idx as u8 % 26)) as char;
+        sql.push_str(&format!(
+            "INSERT INTO tbl_3_a VALUES('ai''li''{third}','al{third}','艾词{idx}',{});",
+            5000 - idx * 50
+        ));
+    }
+    for idx in 0..20 {
+        let fourth = (b'a' + (idx as u8 % 26)) as char;
+        sql.push_str(&format!(
+            "INSERT INTO tbl_4_a VALUES('ai''li''b''{fourth}','alb{fourth}','艾长{idx}',{});",
+            4000 - idx * 50
+        ));
+    }
+    let fixture = Fixture::new(&sql);
+    let mut session = fixture.session_with(|options| {
+        options.learning = true;
+        options.decoupled_personal_learning = true;
+        options.frequency.mode = FrequencyAdjustmentMode::Promote;
+        options.frequency.trigger_count = 1;
+    });
+
+    // 1. 首轮拼出“爱”+“梨”成词上屏。
+    session.set_rescoring_context("上一句");
+    type_text(&mut session, "aili");
+    assert_eq!(
+        select_word(&mut session, "爱").commit.as_deref(),
+        Some("爱")
+    );
+    assert_eq!(
+        select_word(&mut session, "梨").commit.as_deref(),
+        Some("梨")
+    );
+
+    // 2. 上下文立即变化后重打 `aili`：必须穿透双缓存并从低权同音残词与 45 条长词补全中稳居首位。
+    session.set_rescoring_context("上一句爱梨");
+    type_text(&mut session, "aili");
+    let recalled = words(&session);
+    assert_eq!(recalled[0], "爱梨", "recalled candidates: {recalled:?}");
+
+    let meta = session
+        .neural_v2_metadata()
+        .expect("neural_v2_metadata should be available");
+    assert!(
+        meta.candidates[0].exact_span && meta.candidates[0].user_log_prob > 0.0,
+        "meta[0] = {:?}",
+        meta.candidates[0]
+    );
+    assert_eq!(
+        meta.candidates[0].stat_log_prob, None,
+        "新入库用户词条不应被静态低权重拖成负惩罚"
+    );
+
+    // 3. 重新组出“爱梨”后紧接按两次 Backspace（5 秒窗口内退格删词），撤销叠加促进，“艾里”重新回到首位。
+    session.command(Command::Cancel);
+    type_text(&mut session, "aili");
+    assert_eq!(
+        select_word(&mut session, "爱").commit.as_deref(),
+        Some("爱")
+    );
+    assert_eq!(
+        select_word(&mut session, "梨").commit.as_deref(),
+        Some("梨")
+    );
+    session.command(Command::Backspace);
+    session.command(Command::Backspace);
+    type_text(&mut session, "aili");
+    assert_eq!(words(&session)[0], "艾里");
+}
+
+#[test]
+fn shuangpin_composed_phrase_immediately_recalls_after_context_change() {
+    let fixture = Fixture::new(
+        "CREATE TABLE tbl_1_n(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_1_n VALUES('ni','n','你',100000);\
+         CREATE TABLE tbl_1_h(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_1_h VALUES('hao','h','好',200000),('hao','h','号',50000);\
+         CREATE TABLE tbl_2_n(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_2_n VALUES('ni''hao','nh','拟好',2);",
+    );
+    let mut session = fixture.session_with(|options| {
+        options.scheme = SchemeType::Shuangpin;
+        options.shuangpin_profile = ShuangpinProfileKind::Xiaohe;
+        options.learning = true;
+        options.decoupled_personal_learning = true;
+        options.frequency.mode = FrequencyAdjustmentMode::Promote;
+        options.frequency.trigger_count = 1;
+    });
+
+    session.set_rescoring_context("前文");
+    type_text(&mut session, "nihc");
+    assert_eq!(
+        select_word(&mut session, "你").commit.as_deref(),
+        Some("你")
+    );
+    assert_eq!(
+        select_word(&mut session, "号").commit.as_deref(),
+        Some("号")
+    );
+
+    session.set_rescoring_context("前文你号");
+    type_text(&mut session, "nihc");
+    assert_eq!(words(&session)[0], "你号");
+}
+
 mod caret_suffix;

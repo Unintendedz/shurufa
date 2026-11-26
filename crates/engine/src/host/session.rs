@@ -382,6 +382,10 @@ impl Session {
         Ok(result_for(self.inner.select(index)))
     }
 
+    pub fn learn_injected_candidate(&mut self, canonical_pinyin: &str, word: &str) -> Result<()> {
+        self.inner.learn_injected_candidate(canonical_pinyin, word)
+    }
+
     pub fn pin_candidate(&mut self, index: usize) -> Result<EngineResult> {
         Ok(result_for(self.inner.pin(index)))
     }

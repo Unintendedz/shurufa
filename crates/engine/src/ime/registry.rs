@@ -10,6 +10,7 @@ use crate::types::{CandidateSource, QueryRequest, SchemeSet, SchemeType, WordIte
 pub struct ProviderRegistry {
     /// 会话允许运行的方案；不在其中的方案没有 provider，`activate` 拒绝它们。
     enabled: SchemeSet,
+    paths: RuntimePaths,
     quanpin: Option<QuanpinEngine>,
     shuangpin: Option<ShuangpinEngine>,
 }
@@ -22,6 +23,7 @@ impl ProviderRegistry {
     ) -> Self {
         Self {
             enabled,
+            paths: paths.clone(),
             quanpin: enabled
                 .contains(SchemeType::Quanpin)
                 .then(|| QuanpinEngine::new(paths)),
@@ -36,6 +38,13 @@ impl ProviderRegistry {
             return Err(EngineError::invalid(diagnostics::INPUT_SCHEME_NOT_ENABLED));
         }
         Ok(())
+    }
+
+    /// 供全拼/双拼统一复用的单一全拼引擎实例，消除双连接缓存脑裂。
+    pub(crate) fn quanpin_mut(&mut self) -> &mut QuanpinEngine {
+        let paths = &self.paths;
+        self.quanpin
+            .get_or_insert_with(|| QuanpinEngine::new(paths))
     }
 
     fn reset_pinyin_caches(&mut self) {
@@ -106,10 +115,8 @@ impl ProviderRegistry {
         }
     }
 
-    pub fn reset_cache(&mut self, scheme: SchemeType) {
-        if matches!(scheme, SchemeType::Quanpin | SchemeType::Shuangpin) {
-            self.reset_pinyin_caches();
-        }
+    pub fn reset_all_caches(&mut self) {
+        self.reset_pinyin_caches();
     }
 
     pub fn cache_dynamic_candidates_for_request(

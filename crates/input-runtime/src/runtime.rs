@@ -2076,12 +2076,40 @@ impl<E: InputEngine> Runtime<E> {
     }
 
     fn commit_neural_injected(&mut self, seat: usize) -> Result<EngineResult, RuntimeError> {
-        let text = self
+        let (text, entry_code) = self
             .cached
             .candidates
             .get(seat)
-            .map(|entry| entry.text.clone())
+            .map(|entry| (entry.text.clone(), entry.code.clone()))
             .unwrap_or_default();
+        if !text.is_empty() {
+            let (learn_code, learn_text) = if !self.locked_prefix.is_empty()
+                && self.cached.scheme == msime_engine::SchemeType::Quanpin as u8
+                && self.locked_prefix.iter().all(|seg| {
+                    seg.text.chars().count() == 1
+                        && !seg.reading.is_empty()
+                        && seg.reading.bytes().all(|b| b.is_ascii_alphabetic())
+                }) {
+                let mut code = self
+                    .locked_prefix
+                    .iter()
+                    .map(|seg| seg.reading.to_ascii_lowercase())
+                    .collect::<Vec<_>>()
+                    .join("'");
+                if !entry_code.is_empty() {
+                    if !code.is_empty() {
+                        code.push('\'');
+                    }
+                    code.push_str(&entry_code);
+                }
+                (code, format!("{}{}", self.locked_prefix_text(), text))
+            } else {
+                (entry_code, text.clone())
+            };
+            let _ = self
+                .engine
+                .learn_injected_candidate(&learn_code, &learn_text);
+        }
         let mut result = self.discard_composition()?;
         result.handled = true;
         result.has_commit = !text.is_empty();
@@ -2855,13 +2883,13 @@ impl<E: InputEngine> Runtime<E> {
                 };
                 self.engine.conversion_left_from(self.engine_index(seat))
             }
+            Action::Command(Command::CommitCandidate)
+                if len > 0 && !self.cached.prediction && self.cached.conversion.is_empty() =>
+            {
+                pick = Some((SelectionHow::FirstCandidateCommand, 0));
+                self.select_seat(0)
+            }
             Action::Command(Command::CommitCandidate) => {
-                let seat = self
-                    .cached
-                    .candidates
-                    .iter()
-                    .position(|entry| matches!(entry.origin, CandidateOrigin::EngineRow(0)));
-                pick = seat.map(|seat| (SelectionHow::FirstCandidateCommand, seat));
                 self.engine.command(Command::CommitCandidate)
             }
             Action::Command(command) => {

@@ -137,6 +137,10 @@ impl Session {
         result
     }
 
+    pub fn learn_injected_candidate(&mut self, canonical_pinyin: &str, word: &str) -> Result<()> {
+        self.input.learn_injected_candidate(canonical_pinyin, word)
+    }
+
     pub fn select_edge(&mut self, index: usize, edge: CandidateEdge) -> KeyResult {
         if !self.prediction.rows.is_empty() {
             return KeyResult::unhandled();

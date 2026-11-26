@@ -12,7 +12,7 @@ use crate::assets;
 use crate::error::Result;
 use crate::paths::RuntimePaths;
 use crate::pinyin::autocorrect::autocorrect_suppression_key;
-use crate::quanpin::QuanpinScheme;
+use crate::quanpin::{QuanpinEngine, QuanpinScheme};
 use crate::shuangpin::{ShuangpinProfile, ShuangpinScheme};
 use crate::types::{
     autocorrect_type, CandidateSource, FirstPageRows, FuzzyPinyinOptions, QueryRequest, SchemeKey,
@@ -278,9 +278,24 @@ impl ImeSession {
         )
     }
 
+    pub(crate) fn quanpin_mut(&mut self) -> &mut QuanpinEngine {
+        self.registry.quanpin_mut()
+    }
+
+    pub(crate) fn create_word_from_canonical_pinyin(
+        &mut self,
+        canonical_pinyin: &str,
+        word: &str,
+    ) -> Result<()> {
+        self.registry
+            .quanpin_mut()
+            .create_word_from_canonical_pinyin(canonical_pinyin, word)?;
+        self.registry.reset_all_caches();
+        Ok(())
+    }
+
     pub fn reset_cache(&mut self) {
-        let scheme = self.current_scheme_type();
-        self.registry.reset_cache(scheme);
+        self.registry.reset_all_caches();
         self.refresh_candidates();
     }
 

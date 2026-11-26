@@ -634,13 +634,35 @@ pub fn apply_personal_overlay_scoped(
     if pinned_pos.is_none() && !is_single_char_key {
         let mut best_score = posteriors[0];
         let leader_suppressed = neg_strengths[0] >= 0.5;
+        // 仅当静态槽 0 只是低频冷门残留词（`weight < 500`）且用户从未选过时，
+        // 才允许首轮自造/首 pick（`n_user >= 0.9`）直接升格至槽 0；高频核心词仍严格遵守 `1.8` 次防劫持阈值。
+        let weak_static_leader = leader_weight < 500.0 && user_counts[0] < 0.9;
+        let mut weak_winner_found = false;
         for pos in 1..group_len {
+            let weak_picked =
+                weak_static_leader && user_counts[pos] >= 0.9 && neg_strengths[pos] < 0.25;
             let eligible = user_counts[pos] >= SLOT_ZERO_MIN_DECAYED_PICKS
+                || weak_picked
                 || (leader_suppressed && neg_strengths[pos] < 0.25);
-            if eligible && posteriors[pos] > best_score {
+            if !eligible {
+                continue;
+            }
+            let beats_leader = if weak_winner_found
+                && !weak_picked
+                && user_counts[pos] < SLOT_ZERO_MIN_DECAYED_PICKS
+            {
+                false
+            } else if weak_picked && !weak_winner_found {
+                true
+            } else {
+                posteriors[pos] > best_score
+            };
+            if beats_leader {
                 best_score = posteriors[pos];
                 leader_pos = pos;
-                overlay_promoted_leader = user_counts[pos] >= SLOT_ZERO_MIN_DECAYED_PICKS;
+                weak_winner_found |= weak_picked;
+                overlay_promoted_leader =
+                    user_counts[pos] >= SLOT_ZERO_MIN_DECAYED_PICKS || weak_picked;
             }
         }
     }

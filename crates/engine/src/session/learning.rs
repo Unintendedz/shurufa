@@ -432,6 +432,71 @@ impl InputSession {
         typo_diagnostic
     }
 
+    /// 新造词或自组词上屏落盘后同步写入一条个人选择叠加事件，
+    /// 使启用 `decoupled_personal_learning` 时弱先验（如 `艾里(2)`）同码立即可把自造词推至首屏。
+    pub(super) fn record_learned_phrase_overlay(&mut self, canonical_pinyin: &str, word: &str) {
+        if !self.decoupled_personal_learning
+            || !self.learning_enabled
+            || self.local_mode != LocalInputMode::None
+            || self.dedicated_english
+            || !self.scheme().learns_into_main_dictionary()
+            || count_utf8_chars(word) < 2
+        {
+            return;
+        }
+        let entry_key = normalize_canonical_pinyin_for_word(canonical_pinyin, word);
+        if entry_key.is_empty() {
+            return;
+        }
+        let user_db = self.paths.user(assets::USER_JOURNAL);
+        let now_unix = unix_now_seconds();
+        if let Ok(event_id) = record_personal_selection(&user_db, &entry_key, word, now_unix) {
+            self.last_overlay_learning = Some(super::input::LastOverlayLearning {
+                event_id,
+                entry_key,
+                word: word.to_owned(),
+                committed_at_unix: now_unix,
+                remaining_chars: count_utf8_chars(word),
+            });
+        }
+    }
+
+    /// 将运行时选中上屏的受限束搜索/注入候选写入用户词库与个人叠加层，并在允许时记入个人上下文。
+    pub(crate) fn learn_injected_candidate(
+        &mut self,
+        canonical_pinyin: &str,
+        word: &str,
+    ) -> crate::error::Result<()> {
+        if !self.learning_enabled
+            || self.local_mode != LocalInputMode::None
+            || self.dedicated_english
+            || !self
+                .engine
+                .current_scheme_type()
+                .learns_into_main_dictionary()
+        {
+            return Ok(());
+        }
+        let canonical = normalize_canonical_pinyin_for_word(canonical_pinyin, word);
+        if canonical.is_empty()
+            || count_utf8_chars(word) < 2
+            || segment_count(&canonical) > MAX_LEARNED_SENTENCE_SYLLABLES
+        {
+            return Ok(());
+        }
+        self.store_user_phrase_from_canonical_pinyin(&canonical, word)?;
+        if self.personal_context_applies() {
+            let transitions = [PersonalTransition {
+                earlier: self.chain.earlier.clone().unwrap_or_default(),
+                previous: self.chain.previous.clone().unwrap_or_default(),
+                word: word.to_owned(),
+                times: 1,
+            }];
+            let _ = self.personal_context.record(&transitions);
+        }
+        Ok(())
+    }
+
     pub(super) fn can_learn_sentence_candidate(&self, _selected: &WordItem) -> bool {
         self.local_mode == LocalInputMode::None
             && !self.dedicated_english
@@ -445,7 +510,7 @@ impl InputSession {
     fn online_word_matches_reading(&mut self, canonical: &str, word: &str) -> bool {
         let syllables = normalized_syllables(canonical);
         let mut characters = word.chars();
-        let engine = self.canonical_phrase_engine();
+        let engine = self.engine.quanpin_mut();
         for syllable in &syllables {
             let Some(character) = characters.next() else {
                 return false;
@@ -586,8 +651,6 @@ impl InputSession {
             {
                 return Some(diagnostics::PHRASE_NOT_PERSISTED.to_owned());
             }
-            // The phrase engine only resets its own cache; the typing engine must see the new word on its next query.
-            self.engine.reset_cache();
         }
         // The reference discards this result (ISC:686): a counter left behind only makes the next occurrence of the pair try the insert again, which finds the word and changes nothing.
         let _ = clear_pick_transition(

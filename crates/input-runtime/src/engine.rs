@@ -149,6 +149,14 @@ pub trait InputEngine {
         Ok(result)
     }
     fn select(&mut self, index: usize) -> Result<EngineResult, RuntimeError>;
+    /// 将运行时选中的受限束搜索/注入多字候选持久化到用户词库与个人叠加层。
+    fn learn_injected_candidate(
+        &mut self,
+        _canonical_pinyin: &str,
+        _word: &str,
+    ) -> Result<(), RuntimeError> {
+        Ok(())
+    }
     /// 整句改字的左移，进入改字时从引擎的第 `index` 个候选开始。
     fn conversion_left_from(&mut self, _index: usize) -> Result<EngineResult, RuntimeError> {
         self.command(Command::ConversionLeft)
@@ -278,6 +286,14 @@ impl InputEngine for Session {
     }
     fn select(&mut self, index: usize) -> Result<EngineResult, RuntimeError> {
         Session::select(self, index).map_err(|error| RuntimeError::Engine(error.to_string()))
+    }
+    fn learn_injected_candidate(
+        &mut self,
+        canonical_pinyin: &str,
+        word: &str,
+    ) -> Result<(), RuntimeError> {
+        Session::learn_injected_candidate(self, canonical_pinyin, word)
+            .map_err(|error| RuntimeError::Engine(error.to_string()))
     }
     fn conversion_left_from(&mut self, index: usize) -> Result<EngineResult, RuntimeError> {
         Session::conversion_left_from(self, index)
