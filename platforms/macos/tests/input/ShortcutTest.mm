@@ -5443,12 +5443,22 @@ static void TestFieldTraitsAreConfirmedBeforeEveryFocusIn() {
 
 @interface AppScopeShortcutSession : ShortcutSession
 @property(nonatomic, strong) NSMutableArray<NSString *> *reportedBundleIDs;
+@property(nonatomic) BOOL rejectDuringSecureTrait;
 @end
 @implementation AppScopeShortcutSession
+- (uint32_t)setFieldTraits:(uint32_t)traits {
+    return [super setFieldTraits:traits];
+}
 - (BOOL)setAppBundleID:(NSString *)bundleID error:(NSError **)error {
     (void)error;
     if (!self.reportedBundleIDs) self.reportedBundleIDs = [NSMutableArray array];
     [self.reportedBundleIDs addObject:bundleID ?: @""];
+    [self recordCall:[@"bundle:" stringByAppendingString:(bundleID ?: @"")]];
+    if (self.rejectDuringSecureTrait &&
+        self.reportedTraits.count > 0 &&
+        ([self.reportedTraits.lastObject unsignedIntValue] & MSIME_TRAIT_SECURE) != 0) {
+        return NO;
+    }
     return YES;
 }
 @end
@@ -5456,6 +5466,18 @@ static void TestFieldTraitsAreConfirmedBeforeEveryFocusIn() {
 @interface AppScopeActivationController : ModeController
 @end
 @implementation AppScopeActivationController
+- (void)startPreferencesMonitoring {}
+- (void)applySharedInputPreferencesBeforeFirstUse {}
+- (void)scheduleSystemInputModeSyncForClient:(id)sender { (void)sender; }
+@end
+
+@interface AppScopeRealSessionController : MSIMEInputController
+@property(nonatomic, copy) NSDictionary *options;
+@property(nonatomic) BOOL secureInput;
+@end
+@implementation AppScopeRealSessionController
+- (NSDictionary *)runtimeOptions { return self.options; }
+- (BOOL)secureEventInputActive { return self.secureInput; }
 - (void)startPreferencesMonitoring {}
 - (void)applySharedInputPreferencesBeforeFirstUse {}
 - (void)scheduleSystemInputModeSyncForClient:(id)sender { (void)sender; }
@@ -5471,6 +5493,7 @@ static void TestAppScopeSyncsBundleIDAndClearsInSecureInput(void) {
     appearance.fullWidthInput = NO;
     AppScopeActivationController *controller = [AppScopeActivationController alloc];
     AppScopeShortcutSession *session = [AppScopeShortcutSession new];
+    session.rejectDuringSecureTrait = YES;
     VimModeClient *codeClient = [VimModeClient new];
     codeClient.bundleIdentifier = @"com.microsoft.VSCode";
     VimModeClient *terminalClient = [VimModeClient new];
@@ -5487,22 +5510,38 @@ static void TestAppScopeSyncsBundleIDAndClearsInSecureInput(void) {
         return [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0
                                  context:nil characters:characters charactersIgnoringModifiers:characters isARepeat:NO keyCode:code];
     };
+    NSString *knownTraits = [NSString stringWithFormat:@"traits:%x", MSIME_TRAIT_KNOWN];
+    NSString *secureTraits = [NSString stringWithFormat:@"traits:%x", MSIME_TRAIT_KNOWN | MSIME_TRAIT_SECURE];
 
-    // 1. prepareSession 同步当前客户端 `bundleIdentifier`；相同非安全客户连续按键复用缓存。
+    // 1. prepareSession 先刷新 `traits` 再同步当前客户端 `bundleIdentifier`；相同非安全客户连续按键复用缓存。
     [controller setValue:@YES forKey:@"focusPending"];
     [controller prepareSession];
     assert([session.reportedBundleIDs.lastObject isEqual:@"com.microsoft.VSCode"]);
+    const NSUInteger firstTraits = [session.calls indexOfObject:knownTraits];
+    const NSUInteger firstBundle = [session.calls indexOfObject:@"bundle:com.microsoft.VSCode"];
+    assert(firstTraits != NSNotFound && firstBundle != NSNotFound && firstTraits < firstBundle);
     const NSUInteger afterPrepareCount = session.reportedBundleIDs.count;
     [controller handleEvent:letter(0, @"a") client:codeClient];
     assert(session.reportedBundleIDs.count == afterPrepareCount);
 
-    // 2. 安全输入（IsSecureEventInputEnabled 模拟）开启时传空串，关闭后恢复真实 `bundleIdentifier`。
+    // 2. 开启安全输入后先报 `MSIME_TRAIT_SECURE` 再传空串；离开安全输入立即先清 `TRAIT_SECURE` 再恢复 `bundleIdentifier`（紧接空格/回车也生效）。
+    [session.calls removeAllObjects];
     controller.secureInput = YES;
     [controller handleEvent:letter(11, @"b") client:codeClient];
     assert([session.reportedBundleIDs.lastObject isEqual:@""]);
+    const NSUInteger secTraits = [session.calls indexOfObject:secureTraits];
+    const NSUInteger secBundle = [session.calls indexOfObject:@"bundle:"];
+    assert(secTraits != NSNotFound && secBundle != NSNotFound && secTraits < secBundle);
+
+    [session.calls removeAllObjects];
     controller.secureInput = NO;
-    [controller handleEvent:letter(8, @"c") client:codeClient];
+    NSEvent *space = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0
+                                       context:nil characters:@" " charactersIgnoringModifiers:@" " isARepeat:NO keyCode:49];
+    [controller handleEvent:space client:codeClient];
     assert([session.reportedBundleIDs.lastObject isEqual:@"com.microsoft.VSCode"]);
+    const NSUInteger clearTraits = [session.calls indexOfObject:knownTraits];
+    const NSUInteger restoredBundle = [session.calls indexOfObject:@"bundle:com.microsoft.VSCode"];
+    assert(clearTraits != NSNotFound && restoredBundle != NSNotFound && clearTraits < restoredBundle);
 
     // 3. `_voiceContextSnapshot.isSecureField` 为真时同样传空串；清掉快照后恢复透传。
     MSIMEVoiceContextSnapshot *secureVoice = [[MSIMEVoiceContextSnapshot alloc]
@@ -5527,6 +5566,36 @@ static void TestAppScopeSyncsBundleIDAndClearsInSecureInput(void) {
     [controller activateServer:chatClient];
     method_setImplementation(baseActivate, originalActivate);
     assert([session.reportedBundleIDs.lastObject isEqual:@"com.tencent.xinWeChat"]);
+
+    // 6. 端到端真实 `MSIMEClientSession` 验证：进出 `secureInput` 后，`setFieldTraits` 与 `setAppBundleID` 联动无滞后。
+    NSString *realRoot = [NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString];
+    NSMutableDictionary *realOptions = [@{@"api_version": @1,
+        @"preferences": @{@"scheme": @"quanpin", @"default_ime_mode": @"chinese", @"candidate_page_size": @5,
+                          @"learning": @NO, @"chinese_punctuation": @YES}} mutableCopy];
+    for (NSString *name in @[@"resources", @"user_data", @"cache", @"dictionaries"]) {
+        NSString *path = [realRoot stringByAppendingPathComponent:name];
+        assert([NSFileManager.defaultManager createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:nil]);
+        realOptions[name] = path;
+    }
+    appearance.englishMode = NO;
+    AppScopeRealSessionController *realController = [AppScopeRealSessionController alloc];
+    realController.options = realOptions;
+    [realController setValue:appearance forKey:@"appearance"];
+    [realController setValue:codeClient forKey:@"activeClient"];
+    [realController setValue:[[HiddenCandidatePanel alloc] init] forKey:@"panel"];
+    [realController prepareSession];
+    assert([[realController valueForKey:@"syncedAppScopeBundleID"] isEqual:@"com.microsoft.VSCode"]);
+    realController.secureInput = YES;
+    [realController handleEvent:letter(0, @"a") client:codeClient];
+    assert([[realController valueForKey:@"syncedAppScopeBundleID"] isEqual:@""]);
+    realController.secureInput = NO;
+    [realController handleEvent:space client:codeClient];
+    assert([[realController valueForKey:@"syncedAppScopeBundleID"] isEqual:@"com.microsoft.VSCode"]);
+    MSIMEClientSession *realSession = [realController valueForKey:@"session"];
+    [realSession closeWithError:nil];
+    [realController releaseBackgroundMusic];
+    [[NSWorkspace.sharedWorkspace notificationCenter] removeObserver:realController];
+    [NSFileManager.defaultManager removeItemAtPath:realRoot error:nil];
 
     [controller releaseBackgroundMusic];
     [[NSWorkspace.sharedWorkspace notificationCenter] removeObserver:controller];

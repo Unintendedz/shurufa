@@ -48,9 +48,11 @@ pub(crate) fn send_dictionary_action(
     let overhead = serde_json::to_vec(&json!({ "options": options, "action": template }))
         .map_err(|error| error.to_string())?
         .len();
+    let detected_rime = ImportFormat::parse(request.format)
+        .is_some_and(|fmt| fmt.for_text(request.text) == ImportFormat::Rime);
     let batches = split_import(
         request.text,
-        request.format == "rime",
+        detected_rime,
         BATCH_REQUEST_BYTES.saturating_sub(overhead),
     )
     .ok_or(TOO_LARGE)?;
@@ -79,11 +81,11 @@ pub(crate) fn send_dictionary_action(
             let parsed = ImportFormat::parse(format)
                 .ok_or_else(|| ImportError::UnsupportedFormat.to_string())?
                 .for_text(request.text);
-            // 后续批次没有文件头，也可能只有空语言行，保持整份文件识别出的 Gboard 语义。
-            let format = if parsed == ImportFormat::Gboard {
-                "gboard"
-            } else {
-                format
+            // 后续批次没有文件头，也可能只有空语言行或剥离 YAML 头后的条目，保持整份文件识别出的 Rime/Gboard 语义。
+            let format = match parsed {
+                ImportFormat::Gboard => "gboard",
+                ImportFormat::Rime => "rime",
+                _ => format,
             };
             template["format"] = Value::String(format.to_owned());
             Some((kind, parsed))

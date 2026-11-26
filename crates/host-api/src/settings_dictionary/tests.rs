@@ -181,6 +181,39 @@ fn gboard_batches_keep_the_detected_format_without_repeating_the_header() {
 }
 
 #[test]
+fn rime_dict_yaml_batches_keep_the_detected_format_and_strip_header() {
+    let mut host = FakeHost::new();
+    let mut text = String::from(
+        "\u{feff}# Rime dictionary\n---\nname: sample\nversion: \"1.0\"\nimport_tables:\n",
+    );
+    for index in 0..4000 {
+        text.push_str(&format!("  - extra_dictionary_{index}\n"));
+    }
+    text.push_str("...\n");
+    let header_lines = text.lines().count();
+    for line in 1..=2500 {
+        if line == 1800 {
+            text.push_str("坏行\n");
+        } else {
+            text.push_str(&format!("词条{line}\tni hao\t50%\n"));
+        }
+    }
+    let report = host
+        .import("pinyin", "standard", &text, "rime-auto-import")
+        .unwrap();
+    assert_eq!(report["applied"], 2499);
+    assert_eq!(report["failed"], 1);
+    assert_eq!(report["swapped"], false);
+    assert_eq!(
+        failures(&report),
+        [((header_lines + 1800) as u64, "column_count".to_owned())]
+    );
+    assert_eq!(host.store.len(), 2499);
+    assert!(host.actions.len() >= 3);
+    assert!(host.actions.iter().all(|action| action["format"] == "rime"));
+}
+
+#[test]
 fn five_thousand_rows_land_in_batches_and_failures_keep_their_file_lines() {
     let mut host = FakeHost::refusing(|entry| entry.key == "refused");
     let text = phrases(

@@ -6518,7 +6518,6 @@ static NSString *MSIMESessionUnavailableReason(NSDictionary *options, NSError *e
             NSDictionary *view = [_session setDedicatedEnglishEnabled:YES error:nil];
             if (view) _viewState = shurufa::mac::ViewState::fromDictionary(view);
         }
-        [self syncAppScopeContextForClient:_activeClient];
         [self confirmFieldTraitsBeforeFocus];
         [self dispatchFocus:YES];
         _focusPending = NO;
@@ -7100,7 +7099,8 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
 // 开启安全输入或处于安全密码输入框时一律传空串，禁止携带来源应用标识。
 - (void)syncAppScopeContextForClient:(id)client {
     if (!_session || ![_session respondsToSelector:@selector(setAppBundleID:error:)]) return;
-    const BOOL secure = [self secureEventInputActive] || _voiceContextSnapshot.isSecureField;
+    const BOOL secure = [self secureEventInputActive] || _voiceContextSnapshot.isSecureField ||
+        (_fieldTraits & MSIME_TRAIT_SECURE) != 0;
     NSString *bundle = @"";
     if (!secure && [client respondsToSelector:@selector(bundleIdentifier)]) {
         NSString *candidate = [client bundleIdentifier];
@@ -7110,22 +7110,32 @@ static BOOL MSIMEClaimPreferenceRecovery(NSString *directory) {
     if (syncedSession == _session && _syncedAppScopeBundleID && [_syncedAppScopeBundleID isEqualToString:bundle]) {
         return;
     }
-    if ([_session setAppBundleID:bundle error:nil]) {
+    const BOOL updated = [_session setAppBundleID:bundle error:nil];
+    if (updated || (secure && (_fieldTraits & MSIME_TRAIT_SECURE) != 0)) {
         _syncedAppScopeSession = _session;
         _syncedAppScopeBundleID = [bundle copy];
+    } else {
+        _syncedAppScopeSession = nil;
+        _syncedAppScopeBundleID = nil;
     }
 }
 
 // 把字段属性报告给生命周期核心：安全输入是 SECURE，英文模式是 HOST_ENGLISH，macOS 两项都读得到，所以带 KNOWN。只在变了时调用，按契约先于这个键的 msime_client_key。核心按 SECURE 关掉声音、特效和音乐，所以安全输入的开关不必再由这里去开关音乐。
+// 在写完 `_fieldTraits` 并同步给内核之后再同步 `AppScope`，保证退出安全输入后的首个按键/选词能立即恢复非通用场景桶，而不被尚未清除的 `TRAIT_SECURE` 拦截。
 - (void)syncFieldTraits {
     _secureEventInput = [self secureEventInputActive];
     if (_secureEventInput) [MSIMEInputSessionRecoveryPanel dismissForDelegate:self];
-    [self syncAppScopeContextForClient:_activeClient];
     const uint32_t traits = MSIME_TRAIT_KNOWN | (_secureEventInput ? MSIME_TRAIT_SECURE : 0) |
         (_appearance.englishMode ? MSIME_TRAIT_HOST_ENGLISH : 0);
-    if (!_session || traits == _fieldTraits) return;
-    _fieldTraits = traits;
-    [_session setFieldTraits:traits];
+    if (_session && traits != _fieldTraits) {
+        _fieldTraits = traits;
+        [_session setFieldTraits:traits];
+        if ((traits & MSIME_TRAIT_SECURE) != 0) {
+            _syncedAppScopeSession = nil;
+            _syncedAppScopeBundleID = nil;
+        }
+    }
+    [self syncAppScopeContextForClient:_activeClient];
 }
 
 // 每次 setFocused:YES 之前都报告一次字段属性，变没变都报：脚本运行时在每次 msime_client_focus(true) 之后要先确认字段属性才投递事件，聚焦前的报告（同值也算）或聚焦后的第一个键都算确认。只在变了时报告的话，复用的会话、快照替换后的会话和按键换了客户端时的聚焦都等不到确认，focus_in 到不了脚本。新建的会话也走这里，所以建会话时不另报。
