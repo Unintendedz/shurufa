@@ -516,8 +516,10 @@ struct NeuralEngine::Impl {
     // 空上文时额外在起始前缀后附中性中文分句符 `，`，消除 Instruct 模型句首助手提示偏置。
     std::vector<llama_token> prompt_prefix_tokens;
     std::vector<llama_token> empty_prompt_tokens;
-    // 中文 IM 聊天常省略句间逗号，缓存单个中文逗号 token 供前缀树单遍贝叶斯边际化复用。
+    // 中文 IM 聊天常省略句间逗号，缓存单个中文逗号 token 供前缀树单遍贝叶斯边际化复用；
+    // 同时缓存 5 个句读闭合单 token（`，`、`。`、`？`、`！`、`\n`），供无右文时多字候选右边界闭合校准复用。
     llama_token comma_token = -1;
+    std::vector<llama_token> boundary_closure_tokens;
 
     // `seq_id = 0` 持久化上文状态与末尾 / 次末尾 token 的精确 log-softmax 缓存。
     // 次末尾缓存（`cached_ctx_prev_log_probs`）用于零额外推理实现跨上文 BPE 边界 Token Healing，
@@ -1335,8 +1337,11 @@ struct NeuralEngine::Impl {
         std::vector<std::pair<llama_token, int32_t>> children;
         double edge_log_prob = 0.0;
         double cum_log_prob = 0.0;
+        double boundary_eos_lp = -1e9;
         bool scored = false;
         bool is_internal = false;
+        bool need_boundary_eval = false;
+        bool boundary_eos_scored = false;
         bool is_healed = false;
         int32_t branch_begin = 0;
         int32_t branch_end = 0;
@@ -1514,17 +1519,37 @@ struct NeuralEngine::Impl {
             }
         }
 
+        // 无右文且开启 IM 边界校准时，仅对多字候选的主树终点节点标记右边界句读闭合评估，
+        // 避免在逗号子树上重复展开并保持单批序列预算受控。
+        const bool use_right_boundary_closure =
+            im_boundary_calibration && !has_right_suffix && !boundary_closure_tokens.empty();
+        if (use_right_boundary_closure) {
+            for (size_t i = 0; i < candidates.size(); ++i) {
+                if (cand_single_cp[i] != 0) continue;
+                const int32_t primary_end = (cand_healed_end_node[i] > 0)
+                    ? cand_healed_end_node[i]
+                    : cand_end_node[i];
+                if (primary_end > 0) {
+                    trie[static_cast<size_t>(primary_end)].need_boundary_eval = true;
+                }
+            }
+        }
+
         // 在不撑破单批序列上限（`n_seq_max - 1`）的前提下挂载共享隐式逗号子树：
         // - 单 token 候选（绝大多数中文常用双字词与单字）在逗号节点下直接成为叶子，零额外序列与零额外解码 token，全量纳入；
         // - 多 token 候选按 Tier 0 优先级在剩余单批序列预算内纳入，杜绝触发二次 Metal 分块前向。
         int32_t comma_node_id = -1;
         if (use_latent_comma) {
+            auto node_needs_decode = [&](int32_t nid) -> bool {
+                const TrieNode &nd = trie[static_cast<size_t>(nid)];
+                return !nd.children.empty() || nd.need_boundary_eval;
+            };
             int32_t base_internal_leaves = 0;
             for (size_t id = 1; id < trie.size(); ++id) {
-                if (trie[id].parent < 0 || trie[id].children.empty()) continue;
+                if (trie[id].parent < 0 || !node_needs_decode(static_cast<int32_t>(id))) continue;
                 bool has_internal_child = false;
                 for (const auto &ch : trie[id].children) {
-                    if (!trie[static_cast<size_t>(ch.second)].children.empty()) {
+                    if (node_needs_decode(ch.second)) {
                         has_internal_child = true;
                         break;
                     }
@@ -1587,11 +1612,11 @@ struct NeuralEngine::Impl {
             }
         }
 
-        // 3. 标记需要解码的内部节点（仅有子节点的非虚根节点需要解码，叶子节点完全免解码）。
+        // 3. 标记需要解码的节点（有子节点或需取右边界句读闭合 logits 的非虚根节点）。
         int32_t internal_count = 0;
         for (size_t id = 1; id < trie.size(); ++id) {
             if (trie[id].parent < 0) continue;
-            if (!trie[id].children.empty()) {
+            if (!trie[id].children.empty() || trie[id].need_boundary_eval) {
                 trie[id].is_internal = true;
                 ++internal_count;
             }
@@ -1725,7 +1750,7 @@ struct NeuralEngine::Impl {
                         const int32_t node_id = logit_slots[k].second;
                         const float *logits = logits_ptrs[k];
                         const double log_z = log_zs[k];
-                        const TrieNode &parent = trie[static_cast<size_t>(node_id)];
+                        TrieNode &parent = trie[static_cast<size_t>(node_id)];
                         for (const auto &ch : parent.children) {
                             TrieNode &child = trie[static_cast<size_t>(ch.second)];
                             if (ch.first >= 0 && ch.first < n_vocab) {
@@ -1734,6 +1759,32 @@ struct NeuralEngine::Impl {
                                 child.edge_log_prob = -30.0;
                             }
                             child.scored = true;
+                        }
+                        if (parent.need_boundary_eval && !boundary_closure_tokens.empty()) {
+                            double max_b = -1e9;
+                            bool has_b = false;
+                            for (llama_token tid : boundary_closure_tokens) {
+                                if (tid >= 0 && tid < n_vocab) {
+                                    const double v = static_cast<double>(logits[tid]);
+                                    if (!has_b || v > max_b) {
+                                        max_b = v;
+                                        has_b = true;
+                                    }
+                                }
+                            }
+                            if (has_b) {
+                                double sum_b = 0.0;
+                                for (llama_token tid : boundary_closure_tokens) {
+                                    if (tid >= 0 && tid < n_vocab) {
+                                        const double diff = static_cast<double>(logits[tid]) - max_b;
+                                        if (diff > -30.0) {
+                                            sum_b += std::exp(diff);
+                                        }
+                                    }
+                                }
+                                parent.boundary_eos_lp = (max_b - log_z) + std::log(std::max(sum_b, 1e-30));
+                                parent.boundary_eos_scored = true;
+                            }
                         }
                         // 对隐式逗号节点顺带计算全部单字候选的加权前缀边际对数概率（零额外推理）。
                         if (node_id == comma_node_id && !single_hanzi_indices.empty()) {
@@ -1834,7 +1885,20 @@ struct NeuralEngine::Impl {
                 }
             }
 
-            const double total_lp = std::min(0.0, log_sum_exp_pair(lp_primary, lp_via_comma));
+            const double raw_total_lp = std::min(0.0, log_sum_exp_pair(lp_primary, lp_via_comma));
+            double total_lp = raw_total_lp;
+            if (use_right_boundary_closure && cand_single_cp[i] == 0) {
+                const int32_t primary_end = (h_end > 0) ? h_end : end_id;
+                if (primary_end > 0 && trie[static_cast<size_t>(primary_end)].boundary_eos_scored) {
+                    constexpr double kRightBoundaryClosureMinLp = -5.5;
+                    constexpr double kRightBoundaryClosureWeight = 0.80;
+                    const double clamped_eos_lp = std::clamp(
+                        trie[static_cast<size_t>(primary_end)].boundary_eos_lp,
+                        kRightBoundaryClosureMinLp,
+                        0.0);
+                    total_lp = std::min(0.0, raw_total_lp + kRightBoundaryClosureWeight * clamped_eos_lp);
+                }
+            }
             const bool comma_won = (lp_via_comma > lp_primary && c_end > 0);
             out_log_probs[i] = total_lp;
 
@@ -1844,7 +1908,8 @@ struct NeuralEngine::Impl {
                 diag.char_count = std::max<int32_t>(1, count_utf8_codepoints(candidates[i]));
                 const int32_t right_chars = has_right_suffix ? count_utf8_codepoints(right_suffix) : 0;
                 const int32_t eval_chars = std::max<int32_t>(1, diag.char_count + right_chars);
-                diag.avg_char_lp = total_lp / static_cast<double>(eval_chars);
+                // 门控每字平均惊奇度仍基于开放生成前缀 `raw_total_lp`，避免右边界句读闭合项人为拉低 4+ 字正常句从而误触 Stage B 束搜索。
+                diag.avg_char_lp = raw_total_lp / static_cast<double>(eval_chars);
 
                 if (cand_single_cp[i] != 0) {
                     // 单字候选已由精确前缀边际化（含左边界 Token Healing 与隐式逗号）得到整体对数概率，
@@ -2673,26 +2738,30 @@ struct NeuralEngine::Impl {
                 }
             }
 
-            if (beam_ran && !beam_results.empty() && !right_suffix.empty()) {
-                // 句中内填触发受限束搜索时，将束候选统一拼接右侧后文重打分，保证与 Stage A 对数概率尺度严格一致。
+            if (beam_ran && !beam_results.empty() &&
+                (!right_suffix.empty() || (!beam_windowed && !boundary_closure_tokens.empty()))) {
+                // 对齐 Stage B 束搜索候选的概率刻度（句中右侧后文内填或无右文句读闭合校准），
+                // 防止 `beam_candidates` 凭未闭合开放前缀虚高反超或覆写 Stage A 已校准候选。
                 std::vector<std::string> beam_texts;
                 beam_texts.reserve(beam_results.size());
                 for (const auto &bc : beam_results) {
                     beam_texts.push_back(bc.text);
                 }
-                std::vector<double> beam_infill_scores;
+                std::vector<double> beam_calibrated_scores;
                 ScoreStats rescore_stats{};
                 if (score_candidates_with_diag_locked(
                         nullptr,
                         beam_texts,
-                        beam_infill_scores,
+                        beam_calibrated_scores,
                         nullptr,
                         rescore_stats,
                         err,
                         true,
                         right_suffix)) {
                     for (size_t i = 0; i < beam_results.size(); ++i) {
-                        beam_results[i].log_prob = beam_infill_scores[i];
+                        if (beam_calibrated_scores[i] > -1e8) {
+                            beam_results[i].log_prob = beam_calibrated_scores[i];
+                        }
                     }
                     std::sort(beam_results.begin(), beam_results.end(), [](const BeamCandidate &a, const BeamCandidate &b) {
                         return a.log_prob > b.log_prob;
@@ -2828,6 +2897,19 @@ std::unique_ptr<NeuralEngine> NeuralEngine::create(const EngineConfig &config, s
         std::vector<llama_token> comma_toks;
         if (impl->tokenize_raw("，", comma_toks) && comma_toks.size() == 1) {
             impl->comma_token = comma_toks[0];
+        }
+        const char *const kClosurePieces[] = {"，", "。", "？", "！", "\n"};
+        std::vector<llama_token> closure_toks;
+        for (const char *piece : kClosurePieces) {
+            if (impl->tokenize_raw(piece, closure_toks) && closure_toks.size() == 1) {
+                const llama_token tid = closure_toks[0];
+                if (tid >= 0 && tid < impl->n_vocab &&
+                    std::find(impl->boundary_closure_tokens.begin(),
+                              impl->boundary_closure_tokens.end(),
+                              tid) == impl->boundary_closure_tokens.end()) {
+                    impl->boundary_closure_tokens.push_back(tid);
+                }
+            }
         }
     }
 

@@ -244,8 +244,60 @@ int main(int argc, char **argv) {
         shurufa_neural_destroy(c_handle);
         return 4;
     }
-    std::printf("[C ABI] process_request 输出:\n%s\n", resp);
+    std::printf("[C ABI] process_request 输出:\n%s\n\n", resp);
     shurufa_neural_string_free(resp);
+
+    // 5. 右边界句读闭合校准评测：16 候选单批热延迟与 `woshiyigebing` 消歧验证（空上文下开放前缀虚高消除）。
+    const std::string closure_req =
+        "{\"session\":1,\"generation\":8,\"context\":\"\","
+        "\"segmentation\":\"wo'shi'yi'ge'bing\","
+        "\"syllable_paths\":[{\"syllables\":[\"wo\",\"shi\",\"yi\",\"ge\",\"bing\"],\"channel_log_prob\":0.0,\"is_complete\":true}],"
+        "\"candidates\":["
+        "{\"text\":\"我是一个兵\"},{\"text\":\"我是一个病\"},{\"text\":\"我是一个饼\"},{\"text\":\"我是一个冰\"},"
+        "{\"text\":\"我是一个并\"},{\"text\":\"我是一个柄\"},{\"text\":\"我是一个秉\"},{\"text\":\"我是一个丙\"},"
+        "{\"text\":\"卧室一个并\"},{\"text\":\"握是一个病\"},{\"text\":\"沃是一个病\"},{\"text\":\"窝是一个病\"},"
+        "{\"text\":\"我试一个并\"},{\"text\":\"我是一各病\"},{\"text\":\"我是一名兵\"},{\"text\":\"我是一个炳\"}"
+        "],"
+        "\"beam_width\":3,\"max_beam_results\":4,\"enable_constrained_decode\":false}";
+    std::vector<double> closure_lat;
+    std::string last_closure_resp;
+    for (int iter = 0; iter < 8; ++iter) {
+        char *c_resp = shurufa_neural_process_request(c_handle, closure_req.data(), closure_req.size());
+        if (!c_resp) {
+            std::fprintf(stderr, "C ABI 闭合校准请求失败\n");
+            shurufa_neural_destroy(c_handle);
+            return 4;
+        }
+        last_closure_resp.assign(c_resp);
+        shurufa_neural_string_free(c_resp);
+        const size_t pos = last_closure_resp.find("\"score_ms\":");
+        if (pos != std::string::npos && iter >= 2) {
+            closure_lat.push_back(std::strtod(last_closure_resp.c_str() + pos + 11, nullptr));
+        }
+    }
+    auto extract_cand_score = [&](const std::string &json, const std::string &cand) -> double {
+        const std::string needle = "\"text\":\"" + cand + "\",\"neural_log_prob\":";
+        const size_t p = json.find(needle);
+        if (p == std::string::npos) return -1e9;
+        return std::strtod(json.c_str() + p + needle.size(), nullptr);
+    };
+    const double lp_soldier = extract_cand_score(last_closure_resp, "我是一个兵");
+    const double lp_disease = extract_cand_score(last_closure_resp, "我是一个病");
+    const double lp_parallel = extract_cand_score(last_closure_resp, "我是一个并");
+    const double lp_ice = extract_cand_score(last_closure_resp, "我是一个冰");
+    const double lp_cake = extract_cand_score(last_closure_resp, "我是一个饼");
+    std::printf("[能力 D] 右边界句读闭合校准（空上文 `woshiyigebing` 16 候选）:\n");
+    std::printf("  score_ms P50=%.2f ms, P95=%.2f ms\n",
+                percentile(closure_lat, 0.50),
+                percentile(closure_lat, 0.95));
+    std::printf("  我是一个兵=%.4f | 我是一个病=%.4f | 我是一个并=%.4f | 我是一个冰=%.4f | 我是一个饼=%.4f\n",
+                lp_soldier, lp_disease, lp_parallel, lp_ice, lp_cake);
+    if (!(lp_soldier > lp_disease && lp_soldier > lp_parallel && lp_soldier > lp_ice && lp_soldier > lp_cake)) {
+        std::fprintf(stderr, "断言失败: 空上文 `woshiyigebing` 右边界闭合校准后「我是一个兵」未高于开放前缀竞争者!\n");
+        shurufa_neural_destroy(c_handle);
+        return 5;
+    }
+
     shurufa_neural_destroy(c_handle);
     return 0;
 }

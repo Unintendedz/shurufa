@@ -574,8 +574,9 @@ pub fn fuse_neural_response(
     // 5. 跨来源静态先验分桶相对归一：
     //    `Database/UserDatabase` 与 `Lattice(Generated/Collocation/NeuralKeyboard)` 的原始绝对偏移不同
     //    （后者含 `.gram` 边常数偏移），按来源桶各自减去桶内最大值并在 `[-8.0, 0.0]` 后采用 `0.5` 斜率软尾压缩至 `[-20.0, 0.0]`，
-    //    彻底消灭跨来源加性常数错位并保留头部强搭配词与常规低频词之间的静态分差；未测频词典占位条目（`stat_log_prob == None`）
-    //    给予温和中性相对先验 `-1.5`，而未进入 Tier 0 词网格主束的 `UniqueBeam` 独有候选按已观测 Tier 0 下界钳位至 `[-6.5, -3.5]`，
+    //    彻底消灭跨来源加性常数错位并保留头部强搭配词与常规低频词之间的静态分差；当同池无已测频同层词典词且
+    //    未测频词典占位条目本身位居 Tier 0 榜首（`orig_rank == 0`）时给予 `0.0` 相对静态先验，其余未测频占位条目
+    //    保持温和中性相对先验 `-1.5`，而未进入 Tier 0 词网格主束的 `UniqueBeam` 独有候选按已观测 Tier 0 下界钳位至 `[-6.5, -3.5]`，
     //    既杜绝束搜索次优路径凭虚高静态分反超在池真词，又让强神经语境优势的真实 OOV 词稳定翻盘。
     const STAT_REL_KNEE: f64 = -8.0;
     const STAT_REL_TAIL_SLOPE: f64 = 0.5;
@@ -692,7 +693,15 @@ pub fn fuse_neural_response(
                         .max(STAT_REL_FLOOR)
                 }
             }
-            None => NEUTRAL_STAT_REL,
+            None => {
+                if is_dict_bucket(cand.source) && dict_max.is_none() && *orig_rank == 0 {
+                    // 当同池没有更高权已测频词典词且未测频占位词本身位居 Tier 0 首名时，
+                    // 不再相对次位词网格凭空亏损 `-1.5 nats`。
+                    0.0
+                } else {
+                    NEUTRAL_STAT_REL
+                }
+            }
         };
         observed_min_rel_stat =
             Some(observed_min_rel_stat.map_or(rel_stat, |cur| cur.min(rel_stat)));
@@ -2372,5 +2381,100 @@ mod tests {
             page1_indices.contains(&6) && page1_indices.contains(&4) && page1_indices.contains(&5),
             "首页前 6 格应同时包含「贤者之石」(6) 与前缀「闲着」(4)「贤者」(5): {page1_indices:?}"
         );
+    }
+
+    #[test]
+    fn top1_unmeasured_dict_placeholder_gets_zero_relative_prior_without_measured_peers() {
+        // 1. 模拟 `woshiyigebing`：Tier 0 首名是未测频占位长词「我是一个兵」（`Database`, `stat_log_prob = None`），
+        //    同池没有更高权已测频同层词典词（`dict_max.is_none()`），次位为词网格「我是一个病」(`stat = -12.0` -> `rel = 0.0`)。
+        //    经过右边界句读闭合校准后「我是一个兵」神经分更高，且榜首占位词不再白亏 `-1.5 * 0.35 = -0.525 nats`，稳居 #1。
+        let mut soldier = sample_candidate(0, "我是一个兵", true, None);
+        soldier.source = CandidateSource::Database as u8;
+        soldier.pinyin = "wo'shi'yi'ge'bing".into();
+        soldier.exact_literal_dict = true;
+        let mut disease = sample_candidate(1, "我是一个病", true, Some(-12.0));
+        disease.source = CandidateSource::Collocation as u8;
+        disease.pinyin = "wo'shi'yi'ge'bing".into();
+        let mut parallel = sample_candidate(2, "我是一个并", true, Some(-12.4));
+        parallel.source = CandidateSource::Generated as u8;
+        parallel.pinyin = "wo'shi'yi'ge'bing".into();
+
+        let mut req = base_request(vec![soldier, disease, parallel]);
+        req.context.clear();
+        req.raw_input = "woshiyigebing".into();
+        req.segmentation = "wo'shi'yi'ge'bing".into();
+        req.syllable_paths = vec![NeuralSyllablePath {
+            syllables: vec![
+                "wo".into(),
+                "shi".into(),
+                "yi".into(),
+                "ge".into(),
+                "bing".into(),
+            ],
+            channel_log_prob: 0.0,
+            is_complete: true,
+        }];
+        let resp = NeuralDecodeResponse {
+            ok: true,
+            session: 1,
+            generation: 10,
+            candidate_scores: vec![
+                NeuralScoredCandidate {
+                    text: "我是一个兵".into(),
+                    // 原始 -20.16 + 0.60 * (-1.80) = -21.24
+                    neural_log_prob: -21.24,
+                },
+                NeuralScoredCandidate {
+                    text: "我是一个病".into(),
+                    // 原始 -17.59 + 0.60 * (-5.37) = -20.812（此处测试极限接近时 `-1.5 * 0.35 = -0.525` 的公平性影响）
+                    neural_log_prob: -21.45,
+                },
+                NeuralScoredCandidate {
+                    text: "我是一个并".into(),
+                    // 原始 -19.07 + 0.60 * (-5.50) = -22.37
+                    neural_log_prob: -22.37,
+                },
+            ],
+            beam_candidates: vec![],
+        };
+        // 若按旧规则给榜首占位词 `-1.5`：`-21.24 + 0.35*(-1.5) = -21.765 < -21.45` 会痛失首位；
+        // 修复后榜首无同层已测频词典竞争者时 `rel_stat = 0.0`，`-21.24 > -21.45`，稳守 #1。
+        let out = fuse_neural_response(3, &req, &resp, NeuralFusionWeights::default(), false);
+        assert_eq!(out.top1_text.as_deref(), Some("我是一个兵"));
+
+        // 2. 若同池存在已测频词典整词（`dict_max.is_some()`），即使未测频占位词在首位也仍按 `NEUTRAL_STAT_REL = -1.5` 计算。
+        let mut measured_peer = sample_candidate(1, "我是一个冰", true, Some(-10.0));
+        measured_peer.source = CandidateSource::Database as u8;
+        measured_peer.pinyin = "wo'shi'yi'ge'bing".into();
+        let mut req_with_peer = req.clone();
+        req_with_peer.candidates[1] = measured_peer;
+        let resp_with_peer = NeuralDecodeResponse {
+            ok: true,
+            session: 1,
+            generation: 10,
+            candidate_scores: vec![
+                NeuralScoredCandidate {
+                    text: "我是一个兵".into(),
+                    neural_log_prob: -21.24,
+                },
+                NeuralScoredCandidate {
+                    text: "我是一个冰".into(),
+                    neural_log_prob: -21.45,
+                },
+                NeuralScoredCandidate {
+                    text: "我是一个并".into(),
+                    neural_log_prob: -22.37,
+                },
+            ],
+            beam_candidates: vec![],
+        };
+        let out_with_peer = fuse_neural_response(
+            3,
+            &req_with_peer,
+            &resp_with_peer,
+            NeuralFusionWeights::default(),
+            false,
+        );
+        assert_eq!(out_with_peer.top1_text.as_deref(), Some("我是一个冰"));
     }
 }

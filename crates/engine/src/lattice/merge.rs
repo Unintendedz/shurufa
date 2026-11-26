@@ -3,7 +3,7 @@
 //! Ranking when merging into an existing list: exact SQLite full-key hits (Database / UserDatabase) first, then the lattice's whole sentences, then prefixes and everything else.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use super::decode::{
     build_graph, build_graph_borrowed, decode_graph, decode_typo_on_graph,
@@ -284,12 +284,17 @@ fn merge_decoded_paths(
             Cow::Borrowed(paths) => Cow::Borrowed(&paths[..paths.len().min(options.emit)]),
         };
     }
-    let already = existing_sentence_set(candidates, paths.len());
-    let block = if let Some(already) = already.as_ref() {
+    let mut backfills: Vec<(usize, Vec<String>)> = Vec::new();
+    let block = if let Some(already) = existing_sentence_map(candidates, paths.len()) {
         let mut block = Vec::new();
         let capacity = paths.len();
         for path in sentence_path_iter(paths) {
-            if already.contains(path.sentence.as_str()) {
+            if let Some(&existing_idx) = already.get(path.sentence.as_str()) {
+                if is_unmeasured_dict_placeholder(&candidates[existing_idx])
+                    && !path.words.is_empty()
+                {
+                    backfills.push((existing_idx, path.words.clone()));
+                }
                 continue;
             }
             if !block.is_empty()
@@ -311,6 +316,11 @@ fn merge_decoded_paths(
     } else {
         generated_block_linear(candidates, paths, typed_pinyin, options)
     };
+    for (existing_idx, words) in backfills {
+        if is_unmeasured_dict_placeholder(&candidates[existing_idx]) {
+            candidates[existing_idx].sentence_words = words;
+        }
+    }
     if !block.is_empty() {
         let at = whole_sentence_insert_position_with_options(candidates, syllables, options);
         candidates.splice(at..at, block);
@@ -318,11 +328,47 @@ fn merge_decoded_paths(
     typo
 }
 
-fn existing_sentence_set(candidates: &[WordItem], path_count: usize) -> Option<HashSet<&str>> {
+/// 判断已有候选行是否为未测频词典占位长词（`Database`、权重 `100`、字数 `>= 3`、未纠错且尚未写入分词元数据）。
+fn is_unmeasured_dict_placeholder(item: &WordItem) -> bool {
+    item.source == CandidateSource::Database
+        && item.weight == 100
+        && item.word.chars().count() >= 3
+        && item.corrected_from.is_empty()
+        && item.sentence_words.is_empty()
+}
+
+fn find_existing_candidate_idx(candidates: &[WordItem], sentence: &str) -> Option<usize> {
+    let mut fallback = None;
+    for (idx, item) in candidates.iter().enumerate() {
+        if item.word == sentence {
+            if is_unmeasured_dict_placeholder(item) {
+                return Some(idx);
+            }
+            fallback.get_or_insert(idx);
+        }
+    }
+    fallback
+}
+
+fn existing_sentence_map(
+    candidates: &[WordItem],
+    path_count: usize,
+) -> Option<HashMap<&str, usize>> {
     let dedup_size = candidates.len().saturating_add(path_count);
     (path_count > 1 && dedup_size > SMALL_SENTENCE_MERGE).then(|| {
-        let mut already = HashSet::with_capacity(dedup_size);
-        already.extend(candidates.iter().map(|item| item.word.as_str()));
+        let mut already = HashMap::with_capacity(dedup_size);
+        for (idx, item) in candidates.iter().enumerate() {
+            already
+                .entry(item.word.as_str())
+                .and_modify(|existing_idx: &mut usize| {
+                    if !is_unmeasured_dict_placeholder(&candidates[*existing_idx])
+                        && is_unmeasured_dict_placeholder(item)
+                    {
+                        *existing_idx = idx;
+                    }
+                })
+                .or_insert(idx);
+        }
         already
     })
 }
@@ -363,6 +409,7 @@ fn sentence_path_iter(paths: Cow<'_, [SentencePath]>) -> SentencePathIter<'_> {
     }
 }
 
+#[cfg(test)]
 fn sentence_seen_linear(candidates: &[WordItem], block: &[WordItem], sentence: &str) -> bool {
     candidates
         .iter()
@@ -379,7 +426,7 @@ fn lattice_row_source(block: &[WordItem], options: &LatticeOptions<'_>) -> Candi
 }
 
 fn generated_block_linear<'a>(
-    candidates: &[WordItem],
+    candidates: &mut [WordItem],
     paths: impl Into<Cow<'a, [SentencePath]>>,
     typed_pinyin: &str,
     options: &LatticeOptions<'_>,
@@ -388,7 +435,17 @@ fn generated_block_linear<'a>(
     let mut block = Vec::new();
     let capacity = paths.len();
     for path in sentence_path_iter(paths) {
-        if sentence_seen_linear(candidates, &block, &path.sentence) {
+        if block
+            .iter()
+            .any(|item: &WordItem| item.word == path.sentence)
+        {
+            continue;
+        }
+        if let Some(existing_idx) = find_existing_candidate_idx(candidates, &path.sentence) {
+            let existing = &mut candidates[existing_idx];
+            if is_unmeasured_dict_placeholder(existing) && !path.words.is_empty() {
+                existing.sentence_words.clone_from(&path.words);
+            }
             continue;
         }
         if !block.is_empty() && options.include_collocation_best && !options.include_lattice_best {
@@ -898,6 +955,92 @@ mod tests {
         assert_eq!(
             whole_sentence_insert_position(&many_two, &syllables("ge'shi")),
             MAX_LEADING_EXACT_TWO_SYLLABLE_DICT
+        );
+    }
+
+    #[test]
+    fn dedup_backfills_sentence_words_onto_unmeasured_placeholder_in_linear_and_map_paths() {
+        let rows = table(&[
+            ("wo'shi", &[("我是", 900_000)]),
+            ("yi'ge", &[("一个", 900_000)]),
+            ("bing", &[("兵", 500_000), ("病", 400_000)]),
+        ]);
+        // 1. 线性路径（`candidates.len() + paths.len() <= 64`）：占位长词就地写入 `sentence_words` 且不重复插行、不改来源与顺序。
+        let mut linear_candidates = vec![dictionary_row(
+            "woshiyigebing",
+            "我是一个兵",
+            100,
+            "wo'shi'yi'ge'bing",
+        )];
+        merge(
+            &mut linear_candidates,
+            "wo'shi'yi'ge'bing",
+            &rows,
+            "woshiyigebing",
+            &LatticeOptions::default(),
+        );
+        assert_eq!(linear_candidates[0].word, "我是一个兵");
+        assert_eq!(linear_candidates[0].source, CandidateSource::Database);
+        assert_eq!(linear_candidates[0].weight, 100);
+        assert_eq!(
+            linear_candidates[0].sentence_words,
+            vec!["我是", "一个", "兵"]
+        );
+        assert_eq!(
+            linear_candidates
+                .iter()
+                .filter(|item| item.word == "我是一个兵")
+                .count(),
+            1
+        );
+
+        // 非占位长词（例如已测频或用户词库或已有 `sentence_words`）不得被覆写。
+        let mut measured = dictionary_row("woshiyigebing", "我是一个兵", 500, "wo'shi'yi'ge'bing");
+        measured.sentence_words = vec!["自定义".into()];
+        let mut non_placeholder = vec![measured];
+        merge(
+            &mut non_placeholder,
+            "wo'shi'yi'ge'bing",
+            &rows,
+            "woshiyigebing",
+            &LatticeOptions::default(),
+        );
+        assert_eq!(non_placeholder[0].sentence_words, vec!["自定义"]);
+
+        // 2. 大批量 `HashMap` 路径（`candidates.len() + paths.len() > 64`）：同样就地回填 `sentence_words`。
+        let mut large_candidates = vec![dictionary_row(
+            "woshiyigebing",
+            "我是一个兵",
+            100,
+            "wo'shi'yi'ge'bing",
+        )];
+        for idx in 0..SMALL_SENTENCE_MERGE {
+            large_candidates.push(dictionary_row(
+                "woshiyigebing",
+                &format!("占位干扰词{idx}"),
+                50,
+                "wo'shi'yi'ge'bing",
+            ));
+        }
+        merge(
+            &mut large_candidates,
+            "wo'shi'yi'ge'bing",
+            &rows,
+            "woshiyigebing",
+            &LatticeOptions::default(),
+        );
+        assert_eq!(large_candidates[0].word, "我是一个兵");
+        assert_eq!(large_candidates[0].source, CandidateSource::Database);
+        assert_eq!(
+            large_candidates[0].sentence_words,
+            vec!["我是", "一个", "兵"]
+        );
+        assert_eq!(
+            large_candidates
+                .iter()
+                .filter(|item| item.word == "我是一个兵")
+                .count(),
+            1
         );
     }
 }
