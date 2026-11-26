@@ -6205,5 +6205,148 @@ fn multi_syllable_tail_pruning_keeps_common_prefixes_and_preserves_tab_filter_an
     assert_eq!(single_count, 72, "单音节输入必须完整保留 72 个单字");
 }
 
+#[test]
+fn unmeasured_dict_placeholder_gets_sentence_tail_collocation_without_mutating_stat() {
+    use crate::lattice::octagram::encode;
+
+    let fixture = Fixture::new(
+        "CREATE TABLE tbl_1_w(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_1_w VALUES('wo','w','我',5000000);\
+         CREATE TABLE tbl_1_s(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_1_s VALUES('shi','s','是',5000000);\
+         CREATE TABLE tbl_1_y(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_1_y VALUES('yi','y','一',5000000);\
+         CREATE TABLE tbl_1_g(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_1_g VALUES('ge','g','个',5000000);\
+         CREATE TABLE tbl_1_b(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_1_b VALUES('bing','b','兵',800000),('bing','b','饼',400000);\
+         CREATE TABLE tbl_2_w(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_2_w VALUES('wo''shi','wsh','我是',4000000);\
+         CREATE TABLE tbl_2_y(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_2_y VALUES('yi''ge','yg','一个',4000000);\
+         CREATE TABLE tbl_3_w(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_3_w VALUES('wo''shi''bing','wshb','我是兵',50000);\
+         CREATE TABLE tbl_5_w(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_5_w VALUES('wo''shi''yi''ge''bing','wsygb','我是一个兵',100);",
+    );
+    let gram_path = crate::lattice::octagram::fixture::gram_file(
+        fixture.path(),
+        "tail-collocation.gram",
+        &[
+            ([encode("我是一个"), encode("兵")].concat(), 190_000),
+            ([encode("啊我是一个"), encode("兵")].concat(), 200_000),
+            ([encode("我是一个"), encode("饼")].concat(), 190_000),
+            ([encode("今天真累啊"), encode("我是兵")].concat(), 180_000),
+        ],
+    );
+    let mut session = fixture.session_with(|options| {
+        options.sentence_alternatives = true;
+        options.sentence_association.collocation_model = gram_path.clone();
+    });
+
+    // 1. 空上文：未测频词典占位长词 `我是一个兵` 必须与词网格句 `我是一个饼` 取得同等句内末词 `.gram` 搭配分，
+    // 且保持 `stat_log_prob == None` 不重复叠分。
+    type_text(&mut session, "woshiyigebing");
+    let snapshot_empty = session.snapshot();
+    let meta_empty = session
+        .neural_v2_metadata()
+        .expect("neural_v2_metadata should exist on empty context");
+    let bing_idx = snapshot_empty
+        .candidates
+        .iter()
+        .position(|c| c.word == "我是一个兵")
+        .expect("我是一个兵 should appear");
+    let cookie_idx = snapshot_empty
+        .candidates
+        .iter()
+        .position(|c| c.word == "我是一个饼")
+        .expect("我是一个饼 should appear");
+    assert_eq!(
+        snapshot_empty.candidates[bing_idx].source,
+        CandidateSource::Database
+    );
+    assert_eq!(meta_empty.candidates[bing_idx].stat_log_prob, None);
+    assert!(
+        meta_empty.candidates[bing_idx].collocation_log_prob > 0.0,
+        "空上文下占位长词应按 sentence_words.last() 获得句内尾词搭配分，实际 {:?}",
+        meta_empty.candidates[bing_idx]
+    );
+    assert!(
+        (meta_empty.candidates[bing_idx].collocation_log_prob
+            - meta_empty.candidates[cookie_idx].collocation_log_prob)
+            .abs()
+            < 1e-9,
+        "占位长词({}) 与词网格整句({}) 的句内尾词搭配分应对等",
+        meta_empty.candidates[bing_idx].collocation_log_prob,
+        meta_empty.candidates[cookie_idx].collocation_log_prob,
+    );
+
+    // 2. 带末尾标点的分句上文 `今天真累啊，`（`han_clause` 为空）：仍凭借句内前缀 `我是一个` 获得尾词搭配分。
+    session.command(Command::Cancel);
+    session.set_rescoring_context("今天真累啊，");
+    type_text(&mut session, "woshiyigebing");
+    let snapshot_comma = session.snapshot();
+    let meta_comma = session
+        .neural_v2_metadata()
+        .expect("neural_v2_metadata should exist with comma context");
+    let bing_comma_idx = snapshot_comma
+        .candidates
+        .iter()
+        .position(|c| c.word == "我是一个兵")
+        .expect("我是一个兵 should appear with comma context");
+    assert_eq!(meta_comma.candidates[bing_comma_idx].stat_log_prob, None);
+    assert!(
+        (meta_comma.candidates[bing_comma_idx].collocation_log_prob
+            - meta_empty.candidates[bing_idx].collocation_log_prob)
+            .abs()
+            < 1e-9,
+        "末尾带标点时应保持句内尾词搭配分"
+    );
+
+    // 3. 带连续汉字左文 `今天真累啊`：拼接左邻 1 字 `啊` 与候选前缀 `我是一个` 命中最强 `.gram` 窗口，仍保持 `stat_log_prob == None`。
+    session.command(Command::Cancel);
+    session.set_rescoring_context("今天真累啊");
+    type_text(&mut session, "woshiyigebing");
+    let snapshot_ctx = session.snapshot();
+    let meta_ctx = session
+        .neural_v2_metadata()
+        .expect("neural_v2_metadata should exist with context");
+    let bing_ctx_idx = snapshot_ctx
+        .candidates
+        .iter()
+        .position(|c| c.word == "我是一个兵")
+        .expect("我是一个兵 should appear with context");
+    assert_eq!(meta_ctx.candidates[bing_ctx_idx].stat_log_prob, None);
+    assert!(
+        meta_ctx.candidates[bing_ctx_idx].collocation_log_prob
+            > meta_empty.candidates[bing_idx].collocation_log_prob,
+        "拼接全局左文 `啊` 应进一步提升句内末词搭配分: ctx={} vs empty={}",
+        meta_ctx.candidates[bing_ctx_idx].collocation_log_prob,
+        meta_empty.candidates[bing_idx].collocation_log_prob,
+    );
+
+    // 4. 对照：已测频词典长词（`weight == 50000`）仍沿用整词搭配并保留 `stat_log_prob` 加成。
+    session.command(Command::Cancel);
+    type_text(&mut session, "woshibing");
+    let snapshot_measured = session.snapshot();
+    let meta_measured = session
+        .neural_v2_metadata()
+        .expect("neural_v2_metadata should exist for measured dict word");
+    let measured_idx = snapshot_measured
+        .candidates
+        .iter()
+        .position(|c| c.word == "我是兵")
+        .expect("我是兵 should appear");
+    let measured_meta = &meta_measured.candidates[measured_idx];
+    let baseline_stat = crate::neural_v2::dictionary_unified_stat_log_prob(50_000, 3);
+    assert!(measured_meta.collocation_log_prob > 0.0);
+    assert!(
+        measured_meta
+            .stat_log_prob
+            .is_some_and(|s| s > baseline_stat + 1.0),
+        "已测频词典长词应按整词搭配同时叠加 stat_log_prob: {measured_meta:?}"
+    );
+}
+
 mod caret_suffix;
 mod stroke_filter;

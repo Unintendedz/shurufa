@@ -582,7 +582,7 @@ pub fn last_codepoints(text: &str, n: usize) -> &str {
 }
 
 #[cfg(test)]
-pub(in crate::lattice) mod fixture {
+pub(crate) mod fixture {
     // ---- 测试侧的双数组构造器 ------------------------------------------------
     //
     // 只为 fixture 存在：把「编码键 -> 值」排成一棵字节前缀树，再按 darts-clone

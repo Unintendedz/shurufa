@@ -1119,49 +1119,28 @@ impl InputSession {
                 && !item.fuzzy
             {
                 collocation_eval_count += 1;
-                if item.source.is_dictionary() {
-                    if !han_clause.is_empty() {
-                        if let Some(bonus) = self
-                            .engine
-                            .query_collocation_bonus(scheme, han_clause, &item.word, true)
-                        {
-                            let capped = bonus.min(12.0);
-                            if capped > 0.0 {
-                                stat_log_prob = stat_log_prob.map(|s| s + capped);
-                                collocation_log_prob = 0.28 * capped;
-                            }
-                        }
-                    }
-                } else if matches!(
-                    item.source,
-                    CandidateSource::Generated | CandidateSource::Collocation
-                ) && word_chars >= 2
-                {
-                    if let Some(last_word) = item.sentence_words.last() {
-                        let prefix_in_cand =
-                            item.word.strip_suffix(last_word.as_str()).unwrap_or("");
-                        let prefix_chars = prefix_in_cand.chars().count();
-                        let tail_str = if prefix_chars >= 5 || han_clause.is_empty() {
-                            crate::text::last_characters(prefix_in_cand, 5)
-                        } else {
-                            let clause_tail =
-                                crate::text::last_characters(han_clause, 5 - prefix_chars);
-                            tail_buf.clear();
-                            tail_buf.push_str(clause_tail);
-                            tail_buf.push_str(prefix_in_cand);
-                            tail_buf.as_str()
-                        };
-                        if !tail_str.is_empty() {
-                            if let Some(bonus) = self
-                                .engine
-                                .query_collocation_bonus(scheme, tail_str, last_word, true)
-                            {
-                                let capped = bonus.min(12.0);
-                                if capped > 0.0 {
-                                    collocation_log_prob = 0.28 * capped;
-                                }
-                            }
-                        }
+                let uses_sentence_tail = (item.source == CandidateSource::Database
+                    && stat_log_prob.is_none()
+                    && word_chars >= 3
+                    && !item.sentence_words.is_empty())
+                    || (matches!(
+                        item.source,
+                        CandidateSource::Generated | CandidateSource::Collocation
+                    ) && word_chars >= 2);
+                if uses_sentence_tail {
+                    collocation_log_prob = sentence_tail_collocation_log_prob(
+                        &self.engine,
+                        scheme,
+                        han_clause,
+                        item,
+                        &mut tail_buf,
+                    );
+                } else if item.source.is_dictionary() {
+                    if let Some(capped) =
+                        capped_collocation_bonus(&self.engine, scheme, han_clause, &item.word)
+                    {
+                        stat_log_prob = stat_log_prob.map(|s| s + capped);
+                        collocation_log_prob = COLLOCATION_LOG_PROB_SCALE * capped;
                     }
                 }
             }
@@ -1236,6 +1215,51 @@ impl InputSession {
             candidates,
         })
     }
+}
+
+const COLLOCATION_BONUS_CAP: f64 = 12.0;
+const COLLOCATION_LOG_PROB_SCALE: f64 = 0.28;
+
+fn capped_collocation_bonus(
+    engine: &crate::ime::ImeSession,
+    scheme: SchemeType,
+    context_tail: &str,
+    word: &str,
+) -> Option<f64> {
+    if context_tail.is_empty() {
+        return None;
+    }
+    let capped = engine
+        .query_collocation_bonus(scheme, context_tail, word, true)?
+        .min(COLLOCATION_BONUS_CAP);
+    (capped > 0.0).then_some(capped)
+}
+
+/// 按句内末词（拼接候选内前缀与至多 5 字全局汉字左文）查询 `.gram` 搭配分，
+/// 供 `Generated | Collocation` 整句与已回填 `sentence_words` 的未测频词典占位长词共用。
+fn sentence_tail_collocation_log_prob(
+    engine: &crate::ime::ImeSession,
+    scheme: SchemeType,
+    han_clause: &str,
+    item: &WordItem,
+    tail_buf: &mut String,
+) -> f64 {
+    let Some(last_word) = item.sentence_words.last() else {
+        return 0.0;
+    };
+    let prefix_in_cand = item.word.strip_suffix(last_word.as_str()).unwrap_or("");
+    let prefix_chars = prefix_in_cand.chars().count();
+    let tail_str = if prefix_chars >= 5 || han_clause.is_empty() {
+        crate::text::last_characters(prefix_in_cand, 5)
+    } else {
+        let clause_tail = crate::text::last_characters(han_clause, 5 - prefix_chars);
+        tail_buf.clear();
+        tail_buf.push_str(clause_tail);
+        tail_buf.push_str(prefix_in_cand);
+        tail_buf.as_str()
+    };
+    capped_collocation_bonus(engine, scheme, tail_str, last_word)
+        .map_or(0.0, |capped| COLLOCATION_LOG_PROB_SCALE * capped)
 }
 
 fn typo_channel_log_penalty(
