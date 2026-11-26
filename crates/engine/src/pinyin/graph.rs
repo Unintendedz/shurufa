@@ -9,7 +9,10 @@ use std::collections::{BinaryHeap, HashSet};
 use super::autocorrect::{correction_targets_for_piece, MAX_AUTOCORRECT_INPUT_LENGTH};
 use super::jianpin::is_valid_initial_segment;
 use super::syllables::{intact_piece, is_intact, normalized_syllable, MAX_SYLLABLE_LENGTH};
-use super::typos::{probabilistic_syllable_typos, two_letter_neighbor_typos};
+use super::typos::{
+    geminate_boundary_syllable, probabilistic_syllable_typos, two_letter_neighbor_typos,
+    CHANNEL_GEMINATE_ELISION_PENALTY,
+};
 use crate::types::autocorrect_type;
 
 pub const SYLLABLE_GRAPH_PATH_LIMIT: usize = 32;
@@ -51,6 +54,30 @@ pub enum DagEdgeKind {
     Typo,
 }
 
+/// 跨音节同辅音吞音恢复边对前一音节韵尾的约束。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GeminateCoda {
+    None,
+    /// 前一音节须以单 `n`（非 `ng`）结尾，当前边起点补回 `n` 构成 `n-` 声母音节。
+    SingleN,
+    /// 前一音节须以 `ng` 结尾，当前边起点补回 `g` 构成 `g-` 声母音节。
+    NasalNg,
+}
+
+impl GeminateCoda {
+    fn index(self) -> usize {
+        match self {
+            Self::None => 0,
+            Self::SingleN => 1,
+            Self::NasalNg => 2,
+        }
+    }
+
+    fn matches(self, trailing: Self) -> bool {
+        self == Self::None || self == trailing
+    }
+}
+
 /// `SyllableDag` 中的一条有向边，覆盖原始输入的 `[start, end)` 字节区间。
 #[derive(Debug, Clone, PartialEq)]
 pub struct DagEdge {
@@ -59,6 +86,8 @@ pub struct DagEdge {
     /// 规范音节或简拼声母（已将 `lue/nue/jv` 等别名归一）。
     pub syllable: String,
     pub kind: DagEdgeKind,
+    /// 若为跨音节吞音恢复边，要求前一合法音节匹配的韵尾类别。
+    pub required_coda: GeminateCoda,
     /// 该边的对数信道概率 $\log P_{\text{channel}}(X_{\text{start..end}} \mid \text{syllable}) \le 0$（单位：nat）。
     pub channel_log_prob: f64,
 }
@@ -82,6 +111,8 @@ pub struct DagPath {
     pub initial_edges: usize,
     /// 路径中键盘纠错边数量。
     pub typo_edges: usize,
+    /// 路径中跨音节吞音恢复边数量。
+    pub geminate_edges: usize,
     /// 是否全部为完整合法音节（供 `decode_constrained` 跳过半截声母受限展开）。
     pub is_complete: bool,
 }
@@ -262,6 +293,7 @@ pub fn enumerate_kbest_complete_segmentations(
                     extra_splits,
                     initial_edges: 0,
                     typo_edges: 0,
+                    geminate_edges: 0,
                     is_complete: true,
                 });
             }
@@ -315,6 +347,9 @@ pub fn build_syllable_dag(raw: &str, autocorrect_types: u32) -> SyllableDag {
         exact_reachable[pos] = !complete_graph.edges[pos].is_empty();
     }
 
+    let mut has_single_n_coda = vec![false; length + 1];
+    let mut has_ng_coda = vec![false; length + 1];
+
     for start in 0..length {
         let bucket = &mut dag.edges[start];
         // 1. 合法完整音节边（最长优先）。
@@ -322,6 +357,11 @@ pub fn build_syllable_dag(raw: &str, autocorrect_types: u32) -> SyllableDag {
             let piece = &bytes[start..end];
             if let Some(syllable) = intact_piece(piece) {
                 let normalized = normalized_syllable(syllable);
+                if normalized.ends_with("ng") {
+                    has_ng_coda[end] = true;
+                } else if normalized.ends_with('n') {
+                    has_single_n_coda[end] = true;
+                }
                 let kind = if start > 0
                     && matches!(
                         syllable,
@@ -336,6 +376,7 @@ pub fn build_syllable_dag(raw: &str, autocorrect_types: u32) -> SyllableDag {
                     end,
                     syllable: normalized,
                     kind,
+                    required_coda: GeminateCoda::None,
                     channel_log_prob: 0.0,
                 });
             }
@@ -349,6 +390,7 @@ pub fn build_syllable_dag(raw: &str, autocorrect_types: u32) -> SyllableDag {
                 end: start + 1,
                 syllable: single.to_owned(),
                 kind: DagEdgeKind::Initial,
+                required_coda: GeminateCoda::None,
                 channel_log_prob: DAG_INITIAL_EDGE_COST,
             });
         }
@@ -360,6 +402,7 @@ pub fn build_syllable_dag(raw: &str, autocorrect_types: u32) -> SyllableDag {
                     end: start + 2,
                     syllable: pair.to_owned(),
                     kind: DagEdgeKind::Initial,
+                    required_coda: GeminateCoda::None,
                     channel_log_prob: DAG_INITIAL_EDGE_COST,
                 });
             }
@@ -380,6 +423,7 @@ pub fn build_syllable_dag(raw: &str, autocorrect_types: u32) -> SyllableDag {
                             end,
                             syllable: typo.syllable.to_owned(),
                             kind: DagEdgeKind::Typo,
+                            required_coda: GeminateCoda::None,
                             channel_log_prob: -typo.penalty,
                         });
                     }
@@ -394,6 +438,7 @@ pub fn build_syllable_dag(raw: &str, autocorrect_types: u32) -> SyllableDag {
                             end,
                             syllable: normalized_syllable(syllable),
                             kind: DagEdgeKind::Typo,
+                            required_coda: GeminateCoda::None,
                             channel_log_prob: -penalty,
                         });
                     }
@@ -407,7 +452,35 @@ pub fn build_syllable_dag(raw: &str, autocorrect_types: u32) -> SyllableDag {
                             end,
                             syllable: typo.syllable.to_owned(),
                             kind: DagEdgeKind::Typo,
+                            required_coda: GeminateCoda::None,
                             channel_log_prob: -typo.penalty,
+                        });
+                    }
+                }
+            }
+        }
+
+        // 4. 跨音节同辅音吞音恢复边（`-n + n-` 与 `-ng + g-`）。
+        if autocorrect_types & autocorrect_type::DELETION != 0
+            && (has_single_n_coda[start] || has_ng_coda[start])
+        {
+            for end in (start + 1..=length.min(start + MAX_SYLLABLE_LENGTH - 1)).rev() {
+                let remainder = &raw[start..end];
+                for (enabled, required_coda, rep_coda) in [
+                    (has_single_n_coda[start], GeminateCoda::SingleN, "an"),
+                    (has_ng_coda[start], GeminateCoda::NasalNg, "ang"),
+                ] {
+                    if !enabled {
+                        continue;
+                    }
+                    if let Some(syllable) = geminate_boundary_syllable(rep_coda, remainder) {
+                        bucket.push(DagEdge {
+                            start,
+                            end,
+                            syllable: syllable.to_owned(),
+                            kind: DagEdgeKind::Typo,
+                            required_coda,
+                            channel_log_prob: -CHANNEL_GEMINATE_ELISION_PENALTY,
                         });
                     }
                 }
@@ -426,8 +499,32 @@ pub fn build_syllable_dag(raw: &str, autocorrect_types: u32) -> SyllableDag {
     dag
 }
 
+fn edge_out_coda(edge: &DagEdge) -> GeminateCoda {
+    if matches!(edge.kind, DagEdgeKind::Exact | DagEdgeKind::HiatusSplit) {
+        if edge.syllable.ends_with("ng") {
+            GeminateCoda::NasalNg
+        } else if edge.syllable.ends_with('n') {
+            GeminateCoda::SingleN
+        } else {
+            GeminateCoda::None
+        }
+    } else {
+        GeminateCoda::None
+    }
+}
+
 /// 从 `SyllableDag` 提取按总信道对数概率降序排列的前 `path_limit` 条全跨度候选音节路径（受每句最多 2 处纠错约束）。
 pub fn dag_candidate_paths(dag: &SyllableDag, path_limit: usize) -> Vec<DagPath> {
+    extract_dag_paths(dag, path_limit, true)
+}
+
+/// 仅沿完整音节与受控纠错弧（跳过半截简拼声母边）从 `SyllableDag` 提取前 `path_limit` 条完整候选路径。
+/// 供跨音节吞音恢复（`-n+n-`/`-ng+g-`）与多字母错拼尾音节校准使用，防止单字母简拼拆分（如 `fa'n'an`）挤占完整切分额度。
+pub fn dag_complete_candidate_paths(dag: &SyllableDag, path_limit: usize) -> Vec<DagPath> {
+    extract_dag_paths(dag, path_limit, false)
+}
+
+fn extract_dag_paths(dag: &SyllableDag, path_limit: usize, allow_initial: bool) -> Vec<DagPath> {
     let n = dag.input_length;
     if path_limit == 0 || n == 0 || dag.edges.len() != n + 1 {
         return Vec::new();
@@ -448,15 +545,12 @@ pub fn dag_candidate_paths(dag: &SyllableDag, path_limit: usize) -> Vec<DagPath>
     }
     let baseline_segs = min_complete_segs[0];
 
-    // 反向 DP 求出每起点到终点的最小负对数代价（单位：毫 nat，正值表示损失，越小越好）。
+    // 反向 DP 求出每 `(位置, 前驱韵尾)` 到终点的最小负对数代价（单位：毫 nat，越小越好）。
     const HIATUS_STEP_MILLI: i32 = 600;
     let edge_loss_milli = |edge: &DagEdge| -> i32 {
         let channel_loss = (-edge.channel_log_prob * 1000.0).round() as i32;
         // 完整合法音节边统一附带每段 `HIATUS_STEP_MILLI` 边界基数，使多拆出 1 个零声母边界恰好比最小切分多付 `0.60 nats`。
-        let split_base = match edge.kind {
-            DagEdgeKind::Exact | DagEdgeKind::HiatusSplit => HIATUS_STEP_MILLI,
-            DagEdgeKind::Initial | DagEdgeKind::Typo => HIATUS_STEP_MILLI,
-        };
+        let split_base = HIATUS_STEP_MILLI;
         let bare_interior_ao = edge.start > 0
             && edge.end < n
             && matches!(edge.kind, DagEdgeKind::Exact | DagEdgeKind::HiatusSplit)
@@ -470,20 +564,34 @@ pub fn dag_candidate_paths(dag: &SyllableDag, path_limit: usize) -> Vec<DagPath>
             })
     };
 
-    let mut min_loss = vec![i32::MAX; n + 1];
-    min_loss[n] = 0;
+    let mut min_loss = vec![[i32::MAX; 3]; n + 1];
+    min_loss[n] = [0; 3];
     for pos in (0..n).rev() {
         for edge in &dag.edges[pos] {
-            if min_loss[edge.end] == i32::MAX {
+            if !allow_initial && edge.kind == DagEdgeKind::Initial {
                 continue;
             }
-            let cand = edge_loss_milli(edge).saturating_add(min_loss[edge.end]);
-            if cand < min_loss[pos] {
-                min_loss[pos] = cand;
+            let tail = min_loss[edge.end][edge_out_coda(edge).index()];
+            if tail == i32::MAX {
+                continue;
+            }
+            let cand = edge_loss_milli(edge).saturating_add(tail);
+            for in_coda in [
+                GeminateCoda::None,
+                GeminateCoda::SingleN,
+                GeminateCoda::NasalNg,
+            ] {
+                if edge.required_coda.matches(in_coda) {
+                    let idx = in_coda.index();
+                    if cand < min_loss[pos][idx] {
+                        min_loss[pos][idx] = cand;
+                    }
+                }
             }
         }
     }
-    if min_loss[0] == i32::MAX {
+    let start_h = min_loss[0][GeminateCoda::None.index()];
+    if start_h == i32::MAX {
         return Vec::new();
     }
 
@@ -492,8 +600,10 @@ pub fn dag_candidate_paths(dag: &SyllableDag, path_limit: usize) -> Vec<DagPath>
         segments: usize,
         g_loss: i32,
         channel_sum: f64,
+        trailing_coda: GeminateCoda,
         initial_edges: usize,
         typo_edges: usize,
+        geminate_edges: usize,
         parent: usize,
         edge_pos: usize,
         edge_idx: usize,
@@ -504,14 +614,16 @@ pub fn dag_candidate_paths(dag: &SyllableDag, path_limit: usize) -> Vec<DagPath>
         segments: 0,
         g_loss: 0,
         channel_sum: 0.0,
+        trailing_coda: GeminateCoda::None,
         initial_edges: 0,
         typo_edges: 0,
+        geminate_edges: 0,
         parent: usize::MAX,
         edge_pos: 0,
         edge_idx: 0,
     });
     let mut heap: BinaryHeap<Reverse<(i32, usize, usize)>> = BinaryHeap::new();
-    heap.push(Reverse((min_loss[0], 0, 0)));
+    heap.push(Reverse((start_h, 0, 0)));
 
     let mut result = Vec::with_capacity(path_limit.min(32));
     let mut seen: HashSet<Vec<String>> = HashSet::with_capacity(path_limit.min(32));
@@ -528,8 +640,10 @@ pub fn dag_candidate_paths(dag: &SyllableDag, path_limit: usize) -> Vec<DagPath>
         let segments = states[state_id].segments;
         let g_loss = states[state_id].g_loss;
         let channel_sum = states[state_id].channel_sum;
+        let trailing_coda = states[state_id].trailing_coda;
         let initial_edges = states[state_id].initial_edges;
         let typo_edges = states[state_id].typo_edges;
+        let geminate_edges = states[state_id].geminate_edges;
         if pos == n {
             let mut syllables = Vec::with_capacity(segments);
             let mut cursor = state_id;
@@ -553,13 +667,22 @@ pub fn dag_candidate_paths(dag: &SyllableDag, path_limit: usize) -> Vec<DagPath>
                     extra_splits,
                     initial_edges,
                     typo_edges,
+                    geminate_edges,
                     is_complete,
                 });
             }
             continue;
         }
         for (edge_idx, edge) in dag.edges[pos].iter().enumerate() {
-            if min_loss[edge.end] == i32::MAX {
+            if !allow_initial && edge.kind == DagEdgeKind::Initial {
+                continue;
+            }
+            if !edge.required_coda.matches(trailing_coda) {
+                continue;
+            }
+            let out_coda = edge_out_coda(edge);
+            let tail_loss = min_loss[edge.end][out_coda.index()];
+            if tail_loss == i32::MAX {
                 continue;
             }
             let next_typos = typo_edges + usize::from(edge.kind == DagEdgeKind::Typo);
@@ -567,16 +690,20 @@ pub fn dag_candidate_paths(dag: &SyllableDag, path_limit: usize) -> Vec<DagPath>
                 continue;
             }
             let next_initials = initial_edges + usize::from(edge.kind == DagEdgeKind::Initial);
+            let next_geminates =
+                geminate_edges + usize::from(edge.required_coda != GeminateCoda::None);
             let next_g = g_loss.saturating_add(edge_loss_milli(edge));
-            let f_loss = next_g.saturating_add(min_loss[edge.end]);
+            let f_loss = next_g.saturating_add(tail_loss);
             let next_id = states.len();
             states.push(State {
                 pos: edge.end,
                 segments: segments + 1,
                 g_loss: next_g,
                 channel_sum: channel_sum + edge.channel_log_prob,
+                trailing_coda: out_coda,
                 initial_edges: next_initials,
                 typo_edges: next_typos,
+                geminate_edges: next_geminates,
                 parent: state_id,
                 edge_pos: pos,
                 edge_idx,
@@ -703,6 +830,35 @@ mod tests {
                 "{raw} 未生成纠错路径 {expected}: {candidates:?}"
             );
         }
+
+        // 跨音节吞音恢复与 `*gn -> *n` 尾音校准在完整音节通道下均可稳定召回，关闭 `DELETION` 时不误触发吞音恢复。
+        for (raw, expected, expected_geminates) in [
+            ("chunuanhuakai", "chun'nuan'hua'kai", 1usize),
+            ("changjiangungun", "chang'jiang'gun'gun", 1),
+            ("zhinengongju", "zhi'neng'gong'ju", 1),
+            ("fanan", "fan'nan", 1),
+            ("xianan", "xian'nan", 1),
+            ("kunan", "kun'nan", 1),
+            ("beneng", "ben'neng", 1),
+            ("mohuyign", "mo'hu'yin", 0),
+        ] {
+            let dag = build_syllable_dag(raw, all);
+            let candidates = dag_complete_candidate_paths(&dag, 16);
+            assert!(
+                candidates
+                    .iter()
+                    .any(|path| path.syllables.join("'") == expected
+                        && path.geminate_edges == expected_geminates),
+                "{raw} 未生成完整纠错路径 {expected}: {candidates:?}"
+            );
+        }
+        let no_del = autocorrect_type::NEIGHBOR | autocorrect_type::INSERTION;
+        let chun_no_del =
+            dag_complete_candidate_paths(&build_syllable_dag("chunuanhuakai", no_del), 16);
+        assert!(
+            chun_no_del.iter().all(|path| path.geminate_edges == 0),
+            "未启用 DELETION 时不应生成吞音边: {chun_no_del:?}"
+        );
     }
 
     #[test]

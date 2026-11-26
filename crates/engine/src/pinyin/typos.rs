@@ -4,7 +4,9 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use super::syllables::{intact_piece, intact_pinyin_list, is_intact, normalized_syllable};
+use super::syllables::{
+    intact_piece, intact_pinyin_list, is_intact, normalized_syllable, MAX_SYLLABLE_LENGTH,
+};
 use crate::types::autocorrect_type;
 
 /// 按编辑代价从低到高排列；枚举顺序兼作排序键。
@@ -42,6 +44,11 @@ pub const CHANNEL_TRANSPOSITION_PENALTY: f64 = 2.40;
 pub const CHANNEL_MISSING_NASAL_G_PENALTY: f64 = 2.40;
 /// 前后鼻音多打尾 `g`（`ing->in`、`eng->en`、`ang->an`）。
 pub const CHANNEL_EXTRA_NASAL_G_PENALTY: f64 = 3.10;
+/// 鼻音韵尾换位多打 `g`（如 `yign->yin`、`kegn->ken`、`fagn->fan`）：
+/// 略低于一般非法多键 `3.60`，使真实长词能在音节竞争中对抗相邻换位 `yign->ying`。
+pub const CHANNEL_TRANSPOSED_EXTRA_NASAL_G_PENALTY: f64 = 2.95;
+/// 跨音节同辅音吞音恢复（`-n + n-` 与 `-ng + g-` 边界省略）的信道代价。
+pub const CHANNEL_GEMINATE_ELISION_PENALTY: f64 = 2.35;
 /// 连击重复键或单键漏击重复字母。
 pub const CHANNEL_REPEATED_KEY_PENALTY: f64 = 2.50;
 /// 同行相邻键（欧氏距离 `1.0`）的基础邻键误触代价。
@@ -97,6 +104,44 @@ pub fn is_extra_nasal_g(typed: &str, intended: &str) -> bool {
         && typed.ends_with('g')
         && typed.starts_with(intended)
         && (intended.ends_with("an") || intended.ends_with("en") || intended.ends_with("in"))
+}
+
+/// 判断是否属于鼻音韵尾前错插并换位的 `g`（如 `yign->yin`、`kegn->ken`、`fagn->fan`）。
+pub fn is_transposed_extra_nasal_g(typed: &str, intended: &str) -> bool {
+    let t = typed.as_bytes();
+    let g = intended.as_bytes();
+    t.len() == g.len() + 1
+        && t.len() >= 3
+        && t.ends_with(b"gn")
+        && t[..t.len() - 2] == g[..g.len() - 1]
+        && (intended.ends_with("an") || intended.ends_with("en") || intended.ends_with("in"))
+}
+
+/// 跨音节同辅音吞音恢复规则：
+/// 当合法前音节 `prev_syllable` 以单 `n`（非 `ng`）或 `ng` 结尾时，在其后继片段 `remainder` 起始处补回 `n` / `g`，
+/// 若能构成合法 `n-` / `g-` 声母音节则返回归一化音节（如 `chun + uan -> nuan`、`jiang + un -> gun`）。
+pub fn geminate_boundary_syllable(prev_syllable: &str, remainder: &str) -> Option<&'static str> {
+    if !is_intact(prev_syllable) {
+        return None;
+    }
+    let rem = remainder.as_bytes();
+    if rem.is_empty() || rem.len() >= MAX_SYLLABLE_LENGTH || !rem.iter().all(u8::is_ascii_lowercase)
+    {
+        return None;
+    }
+    let shared = if prev_syllable.ends_with("ng") {
+        b'g'
+    } else if prev_syllable.ends_with('n') {
+        b'n'
+    } else {
+        return None;
+    };
+    let mut buf = [0u8; MAX_SYLLABLE_LENGTH];
+    buf[0] = shared;
+    buf[1..=rem.len()].copy_from_slice(rem);
+    let candidate = intact_piece(&buf[..=rem.len()])?;
+    let normalized = normalized_syllable(candidate);
+    intact_piece(normalized.as_bytes())
 }
 
 /// 判断是否属于声母后漏打介母 `u`/`i`（如 `gan->guan`、`shan->shuan`、`dan->dian`）。
@@ -614,6 +659,26 @@ mod tests {
         assert!((discounted(20.0, 1) - (20.0 - 4.0 * 2f64.ln())).abs() < 1e-12);
         // The discount is capped at three fifths of the base.
         assert!((discounted(20.0, 1000) - 8.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn geminate_and_transposed_extra_nasal_g_rules() {
+        assert_eq!(geminate_boundary_syllable("chun", "uan"), Some("nuan"));
+        assert_eq!(geminate_boundary_syllable("fan", "an"), Some("nan"));
+        assert_eq!(geminate_boundary_syllable("ben", "eng"), Some("neng"));
+        assert_eq!(geminate_boundary_syllable("jiang", "un"), Some("gun"));
+        assert_eq!(geminate_boundary_syllable("neng", "ong"), Some("gong"));
+        assert_eq!(geminate_boundary_syllable("xiang", "ang"), Some("gang"));
+        assert_eq!(geminate_boundary_syllable("chu", "nuan"), None);
+        assert_eq!(geminate_boundary_syllable("fan", "nan"), None);
+        assert_eq!(geminate_boundary_syllable("zhong", "guo"), None);
+        assert_eq!(geminate_boundary_syllable("fan", ""), None);
+
+        assert!(is_transposed_extra_nasal_g("yign", "yin"));
+        assert!(is_transposed_extra_nasal_g("kegn", "ken"));
+        assert!(is_transposed_extra_nasal_g("fagn", "fan"));
+        assert!(!is_transposed_extra_nasal_g("ying", "yin"));
+        assert!(!is_transposed_extra_nasal_g("zogn", "zon"));
     }
 }
 

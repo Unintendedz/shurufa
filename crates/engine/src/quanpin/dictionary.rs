@@ -29,10 +29,11 @@ use crate::lattice::{SentencePath, TypoEdgeSource};
 use crate::paths::RuntimePaths;
 use crate::pinyin::autocorrect::{
     autocorrect_cut_kbest, looks_like_syllable_with_jianpin_tail, neighbor_two_letter_cuts,
+    MAX_AUTOCORRECT_INPUT_LENGTH,
 };
 use crate::pinyin::fuzzy::{fuzzy_segmentations, FUZZY_SEGMENTATION_LIMIT};
 use crate::pinyin::graph::{
-    build_syllable_dag, build_syllable_graph, dag_candidate_paths,
+    build_syllable_dag, build_syllable_graph, dag_candidate_paths, dag_complete_candidate_paths,
     enumerate_complete_segmentations, enumerate_kbest_complete_segmentations,
     DAG_HIATUS_SPLIT_COST, DAG_INITIAL_EDGE_COST, SYLLABLE_GRAPH_PATH_LIMIT,
 };
@@ -849,6 +850,17 @@ impl QuanpinDictionary {
                 let rows = self.query_series(raw, &join_segments(costlier), costlier);
                 append_unique_words(&mut result, rows);
             }
+            // 先于 `merge_literal_jianpin_with_corrected` 融合备选完整音节/吞音候选，避免尾部简拼长句（`mo'hu'yi'g'n -> 模糊一个年`）混入整句排序池。
+            if types != 0 && !raw.contains('\'') {
+                self.merge_syllable_dag_competing_cuts(
+                    &mut result,
+                    raw,
+                    &segments,
+                    &resolution,
+                    &alternatives,
+                    types,
+                );
+            }
             self.merge_literal_jianpin_with_corrected(
                 &mut result,
                 literal,
@@ -869,13 +881,19 @@ impl QuanpinDictionary {
                     Some(&mut extra_syllable_runner_ups),
                 );
             }
-        }
-        if types != 0
-            && !raw.contains('\'')
-            && !resolution.corrected_input
-            && !has_only_complete_pinyin_segments(&segments)
-        {
-            self.merge_competing_incomplete_typo_cuts(&mut result, raw, &segments, types);
+            if types != 0 && !raw.contains('\'') && !has_only_complete_pinyin_segments(&segments) {
+                self.merge_competing_incomplete_typo_cuts(&mut result, raw, &segments, types);
+            }
+            if types != 0 && !raw.contains('\'') {
+                self.merge_syllable_dag_competing_cuts(
+                    &mut result,
+                    raw,
+                    &segments,
+                    &resolution,
+                    &alternatives,
+                    types,
+                );
+            }
         }
         // 接在所有切分、补全词和单字之后：放在主切分自己的那段末尾时，另一切分的正确读法（`xieshanga` 的「协商啊」）会排到它们后面，被 `runner_up_order` 挪去列表末尾。
         append_unique_words(&mut result, runner_ups);
@@ -2034,6 +2052,273 @@ impl QuanpinDictionary {
         }
     }
 
+    /// 基于 `SyllableDag` 完整音节信道融合跨音节双辅音吞音恢复（`-n+n-`/`-ng+g-`）
+    /// 与纠错输入上的备选音节竞争（如 `mohuyign -> mo'hu'yin 模糊音`、`beneng -> ben'neng 本能`）。
+    fn merge_syllable_dag_competing_cuts(
+        &mut self,
+        result: &mut Vec<WordItem>,
+        raw: &str,
+        segments: &[String],
+        resolution: &SeriesResolution,
+        alternatives: &[Vec<String>],
+        types: u32,
+    ) {
+        if raw.len() < 4
+            || raw.len() > MAX_AUTOCORRECT_INPUT_LENGTH
+            || types & autocorrect_type::MISSING_OR_EXTRA == 0
+        {
+            return;
+        }
+        let primary_segments: &[String] = if resolution.corrected_input {
+            &resolution.corrected
+        } else {
+            segments
+        };
+        if primary_segments.len() < 2 {
+            return;
+        }
+        let geminate_candidate =
+            types & autocorrect_type::DELETION != 0 && may_have_geminate_boundary(raw);
+        let nasal_gn_candidate = resolution.corrected_input
+            && types & autocorrect_type::INSERTION != 0
+            && may_have_transposed_extra_nasal_g(raw);
+        if !geminate_candidate && !nasal_gn_candidate {
+            return;
+        }
+        let dag = build_syllable_dag(raw, types);
+        let dag_paths = dag_complete_candidate_paths(&dag, 12);
+        if dag_paths.is_empty() {
+            return;
+        }
+        let primary_channel_log_prob = if !resolution.corrected_input {
+            0.0
+        } else {
+            dag_paths
+                .iter()
+                .find(|path| path.syllables == primary_segments)
+                .map_or_else(
+                    || -estimated_correction_channel_penalty(raw, primary_segments).0,
+                    |path| path.channel_log_prob,
+                )
+        };
+        let best_channel_log_prob = dag_paths
+            .first()
+            .map_or(primary_channel_log_prob, |path| path.channel_log_prob);
+
+        let span_limit = self.sentence_tables.options(false).span_limit;
+        let mut candidate_cuts: Vec<(Vec<String>, f64)> = Vec::new();
+        for path in dag_paths {
+            if path.typo_edges == 0
+                || path.syllables.len() < 2
+                || path.syllables == primary_segments
+                || alternatives.contains(&path.syllables)
+                || resolution.costlier_corrected_cuts.contains(&path.syllables)
+            {
+                continue;
+            }
+            if resolution.corrected_input {
+                let channel_floor = best_channel_log_prob.max(primary_channel_log_prob) - 1.50;
+                if path.geminate_edges == 0 && path.channel_log_prob < channel_floor {
+                    continue;
+                }
+            } else if path.geminate_edges == 0 || path.typo_edges != path.geminate_edges {
+                continue;
+            }
+            if primary_segments.len() > MAX_SYLLABLES_FOR_MULTIPLE_SEGMENTATIONS
+                && !has_changed_boundary_lexical_support(
+                    &self.database,
+                    &mut self.lattice_span_cache,
+                    span_limit,
+                    primary_segments,
+                    &path.syllables,
+                )
+            {
+                continue;
+            }
+            let relative_channel_delta = path.channel_log_prob - primary_channel_log_prob;
+            candidate_cuts.push((path.syllables, relative_channel_delta));
+            if candidate_cuts.len() >= 3 {
+                break;
+            }
+        }
+        if candidate_cuts.is_empty() {
+            return;
+        }
+
+        let leading_dict = result
+            .iter()
+            .take_while(|item| {
+                item.source.is_dictionary()
+                    && !item.canonical_pinyin.is_empty()
+                    && (folded_reading_equal(&item.canonical_pinyin, raw)
+                        || item
+                            .canonical_pinyin
+                            .split('\'')
+                            .eq(primary_segments.iter().map(String::as_str))
+                        || (resolution.corrected_input
+                            && item.word.chars().count() == primary_segments.len()
+                            && item.canonical_pinyin.split('\'').count() == primary_segments.len()))
+            })
+            .count();
+        let insert_at = if primary_segments.len() == 2 {
+            leading_dict.min(8)
+        } else {
+            leading_dict
+        };
+
+        let mut pooled: Vec<(WordItem, bool)> = Vec::new();
+        {
+            let association = self.sentence_association.clone();
+            let has_collocation =
+                self.collocation_db.is_some() && association.collocation_weight != 0.0;
+            let preceding = crate::text::trailing_han_clause(&self.rescoring_context);
+            let personal = Arc::clone(&self.personal);
+            let model = personal.model();
+            let mut options = self.sentence_tables.options(self.sentence_alternatives);
+            options.nbest = 6;
+            options.personal = Some(&*model);
+            options.bigram_memo = Some(&self.bigram_memo);
+            if has_collocation {
+                options.preceding_context = preceding;
+            }
+            let scorer;
+            if has_collocation {
+                let db = self.collocation_db.as_ref().expect("collocation db loaded");
+                let config = association.collocation_grammar;
+                scorer = move |tail: &str, word: &str, is_rear: bool| {
+                    db.query(tail, word, is_rear, &config)
+                };
+                options.collocation_scorer = Some(&scorer);
+                options.collocation_weight = association.collocation_weight;
+            }
+
+            let folded = fold_reading(raw);
+            let database = &self.database;
+            let lattice_spans = &mut self.lattice_span_cache;
+            for (cut, relative_channel_delta) in &candidate_cuts {
+                let joined = join_segments(cut);
+                let mut push_candidate = |item: WordItem, is_exact_dict: bool| {
+                    if let Some((existing, existing_exact)) = pooled
+                        .iter_mut()
+                        .find(|(existing, _)| existing.word == item.word)
+                    {
+                        if item.weight > existing.weight {
+                            *existing = item;
+                        }
+                        *existing_exact |= is_exact_dict;
+                    } else {
+                        pooled.push((item, is_exact_dict));
+                    }
+                };
+
+                let exact_rows =
+                    database.query_exact_segmentations_keyed_flat(std::slice::from_ref(cut), 4);
+                for row in exact_rows {
+                    let mut score =
+                        edge_log_prob(row.weight, cut.len(), &options) + *relative_channel_delta;
+                    if let Some(col_scorer) = options.collocation_scorer {
+                        score += options.collocation_weight
+                            * (col_scorer(preceding, &row.value, true)
+                                + options.collocation_edge_offset);
+                    }
+                    let word = row.value;
+                    let mut item = WordItem::new(
+                        joined.clone(),
+                        word.clone(),
+                        (score * 1000.0) as i64,
+                        CandidateSource::Generated,
+                        row.key,
+                    );
+                    item.sentence_association = true;
+                    item.sentence_words = vec![word];
+                    item.corrected_from = folded.as_str().into();
+                    push_candidate(item, true);
+                }
+
+                let mut lookup = |span: &[String]| {
+                    cached_lattice_span(database, lattice_spans, span, span_limit)
+                };
+                for path in decode_sentences(cut, &mut lookup, &options)
+                    .into_iter()
+                    .take(4)
+                {
+                    let score = path.log_prob + *relative_channel_delta;
+                    let is_exact_single = path.words.len() == 1;
+                    let mut item = WordItem::new(
+                        joined.clone(),
+                        path.sentence,
+                        (score * 1000.0) as i64,
+                        CandidateSource::Generated,
+                        path.key,
+                    );
+                    item.sentence_association = true;
+                    item.sentence_words = path.words;
+                    item.corrected_from = folded.as_str().into();
+                    push_candidate(item, is_exact_single);
+                }
+            }
+        }
+
+        if pooled.is_empty() {
+            return;
+        }
+        pooled.sort_by_key(|(item, _)| std::cmp::Reverse(item.weight));
+        pooled.truncate(8);
+
+        let best_sentence_weight = result[insert_at..]
+            .iter()
+            .filter(|item| item.sentence_association)
+            .map(|item| item.weight)
+            .max()
+            .unwrap_or(i64::MIN);
+        let mut alt_sentences: Vec<WordItem> = Vec::new();
+        let mut deferred_two_char_dict: Vec<WordItem> = Vec::new();
+
+        for (mut item, is_exact_dict) in pooled {
+            if result[..insert_at]
+                .iter()
+                .any(|existing| existing.word == item.word)
+            {
+                continue;
+            }
+            if let Some(existing_idx) = result[insert_at..]
+                .iter()
+                .position(|existing| existing.word == item.word)
+            {
+                let abs_idx = insert_at + existing_idx;
+                if result[abs_idx].sentence_association && result[abs_idx].weight >= item.weight {
+                    continue;
+                }
+                result.remove(abs_idx);
+            }
+            // 两音节清洗整词存在前排直拼基准（如 `fanan -> 发难`、`xianan -> 先按`）时，
+            // 若吞音实词（如 `犯难`/`险难`）分值未压过首条 `[1,1]` 拆字句，以 `Database` 行紧随首读法后入前页，避免被单字埋没；
+            // 若如 `kunan -> 困难` 自身压过 `[1,1]` 拆字，则保留为 `sentence_association` 顺位占据 `#3`。
+            if primary_segments.len() == 2 && is_exact_dict && item.weight < best_sentence_weight {
+                let mean_nats = (item.weight as f64 / 1000.0) / 2.0;
+                if mean_nats >= -10.0 && deferred_two_char_dict.len() < 2 {
+                    item.source = CandidateSource::Database;
+                    item.sentence_association = false;
+                    item.sentence_words.clear();
+                    deferred_two_char_dict.push(item);
+                }
+            } else {
+                alt_sentences.push(item);
+            }
+        }
+
+        if !alt_sentences.is_empty() {
+            merge_alternative_sentences_at(result, insert_at, alt_sentences);
+        }
+        if !deferred_two_char_dict.is_empty() {
+            let mut pos = insert_at.min(result.len());
+            while pos < result.len() && result[pos].sentence_association {
+                pos += 1;
+            }
+            result.splice(pos..pos, deferred_two_char_dict);
+        }
+    }
+
     /// 完整音节的长词续接（QD:732-749）：输入切分作为 `pinyin`，完整长键作为规范键。
     fn longer_phrase_candidates(
         &mut self,
@@ -2807,6 +3092,70 @@ fn yield_stand_in_sentence_to_fuzzy_rows(result: &mut [WordItem]) {
     result[..bucket].sort_by_key(|item| !item.fuzzy);
 }
 
+/// 零堆分配前哨检查：跨音节 `-n + n-` / `-ng + g-` 吞音恢复仅可能发生在串内出现 `n + 元音` 或 `ng + 元音` 处。
+#[inline]
+fn may_have_geminate_boundary(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    bytes.len() >= 4
+        && (1..bytes.len().saturating_sub(1)).any(|idx| {
+            bytes[idx] == b'n'
+                && (matches!(bytes[idx + 1], b'a' | b'e' | b'i' | b'o' | b'u' | b'v')
+                    || (bytes[idx + 1] == b'g'
+                        && idx + 2 < bytes.len()
+                        && matches!(bytes[idx + 2], b'a' | b'e' | b'o' | b'u')))
+        })
+}
+
+/// 零堆分配前哨检查：鼻音尾换位多键 `*gn -> *n`（如 `mohuyign`）仅可能出现在含 `gn` 子串的输入中。
+#[inline]
+fn may_have_transposed_extra_nasal_g(raw: &str) -> bool {
+    raw.as_bytes().windows(2).any(|pair| pair == b"gn")
+}
+
+/// 为长句（>4 音节）中发生吞音或音节纠错改写的路径验证变化区间是否命中真实词库多字词组，避免无意义全句解码。
+fn has_changed_boundary_lexical_support(
+    database: &PinyinDatabase,
+    lattice_spans: &mut FifoCache<u64, CachedLatticeSpan>,
+    probe_limit: usize,
+    primary: &[String],
+    alt: &[String],
+) -> bool {
+    let mut prefix = 0usize;
+    let min_len = primary.len().min(alt.len());
+    while prefix < min_len && primary[prefix] == alt[prefix] {
+        prefix += 1;
+    }
+    let mut suffix = 0usize;
+    while suffix + prefix < min_len
+        && primary[primary.len() - 1 - suffix] == alt[alt.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+    let diff_start = prefix;
+    let diff_end = alt.len().saturating_sub(suffix);
+    if diff_start >= diff_end {
+        return false;
+    }
+    for span_len in 2..=4usize.min(alt.len()) {
+        let min_s = diff_start.saturating_sub(span_len - 1);
+        let max_s = diff_end.saturating_sub(1).min(alt.len() - span_len);
+        for s in min_s..=max_s {
+            let e = s + span_len;
+            if e <= diff_start || s >= diff_end {
+                continue;
+            }
+            let span = &alt[s..e];
+            ensure_cached_lattice_span(database, lattice_spans, span, probe_limit);
+            if cached_lattice_span_ref(lattice_spans, span, probe_limit)
+                .is_some_and(|rows| !rows.is_empty())
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// 为长句（>4 音节）的字面备选切分计算变化边界处的词典多字词实证权重。
 /// 仅当新切出的核心跨度（如 `xi'an->西安`、`ti'an->提案`、`ji'e->饥饿`、`fang'an->方案`）或跨边界邻接词组
 /// （如 `he'li'+'an'pai`、`xie'shang`）在词库中真实存在时返回 `Some(weight)`，否则直接剪枝避免伪隔音（`xi'a`/`ya'o`/`gu'o`）反复解码。
@@ -2998,6 +3347,15 @@ fn merge_alternative_sentences_by_score(
     } else {
         leading_dict
     };
+    merge_alternative_sentences_at(result, insert_at, alt_sentences);
+}
+
+/// 从给定 `insert_at` 位置起按统一对数分（毫 nat）重排并融合整句候选。
+fn merge_alternative_sentences_at(
+    result: &mut Vec<WordItem>,
+    insert_at: usize,
+    alt_sentences: Vec<WordItem>,
+) {
     let mut pool: Vec<WordItem> = Vec::new();
     let mut non_sentences: Vec<WordItem> = Vec::with_capacity(result.len());
     for (idx, item) in std::mem::take(result).into_iter().enumerate() {
@@ -3121,3 +3479,120 @@ mod evicted_page_tests;
 
 #[cfg(test)]
 mod online_cache_update_tests;
+
+#[cfg(test)]
+mod chime_regression_tests {
+    use super::*;
+    use crate::quanpin::fixture::Fixture;
+    use crate::types::FuzzyPinyinOptions;
+
+    const ALL_TYPES: u32 = autocorrect_type::TRANSPOSITION
+        | autocorrect_type::NEIGHBOR
+        | autocorrect_type::MISSING_OR_EXTRA;
+    const NO_FUZZY: FuzzyPinyinOptions = FuzzyPinyinOptions { rules: 0 };
+
+    #[test]
+    fn donguan_keeps_leading_corrected_dict_word_ahead_of_compositional_split() {
+        let fixture = Fixture::new();
+        fixture.insert("dong'guan", "东莞", 374_460);
+        fixture.insert("dong'guan", "东关", 15_265);
+        fixture.insert("dong", "东", 2_000_000);
+        fixture.insert("guan", "官", 1_500_000);
+        fixture.insert("dong'huan", "动换", 3_480);
+
+        let mut dict = QuanpinDictionary::new(&fixture.paths);
+        dict.sentence_association = SentenceAssociationOptions {
+            word_lattice: true,
+            ..SentenceAssociationOptions::default()
+        };
+        let rows = dict.query("donguan", "", ALL_TYPES, NO_FUZZY);
+        assert_eq!(rows.first().map(|r| r.word.as_str()), Some("东莞"));
+    }
+
+    #[test]
+    fn geminate_elision_and_transposed_nasal_g_calibration_end_to_end() {
+        let fixture = Fixture::new();
+        // 1. 4 音节吞音词与直拼组合竞争
+        fixture.insert("chun'nuan'hua'kai", "春暖花开", 20_870);
+        fixture.insert("chu", "出", 1_000_000);
+        fixture.insert("nuan", "暖", 300_000);
+        fixture.insert("hua", "花", 800_000);
+        fixture.insert("kai", "开", 900_000);
+        // 2. 2 音节清洗基线保持直拼首屈，同时吞音词进入前排
+        fixture.insert("fa'nan", "发难", 13_505);
+        fixture.insert("fan'an", "翻案", 5_690);
+        fixture.insert("fan'nan", "犯难", 6_680);
+        fixture.insert("fa", "发", 3_000_000);
+        fixture.insert("nan", "难", 1_200_000);
+        fixture.insert("han", "汗", 500_000);
+        fixture.insert("xian'an", "先按", 15_130);
+        fixture.insert("xia'nan", "峡南", 5);
+        fixture.insert("xian'nan", "险难", 1_175);
+        fixture.insert("xi", "西", 2_000_000);
+        fixture.insert("xia", "下", 2_500_000);
+        fixture.insert("ben'neng", "本能", 123_955);
+        fixture.insert("ben", "本", 2_000_000);
+        fixture.insert("ceng", "层", 500_000);
+        // 3. 句尾 `-gn` 错拼与换位保护
+        fixture.insert("mo'hu'yin", "模糊音", 1_200);
+        fixture.insert("mo'hu", "模糊", 50_000);
+        fixture.insert("ying", "应", 1_500_000);
+        fixture.insert("shuang'pin", "双拼", 10_570);
+
+        let mut dict = QuanpinDictionary::new(&fixture.paths);
+        dict.sentence_association = SentenceAssociationOptions {
+            word_lattice: true,
+            ..SentenceAssociationOptions::default()
+        };
+        let query_words = |dict: &mut QuanpinDictionary, raw: &str, types: u32| -> Vec<String> {
+            dict.query(raw, "", types, NO_FUZZY)
+                .into_iter()
+                .map(|r| r.word.to_string())
+                .collect()
+        };
+
+        let chun = query_words(&mut dict, "chunuanhuakai", ALL_TYPES);
+        assert_eq!(
+            chun.first().map(String::as_str),
+            Some("春暖花开"),
+            "{chun:?}"
+        );
+        // 未开启纠错时保持直拼手感，不触发吞音恢复。
+        let chun_clean = query_words(&mut dict, "chunuanhuakai", 0);
+        assert_ne!(
+            chun_clean.first().map(String::as_str),
+            Some("春暖花开"),
+            "{chun_clean:?}"
+        );
+
+        let fan = query_words(&mut dict, "fanan", ALL_TYPES);
+        assert_eq!(fan.first().map(String::as_str), Some("发难"), "{fan:?}");
+        assert!(
+            fan.iter().take(7).any(|w| w == "犯难"),
+            "fanan 前排应包含 犯难: {fan:?}"
+        );
+
+        let xian = query_words(&mut dict, "xianan", ALL_TYPES);
+        assert_eq!(xian.first().map(String::as_str), Some("先按"), "{xian:?}");
+        assert!(
+            xian.iter().take(9).any(|w| w == "险难"),
+            "xianan 前排应包含 险难: {xian:?}"
+        );
+
+        let ben = query_words(&mut dict, "beneng", ALL_TYPES);
+        assert_eq!(ben.first().map(String::as_str), Some("本能"), "{ben:?}");
+
+        let mohu = query_words(&mut dict, "mohuyign", ALL_TYPES);
+        assert!(
+            mohu.iter().take(3).any(|w| w == "模糊音"),
+            "mohuyign 前 3 应包含 模糊音: {mohu:?}"
+        );
+
+        let shuang = query_words(&mut dict, "shaungpin", ALL_TYPES);
+        assert_eq!(
+            shuang.first().map(String::as_str),
+            Some("双拼"),
+            "{shuang:?}"
+        );
+    }
+}

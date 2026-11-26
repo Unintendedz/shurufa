@@ -6,9 +6,10 @@ use std::sync::OnceLock;
 use super::segment::{cut_one_piece_min_segments, is_complete_pinyin_input};
 use super::syllables::{intact_piece, intact_pinyin_list, is_intact, MAX_SYLLABLE_LENGTH};
 use super::typos::{
-    two_letter_neighbor_typos, CHANNEL_MISSING_MEDIAL_PENALTY, CHANNEL_MISSING_NASAL_G_PENALTY,
-    CHANNEL_MISSING_OR_EXTRA_PENALTY, CHANNEL_NEIGHBOR_BASE_PENALTY, CHANNEL_REPEATED_KEY_PENALTY,
-    CHANNEL_TRANSPOSITION_PENALTY,
+    is_transposed_extra_nasal_g, two_letter_neighbor_typos, CHANNEL_MISSING_MEDIAL_PENALTY,
+    CHANNEL_MISSING_NASAL_G_PENALTY, CHANNEL_MISSING_OR_EXTRA_PENALTY,
+    CHANNEL_NEIGHBOR_BASE_PENALTY, CHANNEL_REPEATED_KEY_PENALTY,
+    CHANNEL_TRANSPOSED_EXTRA_NASAL_G_PENALTY, CHANNEL_TRANSPOSITION_PENALTY,
 };
 use crate::types::autocorrect_type;
 
@@ -288,37 +289,61 @@ pub(crate) fn correction_targets_for_piece(
     if limit == 0 || autocorrect_types == 0 {
         return Vec::new();
     }
-    let Some(targets) = correction_index().get(piece) else {
-        return Vec::new();
-    };
-    let mut ranked = Vec::new();
-    for target in targets {
-        let enabled_bits = autocorrect_types & target.type_bits;
-        if enabled_bits == 0 {
-            continue;
-        }
-        let penalty = if enabled_bits & autocorrect_type::TRANSPOSITION != 0 {
-            CHANNEL_TRANSPOSITION_PENALTY
-        } else if enabled_bits & autocorrect_type::INSERTION != 0
-            && is_repeated_insertion(piece, target.syllable)
-        {
-            CHANNEL_REPEATED_KEY_PENALTY
-        } else if enabled_bits & autocorrect_type::NEIGHBOR != 0 {
-            CHANNEL_NEIGHBOR_BASE_PENALTY + 0.10
-        } else if enabled_bits & autocorrect_type::DELETION != 0 {
-            if super::typos::is_missing_nasal_g(piece, target.syllable) {
-                CHANNEL_MISSING_NASAL_G_PENALTY
-            } else if super::typos::is_missing_medial(piece, target.syllable) {
-                CHANNEL_MISSING_MEDIAL_PENALTY
+    let mut ranked: Vec<(&'static str, f64)> = Vec::new();
+    if let Some(targets) = correction_index().get(piece) {
+        for target in targets {
+            let enabled_bits = autocorrect_types & target.type_bits;
+            if enabled_bits == 0 {
+                continue;
+            }
+            let penalty = if enabled_bits & autocorrect_type::TRANSPOSITION != 0 {
+                CHANNEL_TRANSPOSITION_PENALTY
+            } else if enabled_bits & autocorrect_type::INSERTION != 0
+                && is_repeated_insertion(piece, target.syllable)
+            {
+                CHANNEL_REPEATED_KEY_PENALTY
+            } else if enabled_bits & autocorrect_type::NEIGHBOR != 0 {
+                CHANNEL_NEIGHBOR_BASE_PENALTY + 0.10
+            } else if enabled_bits & autocorrect_type::DELETION != 0 {
+                if super::typos::is_missing_nasal_g(piece, target.syllable) {
+                    CHANNEL_MISSING_NASAL_G_PENALTY
+                } else if super::typos::is_missing_medial(piece, target.syllable) {
+                    CHANNEL_MISSING_MEDIAL_PENALTY
+                } else {
+                    CHANNEL_MISSING_OR_EXTRA_PENALTY
+                }
             } else {
                 CHANNEL_MISSING_OR_EXTRA_PENALTY
-            }
-        } else {
-            CHANNEL_MISSING_OR_EXTRA_PENALTY
-        };
-        ranked.push((target.syllable, penalty));
+            };
+            ranked.push((target.syllable, penalty));
+        }
     }
-    ranked.sort_by(|lhs, rhs| lhs.1.total_cmp(&rhs.1));
+    // 音系规则：对 `*agn`/`*egn`/`*ign` 类尾音（如 `yign`）同步召回多打换位 `g` 的前鼻音（`yin`），
+    // 避免 QWERTY 非紧邻插键表遗漏导致 `mohuyign -> 模糊音` 仅靠前缀长词跌至末尾。
+    if autocorrect_types & autocorrect_type::INSERTION != 0
+        && piece.len() >= 3
+        && piece.len() - 1 <= MAX_SYLLABLE_LENGTH
+        && piece.ends_with("gn")
+        && !is_intact(piece)
+    {
+        let mut buf = [0u8; MAX_SYLLABLE_LENGTH];
+        let prefix_len = piece.len() - 2;
+        buf[..prefix_len].copy_from_slice(&piece.as_bytes()[..prefix_len]);
+        buf[prefix_len] = b'n';
+        if let Some(syllable) = intact_piece(&buf[..prefix_len + 1]) {
+            if is_transposed_extra_nasal_g(piece, syllable) {
+                match ranked.iter_mut().find(|(s, _)| *s == syllable) {
+                    Some((_, existing)) => {
+                        if CHANNEL_TRANSPOSED_EXTRA_NASAL_G_PENALTY < *existing {
+                            *existing = CHANNEL_TRANSPOSED_EXTRA_NASAL_G_PENALTY;
+                        }
+                    }
+                    None => ranked.push((syllable, CHANNEL_TRANSPOSED_EXTRA_NASAL_G_PENALTY)),
+                }
+            }
+        }
+    }
+    ranked.sort_by(|lhs, rhs| lhs.1.total_cmp(&rhs.1).then_with(|| lhs.0.cmp(rhs.0)));
     ranked.truncate(limit);
     ranked
 }
@@ -1250,6 +1275,18 @@ mod tests {
         assert_eq!(autocorrect_suppression_key("sahng", "saHng"), "sahng");
         assert_eq!(autocorrect_suppression_key("sa'hng", "sa'hng"), "sahng");
         assert_eq!(autocorrect_suppression_key("nihc", "nihC"), "nihc");
+    }
+
+    #[test]
+    fn transposed_extra_nasal_g_recovers_front_nasal_targets() {
+        let targets = correction_targets_for_piece("yign", TRANSPOSITION | INSERTION, 3);
+        assert_eq!(targets.first().map(|(s, _)| *s), Some("ying"));
+        assert!(targets.iter().any(|(s, _)| *s == "yin"), "{targets:?}");
+        let trans_only = correction_targets_for_piece("yign", TRANSPOSITION, 3);
+        assert!(
+            trans_only.iter().all(|(s, _)| *s != "yin"),
+            "{trans_only:?}"
+        );
     }
 }
 
