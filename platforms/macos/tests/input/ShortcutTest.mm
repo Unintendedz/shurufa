@@ -2961,6 +2961,27 @@ static void TestShurufaCompositionPolicy() {
     NSEvent *digit = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0 timestamp:0
         windowNumber:0 context:nil characters:@"1" charactersIgnoringModifiers:@"1" isARepeat:NO keyCode:18];
     assert([controller handleEvent:digit client:client] && session.selectCalls == 1);
+    // 候选窗已显示上一代（generation 1）且新一代（generation 2）处于 ~28 ms Provisional 窗口时，
+    // 按空格不得被旧面板身份栅栏吞掉，必须派发 MSIME_COMMIT_CANDIDATE。
+    NSDictionary *provisionalNext = @{@"focused":@YES,@"session":@1,@"generation":@2,@"provisional":@YES,
+        @"editing_text":@"nihao",@"scheme":@0,
+        @"candidates":@[@{@"text":@"你好",@"highlighted":@YES,@"id":@{@"session":@1,@"generation":@2,@"index":@0}}]};
+    [controller setValue:provisionalNext forKey:@"view"];
+    session.lastCommand = UINT32_MAX;
+    session.selectCalls = 0;
+    NSEvent *provisionalSpace = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0 timestamp:0
+        windowNumber:0 context:nil characters:@" " charactersIgnoringModifiers:@" " isARepeat:NO keyCode:49];
+    assert([controller handleEvent:provisionalSpace client:client]);
+    assert(session.lastCommand == MSIME_COMMIT_CANDIDATE && session.selectCalls == 0);
+    // 非 Provisional 态下面板代次落后时，仍保持身份栅栏拒绝错选。
+    NSDictionary *stalePresented = @{@"focused":@YES,@"session":@1,@"generation":@2,@"provisional":@NO,
+        @"editing_text":@"nihao",@"scheme":@0,
+        @"candidates":@[@{@"text":@"你好",@"highlighted":@YES,@"id":@{@"session":@1,@"generation":@2,@"index":@0}}]};
+    [controller setValue:stalePresented forKey:@"view"];
+    session.lastCommand = UINT32_MAX;
+    assert([controller handleEvent:provisionalSpace client:client]);
+    assert(session.lastCommand == UINT32_MAX && session.selectCalls == 0);
+    [controller setValue:view forKey:@"view"];
     [controller setDedicatedEnglishInputMode:YES];
     assert(session.englishCandidateCalls == 0);
     NSMenu *menu = [controller menu];

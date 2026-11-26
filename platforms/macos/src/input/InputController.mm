@@ -3587,12 +3587,10 @@ BOOL MSIMEInputControllerHasUnfinishedInput(void) {
         if ([session respondsToSelector:@selector(pollNeuralSnapshotReady:moved:error:)]) {
             BOOL ready = NO;
             const ShurufaViewSnapshot *polled = [session pollNeuralSnapshotReady:&ready moved:nullptr error:nil];
-            if (!polled) return;
+            if (!polled || !ready) return;
             controller->_viewState = shurufa::mac::ViewState::fromSnapshot(*polled);
-            if (ready) {
-                [controller renderCandidates];
-                [controller synchronizeCandidateServices];
-            }
+            [controller renderCandidates];
+            [controller synchronizeCandidateServices];
             return;
         }
         NSDictionary *polled = [session pollNeuralWithError:nil];
@@ -3887,6 +3885,9 @@ BOOL MSIMEInputControllerHasUnfinishedInput(void) {
     if (result) {
         _requestedPageSize = size;
         _viewState = shurufa::mac::ViewState::fromDictionary(result[@"view"]);
+        if (_panel.isVisible && !_viewState.provisional) {
+            [self renderCandidates];
+        }
     }
 }
 
@@ -8064,7 +8065,9 @@ static BOOL MSIMEFrontmostApplicationOwnsFullscreenDisplay(void) {
     }
     // A scheme that spells with Space (Zhuyin's first tone while a syllable is pending) gets it as a character: the key is input, not the selection of a highlighted item.
     const BOOL spaceIsSpelling = event.keyCode == 49 && MSIMESpellingSymbol(_viewState, ' ');
-    if (_panel.isVisible && event.keyCode == 49 && !spaceIsSpelling &&
+    // Provisional 窗口内面板仍停留在上一代候选（等待 ~28 ms 防闪或神经回包），此时按空格必须走下方
+    // MSIME_COMMIT_CANDIDATE（由 Rust 会话层执行热态有界等待并提交当前代次首选），不能按旧面板身份吞键。
+    if (_panel.isVisible && !_viewState.provisional && event.keyCode == 49 && !spaceIsSpelling &&
         !(event.modifierFlags & (NSEventModifierFlagShift | NSEventModifierFlagControl |
                                  NSEventModifierFlagOption | NSEventModifierFlagCommand))) {
         // Space commits the highlighted item shown by the panel. Keep the
