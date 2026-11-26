@@ -141,6 +141,6 @@ Status: implemented
 - **代价与后续跟进**：
   - 端侧依赖 `~/Library/Application Support/Shurufa/resource-packs/neural-lm/Qwen3-0.6B-Base-Q4_K_M.gguf`（378 MB 磁盘、推理期约 500–650 MB 统一内存，空闲 10 分钟或内存压力时自动释放）以及本机 Homebrew `libllama.0.dylib`（当前为本机自签部署；若未来对外打包分发，需将 `libllama` 及其依赖一并拷入 `Contents/Frameworks` 并重写 install name）。
   - `crates/engine/tests/golden` 中 40 个强绑定旧 C++ 引擎 `+20` 断崖整数权重快照的历史金标场景已自然偏离新统一概率口径（如 `meiganxi` 由旧版「没干系」升级为「没关系」），后续按需单独刷新金标基线。
-  - `overlay.rs` 的 `AppScope` 分桶存储已就绪，当前会话统一传入 `AppScope::General`，后续在宿主接入前台应用 `bundleId` 映射即可自动分场景隔离个人学习。
+  - `overlay.rs` 的 `AppScope` 分桶与宿主全链路现已打通（由 `msime_client_set_app_bundle_id` 仅在内存中映射为 5 个粗粒度场景桶，安全输入/隐私态强制复位为 `general`）；端侧右边界句读闭合校准（`，/。/？/！/\n`）与未测频占位长词 `sentence_words` 回填 / 句内尾词 `.gram` 衔接见 [跨音节吞音恢复、免切换句内混输、AppScope 隔离与右边界句读闭合校准](../feature/2026-11-26-chime-inspired-upgrades-and-boundary-closure.md)。
   - 盲测 `S01`/`S11`/`S13` 仍有 `8%–11%` 的 `search_pruned_miss` 上升空间，后续可通过结合真实体感反馈进一步优化 Tier 0 词库覆盖与 Stage B 束触发率。
   - 后续演进：多音节中间列扇出限流、`4+2` (`2+1+1`) 首词多样性排座与 `70 ms` Provisional 窗口收敛见 [多音节候选首词多样性、商业级分段前缀直达与生僻字尾收敛](./2026-11-26-candidate-diversity-and-prefix-hierarchy.md)。
