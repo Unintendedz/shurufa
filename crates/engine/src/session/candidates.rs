@@ -1026,7 +1026,7 @@ impl InputSession {
                     && item.weight >= 100
             });
         let has_exact_literal_dict = !folded_raw.is_empty()
-            && items.iter().take(8).any(|item| {
+            && items.iter().take(64).any(|item| {
                 item.source.is_dictionary()
                     && item.corrected_from.is_empty()
                     && !item.fuzzy
@@ -1038,6 +1038,21 @@ impl InputSession {
                         .map(|c| c.to_ascii_lowercase())
                         .eq(folded_raw.chars())
             });
+        let primary_all_intact = primary_syllables >= 3
+            && segmentation
+                .split('\'')
+                .all(|piece| piece.is_empty() || crate::pinyin::syllables::is_intact(piece));
+        let has_literal_phrase_sentence = primary_all_intact
+            && items.iter().take(16).any(|item| {
+                matches!(
+                    item.source,
+                    CandidateSource::Generated | CandidateSource::Collocation
+                ) && item.corrected_from.is_empty()
+                    && !item.fuzzy
+                    && item.word.chars().count() == primary_syllables
+                    && item.sentence_words.iter().any(|w| w.chars().count() >= 2)
+            });
+        let has_strong_literal_backing = has_exact_literal_dict || has_literal_phrase_sentence;
         let mut candidates = Vec::with_capacity(items.len());
         for item in items {
             let corrected_full_span =
@@ -1181,7 +1196,7 @@ impl InputSession {
                     item.canonical_pinyin.as_ref()
                 };
                 channel_log_prob +=
-                    typo_channel_log_penalty(&folded_raw, target_py, has_exact_literal_dict);
+                    typo_channel_log_penalty(&folded_raw, target_py, has_strong_literal_backing);
             }
             if item.fuzzy {
                 channel_log_prob += crate::neural_v2::DEFAULT_FUZZY_CHANNEL_PENALTY;
@@ -1193,7 +1208,7 @@ impl InputSession {
                     0
                 });
             if extra_hiatus > 0 {
-                channel_log_prob += -0.6 * (extra_hiatus as f64);
+                channel_log_prob += -1.4 * (extra_hiatus as f64);
             }
             let fixed_position = if item.fixed_position > 0 {
                 item.fixed_position
@@ -1278,6 +1293,18 @@ fn sentence_tail_collocation_log_prob(
     };
     let prefix_in_cand = item.word.strip_suffix(last_word.as_str()).unwrap_or("");
     let prefix_chars = prefix_in_cand.chars().count();
+    if prefix_chars == 0 && han_clause.is_empty() {
+        // 空上文下的单跨度合成多字词（如离合词 `请个假`、`转个账`、`睡了个觉`）与 `[2, 1]` 拆词（如 `情歌 + 家`）对齐内部尾字搭配。
+        if let Some((split_idx, _)) = last_word.char_indices().next_back() {
+            if split_idx > 0 && last_word[..split_idx].chars().count() >= 2 {
+                let inner_prefix = crate::text::last_characters(&last_word[..split_idx], 5);
+                let final_char = &last_word[split_idx..];
+                return capped_collocation_bonus(engine, scheme, inner_prefix, final_char)
+                    .map_or(0.0, |capped| COLLOCATION_LOG_PROB_SCALE * capped);
+            }
+        }
+        return 0.0;
+    }
     let tail_str = if prefix_chars >= 5 || han_clause.is_empty() {
         crate::text::last_characters(prefix_in_cand, 5)
     } else {
@@ -1342,7 +1369,8 @@ fn typo_channel_log_penalty(
         {
             return if has_exact_literal_dict { -3.6 } else { -2.6 };
         }
-        return if has_exact_literal_dict { -4.6 } else { -2.8 };
+        let scale = diffs.len().clamp(1, 2) as f64;
+        return scale * if has_exact_literal_dict { -4.6 } else { -2.8 };
     }
     if !has_exact_literal_dict {
         return -2.8;

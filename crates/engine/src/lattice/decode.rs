@@ -420,6 +420,8 @@ pub struct TypoSentence {
     pub words: Vec<String>,
     pub edges: usize,
     pub literal_score: f64,
+    /// 字面最优路径是否已包含至少一个多字词（`char_count >= 2`）。
+    pub literal_has_multi_char_word: bool,
 }
 
 impl TypoSentence {
@@ -3256,11 +3258,15 @@ pub(super) fn decode_typo_on_graph_with_policy(
         ..options.clone()
     };
     let paths = decode_graph(graph, &typo_options, Some(&extra));
-    let best = if allow_nonleading {
-        paths.into_iter().find(|path| path.typo_edges > 0)?
+    let max_typo_edges = if allow_nonleading {
+        usize::MAX
     } else {
-        paths.into_iter().next()?
+        // 2..=5 音节合法全拼至多允许单处纠错边，彻底杜绝 4 字干净句被两处独立误纠拼成幻觉整句（如 `gongxunyongji -> 通讯统计*`）。
+        (n / 3).max(1)
     };
+    let best = paths
+        .into_iter()
+        .find(|path| path.typo_edges > 0 && path.typo_edges <= max_typo_edges)?;
     // The narrower beam can lose the literal best path, so beating it is checked rather than assumed.
     if best.typo_edges == 0 || best.sentence == literal_best.sentence {
         return None;
@@ -3268,6 +3274,10 @@ pub(super) fn decode_typo_on_graph_with_policy(
     if !allow_nonleading && best.log_prob <= literal_best.log_prob {
         return None;
     }
+    let literal_has_multi_char_word = literal_best
+        .words
+        .iter()
+        .any(|word| word.chars().count() >= 2);
     Some(TypoSentence {
         sentence: best.sentence,
         key: best.key,
@@ -3275,6 +3285,7 @@ pub(super) fn decode_typo_on_graph_with_policy(
         words: best.words,
         edges: best.typo_edges,
         literal_score: literal_best.log_prob,
+        literal_has_multi_char_word,
     })
 }
 
@@ -4027,6 +4038,7 @@ pub(super) mod tests {
             words: vec!["甲".into()],
             edges: 0,
             literal_score: 0.0,
+            literal_has_multi_char_word: false,
         };
         assert!(!typo.leads(0.0));
     }

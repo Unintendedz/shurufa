@@ -969,7 +969,9 @@ impl<E: InputEngine> Runtime<E> {
         let mut seen_texts: std::collections::HashSet<String> =
             std::collections::HashSet::with_capacity(max_neural_candidates);
         const MAX_DEFERRED_DICT_NEURAL_RESCUE: usize = 2;
+        const MAX_DEFERRED_TYPO_NEURAL_RESCUE: usize = 1;
         let mut deferred_dict_rescued = 0usize;
+        let mut deferred_typo_rescued = 0usize;
         let mut base_idx = 0usize;
         for entry in &self.cached.candidates {
             if matches!(entry.origin, CandidateOrigin::ProjectedEmoji { .. }) {
@@ -1010,11 +1012,14 @@ impl<E: InputEngine> Runtime<E> {
             let is_dict_source = source == msime_engine::CandidateSource::Database as u8
                 || source == msime_engine::CandidateSource::UserDatabase as u8;
             let pool_full = candidates.len() >= max_neural_candidates;
-            if pool_full
-                && !(primary_syllables >= 3
-                    && is_dict_source
-                    && deferred_dict_rescued < MAX_DEFERRED_DICT_NEURAL_RESCUE)
-            {
+            let can_rescue_deferred_dict = primary_syllables >= 3
+                && is_dict_source
+                && deferred_dict_rescued < MAX_DEFERRED_DICT_NEURAL_RESCUE;
+            let can_rescue_deferred_typo = primary_syllables >= 2
+                && entry.corrected
+                && deferred_typo_rescued < MAX_DEFERRED_TYPO_NEURAL_RESCUE
+                && !candidates.iter().any(|c| c.channel_log_prob <= -2.0);
+            if pool_full && !can_rescue_deferred_dict && !can_rescue_deferred_typo {
                 continue;
             }
             if !is_neural_v2_source(source) {
@@ -1088,9 +1093,11 @@ impl<E: InputEngine> Runtime<E> {
                 continue;
             }
             if pool_full {
-                // 3+ 音节输入下，若被词网格后置且未进入前 16 条生成句的精确词典整词落在后排（如冷门/未测频词典整词），
-                // 置换末尾非词典生成句槽位（绝不触碰前 4 席）确保其进入 Tier 1 神经打分池接受语境裁决。
-                if channel_log_prob != 0.0 || seen_texts.contains(&text) {
+                // 3+ 音节输入下，若被词网格后置的精确词典整词或被 `ordering.rs` 延后的首条整串纠错句（如 `meiganxi -> 没关系*`）
+                // 落在第 16 名之后，置换末尾非词典生成句槽位（绝不触碰前 4 席）确保其进入 Tier 1 神经打分池接受语境裁决。
+                let is_dict_rescue = is_dict_source && channel_log_prob == 0.0;
+                let is_typo_rescue = can_rescue_deferred_typo && channel_log_prob <= -2.0;
+                if (!is_dict_rescue && !is_typo_rescue) || seen_texts.contains(&text) {
                     continue;
                 }
                 let replace_pos = candidates
@@ -1101,6 +1108,7 @@ impl<E: InputEngine> Runtime<E> {
                     .find(|(_, c)| {
                         c.source != msime_engine::CandidateSource::Database as u8
                             && c.source != msime_engine::CandidateSource::UserDatabase as u8
+                            && c.channel_log_prob > -2.0
                     })
                     .map(|(pos, _)| pos);
                 let Some(replace_pos) = replace_pos else {
@@ -1123,7 +1131,11 @@ impl<E: InputEngine> Runtime<E> {
                     pinned,
                     has_lexical_head,
                 };
-                deferred_dict_rescued += 1;
+                if is_dict_rescue {
+                    deferred_dict_rescued += 1;
+                } else {
+                    deferred_typo_rescued += 1;
+                }
                 continue;
             }
             if !seen_texts.insert(text.clone()) {

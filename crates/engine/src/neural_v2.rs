@@ -38,7 +38,7 @@ const UNIFIED_UNIGRAM_Z: f64 = 5e8;
 const UNIFIED_MULTI_SYLLABLE_Z: f64 = 0.70 * UNIFIED_UNIGRAM_Z;
 
 /// 隔音多切分路径每增加一处切分的通道先验代价（nats）。
-const HIATUS_SPLIT_CHANNEL_PENALTY: f64 = -0.6;
+const HIATUS_SPLIT_CHANNEL_PENALTY: f64 = -1.4;
 /// 纠错候选默认信道代价（nats），要求神经语境优势明显大于误触发成本。
 pub const DEFAULT_TYPO_CHANNEL_PENALTY: f64 = -2.8;
 /// 模糊音候选默认信道代价（nats）。

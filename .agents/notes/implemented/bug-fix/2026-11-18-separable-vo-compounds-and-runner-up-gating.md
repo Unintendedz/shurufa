@@ -70,3 +70,4 @@ Status: implemented
   - `msime-engine --lib` `2734 passed; 0 failed; 57 ignored`（含 `separable_vo_table_is_sorted_unique_and_valid`、`separable_vo_edges_are_synthesized_from_single_char_evidence_and_lead_competitors`、`runner_up_order_defers_far_weaker_readings_from_first_page_and_keeps_idempotence`，以及全部 640 例 `graph_ownership_tests` 与查库缓存契约测试）。
   - `msime-input-runtime` `408 passed; 0 failed`；`msime-engine-wasm` `72 passed; 0 failed`。
   - `msime-engine --test golden` `30 passed; 1 failed`（仅 `scripted_scenarios_match_the_reference` 保留 `main` 既有的 10 处 `answers_key` 历史基线差异，真实句集与 290/300 剧本零回归）。
+  - 后续在 Shurufa v2 统一对数概率尺度下的重新标定与两阶段纠错纪律联动见 [全拼两阶段纠错纪律、隔音偏移补偿与动宾离合词拆插恢复](../architecture/2026-11-27-speculative-typo-discipline-and-separable-vo-recall.md)。

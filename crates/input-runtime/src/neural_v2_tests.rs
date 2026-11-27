@@ -536,3 +536,49 @@ fn runtime_take_neural_request_rescues_deferred_exact_dictionary_candidate_into_
         req.candidates.iter().map(|c| &c.text).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn runtime_take_neural_request_rescues_first_deferred_typo_when_pool_has_no_typo() {
+    let generated_texts: Vec<String> = (0..18).map(|i| format!("没干{i}")).collect();
+    let mut rows: Vec<(&str, bool, Option<i64>)> = Vec::new();
+    for text in &generated_texts[..4] {
+        rows.push((text.as_str(), true, Some(-11_000)));
+    }
+    for prefix in ["没干", "美感", "没敢"] {
+        rows.push((prefix, false, None));
+    }
+    for text in &generated_texts[4..] {
+        rows.push((text.as_str(), true, Some(-14_500)));
+    }
+    rows.push(("没关系", true, Some(-9_500)));
+
+    let mut engine = StubNeuralEngine::composing("meiganxi", "mei'gan'xi", &rows);
+    let last_idx = engine.snapshot.candidates.len() - 1;
+    for (idx, entry) in engine.snapshot.candidates.iter_mut().enumerate() {
+        entry.source = if !entry.answers_key {
+            CandidateSource::Database as u8
+        } else {
+            CandidateSource::Generated as u8
+        };
+        if idx == last_idx {
+            entry.corrected = true;
+            entry.channel_log_prob = -2.8;
+        }
+    }
+    let mut runtime = Runtime::new(engine, 6).unwrap();
+    runtime.focused = true;
+    runtime.set_neural_v2_enabled(true);
+    runtime.set_surrounding_context("不用客气真的");
+
+    let req = runtime.take_neural_request().expect("应生成请求");
+    assert_eq!(req.candidates.len(), 16);
+    assert_eq!(req.candidates[0].text, "没干0");
+    assert_eq!(req.candidates[3].text, "没干3");
+    assert!(
+        req.candidates
+            .iter()
+            .any(|c| c.text == "没关系" && c.channel_log_prob <= -2.0),
+        "被 ordering 延后的首条整串纠错句应保底入池供 Tier 1 裁决: {:?}",
+        req.candidates.iter().map(|c| &c.text).collect::<Vec<_>>()
+    );
+}

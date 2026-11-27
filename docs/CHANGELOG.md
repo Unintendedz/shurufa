@@ -4,6 +4,10 @@ Shurufa 从水杉输入法 tag `fork-point/msime-2026-10-27` 分出来之后的�
 
 ## 2026-11-27
 
+- **全拼两阶段投机纠错纪律、隔音偏移补偿与动宾离合词拆插恢复（`lattice/decode.rs`、`lattice/separable_vo.rs`、`quanpin/dictionary.rs`、`session/candidates.rs`、`neural_v2.rs`、`input-runtime/src/runtime.rs`）**：
+  - **根治干净全拼首槽误纠劫持并守住真错字召回**：限制 2–5 音节合法全拼单句至多 1 条纠错边（杜绝 `gongxunyongji -> 通讯统计*` 双错字幻觉），对 3+ 音节含多字词合法字面路径禁止投机纠错在 Tier 0 篡夺首槽并在 `merge_alternative_sentences_by_score` 维持未纠错字面榜首，同时在 `Runtime::take_neural_request` 为被 `ordering.rs` 延后的首条整串纠错句保底 1 个尾槽入池席位供 `Qwen3-0.6B` 裁决（`sentences-v2` 四字句 Tier 0 误纠劫持由 `26.1%` 压至 `1.1%`，Tier 1 `Top1/Top6` 升至 `91.3% / 96.7%`，真错字控制组 `85.0%` 零回退）。
+  - **隔音多拆边偏移红利补偿与动宾离合词拆插恢复**：挂载 `.gram` 时扣回多拆零声母备选句的边偏移红利并同步校准 `HIATUS_SPLIT_CHANNEL_PENALTY = -1.4`；在 v2 统一对数概率尺度上恢复 356 条零分配动宾离合词拆插补边与空上文单跨度合成词尾字 `.gram` 衔接（`spoken-v1` `separable-vo` 达 `100%` 首页召回，全集 Tier 1 `Top1/Top6` 升至 `90.8% / 97.5%`、零倒退）。
+
 - **端侧两阶段（Tier 0 + `Qwen3-0.6B` Metal）自动化真实模型评测门禁（`tier1_eval.rs`、`shurufa-tier1-guardrails-v1.tsv`、`eval-tier1.sh`、`verify-local.sh`）**：
   - 新增 `crates/input-runtime/examples/tier1_eval.rs` 与 `scripts/eval-tier1.sh`，在单次热启动的真实 `ShurufaNeuralService`（`Qwen3-0.6B-Base-Q4_K_M.gguf`）+ 锁定 `msime-pinyin.db` + 万象 `.gram` 上以约 `14 s` 跑完 `417` 条端到端用例并接入 `scripts/verify-local.sh` 硬门禁；同步度量 Tier 0/1 `Top1`/`Top6`/`MRR`、干净句首槽误纠劫持率、Tier 1 净救回/倒退数、违禁幻影篡位数、`all_candidates()` 展开覆写数与 `p50`/`p90` 延迟。
   - 新增全合成护栏评测集 `resources/eval/shurufa-tier1-guardrails-v1.tsv`（205 例，含 24 核心单字 × 6 类左边界 144 例、古音幻影防篡位 14 例、`weight == 100` 占位整词 15 例、真错字召回控制组 20 例与中英混排语境 12 例）及 `scripts/test-tier1-eval-suite.py` 契约检查。

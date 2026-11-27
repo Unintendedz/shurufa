@@ -501,15 +501,15 @@ fn check_gates(results: &[SuiteResult]) -> Vec<String> {
 
         match suite.name.as_str() {
             "spoken-v1" => {
-                if t1_top1 < 0.865 {
-                    violations.push(format!("[spoken-v1] Tier 1 top1 {:.3} < 0.865", t1_top1));
+                if t1_top1 < 0.900 {
+                    violations.push(format!("[spoken-v1] Tier 1 top1 {:.3} < 0.900", t1_top1));
                 }
-                if t1_top6 < 0.935 {
-                    violations.push(format!("[spoken-v1] Tier 1 top6 {:.3} < 0.935", t1_top6));
+                if t1_top6 < 0.965 {
+                    violations.push(format!("[spoken-v1] Tier 1 top6 {:.3} < 0.965", t1_top6));
                 }
-                if o.t1_regressions > 1 {
+                if o.t1_regressions > 0 {
                     violations.push(format!(
-                        "[spoken-v1] Tier 1 regressions = {} (max allowed 1)",
+                        "[spoken-v1] Tier 1 regressions = {} (expected 0)",
                         o.t1_regressions
                     ));
                 }
@@ -562,21 +562,21 @@ fn check_gates(results: &[SuiteResult]) -> Vec<String> {
                 }
             }
             "sentences-v2-4char" => {
-                if t1_top1 < 0.740 {
+                if t1_top1 < 0.900 {
                     violations.push(format!(
-                        "[sentences-v2-4char] Tier 1 top1 {:.3} < 0.740",
+                        "[sentences-v2-4char] Tier 1 top1 {:.3} < 0.900",
                         t1_top1
                     ));
                 }
-                if t0_hijack_rate > 0.270 {
+                if t0_hijack_rate > 0.035 {
                     violations.push(format!(
-                        "[sentences-v2-4char] Tier 0 clean-pinyin typo hijack rate {:.3} > 0.270",
+                        "[sentences-v2-4char] Tier 0 clean-pinyin typo hijack rate {:.3} > 0.035",
                         t0_hijack_rate
                     ));
                 }
-                if t1_hijack_rate > 0.060 {
+                if t1_hijack_rate > 0.025 {
                     violations.push(format!(
-                        "[sentences-v2-4char] Tier 1 clean-pinyin typo hijack rate {:.3} > 0.060",
+                        "[sentences-v2-4char] Tier 1 clean-pinyin typo hijack rate {:.3} > 0.025",
                         t1_hijack_rate
                     ));
                 }

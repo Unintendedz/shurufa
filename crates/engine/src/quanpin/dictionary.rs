@@ -998,7 +998,13 @@ impl QuanpinDictionary {
         let mut alt_sentences = Vec::new();
         let legacy_phrase_bonus_milli =
             (crate::lattice::decode::PHRASE_LENGTH_BONUS * 1000.0).round() as i64;
-        let split_cost_milli = (DAG_HIATUS_SPLIT_COST * 1000.0).round() as i64;
+        let has_active_collocation =
+            self.collocation_db.is_some() && self.sentence_association.collocation_weight != 0.0;
+        // 挂载 `.gram` 时，多拆音节路径每多出一段单字切分都会白拿一份 `collocation_edge_offset`（`+3.0 nats`），
+        // 须在基础 `-0.60 nats` 信道代价之上扣回 `-2.20 nats` 偏移红利，防止 `yu'de'da'o -> 余地大哦` / `gu'a -> 姑阿` 挤占首页。
+        let split_cost_milli =
+            ((DAG_HIATUS_SPLIT_COST - if has_active_collocation { 2.20 } else { 0.0 }) * 1000.0)
+                .round() as i64;
         if primary_segments.len() > MAX_SYLLABLES_FOR_MULTIPLE_SEGMENTATIONS {
             // 长句快速通道：仅保留变化边界在主词典中命中真实多字词的 Top-4 备选切分，
             // 直接复用 `lattice_span_cache` 做整句解码，跳过重复前缀 SQLite 查询，将长句耗时砍低 10-15x。
@@ -1082,8 +1088,10 @@ impl QuanpinDictionary {
                 .position(|item| item.sentence_association && !item.corrected_from.is_empty())
             {
                 if typo_idx > 0
+                    && primary_segments.len() == 2
                     && result[0].source.is_dictionary()
                     && result[0].corrected_from.is_empty()
+                    && result[0].weight < 5_000
                 {
                     let opts = self.sentence_tables.options(false);
                     let dict_syls = result[0]
@@ -1092,11 +1100,13 @@ impl QuanpinDictionary {
                         .filter(|p| !p.is_empty())
                         .count()
                         .max(1);
-                    let dict_score_milli =
-                        (edge_log_prob(result[0].weight, dict_syls, &opts) * 1000.0) as i64;
-                    if result[typo_idx].weight > dict_score_milli + 2500 {
-                        let promoted = result.remove(typo_idx);
-                        result.insert(0, promoted);
+                    if dict_syls == 2 {
+                        let dict_score_milli =
+                            (edge_log_prob(result[0].weight, dict_syls, &opts) * 1000.0) as i64;
+                        if result[typo_idx].weight > dict_score_milli + 2500 {
+                            let promoted = result.remove(typo_idx);
+                            result.insert(0, promoted);
+                        }
                     }
                 }
             }
@@ -1544,8 +1554,21 @@ impl QuanpinDictionary {
                 Some(_) => false,
             };
             if can_insert {
-                let exact_dict_leader = has_exact_literal_dict_leader(result, segments);
-                let leads = !exact_dict_leader && typo.leads(options.typo_lead_margin);
+                let exact_dict_exists = has_exact_literal_dict_leader(result, segments)
+                    || has_any_exact_literal_dict_candidate(result, segments);
+                // 3+ 音节合法全拼：若字面路径已含真实多字词（如 `阡陌+之上`、`界定+不准`、`隔日+周一`），
+                // Tier 0 要求悬殊余量（`>= 9.5 nats`）才允许篡夺首槽，否则排在字面整句之后进入 Top-16 交由 Tier 1 `Qwen3-0.6B` 裁决；
+                // 纯单字零散拼句（如 `mei'gan'xi -> 没+干+系`）要求 `>= 5.5 nats` 余量（真漏键 `没关系` 净胜 `>15 nats` 仍稳居首槽）。
+                let effective_margin = if segments.len() >= 3 {
+                    if typo.literal_has_multi_char_word {
+                        f64::INFINITY
+                    } else {
+                        options.typo_lead_margin.max(5.5)
+                    }
+                } else {
+                    options.typo_lead_margin
+                };
+                let leads = !exact_dict_exists && typo.leads(effective_margin);
                 let mut at = if leads {
                     0
                 } else {
@@ -3297,6 +3320,20 @@ fn has_exact_literal_dict_leader(result: &[WordItem], segments: &[String]) -> bo
         })
 }
 
+/// 判断候选池前 64 项内是否存在覆盖当前全部字面音节的未纠错精确词典整词（含被前缀或占位规则后置的整词，如 `遇得到`/`按理来说`）。
+fn has_any_exact_literal_dict_candidate(result: &[WordItem], segments: &[String]) -> bool {
+    result.iter().take(64).any(|item| {
+        item.source.is_dictionary()
+            && item.corrected_from.is_empty()
+            && !item.fuzzy
+            && !item.canonical_pinyin.is_empty()
+            && item
+                .canonical_pinyin
+                .split('\'')
+                .eq(segments.iter().map(String::as_str))
+    })
+}
+
 /// 从 2 音节词网格解码路径中收集前 8 条 `[1,1]` 拆字组合，供平等送入 Top-24/32 融合池。
 fn collect_two_syllable_split_pool(paths: &[SentencePath], typed: &str, out: &mut Vec<WordItem>) {
     const TWO_SYLLABLE_SPLIT_POOL_LIMIT: usize = 8;
@@ -3367,7 +3404,29 @@ fn merge_alternative_sentences_by_score(
     } else {
         leading_dict
     };
+    let literal_sentence_led = result
+        .get(insert_at..)
+        .and_then(|slice| slice.iter().find(|item| item.sentence_association))
+        .is_some_and(|first| first.corrected_from.is_empty());
     merge_alternative_sentences_at(result, insert_at, alt_sentences);
+    // 若主切分已明确判定未纠错字面整句领跑，合并纯字面隔音备选整句后不得让附带纠错句借重排反超篡夺首槽。
+    if literal_sentence_led
+        && result
+            .get(insert_at)
+            .is_some_and(item_is_corrected_sentence)
+    {
+        if let Some(rel_idx) = result[insert_at..]
+            .iter()
+            .position(|item| item.sentence_association && item.corrected_from.is_empty())
+        {
+            let leader = result.remove(insert_at + rel_idx);
+            result.insert(insert_at, leader);
+        }
+    }
+}
+
+fn item_is_corrected_sentence(item: &WordItem) -> bool {
+    item.sentence_association && !item.corrected_from.is_empty()
 }
 
 /// 从给定 `insert_at` 位置起按统一对数分（毫 nat）重排并融合整句候选。
