@@ -4,6 +4,10 @@ Shurufa 从水杉输入法 tag `fork-point/msime-2026-10-27` 分出来之后的�
 
 ## 2026-11-27
 
+- **双音节词库缺失复合词 `3×3` 入池保底、低频词典壁垒连续退让与惊奇度去噪（`lattice/decode.rs`、`quanpin/dictionary.rs`、`neural_v2.rs`、`input-runtime/src/runtime.rs`、`ShurufaNeuralEngine.cpp`、`shurufa-tier1-guardrails-v1.tsv`）**：
+  - **双音节 `3×3` 常用单字网格保底与跨切分防截断**：将词网格首尾单字多样性配额扩至 `n == 2`，将双音节拆分池扩至 `12` 席（前 `4` 路上下文高分拆字 + `top3(c1) × top3(c2)` 常用单字网格）并前置排入 `MAX_GENERATED_SENTENCES = 16` 窗口，同时在 `merge_alternative_sentences_at` 跨隔音切分重排（如 `yu'an'kong`）时保持 `3×3` 首尾多样性并在 `Runtime::take_neural_request` 同步对齐缺 `g` 尾音纠错（`-1.85 nats`）尾槽保底，利用因果语言模型同首字前缀树零额外 `llama_decode` 成本让 `远控`/`拉群`/`拉流` 等词库缺失复合词 100% 进 Stage A。
+  - **双音节孤立低频词典壁垒按真实词频连续退让 + Stage B 惊奇度剥离错拼项**：`neural_v2.rs` 对完整全拼双音节按已测频词典最高 `stat_log_prob` 在 `[-11.8, -8.8]` 区间平滑缩放非成词拆字保护（同时保留词典桶 `0.0` 相对基准以抵御错拼劫持，且 3+ 字成语与简拼/混拼维持 `1.0` 完整成词保护）；`ShurufaNeuralEngine.cpp` 统计 `best_avg_char_lp` 时排除错拼候选（如 `管控*`）并对带语境高惊奇双音节放行 1 步受限束搜索（救回 `稳帧` 等第 4 位以外同音字复合词）；`shurufa-tier1-guardrails-v1.tsv` 扩至 `215` 例（新增第 6 组 `oov-2char` 达 `100%` Top6，全套 `427` 例门禁零倒退、零违禁幻影）。
+
 - **收敛 `stat_log_prob` 重复计分并消除翻页扩容覆写已落定神经排序（`session/candidates.rs`、`neural_v2.rs`、`input-runtime/src/runtime.rs`、`tier1_eval.rs`）**：
   - 修复 `Runtime::expand_cached_candidates` 在用户翻页或展开全量候选（`all_candidates()`）时用未重排快照覆盖已落定的 Tier 1 `Qwen3-0.6B` 排序与 `InjectedBeam` 束注入项的问题：按 `neural_settled_epoch` 无损保留前排已落定顺序并重绑扩容后最新 `EngineRow` 下标（`417` 例端到端评测 `expand_wiped` 彻底归 `0` 并升级为硬门禁）。
   - 消除 `Session::neural_v2_metadata` 对词典候选同时向 `stat_log_prob` 与 `collocation_log_prob` 重复累加 `.gram` 搭配分的耦合，同时补齐空上文下 `3+` 字词典短语与合成整句对称的词内尾字 `.gram` 衔接并将成词掩码扩至 `2..=5` 字（`spoken-v1` Tier 1 `Top1/Top6` 进一步升至 `91.7% / 98.3%`、零倒退）。

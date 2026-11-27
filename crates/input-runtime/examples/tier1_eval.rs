@@ -566,6 +566,15 @@ fn check_gates(results: &[SuiteResult]) -> Vec<String> {
                         ));
                     }
                 }
+                if let Some(b) = suite.by_tag.get("oov-2char") {
+                    let rate = BucketStats::rate(b.t1_top_page, b.cases);
+                    if rate < 0.900 {
+                        violations.push(format!(
+                            "[guardrails-v1/oov-2char] Tier 1 top6 {:.3} < 0.900 ({}/{})",
+                            rate, b.t1_top_page, b.cases
+                        ));
+                    }
+                }
             }
             "sentences-v2-4char" => {
                 if t1_top1 < 0.900 {
@@ -698,7 +707,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             socket_path: Some(socket_path),
             extra_launch_arguments: Vec::new(),
             idle_unload_seconds: 120.0,
-            request_timeout: Duration::from_millis(2500),
+            request_timeout: Duration::from_secs(8),
             require_model_file: true,
         },
         Some(wakeup),
@@ -720,9 +729,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(req) = runtime.take_neural_request() {
         let sid = req.session;
         let generation = req.generation;
-        if client.enqueue_decode(sid, &req, Duration::from_secs(5)) {
+        if client.enqueue_decode(sid, &req, Duration::from_secs(8)) {
             let _ =
-                wait_for_completed_decode(&client, &rx, sid, generation, Duration::from_secs(5));
+                wait_for_completed_decode(&client, &rx, sid, generation, Duration::from_secs(8));
         }
     }
     runtime.dispatch(Action::Command(Command::Cancel))?;

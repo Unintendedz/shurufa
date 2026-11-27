@@ -18,6 +18,7 @@ REQUIRED_COHORTS = {
     "unmeasured-dict": 12,
     "typo-genuine": 18,
     "mixed-english-ctx": 10,
+    "oov-2char": 10,
 }
 
 

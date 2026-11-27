@@ -211,3 +211,14 @@ me-009	jiekou	接口	2	mixed-english-ctx	API
 me-010	zhuangge	装个	2	mixed-english-ctx	brew 	
 me-011	doubao	豆包	2	mixed-english-ctx	API 	
 me-012	hebing	合并	2	mixed-english-ctx	PR 	
+# 6. 双音节词库缺失/极低权现代常用词召回护栏（10 例）
+ov-001	yuankong	远控	2	oov-2char	打开电脑准备	
+ov-002	yuankong	远控	2	oov-2char	用手机直接	
+ov-003	yuankong	远控	2	oov-2char	远程桌面和	
+ov-004	yuankong	远控	2	oov-2char		
+ov-005	laqun	拉群	2	oov-2char	我们先把大家	
+ov-006	laliu	拉流	2	oov-2char	直播推流和	
+ov-007	wenzhen	稳帧	2	oov-2char	高刷模式全程	
+ov-008	bakong	把控	2	oov-2char	项目节奏需要严格	
+ov-009	guobu	国补	2	oov-2char	今年换新机有	
+ov-010	yunkong	云控	2	oov-2char	后台配置支持	

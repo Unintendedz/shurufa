@@ -1341,12 +1341,18 @@ fn decode_graph_with_terminal<'g, const WIDE_TERMINAL: bool>(
         // `n >= 3` 时同时启用前驱列、首词（避免 Top-6 被同一前词包场挤走次优锚点）、末尾 >=2 字后缀与分词骨架多维配额；
         // `n == 2` 时在 `nbest > 8` 下限制单一整词骨架不超过 `take - 6`，确保至少 8 席留给 `[1, 1]` 拆字路径。
         let prefix_cap = if n >= 3 { max_per_prefix } else { 0 };
-        let head_cap = if n >= 3 && max_per_prefix > 0 {
+        let head_cap = if n >= 2 && max_per_prefix > 0 {
             max_per_prefix.saturating_add(1)
         } else {
             0
         };
-        let suffix_cap = if n >= 3 { max_per_suffix } else { 0 };
+        let suffix_cap = if n == 2 && max_per_suffix > 0 {
+            max_per_suffix.max(3)
+        } else if n >= 3 {
+            max_per_suffix
+        } else {
+            0
+        };
         // 双音节输入下，精确 `tbl_2` 整词已由词典直出，第一遍将 `[2]` 整词骨架限为 6 席、
         // `[1, 1]` 拆字骨架按 `take - 6` 放行，使带语境的 `[1, 1]` 拆字紧随前 6 条精确词直接落入 Top-14 神经池。
         let two_syl_phrase_mask = 1u64;
@@ -1368,7 +1374,7 @@ fn decode_graph_with_terminal<'g, const WIDE_TERMINAL: bool>(
 
         const MULTI_CHAR_HEAD_RESCUE_LIMIT: usize = 3;
         const MAX_LEADING_SINGLE_PAIR_PASS1: usize = 4;
-        let pass1_limit = if head_cap > 0 && take >= 16 {
+        let pass1_limit = if n >= 3 && head_cap > 0 && take >= 16 {
             take - MULTI_CHAR_HEAD_RESCUE_LIMIT
         } else {
             take
@@ -1426,8 +1432,13 @@ fn decode_graph_with_terminal<'g, const WIDE_TERMINAL: bool>(
                     continue;
                 }
             }
-            let suffix = (suffix_cap > 0 && sentence_buf.chars().count() >= 3)
-                .then(|| crate::text::last_characters(&sentence_buf, 2));
+            let suffix = if suffix_cap > 0 && sentence_buf.chars().count() >= 3 {
+                Some(crate::text::last_characters(&sentence_buf, 2))
+            } else if suffix_cap > 0 && n == 2 && trace.len() == 2 {
+                Some(crate::text::last_characters(&sentence_buf, 1))
+            } else {
+                None
+            };
             if let Some(suf) = suffix {
                 if count_str(&suffix_counts, suf) >= suffix_cap {
                     deferred.push(hyp_idx);
@@ -1491,8 +1502,13 @@ fn decode_graph_with_terminal<'g, const WIDE_TERMINAL: bool>(
                         continue;
                     }
                 }
-                let suffix = (suffix_cap > 0 && sentence_buf.chars().count() >= 3)
-                    .then(|| crate::text::last_characters(&sentence_buf, 2));
+                let suffix = if suffix_cap > 0 && sentence_buf.chars().count() >= 3 {
+                    Some(crate::text::last_characters(&sentence_buf, 2))
+                } else if suffix_cap > 0 && n == 2 && trace.len() == 2 {
+                    Some(crate::text::last_characters(&sentence_buf, 1))
+                } else {
+                    None
+                };
                 if let Some(suf) = suffix {
                     if count_str(&suffix_counts, suf) >= suffix_cap {
                         continue;

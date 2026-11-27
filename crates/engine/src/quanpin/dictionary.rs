@@ -1417,7 +1417,7 @@ impl QuanpinDictionary {
             .sentence_decode_cache
             .get_ref(&decode_key)
             .filter(|cached| cached.personal_version == personal_version);
-        let emit_two_syl_splits = self.sentence_alternatives || include_collocation_best;
+        let emit_two_syl_splits = self.sentence_alternatives;
         let mut two_syl_split_pool: Vec<WordItem> = Vec::new();
         let mut two_syl_literal_best: Option<SentencePath> = None;
         let typo = if let Some(cached) = cached {
@@ -1426,9 +1426,30 @@ impl QuanpinDictionary {
                     two_syl_literal_best = cached.decoded.paths.first().cloned();
                 }
                 if emit_two_syl_splits {
+                    warm_lattice_span_cache(
+                        database,
+                        &mut self.lattice_span_cache,
+                        segments,
+                        span_limit,
+                        2,
+                    );
+                    let c1 = cached_lattice_span_ref(
+                        &self.lattice_span_cache,
+                        &segments[0..1],
+                        span_limit,
+                    );
+                    let c2 = cached_lattice_span_ref(
+                        &self.lattice_span_cache,
+                        &segments[1..2],
+                        span_limit,
+                    );
                     collect_two_syllable_split_pool(
                         &cached.decoded.paths,
                         typed,
+                        segments,
+                        c1,
+                        c2,
+                        &options,
                         &mut two_syl_split_pool,
                     );
                 }
@@ -1463,9 +1484,23 @@ impl QuanpinDictionary {
                         two_syl_literal_best = decoded.paths.first().cloned();
                     }
                     if emit_two_syl_splits {
+                        let c1 = cached_lattice_span_ref(
+                            &self.lattice_span_cache,
+                            &segments[0..1],
+                            span_limit,
+                        );
+                        let c2 = cached_lattice_span_ref(
+                            &self.lattice_span_cache,
+                            &segments[1..2],
+                            span_limit,
+                        );
                         collect_two_syllable_split_pool(
                             &decoded.paths,
                             typed,
+                            segments,
+                            c1,
+                            c2,
+                            &options,
                             &mut two_syl_split_pool,
                         );
                     }
@@ -1605,7 +1640,7 @@ impl QuanpinDictionary {
                 }
                 result.remove(existing_idx);
             }
-            let at = if leads
+            let mut at = if leads
                 && result
                     .first()
                     .is_none_or(|first| first.corrected_from.is_empty())
@@ -1614,6 +1649,12 @@ impl QuanpinDictionary {
             } else {
                 whole_sentence_insert_position(result, segments).min(8)
             };
+            if !leads {
+                let max_typo_seat = (at + 3).min(11);
+                while at < result.len() && at < max_typo_seat && result[at].sentence_association {
+                    at += 1;
+                }
+            }
             result.insert(at, item);
         }
     }
@@ -3334,12 +3375,128 @@ fn has_any_exact_literal_dict_candidate(result: &[WordItem], segments: &[String]
     })
 }
 
-/// 从 2 音节词网格解码路径中收集前 8 条 `[1,1]` 拆字组合，供平等送入 Top-24/32 融合池。
-fn collect_two_syllable_split_pool(paths: &[SentencePath], typed: &str, out: &mut Vec<WordItem>) {
-    const TWO_SYLLABLE_SPLIT_POOL_LIMIT: usize = 8;
+/// 从 2 音节词网格解码路径与前排常用单字网格收集至多 12 条多样化 `[1,1]` 拆字组合，
+/// 避免单一高频首字（如 `向日葵+园*` 或 `原*`）垄断拆字席位，确保双字词典缺失词（如 `远控`、`拉群`、`息屏`）稳定进入 Stage A 前缀树。
+fn collect_two_syllable_split_pool(
+    paths: &[SentencePath],
+    typed: &str,
+    segments: &[String],
+    top_c1: Option<&[crate::lattice::LatticeLexeme]>,
+    top_c2: Option<&[crate::lattice::LatticeLexeme]>,
+    options: &crate::lattice::decode::LatticeOptions<'_>,
+    out: &mut Vec<WordItem>,
+) {
+    const TWO_SYLLABLE_SPLIT_POOL_LIMIT: usize = 12;
+    const LEAD_CONTEXT_SPLIT_LIMIT: usize = 4;
+    const PASS1_PER_CHAR_CAP: usize = 2;
+
+    let mut head_counts: Vec<(char, usize)> = Vec::with_capacity(8);
+    let mut tail_counts: Vec<(char, usize)> = Vec::with_capacity(8);
+    let mut deferred: Vec<&SentencePath> = Vec::new();
+
+    // 1. 先保留前 4 条满足首尾单字多样性（每字至多 2 次）的词网格路径，留住强上下文搭配命中。
     for path in paths {
         if path.words.len() != 2 {
             continue;
+        }
+        if out.iter().any(|existing| existing.word == path.sentence) {
+            continue;
+        }
+        if out.len() >= LEAD_CONTEXT_SPLIT_LIMIT {
+            deferred.push(path);
+            continue;
+        }
+        let mut chars = path.sentence.chars();
+        let c1 = chars.next().unwrap_or('\0');
+        let c2 = chars.next().unwrap_or('\0');
+        let h_cnt = head_counts
+            .iter()
+            .find(|(ch, _)| *ch == c1)
+            .map_or(0, |(_, n)| *n);
+        let t_cnt = tail_counts
+            .iter()
+            .find(|(ch, _)| *ch == c2)
+            .map_or(0, |(_, n)| *n);
+        if h_cnt >= PASS1_PER_CHAR_CAP || t_cnt >= PASS1_PER_CHAR_CAP {
+            deferred.push(path);
+            continue;
+        }
+        if let Some((_, n)) = head_counts.iter_mut().find(|(ch, _)| *ch == c1) {
+            *n += 1;
+        } else {
+            head_counts.push((c1, 1));
+        }
+        if let Some((_, n)) = tail_counts.iter_mut().find(|(ch, _)| *ch == c2) {
+            *n += 1;
+        } else {
+            tail_counts.push((c2, 1));
+        }
+        let mut item = WordItem::new(
+            typed,
+            path.sentence.clone(),
+            (path.log_prob * 1000.0) as i64,
+            CandidateSource::Generated,
+            path.key.clone(),
+        );
+        item.sentence_association = true;
+        item.sentence_words = path.words.clone();
+        out.push(item);
+    }
+
+    // 2. 紧接着保证首尾前 3×3 常用单字组合（如 `yuan[0..3] × kong[0..3]` 中的 `远控`）100% 入池，
+    //    绝不因上文偏置（如 `向日葵+园*`）把高频正字组合挤出 Stage A 前缀树。
+    if out.len() < TWO_SYLLABLE_SPLIT_POOL_LIMIT && segments.len() == 2 {
+        if let (Some(list1), Some(list2)) = (top_c1, top_c2) {
+            let joined_key = format!("{}'{}", segments[0], segments[1]);
+            for l1 in list1.iter().filter(|l| l.weight >= 1_000).take(3) {
+                for l2 in list2.iter().filter(|l| l.weight >= 1_000).take(3) {
+                    if out.len() >= TWO_SYLLABLE_SPLIT_POOL_LIMIT {
+                        break;
+                    }
+                    let mut word = String::with_capacity(l1.value.len() + l2.value.len());
+                    word.push_str(&l1.value);
+                    word.push_str(&l2.value);
+                    if out.iter().any(|existing| existing.word == word) {
+                        continue;
+                    }
+                    let mut lp =
+                        edge_log_prob(l1.weight, 1, options) + edge_log_prob(l2.weight, 1, options);
+                    if let Some(scorer) = options.collocation_scorer {
+                        if options.collocation_weight > 0.0 {
+                            lp += options.collocation_weight
+                                * (scorer(options.preceding_context, &l1.value, false)
+                                    + options.collocation_edge_offset);
+                            let mut tail = String::with_capacity(
+                                options.preceding_context.len() + l1.value.len(),
+                            );
+                            tail.push_str(crate::text::last_characters(
+                                options.preceding_context,
+                                4,
+                            ));
+                            tail.push_str(&l1.value);
+                            lp += options.collocation_weight
+                                * (scorer(&tail, &l2.value, true)
+                                    + options.collocation_edge_offset);
+                        }
+                    }
+                    let mut item = WordItem::new(
+                        typed,
+                        word,
+                        (lp * 1000.0) as i64,
+                        CandidateSource::Generated,
+                        joined_key.clone(),
+                    );
+                    item.sentence_association = true;
+                    item.sentence_words = vec![l1.value.clone(), l2.value.clone()];
+                    out.push(item);
+                }
+            }
+        }
+    }
+
+    for path in deferred {
+        if out.len() >= TWO_SYLLABLE_SPLIT_POOL_LIMIT {
+            break;
         }
         if out.iter().any(|existing| existing.word == path.sentence) {
             continue;
@@ -3354,13 +3511,11 @@ fn collect_two_syllable_split_pool(paths: &[SentencePath], typed: &str, out: &mu
         item.sentence_association = true;
         item.sentence_words = path.words.clone();
         out.push(item);
-        if out.len() >= TWO_SYLLABLE_SPLIT_POOL_LIMIT {
-            break;
-        }
     }
 }
 
-/// 把双音节 `[1,1]` 拆字组合插在前排精确词典同音词（至多前 8 席）之后，确保进入 Top-24/32 统一融合池。
+/// 把双音节 `[1,1]` 拆字组合（含上下文前 4 路与 `3×3` 常用单字网格保底）置于前排精确词典同音词（至多前 8 席）之后，
+/// 先移除后排同名未纠错 `[1,1]` 重复项，确保进入 `Session::prune_multi_syllable_tail`（16 席上限）与 Stage A 前缀树。
 fn insert_two_syllable_split_pool(
     result: &mut Vec<WordItem>,
     segments: &[String],
@@ -3369,17 +3524,37 @@ fn insert_two_syllable_split_pool(
     const MAX_LEADING_EXACT_BEFORE_SPLITS: usize = 8;
     let mut at =
         whole_sentence_insert_position(result, segments).min(MAX_LEADING_EXACT_BEFORE_SPLITS);
-    while at < result.len() && result[at].sentence_association {
+    while at < result.len()
+        && result[at].sentence_association
+        && result[at].corrected_from.is_empty()
+        && result[at].sentence_words.len() == 1
+    {
         at += 1;
     }
-    let mut to_insert = Vec::new();
+    let mut to_insert = Vec::with_capacity(splits.len());
     for item in splits {
+        if result[..at]
+            .iter()
+            .any(|existing| existing.word == item.word)
+            || to_insert
+                .iter()
+                .any(|existing: &WordItem| existing.word == item.word)
+        {
+            continue;
+        }
+        result.retain(|existing| {
+            !(existing.word == item.word
+                && existing.sentence_association
+                && existing.corrected_from.is_empty()
+                && existing.sentence_words.len() == 2)
+        });
         if !result.iter().any(|existing| existing.word == item.word) {
             to_insert.push(item);
         }
     }
     if !to_insert.is_empty() {
-        result.splice(at..at, to_insert);
+        let safe_at = at.min(result.len());
+        result.splice(safe_at..safe_at, to_insert);
     }
 }
 
@@ -3448,19 +3623,63 @@ fn merge_alternative_sentences_at(
     // 按统一自然对数分（毫 nat）稳定降序，纠错整句已含物理信道代价，直接与字面/隔音整句平等竞争。
     pool.sort_by_key(|lhs| std::cmp::Reverse(lhs.weight));
     const MAX_MERGED_ALT_SENTENCES: usize = 24;
+    const TWO_CHAR_DIVERSITY_CAP: usize = 3;
     let mut deduped: Vec<WordItem> = Vec::with_capacity(pool.len().min(MAX_MERGED_ALT_SENTENCES));
+    let mut deferred_pool: Vec<WordItem> = Vec::new();
+    let mut head_counts: Vec<(char, usize)> = Vec::new();
+    let mut tail_counts: Vec<(char, usize)> = Vec::new();
     for item in pool {
         let exists_in_non_sentences = non_sentences
             .iter()
             .take(insert_at)
             .any(|existing| existing.word == item.word);
-        if exists_in_non_sentences || deduped.iter().any(|existing| existing.word == item.word) {
+        if exists_in_non_sentences
+            || deduped.iter().any(|existing| existing.word == item.word)
+            || deferred_pool
+                .iter()
+                .any(|existing| existing.word == item.word)
+        {
             continue;
+        }
+        // 双音节未纠错 `[1,1]` 拆字句在跨切分重排时同步维持首尾单字 `3×3` 多样性配额，
+        // 避免高一元频尾字（如 `yu'an'kong` 触发合并时 13 条 `*空`）垄断前 16 席裁掉 `远控`。
+        if item.corrected_from.is_empty() && item.sentence_words.len() == 2 {
+            let mut chars = item.word.chars();
+            if let (Some(c1), Some(c2), None) = (chars.next(), chars.next(), chars.next()) {
+                let h_cnt = head_counts
+                    .iter()
+                    .find(|(ch, _)| *ch == c1)
+                    .map_or(0, |(_, n)| *n);
+                let t_cnt = tail_counts
+                    .iter()
+                    .find(|(ch, _)| *ch == c2)
+                    .map_or(0, |(_, n)| *n);
+                if h_cnt >= TWO_CHAR_DIVERSITY_CAP || t_cnt >= TWO_CHAR_DIVERSITY_CAP {
+                    deferred_pool.push(item);
+                    continue;
+                }
+                if let Some((_, n)) = head_counts.iter_mut().find(|(ch, _)| *ch == c1) {
+                    *n += 1;
+                } else {
+                    head_counts.push((c1, 1));
+                }
+                if let Some((_, n)) = tail_counts.iter_mut().find(|(ch, _)| *ch == c2) {
+                    *n += 1;
+                } else {
+                    tail_counts.push((c2, 1));
+                }
+            }
         }
         deduped.push(item);
         if deduped.len() >= MAX_MERGED_ALT_SENTENCES {
             break;
         }
+    }
+    for item in deferred_pool {
+        if deduped.len() >= MAX_MERGED_ALT_SENTENCES {
+            break;
+        }
+        deduped.push(item);
     }
     // 若前缀/非整句区存在与融合整句同名的词，剔除后排重复项以维持全局词面唯一。
     let tail_start = insert_at.min(non_sentences.len());

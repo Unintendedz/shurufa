@@ -1630,5 +1630,53 @@ fn row_caches_see_rows_another_connection_wrote() {
     assert_eq!(query(&mut fresh, "wonihao", "wo'ni'hao", NONE), after);
 }
 
+#[test]
+fn two_syllable_three_by_three_grid_survives_alt_segmentation_merge() {
+    let fixture = Fixture::new();
+    // 构造高频尾字 `空` 与 15 个同音首字，另含隔音切分 `yu'an'kong` 触发 `merge_alternative_sentences_by_score`。
+    let yuan_chars = [
+        ("原", 1_470_000),
+        ("远", 1_320_000),
+        ("员", 887_000),
+        ("元", 732_000),
+        ("院", 672_000),
+        ("愿", 610_000),
+        ("园", 580_000),
+        ("源", 540_000),
+        ("圆", 510_000),
+        ("缘", 480_000),
+        ("怨", 450_000),
+        ("援", 420_000),
+        ("袁", 390_000),
+        ("渊", 360_000),
+        ("冤", 330_000),
+    ];
+    for (ch, w) in yuan_chars {
+        fixture.insert("yuan", ch, w);
+    }
+    fixture
+        .insert("kong", "空", 1_500_000)
+        .insert("kong", "恐", 490_000)
+        .insert("kong", "控", 272_000)
+        .insert("kong", "孔", 218_000)
+        .insert("yuan'kong", "圆孔", 9_550)
+        .insert("yu", "余", 500_000)
+        .insert("an", "安", 600_000);
+
+    let mut dictionary = QuanpinDictionary::new(&fixture.paths);
+    dictionary.set_sentence_alternatives(true);
+    let items = query(&mut dictionary, "yuankong", "yuan'kong", ALL_FOUR);
+    let generated_16: Vec<&str> = items
+        .iter()
+        .filter(|item| item.sentence_association && !item.source.is_dictionary())
+        .take(16)
+        .map(|item| item.word.as_str())
+        .collect();
+    assert!(
+        generated_16.contains(&"远控"),
+        "双音节 3x3 常用单字组合 `远控` 不得在跨切分重排后被 16 席整句上限截断: {generated_16:?}"
+    );
+}
+
 #[path = "path_page_compaction_tests.rs"]
 mod path_page_compaction_tests;

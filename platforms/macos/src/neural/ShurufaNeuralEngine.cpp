@@ -2798,12 +2798,14 @@ struct NeuralEngine::Impl {
         const size_t cand_cap = (primary_n == 1) ? 24 : ((primary_n >= 14) ? 14 : 16);
 
         std::vector<std::string> unique_cands;
-        std::unordered_set<std::string> seen_cands;
+        std::vector<bool> cand_is_clean;
+        std::unordered_map<std::string, size_t> seen_cand_idx;
         if (const JsonValue *arr = req.find("candidates"); arr && arr->is_array()) {
             unique_cands.reserve(std::min<size_t>(arr->arr_val.size(), cand_cap));
+            cand_is_clean.reserve(std::min<size_t>(arr->arr_val.size(), cand_cap));
             for (const auto &item : arr->arr_val) {
-                if (unique_cands.size() >= cand_cap) break;
                 std::string txt;
+                bool clean = true;
                 if (item.is_string()) {
                     txt = item.str_val;
                 } else if (item.is_object()) {
@@ -2811,10 +2813,18 @@ struct NeuralEngine::Impl {
                         continue;
                     }
                     txt = item.get_string("text");
+                    clean = (item.get_double("channel_log_prob", 0.0) > -1.0);
                 }
-                if (!txt.empty() && seen_cands.insert(txt).second) {
-                    unique_cands.push_back(std::move(txt));
+                if (txt.empty()) continue;
+                auto it = seen_cand_idx.find(txt);
+                if (it != seen_cand_idx.end()) {
+                    if (clean) cand_is_clean[it->second] = true;
+                    continue;
                 }
+                if (unique_cands.size() >= cand_cap) break;
+                seen_cand_idx.emplace(txt, unique_cands.size());
+                unique_cands.push_back(std::move(txt));
+                cand_is_clean.push_back(clean);
             }
         }
 
@@ -2837,11 +2847,12 @@ struct NeuralEngine::Impl {
             }
         }
 
-        // 评估 Tier 0 候选池最高自然度（按每字平均对数概率选最佳锚点，同时检查最差单步惊奇度）。
+        // 评估 Tier 0 未纠错字面候选池最高自然度（排除错拼候选干扰，避免 `管控*` 掩盖字面全高惊奇度而漏触束搜索）。
         int32_t best_idx = -1;
         double best_avg_char_lp = -1e9;
         double best_min_edge_lp = -1e9;
         for (size_t i = 0; i < diags.size(); ++i) {
+            if (i < cand_is_clean.size() && !cand_is_clean[i]) continue;
             const auto &d = diags[i];
             if (best_idx < 0 || d.avg_char_lp > best_avg_char_lp ||
                 (d.avg_char_lp == best_avg_char_lp && d.min_edge_lp > best_min_edge_lp)) {
@@ -2873,11 +2884,13 @@ struct NeuralEngine::Impl {
             && primary_n <= 8;
         const double jianpin_avg_thresh = env_double_or("SHURUFA_BEAM_JIANPIN_AVG_LP_THRESH", -4.8);
 
+        const double short_extreme_avg_thresh = env_double_or("SHURUFA_BEAM_SHORT_EXTREME_AVG_LP_THRESH", -7.5);
         const bool trigger_beam = force_beam ||
             (best_idx < 0) ||
             (best_avg_char_lp < avg_thresh && best_min_edge_lp < min_edge_thresh) ||
             (best_min_edge_lp < extreme_edge_thresh) ||
             (primary_n >= 4 && best_avg_char_lp < extreme_avg_thresh) ||
+            (!cached_ctx_was_empty && primary_n == 2 && best_avg_char_lp < short_extreme_avg_thresh) ||
             (allow_jianpin_beam && best_avg_char_lp < jianpin_avg_thresh);
 
         const bool allow_beam_for_path = !parsed_paths.empty() && (

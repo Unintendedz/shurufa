@@ -648,6 +648,7 @@ pub fn fuse_neural_response(
     let has_any_context =
         !request.context.trim().is_empty() || !request.right_context.trim().is_empty();
     let mut exact_dict_len_mask: u8 = 0;
+    let mut max_dict_stat_by_len: [Option<f64>; 6] = [None; 6];
     let mut has_multi_char_exact_dict = false;
     let mut has_verified_exact_literal_dict = false;
     let mut has_single_char_exact_dict = false;
@@ -658,9 +659,17 @@ pub fn fuse_neural_response(
             }
             // 未测频占位条目（`weight == 100`，`stat_log_prob == None` 或仅携带词网格分 `stat_from_lattice`）
             // 不代表已测频词典整词先验，避免它对真正有搭配证据的 `.gram`/Tier 0 切分施加 `-1.8 nats` 虚假罚分。
-            let has_measured_dict_stat = c.stat_log_prob.is_some() && !c.stat_from_lattice;
+            let has_measured_dict_stat = c.source == CandidateSource::UserDatabase as u8
+                || (c.stat_log_prob.is_some() && !c.stat_from_lattice);
             if (2..=5).contains(&c.char_count) && has_measured_dict_stat {
                 exact_dict_len_mask |= 1u8 << c.char_count;
+                let eff_stat = if c.source == CandidateSource::UserDatabase as u8 {
+                    c.stat_log_prob.unwrap_or(-7.0).max(-7.0)
+                } else {
+                    c.stat_log_prob.unwrap_or(-12.0)
+                };
+                let slot = &mut max_dict_stat_by_len[c.char_count];
+                *slot = Some(slot.map_or(eff_stat, |cur| cur.max(eff_stat)));
             }
             if c.char_count >= 2 && has_measured_dict_stat {
                 has_multi_char_exact_dict = true;
@@ -670,6 +679,22 @@ pub fn fuse_neural_response(
             }
         }
     }
+    let dict_lexical_strength = |len: usize| -> f64 {
+        if !(2..=5).contains(&len) || (exact_dict_len_mask & (1u8 << len)) == 0 {
+            return 0.0;
+        }
+        // 3+ 字成语/短语与简拼/混拼维持 `1.0` 完整成词结构保护；
+        // 完整全拼双音节（`len == 2 && bare_initial_count == 0`）按真实词频平滑缩放：高频实词（`stat >= -8.8`，`weight >= ~52k`）维持 `1.0`，
+        // 生僻冷门孤立词（如 `圆孔(9550)` `stat = -10.5`、`壮歌`、`八孔(27)`）线性退让，绝不凭孤立低频词条封死常用双字复合词。
+        if len >= 3 || bare_initial_count > 0 {
+            return 1.0;
+        }
+        const WEAK_DICT_STAT_FLOOR: f64 = -11.8;
+        const STRONG_DICT_STAT_CEIL: f64 = -8.8;
+        let max_s = max_dict_stat_by_len[len].unwrap_or(WEAK_DICT_STAT_FLOOR);
+        ((max_s - WEAK_DICT_STAT_FLOOR) / (STRONG_DICT_STAT_CEIL - WEAK_DICT_STAT_FLOOR))
+            .clamp(0.0, 1.0)
+    };
     // 无任何上下文（光标左、右均为空）且为单音节输入、已命中未纠错词典单字时，
     // 上下文互信息严格为 0，直接保持 Tier 0 经验词频序，避免句首提示偏置翻转单字基线（如 `xian -> 先`、`zai -> 在`、`le -> 了`）。
     if !has_any_context && primary_syllable_count == 1 && has_single_char_exact_dict {
@@ -714,15 +739,15 @@ pub fn fuse_neural_response(
         };
         observed_min_rel_stat =
             Some(observed_min_rel_stat.map_or(rel_stat, |cur| cur.min(rel_stat)));
-        let has_same_len_exact_dict = (2..=5).contains(&cand.char_count)
-            && (exact_dict_len_mask & (1u8 << cand.char_count)) != 0;
-        let non_lexical_split_penalty = if has_same_len_exact_dict
+        let lex_strength = dict_lexical_strength(cand.char_count);
+        let non_lexical_split_penalty = if lex_strength > 0.0
             && !is_dict_bucket(cand.source)
             && cand.channel_log_prob == 0.0
             && cand.collocation_log_prob < COLLOCATION_SPLIT_EXEMPT_THRESHOLD
         {
-            BASE_NON_LEXICAL_SPLIT_PENALTY
-                + BARE_INITIAL_SPLIT_EXTRA_PER_SYLLABLE * (bare_initial_count.min(3) as f64)
+            lex_strength
+                * (BASE_NON_LEXICAL_SPLIT_PENALTY
+                    + BARE_INITIAL_SPLIT_EXTRA_PER_SYLLABLE * (bare_initial_count.min(3) as f64))
         } else {
             0.0
         };
@@ -758,16 +783,20 @@ pub fn fuse_neural_response(
         });
     }
 
-    let beam_stat_rel = observed_min_rel_stat
-        .unwrap_or(BEAM_OOV_STAT_REL_CEILING)
-        .clamp(BEAM_OOV_STAT_REL_FLOOR, BEAM_OOV_STAT_REL_CEILING);
+    let beam_stat_rel = if has_any_context && primary_syllable_count == 2 {
+        -3.8
+    } else {
+        observed_min_rel_stat
+            .unwrap_or(BEAM_OOV_STAT_REL_CEILING)
+            .clamp(BEAM_OOV_STAT_REL_FLOOR, BEAM_OOV_STAT_REL_CEILING)
+    };
     for (text, pinyin, neural_lp, channel_lp) in unique_beams {
         let char_count = text.chars().count();
-        let has_same_len_exact_dict =
-            (2..=4).contains(&char_count) && (exact_dict_len_mask & (1u8 << char_count)) != 0;
-        let non_lexical_split_penalty = if has_same_len_exact_dict && channel_lp == 0.0 {
-            BASE_NON_LEXICAL_SPLIT_PENALTY
-                + BARE_INITIAL_SPLIT_EXTRA_PER_SYLLABLE * (bare_initial_count.min(3) as f64)
+        let lex_strength = dict_lexical_strength(char_count);
+        let non_lexical_split_penalty = if lex_strength > 0.0 && channel_lp == 0.0 {
+            lex_strength
+                * (BASE_NON_LEXICAL_SPLIT_PENALTY
+                    + BARE_INITIAL_SPLIT_EXTRA_PER_SYLLABLE * (bare_initial_count.min(3) as f64))
         } else {
             0.0
         };
