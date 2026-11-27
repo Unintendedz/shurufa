@@ -92,6 +92,7 @@ fn fixture(per_length: usize) -> PinyinDatabase {
     PinyinDatabase {
         connection: Some(connection),
         data_version: None,
+        calibration: None,
     }
 }
 

@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use crate::assets::{MAIN_DICTIONARY, USER_JOURNAL};
+use crate::assets::USER_JOURNAL;
 use crate::cache::FifoCache;
 use crate::dictionary::pinyin::PinyinDatabase;
 use crate::dictionary::DictRow;
@@ -222,7 +222,7 @@ pub struct QuanpinDictionary {
 impl QuanpinDictionary {
     /// Opens the generation's `msime-pinyin.db`, loads the n-gram tables, the personal context store and the typo profile off the keystroke path, and warms the statement cache (QD:231-268).
     pub fn new(paths: &RuntimePaths) -> Self {
-        let database = PinyinDatabase::open(&paths.dictionary(MAIN_DICTIONARY));
+        let database = PinyinDatabase::open_for_runtime(paths);
         database.warm_up();
         // 构造时预热并保留表；共享缓存淘汰不能让按键查询重新映射和检查整张表。
         let sentence_tables = SentenceNgramTables::load(paths);

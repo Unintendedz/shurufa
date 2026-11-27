@@ -29,6 +29,9 @@ fi
 cargo build --release -p msime-host-api --locked
 python3 scripts/fetch_stroke_dictionary.py
 resources="$(cargo run --quiet -p msime-client-core --example install_resources --locked -- target/resources)"
+cargo run --quiet --release -p msime-engine --example build_lexicon_calibration --locked -- \
+  --pinyin-db "$resources/msime-pinyin.db" \
+  --output "$root/target/language-dictionaries/shurufa-lexicon-calibration.bin" >/dev/null
 MSIME_EDITION=shurufa bash platforms/macos/stage-resources.sh "$resources"
 
 revision="$(git rev-parse HEAD)"

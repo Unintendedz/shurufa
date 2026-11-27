@@ -46,6 +46,7 @@ assert not (contents / "Resources/settled-model").exists()
 lang_dicts = contents / "Resources/language-dictionaries"
 assert (lang_dicts / "msime-stroke.db").is_file()
 assert (lang_dicts / "msime-rime_stroke_LICENSE.txt").is_file()
+assert (lang_dicts / "shurufa-lexicon-calibration.bin").is_file()
 identity = json.loads(subprocess.check_output([str(executable), "--describe-host"], text=True))
 assert identity["bundle_id"] == identifier
 assert identity["preferences_domain"] == identifier

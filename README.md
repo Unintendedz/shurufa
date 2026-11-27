@@ -40,6 +40,7 @@ Shurufa 是我自己用的 macOS 中文输入法，结合了[水杉输入法](ht
   - 组字在焦点会话处原子绑定不可变 `CursorSnapshot`（含左右上下文与段内暂存前缀 `locked_prefix`，退格可反悔拆回拼音并自然推进 `Qwen3-0.6B` KV-Cache）。
   - `RecallPool` 只负责多源召回并产出带 64 位稳定 `CandidateId` 的结构化证据，严禁在召回阶段计算展示下标；`UnifiedScorer` 维护全仓唯一三参数对数线性目标函数；无状态纯函数 `PurePresenter` 一次性完成第 1–5 位固定排位与置顶 L4 席位锁定、首页纠错限流、内联 Emoji 锚定、英文补全（首页上限 3 席）与单字排座，所有操作经稳定 `CandidateId` 寻址。
 - **Shurufa v2 统一概率词格与混淆网络（Tier 0）**：
+  - 离线构建 `SLXC` v1 主词库只读权重校准边车（`shurufa-lexicon-calibration.bin`），在不触碰 `msime-pinyin.db` 锁哈希与用户学习写库的前提下，在读边界零分配压制 `947` 条单字零权方言/讹误幻影（如 `me->没/末`、`ti->是`）、将 `557` 条非词汇化高权「`X的`」组合伪词（如 `鱼的`/`雨的`/`到的`）降权至兜底值，并按万象 `.gram` 精确频次为 `20.8` 万条高频口语 `weight == 100` 短语（如 `怎么个事`/`遇得到`/`按理来说`）恢复平滑对数线性先验。
   - 废除旧词格 `+47.63 nat` 人工断崖，将单字、多字词、356 条零分配双端单字证据动宾离合词拆插边（`separable_vo.rs`，覆盖 `睡了个觉`/`转个账`/`退个款`/`备个份`/`请个假` 等受限宾语语素）与万象 LTS `.gram`（修复 `LOG10_E` 错误衰减并重构为零分配查表，同时对多拆隔音切分扣回边偏移红利以抑制 `余地大哦`/`姑阿` 虚高）统一映射到同一自然对数概率空间。
   - 按句长自适应调度束宽（`56/40/32`、`terminal_beam = 224`）与中间列单字出边上限（`PER_PARENT_DEST_CAP = 8`），叠加多首词种子锚点、算子 C2 `[1, 1] -> [1, 1]` `.gram` 联合重解码、多样性保护上浮以及 3–4 字未测频占位整词经多词组合验证后的词网格原地升格（保留 `Database` 身份与可编辑性，同时继续后置未验证生僻占位词）；3+ 字整句首屏采用 `4+2` 读法布局与 `2+1+1` 成词首词优先多样性选拔，第 2–4 页直达 `24` 席前缀短词与常用单字（`MAX_RERANK_PATHS = 24` 上下文精选），同时过滤多音节零频扩展区古汉字与非主切分隔音单字，由 `PurePresenter` 统一一次性分配展示席位。
 - **任意句长切分、简全混拼与物理键盘错拼信道**：
@@ -107,7 +108,7 @@ bash scripts/verify-local.sh                     # 运行笔记校验、契约�
 bash scripts/eval-tier1.sh --require             # 单独运行 ~15s 端到端 Qwen3-0.6B 两阶段评测门禁（417 例）
 ```
 
-构建时会按 `resources/editions/shurufa.lock.json` 拉取并校验核心词库，并准备轻量笔画词库 `msime-stroke.db`（不再拉取旧 25 MB `safetensors` 模型）；首次安装本地缺万象语法模型时会自动下载 `wanxiang-lts-zh-hans.gram`（约 373 MB）；将端侧神经语言模型 `Qwen3-0.6B-Base-Q4_K_M.gguf`（约 378 MB）放入 `~/Library/Application Support/Shurufa/resource-packs/neural-lm/` 后自动启用两阶段 Metal 神经解码（缺模型时自动无损降级回 Tier 0 统一概率词格与万象 `.gram`）；本地流式语音的运行环境与模型在设置窗口里按需用 `uv` 安装。构建按登录钥匙串里的本机自签名证书「Shurufa Local Signing」签名，没有时脚本会自己建一张。换到你的机器上大概率要改点什么，这正是上面说的：fork 下来，按你自己的来。
+构建时会按 `resources/editions/shurufa.lock.json` 拉取并校验核心词库，离线生成主词库校准边车 `shurufa-lexicon-calibration.bin`，并准备轻量笔画词库 `msime-stroke.db`（不再拉取旧 25 MB `safetensors` 模型）；首次安装本地缺万象语法模型时会自动下载 `wanxiang-lts-zh-hans.gram`（约 373 MB）；将端侧神经语言模型 `Qwen3-0.6B-Base-Q4_K_M.gguf`（约 378 MB）放入 `~/Library/Application Support/Shurufa/resource-packs/neural-lm/` 后自动启用两阶段 Metal 神经解码（缺模型时自动无损降级回 Tier 0 统一概率词格与万象 `.gram`）；本地流式语音的运行环境与模型在设置窗口里按需用 `uv` 安装。构建按登录钥匙串里的本机自签名证书「Shurufa Local Signing」签名，没有时脚本会自己建一张。换到你的机器上大概率要改点什么，这正是上面说的：fork 下来，按你自己的来。
 
 ## 致谢
 

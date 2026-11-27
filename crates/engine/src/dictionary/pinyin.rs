@@ -2,15 +2,18 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use rusqlite::{params_from_iter, Connection, OpenFlags, Row};
 
+use super::calibration::{CalibrationAction, LexiconCalibration};
 use super::{column_i64, column_text, sql_limit, DictRow};
 use crate::error::{EngineError, Result};
 use crate::format::{
     build_table_name, quanpin_table, MAXIMUM_NUMBERED_SYLLABLES, SHIPPED_INITIALS,
 };
+use crate::paths::RuntimePaths;
 use crate::pinyin::jianpin::{
     build_key_like_pattern, build_mixed_jianpin_scan_limit, can_match_exact_key,
     extract_initial_token, is_pure_jianpin, key_prefix_upper_bound, matches_mixed_segments,
@@ -46,6 +49,7 @@ const INVALID_DICTIONARY_KEY: &str = "Invalid pinyin dictionary key";
 pub struct PinyinDatabase {
     connection: Option<Connection>,
     data_version: Option<i64>,
+    calibration: Option<Arc<LexiconCalibration>>,
 }
 
 impl PinyinDatabase {
@@ -54,9 +58,19 @@ impl PinyinDatabase {
         let mut database = Self {
             connection: open_connection_with_mode(path, false),
             data_version: None,
+            calibration: None,
         };
         // The reference constructor records the version, so the first poll after opening already compares (QD:268).
         database.database_changed();
+        database
+    }
+
+    /// 打开会话运行时的主拼音词库，并自动挂载 `resources` 同级 `language-dictionaries/` 下的只读校准边车（若存在）。
+    pub fn open_for_runtime(paths: &RuntimePaths) -> Self {
+        let mut database = Self::open(&paths.dictionary(crate::assets::MAIN_DICTIONARY));
+        if database.is_open() {
+            database.calibration = LexiconCalibration::shared_for_runtime(paths);
+        }
         database
     }
 
@@ -65,7 +79,13 @@ impl PinyinDatabase {
         Self {
             connection: open_connection_with_mode(path, true),
             data_version: None,
+            calibration: None,
         }
+    }
+
+    #[cfg(test)]
+    pub fn set_calibration(&mut self, calibration: Option<Arc<LexiconCalibration>>) {
+        self.calibration = calibration;
     }
 
     pub fn is_open(&self) -> bool {
@@ -714,6 +734,16 @@ impl PinyinDatabase {
             }
             result.push(item);
         });
+        if self.calibration.is_some() && !result.windows(2).all(|w| w[0].weight >= w[1].weight) {
+            // 原地稳定插入排序（零堆分配），仅在边车校准实际改变了本页相对次序时触发。
+            for i in 1..result.len() {
+                let mut j = i;
+                while j > 0 && result[j - 1].weight < result[j].weight {
+                    result.swap(j - 1, j);
+                    j -= 1;
+                }
+            }
+        }
         result
     }
 
@@ -743,7 +773,14 @@ impl PinyinDatabase {
         };
         while let Ok(Some(row)) = rows.next() {
             match dict_row(row) {
-                Ok(item) => {
+                Ok(mut item) => {
+                    if let Some(cal) = &self.calibration {
+                        match cal.apply(&item.key, &item.value, item.weight) {
+                            CalibrationAction::Unchanged => {}
+                            CalibrationAction::UpdateWeight(w) => item.weight = w,
+                            CalibrationAction::Suppress => continue,
+                        }
+                    }
                     if !visit(item) {
                         break;
                     }
@@ -1891,6 +1928,59 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         cascade_fixture(directory.path()).warm_up();
         PinyinDatabase::open(&directory.path().join("absent.db")).warm_up();
+    }
+
+    #[test]
+    fn calibration_sidecar_suppresses_phantoms_and_reorders_calibrated_rows() {
+        use super::super::calibration::{hash_key_value, CalibrationRecord};
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = pinyin_db(
+            directory.path(),
+            &[
+                ("tbl_1_m", "me", "么", 480_000),
+                ("tbl_1_m", "me", "没", 0),
+                ("tbl_1_m", "me", "末", 0),
+                ("tbl_3_y", "yu'de'dao", "欲得到", 400),
+                ("tbl_3_y", "yu'de'dao", "遇得到", 100),
+            ],
+        );
+        let mut database = PinyinDatabase::open(&path);
+        let seed = 3;
+        let cal = LexiconCalibration::from_records(
+            seed,
+            vec![
+                CalibrationRecord {
+                    hash64: hash_key_value(seed, "me", "没"),
+                    raw_weight: 0,
+                    calibrated_weight: -1,
+                },
+                CalibrationRecord {
+                    hash64: hash_key_value(seed, "me", "末"),
+                    raw_weight: 0,
+                    calibrated_weight: -1,
+                },
+                CalibrationRecord {
+                    hash64: hash_key_value(seed, "yu'de'dao", "遇得到"),
+                    raw_weight: 100,
+                    calibrated_weight: 1_200,
+                },
+            ],
+        )
+        .unwrap();
+        database.set_calibration(Some(Arc::new(cal)));
+
+        let me_rows =
+            database.query_segments_keyed_flat(&strings(&["me"]), 16, QuerySource::Quanpin);
+        let me_words: Vec<&str> = me_rows.iter().map(|r| r.value.as_str()).collect();
+        assert_eq!(me_words, vec!["么"]);
+
+        let span_rows = database.query_lattice_span(&strings(&["yu", "de", "dao"]), 8);
+        assert_eq!(span_rows.len(), 2);
+        assert_eq!(span_rows[0].value, "遇得到");
+        assert_eq!(span_rows[0].weight, 1_200);
+        assert_eq!(span_rows[1].value, "欲得到");
+        assert_eq!(span_rows[1].weight, 400);
     }
 
     #[test]

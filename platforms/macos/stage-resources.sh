@@ -35,4 +35,8 @@ if [ -f "$stroke_source/msime-stroke.db" ] && [ -f "$stroke_source/msime-rime_st
   cp "$stroke_source/msime-stroke.db" "$stroke_dest/msime-stroke.db"
   cp "$stroke_source/msime-rime_stroke_LICENSE.txt" "$stroke_dest/msime-rime_stroke_LICENSE.txt"
 fi
+if [ -f "$stroke_source/shurufa-lexicon-calibration.bin" ]; then
+  mkdir -p "$repo_root/target/macos/language-dictionaries"
+  cp "$stroke_source/shurufa-lexicon-calibration.bin" "$repo_root/target/macos/language-dictionaries/shurufa-lexicon-calibration.bin"
+fi
 echo "macOS resources staged for $edition: $destination"

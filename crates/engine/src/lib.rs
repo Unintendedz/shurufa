@@ -26,6 +26,7 @@ pub mod time;
 mod types;
 mod user_dictionary;
 
+pub use dictionary::calibration;
 pub use error::{EngineError, Result};
 pub use lattice::octagram;
 pub use paths::RuntimePaths;

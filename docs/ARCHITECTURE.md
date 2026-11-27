@@ -46,7 +46,7 @@ crates/engine                                         纯 Rust 输入内核（Cu
 
 ## 固定资源与许可证
 
-- **版本与核心资源锁**：`shared/contracts/editions.json` 收敛为 `["full", "shurufa"]`，随包桌面资源由 `resources/editions/shurufa.lock.json` 固定校验并在构建时通过 `platforms/macos/stage-resources.sh` 装配；轻量笔画词库 `msime-stroke.db`（及许可证 `msime-rime_stroke_LICENSE.txt`）由 `scripts/fetch_stroke_dictionary.py` 拉取并装入 `Shurufa.app/Contents/Resources/language-dictionaries/`，旧 4.5 MB / 25 MB `safetensors` 模型仍保持移除。
+- **版本与核心资源锁**：`shared/contracts/editions.json` 收敛为 `["full", "shurufa"]`，随包桌面资源由 `resources/editions/shurufa.lock.json` 固定校验并在构建时通过 `platforms/macos/stage-resources.sh` 装配；轻量笔画词库 `msime-stroke.db`（及许可证 `msime-rime_stroke_LICENSE.txt`）由 `scripts/fetch_stroke_dictionary.py` 拉取，连同 `build_lexicon_calibration` 生成的 `SLXC` v1 主词库只读权重校准边车 `shurufa-lexicon-calibration.bin` 一并装入 `Shurufa.app/Contents/Resources/language-dictionaries/`（由 `PinyinDatabase::open_for_runtime` 在读边界零分配挂载且尊重用户学习改写），旧 4.5 MB / 25 MB `safetensors` 模型仍保持移除。
 - **OpenCC 简繁转换表**：由 `resources/opencc.lock.json` 固定 7 份表及许可证校验，`client-base/build.rs` 通过 `scripts/fetch_opencc.py` 在 `target/opencc/<commit>/` 缓存准备并内嵌，支持 `MSIME_OPENCC_OFFLINE=1` 离线构建。
 - **符号与第三方声明**：`crates/engine/src/local/symbol_groups.tsv` 随仓库提交并受 `scripts/test-symbol-groups.py` 校验；所有内嵌与按需下载组件（OpenCC、SCOWL、symphonia、sherpa-onnx、TextStream/MLX、`Qwen3-0.6B`、万象 `.gram` 等）的来源、固定提交与许可证全文须同步登记在 `platforms/macos/resources/Licenses/THIRD_PARTY_NOTICES.txt` 与 [third-party.md](third-party.md)，网络与隐私边界见 [cloud-candidates.md](cloud-candidates.md)。
 

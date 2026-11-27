@@ -59,7 +59,7 @@ pub struct ShuangpinDictionary {
 
 impl ShuangpinDictionary {
     pub fn new(profile: &'static ShuangpinProfile, paths: &RuntimePaths) -> Self {
-        let mut database = PinyinDatabase::open(&paths.dictionary(assets::MAIN_DICTIONARY));
+        let mut database = PinyinDatabase::open_for_runtime(paths);
         let mut sentence_tables = SentenceNgramTables::default();
         if database.is_open() {
             database.warm_up();

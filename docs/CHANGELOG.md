@@ -4,6 +4,10 @@ Shurufa 从水杉输入法 tag `fork-point/msime-2026-10-27` 分出来之后的�
 
 ## 2026-11-27
 
+- **主词库只读校准边车与离线权重重标定管线（`dictionary/calibration.rs`、`dictionary/pinyin.rs`、`lattice/octagram.rs`、`build_lexicon_calibration.rs`、`build-shurufa.sh`、`stage-resources.sh`）**：
+  - 新增 `SLXC` v1 只读二进制校准表 `shurufa-lexicon-calibration.bin`（随包置于 `Contents/Resources/language-dictionaries/`，构建期在整库 `70` 万+键值上校验零碰撞 `seed`），由 `PinyinDatabase::open_for_runtime` 在全拼/双拼读边界零分配挂载且自动退让已被用户学习改写的权重，保持 `msime-pinyin.db` 锁哈希与用户代次完全无侵入。
+  - 从源头压制 `947` 条 `tbl_1_*` 单字零权方言/讹误幻影（保留 `weight == 1` 合法生僻多音字与 `n/ng -> 嗯`），将 `557` 条非词汇化高权「`X的`」伪词（如 `鱼的`/`雨的`/`到的`，保留 `28` 个已词汇化代词/评价词）降权至 `80`，并基于 `GramDb::exact_phrase_ln_count` 为 `20.8` 万条高频口语 `weight == 100` 短语平滑赋予对数线性权重（`yudedao` 首屏净化为 `#1 遇得到 / #2 欲得到 / #3 于得到 / #4 欲得 / #5 育德`，`spoken-v1` Tier 1 `Top6` 升至 `98.3%`）。
+
 - **全拼两阶段投机纠错纪律、隔音偏移补偿与动宾离合词拆插恢复（`lattice/decode.rs`、`lattice/separable_vo.rs`、`quanpin/dictionary.rs`、`session/candidates.rs`、`neural_v2.rs`、`input-runtime/src/runtime.rs`）**：
   - **根治干净全拼首槽误纠劫持并守住真错字召回**：限制 2–5 音节合法全拼单句至多 1 条纠错边（杜绝 `gongxunyongji -> 通讯统计*` 双错字幻觉），对 3+ 音节含多字词合法字面路径禁止投机纠错在 Tier 0 篡夺首槽并在 `merge_alternative_sentences_by_score` 维持未纠错字面榜首，同时在 `Runtime::take_neural_request` 为被 `ordering.rs` 延后的首条整串纠错句保底 1 个尾槽入池席位供 `Qwen3-0.6B` 裁决（`sentences-v2` 四字句 Tier 0 误纠劫持由 `26.1%` 压至 `1.1%`，Tier 1 `Top1/Top6` 升至 `91.3% / 96.7%`，真错字控制组 `85.0%` 零回退）。
   - **隔音多拆边偏移红利补偿与动宾离合词拆插恢复**：挂载 `.gram` 时扣回多拆零声母备选句的边偏移红利并同步校准 `HIATUS_SPLIT_CHANNEL_PENALTY = -1.4`；在 v2 统一对数概率尺度上恢复 356 条零分配动宾离合词拆插补边与空上文单跨度合成词尾字 `.gram` 衔接（`spoken-v1` `separable-vo` 达 `100%` 首页召回，全集 Tier 1 `Top1/Top6` 升至 `90.8% / 97.5%`、零倒退）。

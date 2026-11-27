@@ -374,6 +374,42 @@ impl GramDb {
         }
         result
     }
+
+    /// 查询 `phrase`（2..=`MAX_ENCODED_UNICODE` 个码点）在双数组 Trie 中的精确整串对数频次 `ln(count)`。
+    /// 若该完整 n-gram 未收录则返回 `None`；全程栈缓冲零堆分配。
+    pub fn exact_phrase_ln_count(&self, phrase: &str) -> Option<f64> {
+        let mut split_at = None;
+        for (idx, _) in phrase.char_indices() {
+            if idx > 0 {
+                split_at = Some(idx);
+            }
+        }
+        let split_at = split_at?;
+        if codepoint_count(phrase) > MAX_ENCODED_UNICODE {
+            return None;
+        }
+        let (prefix, last_char) = phrase.split_at(split_at);
+        let mut prefix_buf = [0u8; MAX_ENCODED_BYTES];
+        let mut last_buf = [0u8; MAX_ENCODED_BYTES];
+        let prefix_len = encode_into(prefix, &mut prefix_buf);
+        let last_len = encode_into(last_char, &mut last_buf);
+        if prefix_len == 0 || last_len == 0 {
+            return None;
+        }
+        let mut matches = [GramMatch {
+            value: 0,
+            length: 0,
+        }; MAX_RESULTS];
+        let count = self.lookup(
+            &prefix_buf[..prefix_len],
+            &last_buf[..last_len],
+            &mut matches,
+        );
+        matches[..count]
+            .iter()
+            .find(|m| m.length == last_len)
+            .map(|m| scale_value(m.value))
+    }
 }
 
 /// `scale_value`：负值不可能是合法频次分，一律按 -1 处理。
