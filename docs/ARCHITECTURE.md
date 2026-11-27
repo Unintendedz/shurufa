@@ -55,10 +55,11 @@ crates/engine                                         纯 Rust 输入内核（Cu
 仓库通过 `.githooks/`（执行一次 `git config core.hooksPath .githooks` 启用）与两级本地门禁脚本保障质量：
 
 ```sh
-bash scripts/verify-local.sh --quick   # 快速门禁：决策笔记校验 + run-checks.sh + workspace 编译 + macOS 主目标编译
-bash scripts/verify-local.sh           # 完整门禁：快速门禁 + workspace 单元测试 + clippy + 全量 macOS CTest
+bash scripts/verify-local.sh --quick   # 快速门禁：决策笔记校验 + run-checks.sh + workspace 编译 + macOS 主目标编译（加 --tier1 跑真模型门禁）
+bash scripts/verify-local.sh           # 完整门禁：快速门禁 + workspace 单元测试 + clippy + 全量 macOS CTest + Tier 1 真模型评测门禁
+bash scripts/eval-tier1.sh --require   # 独立运行 ~15s 端侧两阶段（Tier 0 + Qwen3-0.6B Metal）417 例端到端回归门禁
 ```
 
-- **文本契约检查（`scripts/run-checks.sh`）**：自动发现并并发执行全部 `scripts/test-*.py`（包括格式、冲突标记、符号链接、文件锁、Edition 锁、OpenCC 校验、符号表、云候选预算、macOS 孤立源文件、设置窗口生命周期与 `NSUserDefaults` 测试 suite 清理）。
+- **文本契约检查（`scripts/run-checks.sh`）**：自动发现并并发执行全部 `scripts/test-*.py`（包括格式、冲突标记、符号链接、文件锁、Edition 锁、OpenCC 校验、符号表、云候选预算、macOS 孤立源文件、设置窗口生命周期、`NSUserDefaults` 测试 suite 清理与 Tier 1 护栏集契约）。
 - **macOS 原生测试套件（`target/macos-isolated`）**：通过 CMake/Ninja 配置 `MSIME_EDITION=shurufa`，由 `ctest --test-dir target/macos-isolated -E '^(textstream-real|textstream-protocol)$' --parallel 4 --output-on-failure` 运行全套原生单元与 UI 回归测试。
-- **拼音转换评测门禁（`convert_eval`）**：使用 `crates/input-runtime/examples/convert_eval` 对照锁定资源与万象 `.gram` 模型评估 `resources/eval/shurufa-spoken-v1.tsv` 与 `resources/eval/sentences-v2.tsv` 的 Top-1 准确率及分阶段归因。
+- **拼音转换与两阶段神经评测门禁（`convert_eval` + `tier1_eval`）**：`crates/input-runtime/examples/convert_eval` 评估纯统计层基线与分阶段归因；`crates/input-runtime/examples/tier1_eval`（由 `scripts/eval-tier1.sh` 驱动）在真实 `msime-pinyin.db` + 万象 `.gram` + `ShurufaNeuralService`（`Qwen3-0.6B` Metal）上联合守卫 `shurufa-spoken-v1.tsv`、`shurufa-tier1-guardrails-v1.tsv`（单字 6 边界矩阵、幻影异读、未测频整词、真错字召回控制组与中英混排）及 `sentences-v2.tsv` 的准确率、误纠劫持率与热推理延迟。

@@ -11,11 +11,17 @@ if [[ -d "/opt/homebrew/opt/python@3.14/bin" ]]; then
   export PATH="/opt/homebrew/opt/python@3.14/bin:$PATH"
 fi
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target/macos-cargo}"
+# 防止长路径 TMPDIR 超过 Unix 域套接字 `SUN_LEN`（104 字节）上限导致本地 IPC 单测失败。
+if [[ -d "/private/tmp" && "${#TMPDIR}" -gt 60 ]]; then
+  export TMPDIR="/private/tmp"
+fi
 
 quick=0
+run_tier1=0
 for argument in "$@"; do
   case "$argument" in
     --quick) quick=1 ;;
+    --tier1) run_tier1=1 ;;
     *) echo "unknown option: $argument" >&2; exit 2 ;;
   esac
 done
@@ -46,6 +52,10 @@ if [[ -d "$MSIME_MACOS_BUILD" ]]; then
 fi
 
 if [[ "$quick" -eq 1 ]]; then
+  if [[ "$run_tier1" -eq 1 ]]; then
+    note "tier1 neural eval gate"
+    bash scripts/eval-tier1.sh --require
+  fi
   printf '\nquick check passed\n'
   exit 0
 fi
@@ -61,5 +71,8 @@ if [[ -d "$MSIME_MACOS_BUILD" ]]; then
   cmake --build "$MSIME_MACOS_BUILD" --parallel "$MSIME_BUILD_JOBS"
   ctest --test-dir "$MSIME_MACOS_BUILD" -E '^(textstream-real|textstream-protocol)$' --parallel 4 --output-on-failure
 fi
+
+note "tier1 neural eval gate"
+bash scripts/eval-tier1.sh
 
 printf '\nverification passed\n'

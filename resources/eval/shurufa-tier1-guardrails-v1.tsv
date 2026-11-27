@@ -1,0 +1,213 @@
+# Shurufa Tier 1 端侧神经解码（Qwen3-0.6B）结构性护栏评测集（100% 合成数据，无任何真实用户输入）。
+# 列：id / 拼音 / 金标准 / 音节数 / 标签 / 上文（支持 \n 转义） / 首页违禁词（可选，逗号分隔）
+id	input	gold	syllables	tags	context	forbidden_page1
+# 1. 24 个核心高频单字 × 6 类左边界（空上文 / 英文+空格 / 英文紧贴 / 中文逗号 / 换行 / 中文从句）= 144 例
+bs-001	he	和	1	boundary-single,boundary-empty		
+bs-002	he	和	1	boundary-single,boundary-en-space	turnitin 	
+bs-003	he	和	1	boundary-single,boundary-en-tight	turnitin	
+bs-004	he	和	1	boundary-single,boundary-zh-comma	我觉得，	
+bs-005	he	和	1	boundary-single,boundary-newline	第一行\n	
+bs-006	he	和	1	boundary-single,boundary-zh-clause	今天天气真不错	
+bs-007	de	的	1	boundary-single,boundary-empty		
+bs-008	de	的	1	boundary-single,boundary-en-space	macOS 	
+bs-009	de	的	1	boundary-single,boundary-en-tight	macOS	
+bs-010	de	的	1	boundary-single,boundary-zh-comma	坦白说，	
+bs-011	de	的	1	boundary-single,boundary-newline	第一行\n	
+bs-012	de	的	1	boundary-single,boundary-zh-clause	我刚看完最新	
+bs-013	shi	是	1	boundary-single,boundary-empty		
+bs-014	shi	是	1	boundary-single,boundary-en-space	turnitin 	
+bs-015	shi	是	1	boundary-single,boundary-en-tight	turnitin	
+bs-016	shi	是	1	boundary-single,boundary-zh-comma	说实话，	
+bs-017	shi	是	1	boundary-single,boundary-newline	第一行\n	
+bs-018	shi	是	1	boundary-single,boundary-zh-clause	这个问题其实就	
+bs-019	zai	在	1	boundary-single,boundary-empty		
+bs-020	zai	在	1	boundary-single,boundary-en-space	turnitin 	
+bs-021	zai	在	1	boundary-single,boundary-en-tight	turnitin	
+bs-022	zai	在	1	boundary-single,boundary-zh-comma	我觉得，	
+bs-023	zai	在	1	boundary-single,boundary-newline	第一行\n	
+bs-024	zai	在	1	boundary-single,boundary-zh-clause	我们现在正好就	
+bs-025	bu	不	1	boundary-single,boundary-empty		
+bs-026	bu	不	1	boundary-single,boundary-en-space	GitHub 	
+bs-027	bu	不	1	boundary-single,boundary-en-tight	GitHub	
+bs-028	bu	不	1	boundary-single,boundary-zh-comma	老实讲，	
+bs-029	bu	不	1	boundary-single,boundary-newline	第一行\n	
+bs-030	bu	不	1	boundary-single,boundary-zh-clause	这件事我真的	
+bs-031	le	了	1	boundary-single,boundary-empty		
+bs-032	le	了	1	boundary-single,boundary-en-space	Docker 	
+bs-033	le	了	1	boundary-single,boundary-en-tight	Docker	
+bs-034	le	了	1	boundary-single,boundary-zh-comma	太好了，	
+bs-035	le	了	1	boundary-single,boundary-newline	第一行\n	
+bs-036	le	了	1	boundary-single,boundary-zh-clause	代码已经全部写完	
+bs-037	wo	我	1	boundary-single,boundary-empty		
+bs-038	wo	我	1	boundary-single,boundary-en-space	turnitin 	
+bs-039	wo	我	1	boundary-single,boundary-en-tight	turnitin	
+bs-040	wo	我	1	boundary-single,boundary-zh-comma	我觉得，	
+bs-041	wo	我	1	boundary-single,boundary-newline	第一行\n	
+bs-042	wo	我	1	boundary-single,boundary-zh-clause	昨天开会的时候	
+bs-043	ni	你	1	boundary-single,boundary-empty		
+bs-044	ni	你	1	boundary-single,boundary-en-space	ChatGPT 	
+bs-045	ni	你	1	boundary-single,boundary-en-tight	ChatGPT	
+bs-046	ni	你	1	boundary-single,boundary-zh-comma	顺便问下，	
+bs-047	ni	你	1	boundary-single,boundary-newline	第一行\n	
+bs-048	ni	你	1	boundary-single,boundary-zh-clause	明天下午我去找	
+bs-049	ta	他	1	boundary-single,boundary-empty		
+bs-050	ta	他	1	boundary-single,boundary-en-space	turnitin 	
+bs-051	ta	他	1	boundary-single,boundary-en-tight	turnitin	
+bs-052	ta	他	1	boundary-single,boundary-zh-comma	按理说，	
+bs-053	ta	他	1	boundary-single,boundary-newline	第一行\n	
+bs-054	ta	他	1	boundary-single,boundary-zh-clause	老张刚才打电话找	
+bs-055	you	有	1	boundary-single,boundary-empty		
+bs-056	you	有	1	boundary-single,boundary-en-space	macOS 	
+bs-057	you	有	1	boundary-single,boundary-en-tight	macOS	
+bs-058	you	有	1	boundary-single,boundary-zh-comma	严格来说，	
+bs-059	you	有	1	boundary-single,boundary-newline	第一行\n	
+bs-060	you	有	1	boundary-single,boundary-zh-clause	这周工作安排还	
+bs-061	zhe	这	1	boundary-single,boundary-empty		
+bs-062	zhe	这	1	boundary-single,boundary-en-space	turnitin 	
+bs-063	zhe	这	1	boundary-single,boundary-en-tight	turnitin	
+bs-064	zhe	这	1	boundary-single,boundary-zh-comma	你看，	
+bs-065	zhe	这	1	boundary-single,boundary-newline	第一行\n	
+bs-066	zhe	这	1	boundary-single,boundary-zh-clause	大家一起来讨论	
+bs-067	ge	个	1	boundary-single,boundary-empty		
+bs-068	ge	个	1	boundary-single,boundary-en-space	GitHub 	
+bs-069	ge	个	1	boundary-single,boundary-en-tight	GitHub	
+bs-070	ge	个	1	boundary-single,boundary-zh-comma	先建两，	
+bs-071	ge	个	1	boundary-single,boundary-newline	第一行\n	
+bs-072	ge	个	1	boundary-single,boundary-zh-clause	我想先新建一	
+bs-073	shang	上	1	boundary-single,boundary-empty		
+bs-074	shang	上	1	boundary-single,boundary-en-space	GitHub 	
+bs-075	shang	上	1	boundary-single,boundary-en-tight	GitHub	
+bs-076	shang	上	1	boundary-single,boundary-zh-comma	总体来看，	
+bs-077	shang	上	1	boundary-single,boundary-newline	第一行\n	
+bs-078	shang	上	1	boundary-single,boundary-zh-clause	文件已经放在桌	
+bs-079	lai	来	1	boundary-single,boundary-empty		
+bs-080	lai	来	1	boundary-single,boundary-en-space	turnitin 	
+bs-081	lai	来	1	boundary-single,boundary-en-tight	turnitin	
+bs-082	lai	来	1	boundary-single,boundary-zh-comma	快点过，	
+bs-083	lai	来	1	boundary-single,boundary-newline	第一行\n	
+bs-084	lai	来	1	boundary-single,boundary-zh-clause	你什么时候能够过	
+bs-085	dao	到	1	boundary-single,boundary-empty		
+bs-086	dao	到	1	boundary-single,boundary-en-space	macOS 	
+bs-087	dao	到	1	boundary-single,boundary-en-tight	macOS	
+bs-088	dao	到	1	boundary-single,boundary-zh-comma	没想，	
+bs-089	dao	到	1	boundary-single,boundary-newline	第一行\n	
+bs-090	dao	到	1	boundary-single,boundary-zh-clause	快递今天下午刚收	
+bs-091	shuo	说	1	boundary-single,boundary-empty		
+bs-092	shuo	说	1	boundary-single,boundary-en-space	ChatGPT 	
+bs-093	shuo	说	1	boundary-single,boundary-en-tight	ChatGPT	
+bs-094	shuo	说	1	boundary-single,boundary-zh-comma	听大家，	
+bs-095	shuo	说	1	boundary-single,boundary-newline	第一行\n	
+bs-096	shuo	说	1	boundary-single,boundary-zh-clause	刚才在电话里听他	
+bs-097	yao	要	1	boundary-single,boundary-empty		
+bs-098	yao	要	1	boundary-single,boundary-en-space	turnitin 	
+bs-099	yao	要	1	boundary-single,boundary-en-tight	turnitin	
+bs-100	yao	要	1	boundary-single,boundary-zh-comma	如果需，	
+bs-101	yao	要	1	boundary-single,boundary-newline	第一行\n	
+bs-102	yao	要	1	boundary-single,boundary-zh-clause	明天早上一定需	
+bs-103	qu	去	1	boundary-single,boundary-empty		
+bs-104	qu	去	1	boundary-single,boundary-en-space	Docker 	
+bs-105	qu	去	1	boundary-single,boundary-en-tight	Docker	
+bs-106	qu	去	1	boundary-single,boundary-zh-comma	走吧一起，	
+bs-107	qu	去	1	boundary-single,boundary-newline	第一行\n	
+bs-108	qu	去	1	boundary-single,boundary-zh-clause	吃完午饭我们一起	
+bs-109	hui	会	1	boundary-single,boundary-empty		
+bs-110	hui	会	1	boundary-single,boundary-en-space	ChatGPT 	
+bs-111	hui	会	1	boundary-single,boundary-en-tight	ChatGPT	
+bs-112	hui	会	1	boundary-single,boundary-zh-comma	待会儿开，	
+bs-113	hui	会	1	boundary-single,boundary-newline	第一行\n	
+bs-114	hui	会	1	boundary-single,boundary-zh-clause	下午三点准时开	
+bs-115	kan	看	1	boundary-single,boundary-empty		
+bs-116	kan	看	1	boundary-single,boundary-en-space	GitHub 	
+bs-117	kan	看	1	boundary-single,boundary-en-tight	GitHub	
+bs-118	kan	看	1	boundary-single,boundary-zh-comma	你先看，	
+bs-119	kan	看	1	boundary-single,boundary-newline	第一行\n	
+bs-120	kan	看	1	boundary-single,boundary-zh-clause	我把日志发给你看	
+bs-121	hao	好	1	boundary-single,boundary-empty		
+bs-122	hao	好	1	boundary-single,boundary-en-space	macOS 	
+bs-123	hao	好	1	boundary-single,boundary-en-tight	macOS	
+bs-124	hao	好	1	boundary-single,boundary-zh-comma	准备得真，	
+bs-125	hao	好	1	boundary-single,boundary-newline	第一行\n	
+bs-126	hao	好	1	boundary-single,boundary-zh-clause	这个方案效果特别	
+bs-127	me	么	1	boundary-single,boundary-empty		没,末
+bs-128	me	么	1	boundary-single,boundary-en-space	turnitin 	没,末
+bs-129	me	么	1	boundary-single,boundary-en-tight	turnitin	没,末
+bs-130	me	么	1	boundary-single,boundary-zh-comma	你说什，	没,末
+bs-131	me	么	1	boundary-single,boundary-newline	第一行\n	没,末
+bs-132	me	么	1	boundary-single,boundary-zh-clause	今天下午到底干什	没,末
+bs-133	ne	呢	1	boundary-single,boundary-empty		那,哪
+bs-134	ne	呢	1	boundary-single,boundary-en-space	turnitin 	那,哪
+bs-135	ne	呢	1	boundary-single,boundary-en-tight	turnitin	那,哪
+bs-136	ne	呢	1	boundary-single,boundary-zh-comma	怎么办，	那,哪
+bs-137	ne	呢	1	boundary-single,boundary-newline	第一行\n	那,哪
+bs-138	ne	呢	1	boundary-single,boundary-zh-clause	其他人现在在哪儿	那,哪
+bs-139	ma	吗	1	boundary-single,boundary-empty		
+bs-140	ma	吗	1	boundary-single,boundary-en-space	turnitin 	
+bs-141	ma	吗	1	boundary-single,boundary-en-tight	turnitin	
+bs-142	ma	吗	1	boundary-single,boundary-zh-comma	真的可以，	
+bs-143	ma	吗	1	boundary-single,boundary-newline	第一行\n	
+bs-144	ma	吗	1	boundary-single,boundary-zh-clause	明天早上你有空	
+# 2. 古音 / 方言低权重幻影异读单字诱捕护栏（14 例）
+ph-001	me	么	1	phantom-reading	老王在说喊你开店	没,末
+ph-002	me	么	1	phantom-reading	你今天到底吃饭	没,末
+ph-003	me	么	1	phantom-reading	这件事到底怎	没,末
+ph-004	me	么	1	phantom-reading	刚才那个人说什	没,末
+ph-005	ne	呢	1	phantom-reading	你说这可怎么办	那,哪
+ph-006	ne	呢	1	phantom-reading	他们到底去了哪儿	那,哪
+ph-007	ti	题	1	phantom-reading	先看今天这道数学	是
+ph-008	ti	体	1	phantom-reading	平时要注意锻炼身	是
+ph-009	wei	为	1	phantom-reading	大家这样做都是因	有
+ph-010	shui	水	1	phantom-reading	嗓子干就多喝点热	说
+ph-011	fu	服	1	phantom-reading	今天换了一件新衣	不,还
+ph-012	gan	干	1	phantom-reading	这活接下来该怎么	个
+ph-013	tai	太	1	phantom-reading	外面的风实在是	大
+ph-014	e	饿	1	phantom-reading	忙了一整天肚子好	啊,哦
+# 3. 词库 weight==100 未测频占位整词与对照护栏（15 例）
+ud-001	zenmegeshi	怎么个事	4	unmeasured-dict	我看看	
+ud-002	zenmegeshi	怎么个事	4	unmeasured-dict		
+ud-003	yudedao	遇得到	3	unmeasured-dict		
+ud-004	yudedao	遇得到	3	unmeasured-dict	希望下次还能	
+ud-005	daanjiushi	答案就是	4	unmeasured-dict	这道题最后的	
+ud-006	daaiwujiang	大爱无疆	4	unmeasured-dict		
+ud-007	ehenhende	恶狠狠地	4	unmeasured-dict	他转过头来	
+ud-008	abidiyu	阿鼻地狱	4	unmeasured-dict		
+ud-009	baaichuandi	把爱传递	4	unmeasured-dict	让我们一起	
+ud-010	anlilaishuo	按理来说	4	unmeasured-dict		
+ud-011	youmaobingba	有毛病吧	4	unmeasured-dict	这设计简直	
+ud-012	gandepiaoliang	干得漂亮	4	unmeasured-dict	这次发布真是	
+ud-013	woshiyigebing	我是一个兵	5	unmeasured-dict		
+ud-014	xianzhezhishi	贤者之石	4	unmeasured-dict	还真是	先哲之石
+ud-015	buxiedai	不携带	3	unmeasured-dict	请大家尽量	
+# 4. 真实打字错拼召回控制组（20 例：覆盖合法音节邻键/漏g/跨音节2合1换位 + 非法音节换位）
+ty-001	diannai	电脑	2	typo,typo-genuine	我刚重启了笔记本	
+ty-002	kuaisi	快递	2	typo,typo-genuine	顺丰下午送来的	
+ty-003	yingai	应该	2	typo,typo-genuine	按照目前的进度	
+ty-004	qinkuang	情况	2	typo,typo-genuine	先汇报一下现场的	
+ty-005	penyou	朋友	2	typo,typo-genuine	周末约了几个老	
+ty-006	yijin	已经	2	typo,typo-genuine	全部单元测试都	
+ty-007	meiganxi	没关系	3	typo,typo-genuine	不用客气真的	
+ty-008	jintina	今天	2	typo,typo-genuine	我们看看	
+ty-009	xihuna	喜欢	2	typo,typo-genuine	我一直非常	
+ty-010	linaxi	练习	2	typo,typo-genuine	每天都要坚持	
+ty-011	sahnghai	上海	2	typo,typo-genuine	明天坐高铁去	
+ty-012	womne	我们	2	typo,typo-genuine	这件事就交给	
+ty-013	shenem	什么	2	typo,typo-genuine	你刚才到底在说	
+ty-014	zhidap	知道	2	typo,typo-genuine	这件事我早就	
+ty-015	xianzau	现在	2	typo,typo-genuine	那就从	
+ty-016	mingtina	明天	2	typo,typo-genuine	那我们定在	
+ty-017	buhaoyisu	不好意思	4	typo,typo-genuine	实在太麻烦你了	
+ty-018	shuruga	输入法	3	typo,typo-genuine	刚装好这个新	
+ty-019	zenmebna	怎么办	3	typo,typo-genuine	遇到这种异常该	
+ty-020	wenri	问题	2	typo,typo-genuine	先定位最核心的	
+# 5. 中英混排上文词组稳定性护栏（12 例）
+me-001	hezuo	合作	2	mixed-english-ctx	turnitin 	
+me-002	shurufa	输入法	3	mixed-english-ctx	macOS 	
+me-003	shang	上	1	mixed-english-ctx	GitHub 	
+me-004	zenmeyang	怎么样	3	mixed-english-ctx	ChatGPT 	
+me-005	bianyi	编译	2	mixed-english-ctx	Xcode 	
+me-006	rongqi	容器	2	mixed-english-ctx	Docker 	
+me-007	jiaoben	脚本	2	mixed-english-ctx	Python 	
+me-008	neicun	内存	2	mixed-english-ctx	Rust 	
+me-009	jiekou	接口	2	mixed-english-ctx	API 	
+me-010	zhuangge	装个	2	mixed-english-ctx	brew 	
+me-011	doubao	豆包	2	mixed-english-ctx	API 	
+me-012	hebing	合并	2	mixed-english-ctx	PR 	

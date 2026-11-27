@@ -103,7 +103,8 @@ Shurufa 是我自己用的 macOS 中文输入法，结合了[水杉输入法](ht
 ```sh
 bash platforms/macos/build-shurufa.sh            # 构建 target/macos-isolated/Shurufa.app（含 ShurufaNeuralService）
 bash platforms/macos/scripts/install-shurufa.sh  # 安装到 ~/Library/Input Methods/Shurufa.app
-bash scripts/verify-local.sh                     # 运行笔记校验、契约检查、Rust 单测/Clippy 与全量 macOS CTest
+bash scripts/verify-local.sh                     # 运行笔记校验、契约检查、Rust 单测/Clippy、全量 macOS CTest 与 Tier 1 真模型门禁
+bash scripts/eval-tier1.sh --require             # 单独运行 ~15s 端到端 Qwen3-0.6B 两阶段评测门禁（417 例）
 ```
 
 构建时会按 `resources/editions/shurufa.lock.json` 拉取并校验核心词库，并准备轻量笔画词库 `msime-stroke.db`（不再拉取旧 25 MB `safetensors` 模型）；首次安装本地缺万象语法模型时会自动下载 `wanxiang-lts-zh-hans.gram`（约 373 MB）；将端侧神经语言模型 `Qwen3-0.6B-Base-Q4_K_M.gguf`（约 378 MB）放入 `~/Library/Application Support/Shurufa/resource-packs/neural-lm/` 后自动启用两阶段 Metal 神经解码（缺模型时自动无损降级回 Tier 0 统一概率词格与万象 `.gram`）；本地流式语音的运行环境与模型在设置窗口里按需用 `uv` 安装。构建按登录钥匙串里的本机自签名证书「Shurufa Local Signing」签名，没有时脚本会自己建一张。换到你的机器上大概率要改点什么，这正是上面说的：fork 下来，按你自己的来。

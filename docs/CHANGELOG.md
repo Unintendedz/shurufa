@@ -4,6 +4,10 @@ Shurufa 从水杉输入法 tag `fork-point/msime-2026-10-27` 分出来之后的�
 
 ## 2026-11-27
 
+- **端侧两阶段（Tier 0 + `Qwen3-0.6B` Metal）自动化真实模型评测门禁（`tier1_eval.rs`、`shurufa-tier1-guardrails-v1.tsv`、`eval-tier1.sh`、`verify-local.sh`）**：
+  - 新增 `crates/input-runtime/examples/tier1_eval.rs` 与 `scripts/eval-tier1.sh`，在单次热启动的真实 `ShurufaNeuralService`（`Qwen3-0.6B-Base-Q4_K_M.gguf`）+ 锁定 `msime-pinyin.db` + 万象 `.gram` 上以约 `14 s` 跑完 `417` 条端到端用例并接入 `scripts/verify-local.sh` 硬门禁；同步度量 Tier 0/1 `Top1`/`Top6`/`MRR`、干净句首槽误纠劫持率、Tier 1 净救回/倒退数、违禁幻影篡位数、`all_candidates()` 展开覆写数与 `p50`/`p90` 延迟。
+  - 新增全合成护栏评测集 `resources/eval/shurufa-tier1-guardrails-v1.tsv`（205 例，含 24 核心单字 × 6 类左边界 144 例、古音幻影防篡位 14 例、`weight == 100` 占位整词 15 例、真错字召回控制组 20 例与中英混排语境 12 例）及 `scripts/test-tier1-eval-suite.py` 契约检查。
+
 - **未测频占位整词词网格组合升格、单字幻影异读护栏与非汉字左边界 BPE Token Healing（`types.rs`、`lattice/merge.rs`、`lattice/octagram.rs`、`ordering.rs`、`session/candidates.rs`、`neural_v2.rs`、`input-runtime/src/runtime.rs`、`ShurufaNeuralEngine.cpp`）**：
   - **带上文 3–4 字未测频占位整词升格与 Tier 1 尾槽保底**：修复主词库 `238,926` 条 `weight == 100` 未测频占位整词（如「`怎么个事`」「`遇得到`」「`答案就是`」「`大爱无疆`」「`擦边主播`」「`有毛病吧`」「`按理来说`」「`干得漂亮`」「`恶狠狠地`」「`阿鼻地狱`」）在有中文上文与万象 `.gram` 时因后置护栏叠词网格去重而反被挤出首页与 `Qwen3-0.6B` 16 候选池的回归；`WordItem` 新增 `lattice_log_prob_milli_nats: Option<i64>` 保留 `CandidateSource::Database` 身份与可编辑性，`merge.rs` 仅在多词组合验证（`path.words.len() >= 2`）时升格入主块（继续后置未验证的「`先哲之石`」），`ordering.rs` 纳入主读法并修正同首 `leader_head_cap`，`candidates.rs` / `neural_v2.rs` 新增 `stat_from_lattice` 独立分桶归一，`runtime.rs` 在 3+ 音节满池时向 `candidates[4..]` 尾槽抢救至多 `2` 条后置精确词典整词（「`我看看` + `zenmegeshi`」Tier 0/1 双 `#1 怎么个事`，`yudedao` 稳居首页 `#2–#3 遇得到`）。
   - **单音节 `weight <= 1` 幻影异读护栏**：修复 `msime-pinyin.db` `tbl_1_*` 中 `552` 条高频字零权/极低权古音异读（如 `me -> 没(0)/末(0)`、`ti -> 是(0)`、`wei -> 有(0)`、`ne -> 那(0)/哪(1)`、`shui -> 说(1)`）被 `.gram` 与 `Qwen3-0.6B` 凭上下文反超现代常用字的问题（如「`青爷在说喊你开店` + `me`」原出 `1 没 / 2 么 / 3 末`）；当同音存在 `weight >= 100` 实证读音时，拦住 `weight <= 1` 单字参与 Tier 0 `.gram` 提权与 Tier 1 神经竞争并保留在后排可翻找（「`青爷在说喊你开店` + `me`」稳定 `#1 么`）。
