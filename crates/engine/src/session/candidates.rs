@@ -63,6 +63,7 @@ pub(super) fn clone_candidate_rows(source: &[WordItem], destination: &mut Vec<Wo
         target.keyboard_runner_up = item.keyboard_runner_up;
         target.extra_syllables = item.extra_syllables;
         target.keyboard_neural = item.keyboard_neural;
+        target.lattice_log_prob_milli_nats = item.lattice_log_prob_milli_nats;
     }
     if destination.len() > source.len() {
         destination.truncate(source.len());
@@ -271,6 +272,7 @@ impl InputSession {
         let first = decoded.first()?;
         let reading = Self::item_reading(first);
         if first.source != CandidateSource::Database
+            || first.lattice_log_prob_milli_nats.is_some()
             || !first.scheme.is_pinyin()
             || first.fuzzy
             || !first.corrected_from.is_empty()
@@ -306,6 +308,7 @@ impl InputSession {
         if !all_intact && !aligned_jianpin {
             return None;
         }
+        let skip_unattested_single_char = characters == 1 && first.weight >= 100;
         let scheme = first.scheme;
         let mut refs = [first; crate::lattice::octagram::MAX_RERANK_PATHS];
         let mut indices = [0usize; crate::lattice::octagram::MAX_RERANK_PATHS];
@@ -322,6 +325,7 @@ impl InputSession {
                 && item.corrected_from.is_empty()
                 && Self::item_reading(item) == reading
                 && item.word.chars().count() == characters
+                && (!skip_unattested_single_char || item.weight > 1)
                 && self.selection_completes_composition(item)
                 && self.reading_answers_key(item)
             {
@@ -404,6 +408,7 @@ impl InputSession {
         {
             return None;
         }
+        let skip_unattested_single_char = first.weight >= 100;
         let mut refs = [first; crate::lattice::octagram::MAX_RERANK_PATHS];
         let mut indices = [first_idx; crate::lattice::octagram::MAX_RERANK_PATHS];
         let mut count = 1usize;
@@ -417,6 +422,7 @@ impl InputSession {
                 && !item.fuzzy
                 && item.corrected_from.is_empty()
                 && item.word.chars().count() == 1
+                && (!skip_unattested_single_char || item.weight > 1)
                 && !self.selection_completes_composition(item)
                 && Self::item_reading(item) == first_syl
             {
@@ -1008,6 +1014,17 @@ impl InputSession {
         const MAX_COLLOCATION_EVAL_ITEMS: usize = 24;
         let mut collocation_eval_count = 0usize;
         let items = self.candidates();
+        // 单音节输入下，当词库已命中至少一条实证单字读音（`weight >= 100`，如 `me -> 么(9727)`）时，
+        // 同键中 `weight <= 1` 的古音/异读/方言幻影条目（如 `me -> 没(0)/末(0)`、`ti -> 是(0)`、`ne -> 那(0)/哪(1)`）
+        // 仅按词典原序保留在候选后排，绝不享受 `.gram` 搭配加分或送入 Tier 1 神经打分池反超现代常用字。
+        let has_attested_single_char_dict = primary_syllables == 1
+            && items.iter().take(24).any(|item| {
+                item.source == CandidateSource::Database
+                    && item.corrected_from.is_empty()
+                    && !item.fuzzy
+                    && item.word.chars().count() == 1
+                    && item.weight >= 100
+            });
         let has_exact_literal_dict = !folded_raw.is_empty()
             && items.iter().take(8).any(|item| {
                 item.source.is_dictionary()
@@ -1092,6 +1109,17 @@ impl InputSession {
                 );
             }
 
+            let is_unattested_single_char_phantom = has_attested_single_char_dict
+                && item.source == CandidateSource::Database
+                && item.corrected_from.is_empty()
+                && !item.fuzzy
+                && word_chars == 1
+                && item.weight <= 1
+                && user_log_prob <= 0.0;
+            let exact_span = exact_span && !is_unattested_single_char_phantom;
+
+            let stat_from_lattice = item.source == CandidateSource::Database
+                && item.lattice_log_prob_milli_nats.is_some();
             let mut stat_log_prob = if let Some(ev) = item.static_evidence() {
                 Some(ev.log_prob_milli_nats as f64 / 1000.0)
             } else if item.source.is_dictionary() {
@@ -1120,7 +1148,7 @@ impl InputSession {
             {
                 collocation_eval_count += 1;
                 let uses_sentence_tail = (item.source == CandidateSource::Database
-                    && stat_log_prob.is_none()
+                    && (stat_log_prob.is_none() || stat_from_lattice)
                     && word_chars >= 3
                     && !item.sentence_words.is_empty())
                     || (matches!(
@@ -1197,6 +1225,7 @@ impl InputSession {
 
             candidates.push(crate::neural_v2::EngineNeuralCandidateMeta {
                 stat_log_prob,
+                stat_from_lattice,
                 collocation_log_prob,
                 channel_log_prob,
                 user_log_prob,

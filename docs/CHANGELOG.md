@@ -2,6 +2,13 @@
 
 Shurufa 从水杉输入法 tag `fork-point/msime-2026-10-27` 分出来之后的改动，按 `git log` 整理。没有版本号，也不发版：`main` 上的最新提交就是我在用的那一版。更早的历史是水杉的，见上游仓库。
 
+## 2026-11-27
+
+- **未测频占位整词词网格组合升格、单字幻影异读护栏与非汉字左边界 BPE Token Healing（`types.rs`、`lattice/merge.rs`、`lattice/octagram.rs`、`ordering.rs`、`session/candidates.rs`、`neural_v2.rs`、`input-runtime/src/runtime.rs`、`ShurufaNeuralEngine.cpp`）**：
+  - **带上文 3–4 字未测频占位整词升格与 Tier 1 尾槽保底**：修复主词库 `238,926` 条 `weight == 100` 未测频占位整词（如「`怎么个事`」「`遇得到`」「`答案就是`」「`大爱无疆`」「`擦边主播`」「`有毛病吧`」「`按理来说`」「`干得漂亮`」「`恶狠狠地`」「`阿鼻地狱`」）在有中文上文与万象 `.gram` 时因后置护栏叠词网格去重而反被挤出首页与 `Qwen3-0.6B` 16 候选池的回归；`WordItem` 新增 `lattice_log_prob_milli_nats: Option<i64>` 保留 `CandidateSource::Database` 身份与可编辑性，`merge.rs` 仅在多词组合验证（`path.words.len() >= 2`）时升格入主块（继续后置未验证的「`先哲之石`」），`ordering.rs` 纳入主读法并修正同首 `leader_head_cap`，`candidates.rs` / `neural_v2.rs` 新增 `stat_from_lattice` 独立分桶归一，`runtime.rs` 在 3+ 音节满池时向 `candidates[4..]` 尾槽抢救至多 `2` 条后置精确词典整词（「`我看看` + `zenmegeshi`」Tier 0/1 双 `#1 怎么个事`，`yudedao` 稳居首页 `#2–#3 遇得到`）。
+  - **单音节 `weight <= 1` 幻影异读护栏**：修复 `msime-pinyin.db` `tbl_1_*` 中 `552` 条高频字零权/极低权古音异读（如 `me -> 没(0)/末(0)`、`ti -> 是(0)`、`wei -> 有(0)`、`ne -> 那(0)/哪(1)`、`shui -> 说(1)`）被 `.gram` 与 `Qwen3-0.6B` 凭上下文反超现代常用字的问题（如「`青爷在说喊你开店` + `me`」原出 `1 没 / 2 么 / 3 末`）；当同音存在 `weight >= 100` 实证读音时，拦住 `weight <= 1` 单字参与 Tier 0 `.gram` 提权与 Tier 1 神经竞争并保留在后排可翻找（「`青爷在说喊你开店` + `me`」稳定 `#1 么`）。
+  - **非汉字左边界 BPE Token Healing（空格/标点 + 汉字）**：修复 `ShurufaNeuralEngine.cpp` 此前仅对汉字末 token 做左边界 Token Healing 导致 Qwen3 词表 `78` 条 `" " + 汉字` 合并 token（如 `" 和"`、`" 的"`、`" 是"`、`" 在"`、`" 不"`）与 `5` 条 `"，" + 汉字` 合并 token 在英文接空格后被漏算并吃下 `-5~-8 nats` 伪影暴跌的问题（原「`turnitin ` + `he`」将「`和`」挤至第 2–3 页、`turnitin  + shi` 将「`是`」挤出首页）；补齐非汉字前导 token 索引、精确条件分母 `Z_last` 与单字愈合前缀和（`turnitin /ChatGPT /macOS ` 后接 `he`/`de`/`shi`/`zai` 全线 `#1`）。
+
 ## 2026-11-26
 
 - **跨音节吞音恢复、免切换句内混输、`AppScope` 场景隔离与右边界句读闭合校准**：

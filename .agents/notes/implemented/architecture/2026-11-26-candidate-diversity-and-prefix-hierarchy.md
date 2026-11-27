@@ -36,6 +36,7 @@ Status: implemented
 - [词网格指物代词对等、末列前缀多样性、隔音切分降级与次选排座精排](../../implemented/bug-fix/2026-11-14-lattice-pronoun-diversity-and-seating.md) 与 [词网格动宾离合词拆插补边与三字短词悬殊次选首屏让位](../../implemented/bug-fix/2026-11-18-separable-vo-compounds-and-runner-up-gating.md)：延续其首屏整句与前缀共存框架和 `Terminal` 多样性思路，将次选合成整句进一步后置到 `24` 条前缀区之后、双音节精确词阈值收敛至 `4` 并增加 `2+1+1` 首词多样性配额。
 - [Shurufa v2 统一概率词格与端侧 Metal 两阶段神经解码架构](./2026-11-24-shurufa-v2-probabilistic-neural-ime.md)：延续统一自然对数词格、`Qwen3-0.6B` 双边界概率与 `4+2` 读法布局；补齐中间列按父假设 `PER_PARENT_DEST_CAP = 8`、混淆网络多锚点种子与算子 C2 `[1, 1] -> [1, 1]`、`fuse_neural_response` 的 `2+1+1` 首词多样性及未测频占位词护栏，并将 `MAX_RERANK_PATHS` 扩至 `24`、`NEURAL_PROVISIONAL_WINDOW` 调至 `70 ms`。
 - [Shurufa 纯 macOS 单产品减法与三段单向候选管线收敛](./2026-11-25-shurufa-pure-macos-pipeline-convergence.md)：严格保持 `CursorSnapshot -> RecallPool -> UnifiedScorer -> PurePresenter` 单向数据流与 `SlotAllocator` / L4 固定排位不变量，`has_lexical_head` / `lexical_head` 仅作为前段召回元数据传递，不破坏无状态 `PurePresenter` 契约。
+- 后续演进见 [未测频占位整词词网格升格、幻影异读单字护栏与非汉字左边界 BPE Token Healing](../bug-fix/2026-11-27-deferred-unmeasured-placeholder-lattice-promotion.md)：在保留 3–4 字 `weight == 100` 未验证占位词后置护栏的同时，修复经词网格组合胜出（`path.words.len() >= 2`）的日常占位整词被去重跳过反遭放逐及漏出 Tier 1 神经池的边界问题。
 
 ## Alternatives considered
 

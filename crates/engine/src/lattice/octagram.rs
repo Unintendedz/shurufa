@@ -88,15 +88,19 @@ pub(crate) fn pick_collocation_homophone(
     if count < 2 {
         return None;
     }
+    let skip_unattested_single_char = items[0].word.chars().count() == 1 && items[0].weight >= 100;
     let mut best = 0usize;
     let mut best_score = f64::NEG_INFINITY;
     let mut leader_score = 0.0f64;
     for (index, item) in items[..count].iter().enumerate() {
-        let raw_gram = db.query(clause, &item.word, true, config);
-        let bonus = collocation_weight * (raw_gram - config.non_collocation_penalty);
         let weight = effective_weights
             .and_then(|weights| weights.get(index).copied())
             .unwrap_or(item.weight as f64);
+        if index > 0 && skip_unattested_single_char && item.weight <= 1 && weight <= 1.0 {
+            continue;
+        }
+        let raw_gram = db.query(clause, &item.word, true, config);
+        let bonus = collocation_weight * (raw_gram - config.non_collocation_penalty);
         let prior = if weight > 0.0 { weight.ln() } else { 0.0 };
         let score = prior * 0.25 + bonus;
         if index == 0 {

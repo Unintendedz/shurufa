@@ -131,6 +131,10 @@ pub struct NeuralCandidateInput {
     /// Tier 0 统一自然对数静态先验（nats）；非词格或缺失时为 `None`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stat_log_prob: Option<f64>,
+    /// 为 `true` 时表示该词典候选的 `stat_log_prob` 源自词网格解码分（未测频占位长词经词网格升格），
+    /// 须归入词网格分桶归一，避免与词典频率对数刻度混桶，且不触发已测频词典整词拆字惩罚。
+    #[serde(default)]
+    pub stat_from_lattice: bool,
     /// 输入信道对数概率（完全匹配为 0.0，隔音拆分/纠错/模糊音为负值）。
     #[serde(default)]
     pub channel_log_prob: f64,
@@ -152,6 +156,7 @@ pub struct NeuralCandidateInput {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct EngineNeuralCandidateMeta {
     pub stat_log_prob: Option<f64>,
+    pub stat_from_lattice: bool,
     pub collocation_log_prob: f64,
     pub channel_log_prob: f64,
     pub user_log_prob: f64,
@@ -588,11 +593,14 @@ pub fn fuse_neural_response(
     let is_dict_bucket = |source: u8| -> bool {
         source == CandidateSource::Database as u8 || source == CandidateSource::UserDatabase as u8
     };
+    let is_dict_stat_bucket = |cand: &NeuralCandidateInput| -> bool {
+        is_dict_bucket(cand.source) && !cand.stat_from_lattice
+    };
     let mut dict_max: Option<f64> = None;
     let mut lattice_max: Option<f64> = None;
     for &(_, cand, _) in &competing_tier0 {
         if let Some(s) = cand.stat_log_prob.filter(|v| v.is_finite()) {
-            let slot = if is_dict_bucket(cand.source) {
+            let slot = if is_dict_stat_bucket(cand) {
                 &mut dict_max
             } else {
                 &mut lattice_max
@@ -648,15 +656,16 @@ pub fn fuse_neural_response(
             if c.char_count == 1 {
                 has_single_char_exact_dict = true;
             }
-            // 未测频占位条目（`weight == 100`，`stat_log_prob == None`）不代表已成词先验，
-            // 避免它对真正有搭配证据的 `.gram`/Tier 0 切分施加 `-1.8 nats` 虚假罚分。
-            if (2..=4).contains(&c.char_count) && c.stat_log_prob.is_some() {
+            // 未测频占位条目（`weight == 100`，`stat_log_prob == None` 或仅携带词网格分 `stat_from_lattice`）
+            // 不代表已测频词典整词先验，避免它对真正有搭配证据的 `.gram`/Tier 0 切分施加 `-1.8 nats` 虚假罚分。
+            let has_measured_dict_stat = c.stat_log_prob.is_some() && !c.stat_from_lattice;
+            if (2..=4).contains(&c.char_count) && has_measured_dict_stat {
                 exact_dict_len_mask |= 1u8 << c.char_count;
             }
-            if c.char_count >= 2 && c.stat_log_prob.is_some() {
+            if c.char_count >= 2 && has_measured_dict_stat {
                 has_multi_char_exact_dict = true;
             }
-            if c.exact_literal_dict && (c.char_count == 1 || c.stat_log_prob.is_some()) {
+            if c.exact_literal_dict && (c.char_count == 1 || has_measured_dict_stat) {
                 has_verified_exact_literal_dict = true;
             }
         }
@@ -680,7 +689,7 @@ pub fn fuse_neural_response(
     for (orig_rank, cand, neural_lp) in &competing_tier0 {
         let rel_stat = match cand.stat_log_prob.filter(|v| v.is_finite()) {
             Some(s) => {
-                let bucket_max = if is_dict_bucket(cand.source) {
+                let bucket_max = if is_dict_stat_bucket(cand) {
                     dict_max.unwrap_or(s)
                 } else {
                     lattice_max.unwrap_or(s)
@@ -1214,6 +1223,7 @@ mod tests {
             exact_span,
             exact_literal_dict: false,
             stat_log_prob,
+            stat_from_lattice: false,
             channel_log_prob: 0.0,
             user_log_prob: 0.0,
             collocation_log_prob: 0.0,
@@ -2476,5 +2486,89 @@ mod tests {
             false,
         );
         assert_eq!(out_with_peer.top1_text.as_deref(), Some("我是一个冰"));
+    }
+
+    #[test]
+    fn lattice_promoted_placeholder_normalizes_in_lattice_bucket_without_corrupting_dict_bucket() {
+        // 1. 模拟「我看看 + zenmegeshi」：「怎么个事」保留 `Database` 来源并由词网格升格（`stat_from_lattice = true`），
+        //    与「怎么格式」（`Generated`）同归词网格分桶归一，结合 `.gram` 尾词搭配分稳胜开放前缀虚高的「怎么格式」。
+        let mut zmg_shi = sample_candidate(0, "怎么个事", true, Some(4.84));
+        zmg_shi.source = CandidateSource::Database as u8;
+        zmg_shi.stat_from_lattice = true;
+        zmg_shi.collocation_log_prob = 2.72;
+        zmg_shi.pinyin = "zen'me'ge'shi".into();
+        zmg_shi.exact_literal_dict = true;
+
+        let mut zmg_geshi = sample_candidate(1, "怎么格式", true, Some(-9.45));
+        zmg_geshi.source = CandidateSource::Generated as u8;
+        zmg_geshi.pinyin = "zen'me'ge'shi".into();
+
+        let mut req = base_request(vec![zmg_shi, zmg_geshi]);
+        req.context = "我看看".into();
+        req.raw_input = "zenmegeshi".into();
+        req.segmentation = "zen'me'ge'shi".into();
+        req.syllable_paths = vec![NeuralSyllablePath {
+            syllables: vec!["zen".into(), "me".into(), "ge".into(), "shi".into()],
+            channel_log_prob: 0.0,
+            is_complete: true,
+        }];
+        let resp = NeuralDecodeResponse {
+            ok: true,
+            session: 1,
+            generation: 10,
+            candidate_scores: vec![
+                NeuralScoredCandidate {
+                    text: "怎么个事".into(),
+                    neural_log_prob: -16.93,
+                },
+                NeuralScoredCandidate {
+                    text: "怎么格式".into(),
+                    neural_log_prob: -14.59,
+                },
+            ],
+            beam_candidates: vec![],
+        };
+        let out = fuse_neural_response(2, &req, &resp, NeuralFusionWeights::default(), false);
+        assert_eq!(out.top1_text.as_deref(), Some("怎么个事"));
+
+        // 2. 同时存在已测频词典整词（`stat = -11.5`，`stat_from_lattice = false`）与词网格升格占位词
+        //    （`stat = +5.0`，`stat_from_lattice = true`）时，后者不得拉高 `dict_max` 压垮已测频词典整词。
+        let mut measured = sample_candidate(0, "恶狠狠的", true, Some(-11.5));
+        measured.source = CandidateSource::Database as u8;
+        measured.pinyin = "e'hen'hen'de".into();
+        measured.exact_literal_dict = true;
+
+        let mut promoted = sample_candidate(1, "恶狠狠地", true, Some(5.0));
+        promoted.source = CandidateSource::Database as u8;
+        promoted.stat_from_lattice = true;
+        promoted.pinyin = "e'hen'hen'de".into();
+        promoted.exact_literal_dict = true;
+
+        let mut req2 = base_request(vec![measured, promoted]);
+        req2.context = "他刚才".into();
+        req2.raw_input = "ehenhende".into();
+        req2.segmentation = "e'hen'hen'de".into();
+        let resp2 = NeuralDecodeResponse {
+            ok: true,
+            session: 1,
+            generation: 10,
+            candidate_scores: vec![
+                NeuralScoredCandidate {
+                    text: "恶狠狠的".into(),
+                    neural_log_prob: -12.0,
+                },
+                NeuralScoredCandidate {
+                    text: "恶狠狠地".into(),
+                    neural_log_prob: -12.5,
+                },
+            ],
+            beam_candidates: vec![],
+        };
+        let out2 = fuse_neural_response(2, &req2, &resp2, NeuralFusionWeights::default(), false);
+        assert_eq!(
+            out2.top1_text.as_deref(),
+            Some("恶狠狠的"),
+            "升格占位词的词网格高分不应污染 dict_max 导致已测频词典整词白亏相对静态分"
+        );
     }
 }

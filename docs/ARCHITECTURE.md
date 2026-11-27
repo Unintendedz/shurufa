@@ -27,7 +27,7 @@ crates/engine                                         纯 Rust 输入内核（Cu
 - **`crates/input-runtime`**：纯 Rust 会话编排层。负责托管 `ShurufaNeuralService` 子进程生命周期与私有 UDS 二进制帧通信（`neural_client.rs`）、`50 ms` 空闲上文 prefill 防抖、前台应用粗粒度 `app_scope_key` 透传、独立定时器线程驱动的 `PresentationPhase::Provisional → PresentationPhase::Presented` 状态机（`~70 ms` 微窗口延迟绘制与面板绘出后槽 0 硬锁）、热态快敲空格有界等待（`55 ms`）、非游离候选 `128` 扫描窗 / 单音节 `24` 候选神经入池，以及按稳定 `CandidateId` 驱动候选分页和退格负反馈学习闭环。
 - **`crates/engine`**：纯 Rust 输入算法内核，围绕不可变 `CursorSnapshot` 执行 `RecallPool → UnifiedScorer → PurePresenter` 三段单向函数式管线（`crates/engine/src/pipeline.rs`）：
   - **支持能力**：仅覆盖全拼与双拼、OpenCC 简繁转换、基本中文标点与全半角、全拼/双拼轻量 `Tab` 笔画与偏旁部件筛选（依托随包 `msime-stroke.db` 与内置 `chaizi` 表）、中文组字下的英文单词自动补全（`msime-english.db` + `canonical_terms` 编译期开发者品牌规范词表叠加层）与免切换句内中英同轨混输（`CodeSwitchDecoder`）、精选内联 Emoji 投影（`slot_allocator.rs` / `emoji_mru.rs`）、小写 `v` 数字与算式计算、第 1–5 位固定排位（`fixed_candidate_positions` 与 `pinned_candidates` 双向同步）、万象 `.gram` 语法搭配与前台应用粗粒度 `AppScope` 分桶个人学习闭环。
-  - **三段单向流**：`RecallPool` 负责多源召回（含跨音节 `-n+n-`/`-ng+g-` 吞音恢复与 `*gn -> *n` 音系竞争、多音节生僻古汉字/非主切分单字收尾净化 `MAX_GENERATED_SENTENCES = 16` / 首音节常用单字上限 `64`）、未测频占位长词 `sentence_words` 回填与 `lexical_head` 元数据采集；`UnifiedScorer` 持有唯一三参数对数线性目标函数（`neural_v2_metadata` 对占位长词与词网格整句统一按 `sentence_words.last()` 计算 `.gram` 尾词搭配分；无神经回包时由 `ordering.rs` 配合 `.gram` 与 `PER_PARENT_DEST_CAP = 8` / 多锚点混淆网络及算子 C2 `[1, 1] -> [1, 1]` 执行 `4+2` 读法配额 + `2+1+1` 成词首词多样性排座，有回包时由 `neural_v2.rs` 融合 `Qwen3-0.6B` 双边界概率并保证榜首占位长词先验对称；`Tab` 笔画/部件筛选激活即 `preedit` 含 `｜` 期间暂停 Tier 1 神经重排与内联 Emoji 投影）；`PurePresenter` 作为无状态纯函数一次性完成第 1–5 位 L4 固定席位与置顶保护（云/AI 候选、次选让位及神经融合均围绕已锁席位绕行）、首页纠错限流、内联 Emoji 锚定、英文补全上限（最多 3 席）与单字排座，所有动作通过 64 位稳定 `CandidateId` 寻址。
+  - **三段单向流**：`RecallPool` 负责多源召回（含跨音节 `-n+n-`/`-ng+g-` 吞音恢复与 `*gn -> *n` 音系竞争、多音节生僻古汉字/非主切分单字收尾净化 `MAX_GENERATED_SENTENCES = 16` / 首音节常用单字上限 `64`）、未测频占位长词 `sentence_words` 回填与经多词组合验证后的 `lattice_log_prob_milli_nats` 原地升格（保留 `Database` 来源），以及 `lexical_head` 元数据采集；`UnifiedScorer` 持有唯一三参数对数线性目标函数（`neural_v2_metadata` 对占位长词与词网格整句统一按 `sentence_words.last()` 计算 `.gram` 尾词搭配分，并透传 `stat_from_lattice` 避免升格占位词混入已测频词典桶或误触发非成词拆字罚分；无神经回包时由 `ordering.rs` 配合 `.gram` 与 `PER_PARENT_DEST_CAP = 8` / 多锚点混淆网络及算子 C2 `[1, 1] -> [1, 1]` 执行 `4+2` 读法配额 + `2+1+1` 成词首词多样性排座，有回包时由 `neural_v2.rs` 融合 `Qwen3-0.6B` 双边界概率并保证榜首占位长词先验对称；`Tab` 笔画/部件筛选激活即 `preedit` 含 `｜` 期间暂停 Tier 1 神经重排与内联 Emoji 投影）；`PurePresenter` 作为无状态纯函数一次性完成第 1–5 位 L4 固定席位与置顶保护（云/AI 候选、次选让位及神经融合均围绕已锁席位绕行）、首页纠错限流、内联 Emoji 锚定、英文补全上限（最多 3 席）与单字排座，所有动作通过 64 位稳定 `CandidateId` 寻址。
 - **平行支撑 crate**：
   - `crates/client-base`：文件锁、原子写入、OpenCC 简繁转换等离线基础能力；
   - `crates/client-core`：以单一 `~/Library/Application Support/Shurufa/config.json` 作为唯一配置真源（兼容首次从旧偏好幂等导入），以及固定资源清单校验；
@@ -35,7 +35,7 @@ crates/engine                                         纯 Rust 输入内核（Cu
   - `crates/client-providers`：本地/云端语音识别、AI 润色与按需模型包管理；
   - `crates/path-trust`：受限路径与符号链接安全校验。
   - 依赖方向固定为 `client-base → client-core → client-services` 与 `client-core → client-providers`（`services` 与 `providers` 互不引用），`input-runtime` 只依赖 `client-core` 与 `engine`。
-- **`platforms/macos/src/neural`（`ShurufaNeuralService`）**：随包分发的进程外 Apple Metal 守护进程，承载 `Qwen3-0.6B-Base` 推理与 `ShurufaNeuralEngine` 双边界条件对数概率算子（左 Token Healing + 右单字前缀边际化 + 句中右侧前瞻 + 无右文多字候选 `，/。/？/！/\n` 右边界句读闭合校准）。
+- **`platforms/macos/src/neural`（`ShurufaNeuralService`）**：随包分发的进程外 Apple Metal 守护进程，承载 `Qwen3-0.6B-Base` 推理与 `ShurufaNeuralEngine` 双边界条件对数概率算子（汉字与空格/标点非汉字全边界左 Token Healing 与精确分母 `Z_last` + 右单字前缀边际化 + 句中右侧前瞻 + 无右文多字候选 `，/。/？/！/\n` 右边界句读闭合校准）。
 
 ## 不能打破的架构不变量
 

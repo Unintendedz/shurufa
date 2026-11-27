@@ -1388,6 +1388,7 @@ PYEOF
                     exact_span: true,
                     exact_literal_dict: false,
                     stat_log_prob: Some(-12.0),
+                    stat_from_lattice: false,
                     channel_log_prob: 0.0,
                     user_log_prob: 0.0,
                     collocation_log_prob: 0.0,

@@ -819,12 +819,26 @@ pub struct WordItem {
     pub extra_syllables: u8,
     /// 引擎逐键 4.5MB 模型对同一整句路径已算出的 `(模型实例标识, 逐字均值毫 nat)`；供运行时单遍复用。
     pub keyboard_neural: Option<(usize, i32)>,
+    /// 未测频词典占位长词（`Database`、`weight == 100`）经词网格与 `.gram` 确认并按真实排位升格后携带的词网格自然对数分（毫 nat）。
+    pub lattice_log_prob_milli_nats: Option<i64>,
 }
 
 impl WordItem {
     /// 只把真实词网格整句的分交给独立模型；字典权重和其它来源没有同一计分单位。
-    /// v2 统一对数概率底座下 `self.weight` 已是长度中性的自然对数毫 nat，直接透传，不再扣旧词长奖励或 `-30 nats` 隔音重罚。
+    /// v2 统一对数概率底座下 `self.weight` 已是长度中性的自然对数毫 nat，直接透传，不再扣旧词长奖励或 `-30 nats` 隔音重罚；
+    /// 已由词网格升格的未测频词典占位长词（`Database` 且 `lattice_log_prob_milli_nats.is_some()`）透传该词网格分，同时保持其词典身份与可编辑性。
     pub fn static_evidence(&self) -> Option<crate::ordering::StaticEvidence> {
+        if self.canonical_pinyin.is_empty() || self.word.is_empty() {
+            return None;
+        }
+        if self.source == CandidateSource::Database {
+            let log_prob_milli_nats = self.lattice_log_prob_milli_nats?;
+            return Some(crate::ordering::StaticEvidence {
+                log_prob_milli_nats,
+                characters: self.word.chars().count(),
+                keyboard_neural: self.keyboard_neural,
+            });
+        }
         if !self.sentence_association
             || !matches!(
                 self.source,
@@ -834,8 +848,6 @@ impl WordItem {
                     | CandidateSource::NeuralV2
                     | CandidateSource::NeuralConstrained
             )
-            || self.canonical_pinyin.is_empty()
-            || self.word.is_empty()
         {
             return None;
         }

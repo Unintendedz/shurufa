@@ -962,12 +962,14 @@ impl<E: InputEngine> Runtime<E> {
         } else {
             DEFAULT_MAX_NEURAL_CANDIDATES
         };
-        let mut candidates =
+        let mut candidates: Vec<NeuralCandidateInput> =
             Vec::with_capacity(self.cached.candidates.len().min(max_neural_candidates));
         let mut pinned_first_index: Option<usize> = None;
         let mut pinned_seats: Vec<(usize, usize)> = Vec::new();
         let mut seen_texts: std::collections::HashSet<String> =
             std::collections::HashSet::with_capacity(max_neural_candidates);
+        const MAX_DEFERRED_DICT_NEURAL_RESCUE: usize = 2;
+        let mut deferred_dict_rescued = 0usize;
         let mut base_idx = 0usize;
         for entry in &self.cached.candidates {
             if matches!(entry.origin, CandidateOrigin::ProjectedEmoji { .. }) {
@@ -1004,10 +1006,17 @@ impl<E: InputEngine> Runtime<E> {
                 pinned_seats.push((current_base_idx, usize::from(fixed_pos - 1)));
                 continue;
             }
-            if candidates.len() >= max_neural_candidates {
+            let source = entry.source;
+            let is_dict_source = source == msime_engine::CandidateSource::Database as u8
+                || source == msime_engine::CandidateSource::UserDatabase as u8;
+            let pool_full = candidates.len() >= max_neural_candidates;
+            if pool_full
+                && !(primary_syllables >= 3
+                    && is_dict_source
+                    && deferred_dict_rescued < MAX_DEFERRED_DICT_NEURAL_RESCUE)
+            {
                 continue;
             }
-            let source = entry.source;
             if !is_neural_v2_source(source) {
                 continue;
             }
@@ -1017,6 +1026,7 @@ impl<E: InputEngine> Runtime<E> {
 
             let (
                 stat_log_prob,
+                stat_from_lattice,
                 channel_log_prob,
                 user_log_prob,
                 collocation_log_prob,
@@ -1027,6 +1037,7 @@ impl<E: InputEngine> Runtime<E> {
             ) = if let Some(m) = meta {
                 (
                     m.stat_log_prob,
+                    m.stat_from_lattice,
                     m.channel_log_prob,
                     m.user_log_prob,
                     m.collocation_log_prob,
@@ -1039,6 +1050,7 @@ impl<E: InputEngine> Runtime<E> {
                 let stat = entry
                     .static_evidence
                     .map(|e| e.log_prob_milli_nats as f64 / 1000.0);
+                let stat_from_lattice = is_dict_source && entry.static_evidence.is_some();
                 let channel = if entry.corrected {
                     DEFAULT_TYPO_CHANNEL_PENALTY
                 } else {
@@ -1054,6 +1066,7 @@ impl<E: InputEngine> Runtime<E> {
                     && (primary_syllables == 0 || char_count <= primary_syllables + 1);
                 (
                     stat,
+                    stat_from_lattice,
                     channel,
                     user,
                     0.0,
@@ -1074,6 +1087,45 @@ impl<E: InputEngine> Runtime<E> {
             if !exact_span {
                 continue;
             }
+            if pool_full {
+                // 3+ 音节输入下，若被词网格后置且未进入前 16 条生成句的精确词典整词落在后排（如冷门/未测频词典整词），
+                // 置换末尾非词典生成句槽位（绝不触碰前 4 席）确保其进入 Tier 1 神经打分池接受语境裁决。
+                if channel_log_prob != 0.0 || seen_texts.contains(&text) {
+                    continue;
+                }
+                let replace_pos = candidates
+                    .iter()
+                    .enumerate()
+                    .skip(4)
+                    .rev()
+                    .find(|(_, c)| {
+                        c.source != msime_engine::CandidateSource::Database as u8
+                            && c.source != msime_engine::CandidateSource::UserDatabase as u8
+                    })
+                    .map(|(pos, _)| pos);
+                let Some(replace_pos) = replace_pos else {
+                    continue;
+                };
+                seen_texts.insert(text.clone());
+                candidates[replace_pos] = NeuralCandidateInput {
+                    index: current_base_idx,
+                    text,
+                    pinyin,
+                    source,
+                    char_count,
+                    exact_span,
+                    exact_literal_dict,
+                    stat_log_prob,
+                    stat_from_lattice,
+                    channel_log_prob,
+                    user_log_prob,
+                    collocation_log_prob,
+                    pinned,
+                    has_lexical_head,
+                };
+                deferred_dict_rescued += 1;
+                continue;
+            }
             if !seen_texts.insert(text.clone()) {
                 continue;
             }
@@ -1087,6 +1139,7 @@ impl<E: InputEngine> Runtime<E> {
                 exact_span,
                 exact_literal_dict,
                 stat_log_prob,
+                stat_from_lattice,
                 channel_log_prob,
                 user_log_prob,
                 collocation_log_prob,

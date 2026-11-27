@@ -433,7 +433,15 @@ fn visit_runner_up_order(
                 }
             }
             let leader_head = head_key(first_reading);
-            let leader_head_cap: u8 = if first_reading == 0 && cap >= 3 { 2 } else { 1 };
+            // 当 `0..first_reading` 含实词领跑且与 `first_reading` 同首词（如已测频词典 `恶狠狠的` + 词网格升格 `恶狠狠地`）时，
+            // 维持整屏首词 `2+1+1` 配额（允许同首词合计占 2 席），避免第一条词网格读法因首词已计数为 1 而被异首词挤出首页。
+            let leader_head_cap: u8 = if cap >= 3
+                && (first_reading == 0 || head_keys[..head_len].contains(&leader_head))
+            {
+                2
+            } else {
+                1
+            };
             for pass in 0u8..3u8 {
                 if kept_primary >= cap {
                     break;
@@ -653,9 +661,13 @@ pub fn runner_up_order<'a, R: OrderRowSource<'a> + ?Sized>(
     if count < 2 {
         return None;
     }
+    let is_lattice_scored_dict = |index: usize| {
+        let row = rows.get(index);
+        DICTIONARY_SOURCES.contains(&row.source) && rows.static_evidence(index).is_some()
+    };
     let is_sentence_source = |index: usize| {
         let row = rows.get(index);
-        SENTENCE_READING_SOURCES.contains(&row.source)
+        (SENTENCE_READING_SOURCES.contains(&row.source) || is_lattice_scored_dict(index))
             && row.text.chars().count() >= SENTENCE_SYLLABLES
     };
     let any_reading_answers_key =
@@ -669,6 +681,7 @@ pub fn runner_up_order<'a, R: OrderRowSource<'a> + ?Sized>(
         index > first_reading
             && width >= LONG_SENTENCE_CHARACTERS
             && DICTIONARY_SOURCES.contains(&row.source)
+            && rows.static_evidence(index).is_none()
             && row.answers_key
             && !row.corrected
             && row.text.chars().count() == width
@@ -678,7 +691,8 @@ pub fn runner_up_order<'a, R: OrderRowSource<'a> + ?Sized>(
         if any_reading_answers_key {
             (row.answers_key && is_sentence_source(index)) || full_len_dict_after_first(index)
         } else {
-            (SENTENCE_READING_SOURCES.contains(&row.source) && row.text.chars().count() == width)
+            ((SENTENCE_READING_SOURCES.contains(&row.source) || is_lattice_scored_dict(index))
+                && row.text.chars().count() == width)
                 || full_len_dict_after_first(index)
         }
     };
@@ -1313,5 +1327,79 @@ mod tests {
         });
         assert_eq!(again, None);
         assert_eq!(allocations, 0);
+    }
+
+    #[test]
+    fn lattice_scored_dictionary_reading_participates_as_primary_while_unscored_stays_deferred() {
+        let mut prefix = row("恶狠狠的眼神", 0);
+        prefix.answers_key = false;
+        let rows = [
+            row("恶狠狠的", 0),              // 0: 已测频词典整词（无词网格分，领衔首位）
+            row("恶狠狠地", 0), // 1: 经词网格升格的未测频词典整词（携带 static_evidence）
+            row("饿狠狠的", LATTICE_SOURCE), // 2: 异首词生成句
+            row("呃狠狠的", LATTICE_SOURCE), // 3: 异首词生成句
+            row("额狠狠的", LATTICE_SOURCE), // 4: 异首词生成句
+            row("恶狠狠底", 0), // 5: 未命中词网格的未测频词典占位（无 static_evidence）
+            prefix,             // 6: 非整句续写前缀
+        ];
+        let scores = [
+            None,
+            Some(StaticEvidence::new(-12_200, 4)),
+            Some(StaticEvidence::new(-12_500, 4)),
+            Some(StaticEvidence::new(-18_000, 4)),
+            Some(StaticEvidence::new(-19_000, 4)),
+            None,
+            None,
+        ];
+        let scored = ScoredOrderRows::new(&rows, &scores);
+        let order = runner_up_order(0, &scored)
+            .expect("词网格升格词典词应按主读法参与排序，未升格占位词留在末尾");
+        assert_eq!(order, vec![0, 1, 2, 3, 6, 4, 5]);
+
+        let reordered: Vec<_> = order.iter().map(|&idx| rows[idx]).collect();
+        let reordered_scores: Vec<_> = order.iter().map(|&idx| scores[idx]).collect();
+        let reordered_scored = ScoredOrderRows::new(&reordered, &reordered_scores);
+        let (again, allocations) = crate::ime::personal_rerank::allocations::count(|| {
+            runner_up_order(0, &reordered_scored)
+        });
+        assert_eq!(again, None);
+        assert_eq!(allocations, 0);
+
+        // 异首词场景：词网格升格的 `贤者之石` 应进入前 4 席，未入词网格的 `先哲之石` 留在前缀之后。
+        let mut p2 = row("闲着", 0);
+        p2.answers_key = false;
+        let alt_rows = [
+            row("闲着只是", LATTICE_SOURCE), // 0
+            row("闲着之时", LATTICE_SOURCE), // 1
+            row("闲着之事", LATTICE_SOURCE), // 2
+            row("贤者之石", 0),              // 3: 词网格升格词典整词
+            row("先哲之石", 0),              // 4: 未升格占位词典整词
+            p2,                              // 5: 前缀
+        ];
+        let alt_scores = [
+            Some(StaticEvidence::new(-14_000, 4)),
+            Some(StaticEvidence::new(-14_500, 4)),
+            Some(StaticEvidence::new(-15_000, 4)),
+            Some(StaticEvidence::new(-14_200, 4)),
+            None,
+            None,
+        ];
+        let alt_scored = ScoredOrderRows::new(&alt_rows, &alt_scores);
+        let alt_order = runner_up_order(0, &alt_scored)
+            .expect("异首词词网格升格词典词应进首页，未升格占位应后置");
+        assert!(
+            alt_order[..4].contains(&3),
+            "异首升格词典词 3 应留在前 4 席: {alt_order:?}"
+        );
+        assert_eq!(alt_order.last().copied(), Some(4));
+
+        let alt_reordered: Vec<_> = alt_order.iter().map(|&idx| alt_rows[idx]).collect();
+        let alt_reordered_scores: Vec<_> = alt_order.iter().map(|&idx| alt_scores[idx]).collect();
+        let alt_reordered_scored = ScoredOrderRows::new(&alt_reordered, &alt_reordered_scores);
+        let (alt_again, alt_allocs) = crate::ime::personal_rerank::allocations::count(|| {
+            runner_up_order(0, &alt_reordered_scored)
+        });
+        assert_eq!(alt_again, None);
+        assert_eq!(alt_allocs, 0);
     }
 }

@@ -6348,5 +6348,185 @@ fn unmeasured_dict_placeholder_gets_sentence_tail_collocation_without_mutating_s
     );
 }
 
+#[test]
+fn deferred_four_char_placeholder_promotes_when_decoded_while_undecoded_stays_deferred() {
+    use crate::lattice::octagram::encode;
+
+    let fixture = Fixture::new(
+        "CREATE TABLE tbl_1_z(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_1_z VALUES('zen','z','怎',500000),('zhi','z','之',2000000),('zhi','z','只',1500000),('zhi','z','知',1400000),('zhi','z','直',1300000),('zhi','z','指',1200000);\
+         CREATE TABLE tbl_1_m(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_1_m VALUES('me','m','么',500000);\
+         CREATE TABLE tbl_1_g(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_1_g VALUES('ge','g','个',5000000),('ge','g','各',800000);\
+         CREATE TABLE tbl_1_s(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_1_s VALUES('shi','s','事',4000000),('shi','s','十',2000000),('shi','s','使',1000000),('shi','s','石',1500000),('shi','s','是',4000000),('shi','s','时',3000000),('shi','s','识',1200000),('shi','s','视',1100000);\
+         CREATE TABLE tbl_2_z(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_2_z VALUES('zen''me','zm','怎么',5000000),('zhi''shi','zs','只是',1000000),('zhi''shi','zs','知识',1200000),('zhi''shi','zs','之时',1100000),('zhi''shi','zs','知事',900000),('zhi''shi','zs','直视',800000),('zhi''shi','zs','指示',700000);\
+         CREATE TABLE tbl_2_g(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_2_g VALUES('ge''shi','gs','格式',1200000),('ge''shi','gs','个事',600000);\
+         CREATE TABLE tbl_2_x(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_2_x VALUES('xian''zhe','xz','贤者',1800000),('xian''zhe','xz','闲着',900000),('xian''zhe','xz','显着',800000),('xian''zhe','xz','献着',700000);\
+         CREATE TABLE tbl_4_z(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_4_z VALUES('zen''me''ge''shi','zmgs','怎么个事',100);\
+         CREATE TABLE tbl_4_x(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_4_x VALUES('xian''zhe''zhi''shi','xzzs','先哲之石',100);\
+         CREATE TABLE tbl_5_z(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_5_z VALUES('zen''me''ge''shi''er','zmgse','怎么个事儿',100);",
+    );
+    let gram_path = crate::lattice::octagram::fixture::gram_file(
+        fixture.path(),
+        "deferred-promotion.gram",
+        &[
+            ([encode("怎么个"), encode("事")].concat(), 220_000),
+            ([encode("怎么"), encode("个事")].concat(), 210_000),
+            ([encode("看看"), encode("怎么")].concat(), 190_000),
+            ([encode("贤者之"), encode("石")].concat(), 220_000),
+            ([encode("还真是"), encode("贤者")].concat(), 200_000),
+        ],
+    );
+    let mut session = fixture.session_with(|options| {
+        options.sentence_alternatives = true;
+        options.sentence_association.collocation_model = gram_path.clone();
+    });
+
+    // 1. 有中文上文 + `.gram` 时，被词网格胜出解码的 4 字 `weight == 100` 占位词 `怎么个事`
+    // 必须按词网格真实得分升格至第 0 槽，保留 `Database` 来源并标记 `stat_from_lattice = true`。
+    session.set_rescoring_context("我看看");
+    type_text(&mut session, "zenmegeshi");
+    let snap_zm = session.snapshot();
+    let meta_zm = session
+        .neural_v2_metadata()
+        .expect("neural_v2_metadata should exist for zenmegeshi");
+    assert_eq!(
+        snap_zm.candidates[0].word,
+        "怎么个事",
+        "词网格胜出的占位整词必须居首而非被后置: {:?}",
+        snap_zm
+            .candidates
+            .iter()
+            .take(8)
+            .map(|c| (&c.word, c.source, c.lattice_log_prob_milli_nats))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(snap_zm.candidates[0].source, CandidateSource::Database);
+    assert!(snap_zm.candidates[0].lattice_log_prob_milli_nats.is_some());
+    assert!(meta_zm.candidates[0].stat_from_lattice);
+    assert!(meta_zm.candidates[0].stat_log_prob.is_some());
+    assert!(
+        meta_zm.candidates[0].collocation_log_prob > 0.0,
+        "升格占位整词应携带句内尾词搭配分，实际 {:?}",
+        meta_zm.candidates[0]
+    );
+
+    // 2. 对照：未在词网格中解码胜出的 4 字 `weight == 100` 占位词 `先哲之石` 仍须保持后置，
+    // 不得篡夺词网格胜出的 `贤者之石` 首槽。
+    session.command(Command::Cancel);
+    session.set_rescoring_context("还真是");
+    type_text(&mut session, "xianzhezhishi");
+    let snap_xz = session.snapshot();
+    let meta_xz = session
+        .neural_v2_metadata()
+        .expect("neural_v2_metadata should exist for xianzhezhishi");
+    assert_eq!(
+        snap_xz.candidates[0].word,
+        "贤者之石",
+        "未入词网格的先哲之石不得抢占贤者之石首槽: {:?}",
+        snap_xz
+            .candidates
+            .iter()
+            .take(6)
+            .map(|c| &c.word)
+            .collect::<Vec<_>>()
+    );
+    let xianzhe_placeholder_idx = snap_xz
+        .candidates
+        .iter()
+        .position(|c| c.word == "先哲之石")
+        .expect("先哲之石应仍保留在尾部候选池中");
+    assert!(
+        xianzhe_placeholder_idx >= 4,
+        "未入词网格的占位词应保持后置，实际下标 {xianzhe_placeholder_idx}"
+    );
+    assert_eq!(
+        snap_xz.candidates[xianzhe_placeholder_idx].lattice_log_prob_milli_nats,
+        None
+    );
+    assert!(!meta_xz.candidates[xianzhe_placeholder_idx].stat_from_lattice);
+    assert_eq!(
+        meta_xz.candidates[xianzhe_placeholder_idx].stat_log_prob,
+        None
+    );
+}
+
+#[test]
+fn unattested_zero_weight_single_char_phantom_never_hijacks_attested_reading() {
+    use crate::lattice::octagram::encode;
+
+    let fixture = Fixture::new(
+        "CREATE TABLE tbl_1_m(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_1_m VALUES\
+           ('me','m','么',9727),\
+           ('me','m','没',0),\
+           ('me','m','末',0),\
+           ('me','m','麼',0);\
+         CREATE TABLE tbl_1_n(key TEXT, jp TEXT, value TEXT, weight INTEGER);\
+         INSERT INTO tbl_1_n VALUES\
+           ('ne','n','呢',179349),\
+           ('ne','n','哪',1),\
+           ('ne','n','那',0);",
+    );
+    let gram_path = crate::lattice::octagram::fixture::gram_file(
+        fixture.path(),
+        "single-char-phantom.gram",
+        &[
+            ([encode("开店"), encode("没")].concat(), 240_000),
+            ([encode("开店"), encode("那")].concat(), 240_000),
+            ([encode("开店"), encode("哪")].concat(), 240_000),
+        ],
+    );
+    let mut session = fixture.session_with(|options| {
+        options.sentence_association.collocation_model = gram_path.clone();
+    });
+
+    // `me` 存在实证现代读音 `么 (9727)` 时，即使 `.gram` 对 `开店+没` 给出极强搭配，
+    // `weight == 0` 幻影异读 `没`/`末` 也不得被 Tier 0 提权，且不进入 Tier 1 等跨度神经池。
+    session.set_rescoring_context("青爷在说喊你开店");
+    type_text(&mut session, "me");
+    let snap_me = session.snapshot();
+    let meta_me = session
+        .neural_v2_metadata()
+        .expect("neural_v2_metadata should exist for me");
+    assert_eq!(snap_me.candidates[0].word, "么");
+    assert!(meta_me.candidates[0].exact_span);
+    let mei_idx = snap_me
+        .candidates
+        .iter()
+        .position(|c| c.word == "没")
+        .expect("没 仍应保留在后排供翻找");
+    assert!(mei_idx > 0);
+    assert!(!meta_me.candidates[mei_idx].exact_span);
+    assert_eq!(meta_me.candidates[mei_idx].collocation_log_prob, 0.0);
+
+    // `weight == 1` 的古音异读 `哪` 与 `weight == 0` 的 `那` 同样不得在 `ne` 下反超 `呢 (179349)`。
+    session.command(Command::Cancel);
+    session.set_rescoring_context("青爷在说喊你开店");
+    type_text(&mut session, "ne");
+    let snap_ne = session.snapshot();
+    let meta_ne = session
+        .neural_v2_metadata()
+        .expect("neural_v2_metadata should exist for ne");
+    assert_eq!(snap_ne.candidates[0].word, "呢");
+    for phantom in ["哪", "那"] {
+        let idx = snap_ne
+            .candidates
+            .iter()
+            .position(|c| c.word == phantom)
+            .expect("phantom char should remain in tail");
+        assert!(idx > 0);
+        assert!(!meta_ne.candidates[idx].exact_span);
+    }
+}
+
 mod caret_suffix;
 mod stroke_filter;

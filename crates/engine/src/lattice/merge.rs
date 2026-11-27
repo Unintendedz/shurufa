@@ -284,14 +284,41 @@ fn merge_decoded_paths(
             Cow::Borrowed(paths) => Cow::Borrowed(&paths[..paths.len().min(options.emit)]),
         };
     }
+    let at = whole_sentence_insert_position_with_options(candidates, syllables, options);
     let mut backfills: Vec<(usize, Vec<String>)> = Vec::new();
+    let mut promoted_indices: Vec<usize> = Vec::new();
     let block = if let Some(already) = existing_sentence_map(candidates, paths.len()) {
         let mut block = Vec::new();
         let capacity = paths.len();
         for path in sentence_path_iter(paths) {
             if let Some(&existing_idx) = already.get(path.sentence.as_str()) {
+                if existing_idx >= at
+                    && path.words.len() >= 2
+                    && is_promotable_deferred_placeholder(&candidates[existing_idx], syllables)
+                {
+                    if promoted_indices.contains(&existing_idx) {
+                        continue;
+                    }
+                    if !block.is_empty()
+                        && options.include_collocation_best
+                        && !options.include_lattice_best
+                    {
+                        break;
+                    }
+                    if block.is_empty() {
+                        block = Vec::with_capacity(capacity);
+                    }
+                    let mut promoted = candidates[existing_idx].clone();
+                    let owned_path = path.into_owned();
+                    promoted.sentence_words = owned_path.words;
+                    promoted.lattice_log_prob_milli_nats =
+                        Some((owned_path.log_prob * 1000.0) as i64);
+                    block.push(promoted);
+                    promoted_indices.push(existing_idx);
+                    continue;
+                }
                 if is_unmeasured_dict_placeholder(&candidates[existing_idx])
-                    && !path.words.is_empty()
+                    && path.words.len() >= 2
                 {
                     backfills.push((existing_idx, path.words.clone()));
                 }
@@ -314,15 +341,29 @@ fn merge_decoded_paths(
         }
         block
     } else {
-        generated_block_linear(candidates, paths, typed_pinyin, options)
+        generated_block_linear(
+            candidates,
+            paths,
+            syllables,
+            typed_pinyin,
+            options,
+            at,
+            &mut promoted_indices,
+        )
     };
     for (existing_idx, words) in backfills {
         if is_unmeasured_dict_placeholder(&candidates[existing_idx]) {
             candidates[existing_idx].sentence_words = words;
         }
     }
+    if !promoted_indices.is_empty() {
+        // 所有被升格的占位行下标均 >= at，按降序移除后不会改变插入点 at。
+        promoted_indices.sort_unstable_by(|a, b| b.cmp(a));
+        for idx in promoted_indices {
+            candidates.remove(idx);
+        }
+    }
     if !block.is_empty() {
-        let at = whole_sentence_insert_position_with_options(candidates, syllables, options);
         candidates.splice(at..at, block);
     }
     typo
@@ -335,6 +376,18 @@ fn is_unmeasured_dict_placeholder(item: &WordItem) -> bool {
         && item.word.chars().count() >= 3
         && item.corrected_from.is_empty()
         && item.sentence_words.is_empty()
+}
+
+/// 判断被 `whole_sentence_insert_position_with_options` 延后至 `at` 之后的未测频占位长词，
+/// 是否精确匹配当前输入音节且应随词网格解码结果按真实排位升格入 `block`。
+fn is_promotable_deferred_placeholder(item: &WordItem, syllables: &[String]) -> bool {
+    is_unmeasured_dict_placeholder(item)
+        && !item.fuzzy
+        && if item.canonical_pinyin.is_empty() {
+            covers_all_syllables(item, syllables.len())
+        } else {
+            canonical_matches_segments(&item.canonical_pinyin, syllables)
+        }
 }
 
 fn find_existing_candidate_idx(candidates: &[WordItem], sentence: &str) -> Option<usize> {
@@ -428,8 +481,11 @@ fn lattice_row_source(block: &[WordItem], options: &LatticeOptions<'_>) -> Candi
 fn generated_block_linear<'a>(
     candidates: &mut [WordItem],
     paths: impl Into<Cow<'a, [SentencePath]>>,
+    syllables: &[String],
     typed_pinyin: &str,
     options: &LatticeOptions<'_>,
+    at: usize,
+    promoted_indices: &mut Vec<usize>,
 ) -> Vec<WordItem> {
     let paths = paths.into();
     let mut block = Vec::new();
@@ -442,8 +498,29 @@ fn generated_block_linear<'a>(
             continue;
         }
         if let Some(existing_idx) = find_existing_candidate_idx(candidates, &path.sentence) {
+            if existing_idx >= at
+                && path.words.len() >= 2
+                && is_promotable_deferred_placeholder(&candidates[existing_idx], syllables)
+            {
+                if !block.is_empty()
+                    && options.include_collocation_best
+                    && !options.include_lattice_best
+                {
+                    break;
+                }
+                if block.is_empty() {
+                    block = Vec::with_capacity(capacity);
+                }
+                let mut promoted = candidates[existing_idx].clone();
+                let owned_path = path.into_owned();
+                promoted.sentence_words = owned_path.words;
+                promoted.lattice_log_prob_milli_nats = Some((owned_path.log_prob * 1000.0) as i64);
+                block.push(promoted);
+                promoted_indices.push(existing_idx);
+                continue;
+            }
             let existing = &mut candidates[existing_idx];
-            if is_unmeasured_dict_placeholder(existing) && !path.words.is_empty() {
+            if is_unmeasured_dict_placeholder(existing) && path.words.len() >= 2 {
                 existing.sentence_words.clone_from(&path.words);
             }
             continue;
@@ -1039,6 +1116,102 @@ mod tests {
             large_candidates
                 .iter()
                 .filter(|item| item.word == "我是一个兵")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn deferred_unmeasured_placeholder_promotes_into_block_at_lattice_rank_in_linear_and_map_paths()
+    {
+        let rows = table(&[
+            ("zen'me", &[("怎么", 500_000)]),
+            ("ge", &[("个", 14_000_000)]),
+            ("shi", &[("事", 4_700_000), ("师", 1_500_000)]),
+            ("ge'shi", &[("格式", 500_000)]),
+        ]);
+        let scorer = |tail: &str, word: &str, _is_rear: bool| {
+            if tail.ends_with("怎么个") && word == "事" {
+                4.0
+            } else {
+                -6.0
+            }
+        };
+        let options = LatticeOptions {
+            preceding_context: "我看看",
+            collocation_scorer: Some(&scorer),
+            collocation_weight: 1.0,
+            collocation_edge_offset: 3.0,
+            include_collocation_best: true,
+            nbest: 8,
+            ..LatticeOptions::default()
+        };
+
+        // 1. 线性路径：被后置的未测频占位长词「怎么个事」在词网格中居首，必须按真实排位升格到第 0 位，
+        // 保留 `Database` 来源与原始权重 100，并写入 `sentence_words` 与 `lattice_log_prob_milli_nats`；
+        // 未被词网格选出的占位词「怎么格仕」则继续留在词网格块之后且无词网格分。
+        let mut linear_candidates = vec![
+            dictionary_row("zenmegeshi", "怎么个事", 100, "zen'me'ge'shi"),
+            dictionary_row("zenmegeshi", "怎么格仕", 100, "zen'me'ge'shi"),
+            dictionary_row("zenmege", "怎么个", 7, "zen'me'ge"),
+        ];
+        merge(
+            &mut linear_candidates,
+            "zen'me'ge'shi",
+            &rows,
+            "zenmegeshi",
+            &options,
+        );
+        assert_eq!(linear_candidates[0].word, "怎么个事");
+        assert_eq!(linear_candidates[0].source, CandidateSource::Database);
+        assert_eq!(linear_candidates[0].weight, 100);
+        assert_eq!(
+            linear_candidates[0].sentence_words,
+            vec!["怎么", "个", "事"]
+        );
+        assert!(linear_candidates[0].lattice_log_prob_milli_nats.is_some());
+        assert!(linear_candidates[0].static_evidence().is_some());
+        assert_eq!(
+            linear_candidates
+                .iter()
+                .filter(|item| item.word == "怎么个事")
+                .count(),
+            1
+        );
+        let undecoded_idx = linear_candidates
+            .iter()
+            .position(|item| item.word == "怎么格仕")
+            .expect("未命中词网格的占位词应保留");
+        assert!(undecoded_idx > 1, "未命中词网格的占位词不应抢占词网格前排");
+        assert_eq!(
+            linear_candidates[undecoded_idx].lattice_log_prob_milli_nats,
+            None
+        );
+
+        // 2. HashMap 路径（`candidates.len() + paths.len() > 64`）：同样精确升格并零重复。
+        let mut large_candidates = vec![
+            dictionary_row("zenmegeshi", "怎么个事", 100, "zen'me'ge'shi"),
+            dictionary_row("zenmegeshi", "怎么格仕", 100, "zen'me'ge'shi"),
+        ];
+        for idx in 0..SMALL_SENTENCE_MERGE {
+            large_candidates.push(dictionary_row("zen", &format!("干扰单字{idx}"), 50, "zen"));
+        }
+        merge(
+            &mut large_candidates,
+            "zen'me'ge'shi",
+            &rows,
+            "zenmegeshi",
+            &options,
+        );
+        assert_eq!(large_candidates[0].word, "怎么个事");
+        assert_eq!(large_candidates[0].source, CandidateSource::Database);
+        assert_eq!(large_candidates[0].weight, 100);
+        assert_eq!(large_candidates[0].sentence_words, vec!["怎么", "个", "事"]);
+        assert!(large_candidates[0].lattice_log_prob_milli_nats.is_some());
+        assert_eq!(
+            large_candidates
+                .iter()
+                .filter(|item| item.word == "怎么个事")
                 .count(),
             1
         );

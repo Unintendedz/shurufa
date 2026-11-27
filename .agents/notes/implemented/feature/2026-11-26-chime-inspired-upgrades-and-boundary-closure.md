@@ -54,6 +54,7 @@ Status: implemented
 - [Shurufa 中文输入下的英文单词自动补全](./2026-11-17-shurufa-english-word-autocomplete.md)：保留其整词/短前缀与大写起手英文补全边界及「无内部英文模式、Caps Lock 交还系统 `ABC`」定位，向上叠加开发者品牌规范词表与句内中英同轨混输。
 - [全拼、双拼的 Tab 笔画与部件筛选](./2026-11-04-tab-stroke-filter.md)：明确保持 `Tab` 键专属于轻量笔画/部件筛选，不引入古诗或大模型 `Tab` 续写抢占按键习惯。
 - [导入搜狗细胞词库（.scel）](./2026-10-13-scel-import.md)：保留 macOS 原生词库窗口分批导入管道，为 `.dict.yaml` 补齐文本头自动识别与跨批 `"rime"` 格式保留。
+- 后续演进见 [未测频占位整词词网格升格、幻影异读单字护栏与非汉字左边界 BPE Token Healing](../bug-fix/2026-11-27-deferred-unmeasured-placeholder-lattice-promotion.md)：将未测频占位长词的 `sentence_words` 与句内尾词 `.gram` 衔接机制完整延伸至 3–4 字带上文后置场景，补齐词网格组合升格、`stat_from_lattice` 独立分桶、Tier 1 尾槽精准保底及非汉字左边界 BPE 愈合。
 
 ## Alternatives considered
 

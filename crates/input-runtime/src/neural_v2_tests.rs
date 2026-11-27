@@ -495,3 +495,44 @@ fn runtime_take_neural_request_scans_past_64_for_deferred_sentences_and_allows_2
         .expect("单音节有上文应发往神经池");
     assert_eq!(single_req.candidates.len(), 24);
 }
+
+#[test]
+fn runtime_take_neural_request_rescues_deferred_exact_dictionary_candidate_into_tail_slot() {
+    let generated_texts: Vec<String> = (0..16).map(|i| format!("辩解{i}")).collect();
+    let mut rows: Vec<(&str, bool, Option<i64>)> = Vec::new();
+    for text in &generated_texts[..4] {
+        rows.push((text.as_str(), true, Some(-10_000)));
+    }
+    let prefixes: Vec<String> = (0..12).map(|i| format!("前{i}")).collect();
+    for p in &prefixes {
+        rows.push((p.as_str(), false, None));
+    }
+    for text in &generated_texts[4..] {
+        rows.push((text.as_str(), true, Some(-14_000)));
+    }
+    rows.push(("辩解者", true, None));
+
+    let mut engine = StubNeuralEngine::composing("bianjiezhe", "bian'jie'zhe", &rows);
+    for (idx, entry) in engine.snapshot.candidates.iter_mut().enumerate() {
+        entry.source = if idx + 1 == rows.len() || !entry.answers_key {
+            CandidateSource::Database as u8
+        } else {
+            CandidateSource::Generated as u8
+        };
+    }
+    let mut runtime = Runtime::new(engine, 6).unwrap();
+    runtime.focused = true;
+    runtime.set_neural_v2_enabled(true);
+    runtime.set_surrounding_context("他是");
+
+    let req = runtime.take_neural_request().expect("应生成请求");
+    assert_eq!(req.candidates.len(), 16);
+    // 前 4 席主候选不受置换影响，同时末尾非词典生成句槽位应置换为后置精确词典整词「辩解者」。
+    assert_eq!(req.candidates[0].text, "辩解0");
+    assert_eq!(req.candidates[3].text, "辩解3");
+    assert!(
+        req.candidates.iter().any(|c| c.text == "辩解者"),
+        "后置精确词典整词应被保底换入神经打分池: {:?}",
+        req.candidates.iter().map(|c| &c.text).collect::<Vec<_>>()
+    );
+}

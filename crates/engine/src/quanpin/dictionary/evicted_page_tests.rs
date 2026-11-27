@@ -448,6 +448,7 @@ fn page_copy_preserves_all_fields_and_clone_capacities_across_shapes() {
                     keyboard_runner_up: index % 3 == 0,
                     extra_syllables: (index % 4) as u8,
                     keyboard_neural: Some((index + 1, -(index as i32))),
+                    lattice_log_prob_milli_nats: None,
                 };
                 let mut source: Vec<_> = (0..new_len).map(make).collect();
                 for row in &mut source {

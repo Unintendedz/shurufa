@@ -172,6 +172,61 @@ bool decode_first_utf8_hanzi(const char *data, size_t len, char32_t &first_cp) {
     return got_first;
 }
 
+/// 严格校验 UTF-8 完整性并检测「非汉字前缀 + 汉字」结构（如 `" 和"`、`" 是否"`、`"，请"`）；
+/// 仅当首码点非汉字且后续存在首个 CJK 汉字时返回 true，并写出首个汉字的字节偏移与码点。
+bool find_first_hanzi_after_non_han_prefix(
+    const char *data,
+    size_t len,
+    size_t &han_offset_out,
+    char32_t &han_cp_out) {
+    if (!data || len < 2) return false;
+    size_t i = 0;
+    bool saw_first = false;
+    bool found_han = false;
+    while (i < len) {
+        const unsigned char b0 = static_cast<unsigned char>(data[i]);
+        char32_t cp = 0;
+        size_t need = 0;
+        if (b0 < 0x80u) {
+            need = 1;
+            cp = b0;
+        } else if ((b0 & 0xE0u) == 0xC0u) {
+            need = 2;
+            cp = b0 & 0x1Fu;
+        } else if ((b0 & 0xF0u) == 0xE0u) {
+            need = 3;
+            cp = b0 & 0x0Fu;
+        } else if ((b0 & 0xF8u) == 0xF0u) {
+            need = 4;
+            cp = b0 & 0x07u;
+        } else {
+            return false;
+        }
+        if (i + need > len) return false;
+        for (size_t k = 1; k < need; ++k) {
+            const unsigned char bk = static_cast<unsigned char>(data[i + k]);
+            if ((bk & 0xC0u) != 0x80u) return false;
+            cp = (cp << 6) | (bk & 0x3Fu);
+        }
+        if ((need == 2 && cp < 0x80u) ||
+            (need == 3 && cp < 0x800u) ||
+            (need == 4 && (cp < 0x10000u || cp > 0x10FFFFu)) ||
+            (cp >= 0xD800u && cp <= 0xDFFFu)) {
+            return false;
+        }
+        if (!saw_first) {
+            if (is_cjk_hanzi(cp)) return false;
+            saw_first = true;
+        } else if (!found_han && is_cjk_hanzi(cp)) {
+            han_offset_out = i;
+            han_cp_out = cp;
+            found_han = true;
+        }
+        i += need;
+    }
+    return found_han;
+}
+
 double log_sum_exp_pair(double a, double b) {
     if (a <= -1e8) return b;
     if (b <= -1e8) return a;
@@ -535,15 +590,21 @@ struct NeuralEngine::Impl {
     std::string cached_ctx_last_piece;
     char32_t cached_ctx_last_first_cp = 0;
     bool cached_ctx_last_has_han_first = false;
+    bool cached_ctx_last_has_non_han_heal = false;
     int32_t cached_ctx_last_piece_chars = 0;
     double cached_ctx_last_lp = 0.0;
     double cached_ctx_last_prefix_log_z = 0.0;
     double cached_ctx_unmerged_log_weight = 0.0;
 
-    // BPE 词表首字前缀索引（启动一次性构建 < 2 ms）：
-    // 支持单字精确前缀边际化（汇聚「没 / 没有 / 没问题 / 没事…」全部 BPE 概率质量）与 Token Healing 归一常数。
+    // BPE 词表首字前缀索引（启动一次性构建 < 3 ms）：
+    // - `hanzi_prefix_tokens`：支持汉字起手单字精确前缀边际化与汉字左边界 Token Healing；
+    // - `non_han_hanzi_prefix_tokens` / `non_han_prefix_z_tokens`：覆盖非汉字左边界（如 ASCII 空格 `" "`、中文逗号 `"，"`）
+    //   与后续汉字发生 BPE 合并的词表项（如 Qwen3 中 `" 和"`/`" 的"`/`" 是"`/`" 在"`/`" 不"`），彻底消除英文后接空格时
+    //   单字高频汉字因未愈合而暴跌 -5~-8 nats 的 BPE 分词伪影。
     std::vector<std::string> token_utf8_pieces;
     std::unordered_map<char32_t, std::vector<llama_token>> hanzi_prefix_tokens;
+    std::unordered_map<llama_token, std::unordered_map<char32_t, std::vector<llama_token>>> non_han_hanzi_prefix_tokens;
+    std::unordered_map<llama_token, std::vector<llama_token>> non_han_prefix_z_tokens;
 
     // 能力 C：受限束搜索倒排索引（全拼 `syllable_to_tokens` + 简拼/混拼首字母 `initial_to_tokens`）及每个 token 的纯汉字文本与读音列表。
     bool constrained_vocab_ready = false;
@@ -948,6 +1009,11 @@ struct NeuralEngine::Impl {
         }
         hanzi_prefix_tokens.clear();
         hanzi_prefix_tokens.reserve(8192);
+        non_han_hanzi_prefix_tokens.clear();
+        non_han_prefix_z_tokens.clear();
+
+        std::unordered_map<std::string_view, llama_token> short_non_han_pieces;
+        short_non_han_pieces.reserve(4096);
 
         char piece_buf[128];
         for (llama_token tid = 0; tid < n_vocab; ++tid) {
@@ -964,6 +1030,45 @@ struct NeuralEngine::Impl {
             char32_t first_cp = 0;
             if (decode_first_utf8_hanzi(piece_buf, ulen, first_cp)) {
                 hanzi_prefix_tokens[first_cp].push_back(tid);
+            } else if (ulen <= 16) {
+                short_non_han_pieces.emplace(
+                    std::string_view(token_utf8_pieces[static_cast<size_t>(tid)]), tid);
+            }
+        }
+
+        // 第二遍：索引「非汉字前导 token + 汉字」合并 token（如 `" 和"`、`" 的"`、`" 是"`、`"，请"`）。
+        for (llama_token tid = 0; tid < n_vocab; ++tid) {
+            const std::string &piece = token_utf8_pieces[static_cast<size_t>(tid)];
+            if (piece.size() < 2) continue;
+            size_t han_offset = 0;
+            char32_t han_cp = 0;
+            if (!find_first_hanzi_after_non_han_prefix(piece.data(), piece.size(), han_offset, han_cp)) {
+                continue;
+            }
+            if (han_offset == 0 || han_offset > 16) continue;
+            auto pit = short_non_han_pieces.find(std::string_view(piece.data(), han_offset));
+            if (pit != short_non_han_pieces.end()) {
+                non_han_hanzi_prefix_tokens[pit->second][han_cp].push_back(tid);
+            }
+        }
+
+        // 第三遍：仅为确实拥有汉字合并延伸的少量非汉字前导 token（Qwen3 全表仅 ~20 个）建立分母 `Z_last` 列表。
+        if (!non_han_hanzi_prefix_tokens.empty()) {
+            std::vector<std::pair<llama_token, std::string_view>> active_prefixes;
+            active_prefixes.reserve(non_han_hanzi_prefix_tokens.size());
+            for (const auto &[prefix_tid, _] : non_han_hanzi_prefix_tokens) {
+                active_prefixes.emplace_back(
+                    prefix_tid, std::string_view(token_utf8_pieces[static_cast<size_t>(prefix_tid)]));
+            }
+            for (llama_token tid = 0; tid < n_vocab; ++tid) {
+                const std::string &piece = token_utf8_pieces[static_cast<size_t>(tid)];
+                if (piece.empty()) continue;
+                for (const auto &[prefix_tid, pview] : active_prefixes) {
+                    if (piece.size() >= pview.size() &&
+                        piece.compare(0, pview.size(), pview.data(), pview.size()) == 0) {
+                        non_han_prefix_z_tokens[prefix_tid].push_back(tid);
+                    }
+                }
             }
         }
     }
@@ -1291,6 +1396,7 @@ struct NeuralEngine::Impl {
         cached_ctx_last_piece.clear();
         cached_ctx_last_first_cp = 0;
         cached_ctx_last_has_han_first = false;
+        cached_ctx_last_has_non_han_heal = false;
         cached_ctx_last_piece_chars = 0;
         cached_ctx_last_lp = 0.0;
         cached_ctx_last_prefix_log_z = 0.0;
@@ -1310,6 +1416,28 @@ struct NeuralEngine::Impl {
                     cached_ctx_last_has_han_first = true;
                     const double prefix_z = sum_prefix_log_probs_vec(
                         cached_ctx_prev_log_probs, first_cp, cached_ctx_last_piece);
+                    cached_ctx_last_prefix_log_z = std::max(cached_ctx_last_lp, prefix_z);
+                } else if (auto zit = non_han_prefix_z_tokens.find(last_tok);
+                           zit != non_han_prefix_z_tokens.end() && !zit->second.empty()) {
+                    cached_ctx_last_has_non_han_heal = true;
+                    double max_lp = cached_ctx_last_lp;
+                    for (llama_token tid : zit->second) {
+                        if (tid >= 0 && static_cast<size_t>(tid) < cached_ctx_prev_log_probs.size()) {
+                            const double v = static_cast<double>(cached_ctx_prev_log_probs[static_cast<size_t>(tid)]);
+                            if (v > max_lp) max_lp = v;
+                        }
+                    }
+                    double sum_exp = 0.0;
+                    for (llama_token tid : zit->second) {
+                        if (tid >= 0 && static_cast<size_t>(tid) < cached_ctx_prev_log_probs.size()) {
+                            const double diff =
+                                static_cast<double>(cached_ctx_prev_log_probs[static_cast<size_t>(tid)]) - max_lp;
+                            if (diff > -25.0) {
+                                sum_exp += std::exp(diff);
+                            }
+                        }
+                    }
+                    const double prefix_z = (sum_exp > 0.0) ? (max_lp + std::log(sum_exp)) : cached_ctx_last_lp;
                     cached_ctx_last_prefix_log_z = std::max(cached_ctx_last_lp, prefix_z);
                 } else {
                     cached_ctx_last_prefix_log_z = cached_ctx_last_lp;
@@ -1496,9 +1624,11 @@ struct NeuralEngine::Impl {
                         healed_toks.resize(static_cast<size_t>(max_healed_len));
                     }
                     merged_with_prev = true;
-                    // 单字候选若只合为 1 个 token，直接由 `sum_prefix_log_probs_vec` 零开销涵盖；
-                    // 多字候选或跨 token 重切（如 `也是 + 个 → 也|是个`）插入 `healed_root_id` 子树。
-                    if (!is_single_hanzi || healed_toks.size() >= 2) {
+                    // 单字候选若只合为 1 个 token，在已建立汉字或非汉字前导索引时由零开销前缀和涵盖；
+                    // 其余多字候选、跨 token 重切或未建索引的合并 token 均插入 `healed_root_id` 子树，防止漏算。
+                    const bool covered_by_prefix_sum =
+                        cached_ctx_last_has_han_first || cached_ctx_last_has_non_han_heal;
+                    if (!is_single_hanzi || healed_toks.size() >= 2 || !covered_by_prefix_sum) {
                         int32_t h_cur = healed_root_id;
                         for (size_t d = 0; d < healed_toks.size(); ++d) {
                             h_cur = insert_child(h_cur, healed_toks[d], static_cast<int32_t>(d), true);
@@ -1856,6 +1986,58 @@ struct NeuralEngine::Impl {
                         true);
                     if (raw_heal > -1e8) {
                         lp_heal = raw_heal - cached_ctx_last_prefix_log_z;
+                    }
+                } else if (can_heal && cached_ctx_last_has_non_han_heal) {
+                    auto pit = non_han_hanzi_prefix_tokens.find(cached_ctx_last_token);
+                    if (pit != non_han_hanzi_prefix_tokens.end()) {
+                        auto hit = pit->second.find(cand_single_cp[i]);
+                        if (hit != pit->second.end() && !hit->second.empty()) {
+                            const int32_t prefix_chars = cached_ctx_last_piece_chars + 1;
+                            double max_lp = -1e9;
+                            bool found = false;
+                            for (llama_token tid : hit->second) {
+                                if (tid < 0 || static_cast<size_t>(tid) >= cached_ctx_prev_log_probs.size()) {
+                                    continue;
+                                }
+                                const int32_t tok_chars =
+                                    std::max<int32_t>(prefix_chars, token_char_lens[static_cast<size_t>(tid)]);
+                                const int32_t extra_right = tok_chars - prefix_chars;
+                                const double stop_adj = (extra_right > 0)
+                                    ? (-kSingleCharRightExtStopPenalty *
+                                       static_cast<double>(std::min<int32_t>(extra_right, 3)))
+                                    : 0.0;
+                                const double lp =
+                                    static_cast<double>(cached_ctx_prev_log_probs[static_cast<size_t>(tid)]) + stop_adj;
+                                if (!found || lp > max_lp) {
+                                    max_lp = lp;
+                                    found = true;
+                                }
+                            }
+                            if (found) {
+                                double sum_exp = 0.0;
+                                for (llama_token tid : hit->second) {
+                                    if (tid < 0 || static_cast<size_t>(tid) >= cached_ctx_prev_log_probs.size()) {
+                                        continue;
+                                    }
+                                    const int32_t tok_chars =
+                                        std::max<int32_t>(prefix_chars, token_char_lens[static_cast<size_t>(tid)]);
+                                    const int32_t extra_right = tok_chars - prefix_chars;
+                                    const double stop_adj = (extra_right > 0)
+                                        ? (-kSingleCharRightExtStopPenalty *
+                                           static_cast<double>(std::min<int32_t>(extra_right, 3)))
+                                        : 0.0;
+                                    const double diff =
+                                        (static_cast<double>(cached_ctx_prev_log_probs[static_cast<size_t>(tid)]) +
+                                         stop_adj) -
+                                        max_lp;
+                                    if (diff > -25.0) {
+                                        sum_exp += std::exp(diff);
+                                    }
+                                }
+                                const double raw_heal = max_lp + std::log(std::max(sum_exp, 1e-30));
+                                lp_heal = raw_heal - cached_ctx_last_prefix_log_z;
+                            }
+                        }
                     }
                 }
                 if (h_end > 0 && trie[static_cast<size_t>(h_end)].scored) {

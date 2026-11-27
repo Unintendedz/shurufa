@@ -143,4 +143,4 @@ Status: implemented
   - `crates/engine/tests/golden` 中 40 个强绑定旧 C++ 引擎 `+20` 断崖整数权重快照的历史金标场景已自然偏离新统一概率口径（如 `meiganxi` 由旧版「没干系」升级为「没关系」），后续按需单独刷新金标基线。
   - `overlay.rs` 的 `AppScope` 分桶与宿主全链路现已打通（由 `msime_client_set_app_bundle_id` 仅在内存中映射为 5 个粗粒度场景桶，安全输入/隐私态强制复位为 `general`）；端侧右边界句读闭合校准（`，/。/？/！/\n`）与未测频占位长词 `sentence_words` 回填 / 句内尾词 `.gram` 衔接见 [跨音节吞音恢复、免切换句内混输、AppScope 隔离与右边界句读闭合校准](../feature/2026-11-26-chime-inspired-upgrades-and-boundary-closure.md)。
   - 盲测 `S01`/`S11`/`S13` 仍有 `8%–11%` 的 `search_pruned_miss` 上升空间，后续可通过结合真实体感反馈进一步优化 Tier 0 词库覆盖与 Stage B 束触发率。
-  - 后续演进：多音节中间列扇出限流、`4+2` (`2+1+1`) 首词多样性排座与 `70 ms` Provisional 窗口收敛见 [多音节候选首词多样性、商业级分段前缀直达与生僻字尾收敛](./2026-11-26-candidate-diversity-and-prefix-hierarchy.md)。
+  - 后续演进：多音节中间列扇出限流、`4+2` (`2+1+1`) 首词多样性排座与 `70 ms` Provisional 窗口收敛见 [多音节候选首词多样性、商业级分段前缀直达与生僻字尾收敛](./2026-11-26-candidate-diversity-and-prefix-hierarchy.md)；未测频占位整词组合升格、单字幻影异读护栏与非汉字左边界（空格/标点）BPE Token Healing 见 [未测频占位整词词网格升格、幻影异读单字护栏与非汉字左边界 BPE Token Healing](../bug-fix/2026-11-27-deferred-unmeasured-placeholder-lattice-promotion.md)。
