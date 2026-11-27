@@ -659,7 +659,7 @@ pub fn fuse_neural_response(
             // 未测频占位条目（`weight == 100`，`stat_log_prob == None` 或仅携带词网格分 `stat_from_lattice`）
             // 不代表已测频词典整词先验，避免它对真正有搭配证据的 `.gram`/Tier 0 切分施加 `-1.8 nats` 虚假罚分。
             let has_measured_dict_stat = c.stat_log_prob.is_some() && !c.stat_from_lattice;
-            if (2..=4).contains(&c.char_count) && has_measured_dict_stat {
+            if (2..=5).contains(&c.char_count) && has_measured_dict_stat {
                 exact_dict_len_mask |= 1u8 << c.char_count;
             }
             if c.char_count >= 2 && has_measured_dict_stat {
@@ -714,7 +714,7 @@ pub fn fuse_neural_response(
         };
         observed_min_rel_stat =
             Some(observed_min_rel_stat.map_or(rel_stat, |cur| cur.min(rel_stat)));
-        let has_same_len_exact_dict = (2..=4).contains(&cand.char_count)
+        let has_same_len_exact_dict = (2..=5).contains(&cand.char_count)
             && (exact_dict_len_mask & (1u8 << cand.char_count)) != 0;
         let non_lexical_split_penalty = if has_same_len_exact_dict
             && !is_dict_bucket(cand.source)

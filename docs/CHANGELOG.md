@@ -4,6 +4,10 @@ Shurufa 从水杉输入法 tag `fork-point/msime-2026-10-27` 分出来之后的�
 
 ## 2026-11-27
 
+- **收敛 `stat_log_prob` 重复计分并消除翻页扩容覆写已落定神经排序（`session/candidates.rs`、`neural_v2.rs`、`input-runtime/src/runtime.rs`、`tier1_eval.rs`）**：
+  - 修复 `Runtime::expand_cached_candidates` 在用户翻页或展开全量候选（`all_candidates()`）时用未重排快照覆盖已落定的 Tier 1 `Qwen3-0.6B` 排序与 `InjectedBeam` 束注入项的问题：按 `neural_settled_epoch` 无损保留前排已落定顺序并重绑扩容后最新 `EngineRow` 下标（`417` 例端到端评测 `expand_wiped` 彻底归 `0` 并升级为硬门禁）。
+  - 消除 `Session::neural_v2_metadata` 对词典候选同时向 `stat_log_prob` 与 `collocation_log_prob` 重复累加 `.gram` 搭配分的耦合，同时补齐空上文下 `3+` 字词典短语与合成整句对称的词内尾字 `.gram` 衔接并将成词掩码扩至 `2..=5` 字（`spoken-v1` Tier 1 `Top1/Top6` 进一步升至 `91.7% / 98.3%`、零倒退）。
+
 - **主词库只读校准边车与离线权重重标定管线（`dictionary/calibration.rs`、`dictionary/pinyin.rs`、`lattice/octagram.rs`、`build_lexicon_calibration.rs`、`build-shurufa.sh`、`stage-resources.sh`）**：
   - 新增 `SLXC` v1 只读二进制校准表 `shurufa-lexicon-calibration.bin`（随包置于 `Contents/Resources/language-dictionaries/`，构建期在整库 `70` 万+键值上校验零碰撞 `seed`），由 `PinyinDatabase::open_for_runtime` 在全拼/双拼读边界零分配挂载且自动退让已被用户学习改写的权重，保持 `msime-pinyin.db` 锁哈希与用户代次完全无侵入。
   - 从源头压制 `947` 条 `tbl_1_*` 单字零权方言/讹误幻影（保留 `weight == 1` 合法生僻多音字与 `n/ng -> 嗯`），将 `557` 条非词汇化高权「`X的`」伪词（如 `鱼的`/`雨的`/`到的`，保留 `28` 个已词汇化代词/评价词）降权至 `80`，并基于 `GramDb::exact_phrase_ln_count` 为 `20.8` 万条高频口语 `weight == 100` 短语平滑赋予对数线性权重（`yudedao` 首屏净化为 `#1 遇得到 / #2 欲得到 / #3 于得到 / #4 欲得 / #5 育德`，`spoken-v1` Tier 1 `Top6` 升至 `98.3%`）。

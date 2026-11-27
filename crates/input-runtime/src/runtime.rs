@@ -74,6 +74,8 @@ pub struct Runtime<E: InputEngine = Session> {
     pub(crate) neural_context: String,
     pub(crate) neural_right_context: String,
     pub(crate) neural_pending_request: Option<msime_engine::neural_v2::NeuralDecodeRequest>,
+    /// 当前 `composition_epoch` 下是否已完成 Tier 1 神经响应落定；翻页扩容时据此保留已落定前排顺序与束搜索注入项。
+    pub(crate) neural_settled_epoch: Option<u64>,
     pub(crate) neural_fusion_weights: msime_engine::neural_v2::NeuralFusionWeights,
     pub(crate) presentation_phase: PresentationPhase,
     pub(crate) facts: DispatchFacts,
@@ -755,6 +757,7 @@ impl<E: InputEngine> Runtime<E> {
             neural_context: String::new(),
             neural_right_context: String::new(),
             neural_pending_request: None,
+            neural_settled_epoch: None,
             neural_fusion_weights:
                 msime_engine::neural_v2::NeuralFusionWeights::from_env_or_default(),
             presentation_phase: PresentationPhase::Idle,
@@ -821,6 +824,7 @@ impl<E: InputEngine> Runtime<E> {
         self.neural_v2_enabled = enabled;
         if !enabled {
             self.neural_pending_request = None;
+            self.neural_settled_epoch = None;
             self.presentation_phase = PresentationPhase::Idle;
         }
     }
@@ -1303,6 +1307,7 @@ impl<E: InputEngine> Runtime<E> {
                 generation: self.generation,
             };
             self.neural_pending_request = None;
+            self.neural_settled_epoch = Some(self.composition_epoch);
             return NeuralApplyOutcome {
                 applied: true,
                 moved: true,
@@ -1327,6 +1332,7 @@ impl<E: InputEngine> Runtime<E> {
             };
         }
         self.neural_pending_request = None;
+        self.neural_settled_epoch = Some(self.composition_epoch);
         NeuralApplyOutcome {
             applied: true,
             moved: false,
@@ -1876,6 +1882,8 @@ impl<E: InputEngine> Runtime<E> {
         self.engine.set_rescoring_context(&self.ai_context);
         self.engine.set_app_scope_key(self.app_scope_key);
         self.load_snapshot(cached);
+        self.neural_pending_request = None;
+        self.neural_settled_epoch = None;
         self.snapshot_valid = true;
         self.presentation_phase = PresentationPhase::Idle;
         self.page_size = page_size.into();
@@ -1926,12 +1934,62 @@ impl<E: InputEngine> Runtime<E> {
     }
 
     fn expand_cached_candidates(&mut self) -> Result<bool, RuntimeError> {
+        let settled_prefix: Option<Vec<CandidateEntry>> =
+            (self.neural_settled_epoch == Some(self.composition_epoch)).then(|| {
+                self.cached
+                    .candidates
+                    .iter()
+                    .filter(|entry| !matches!(entry.origin, CandidateOrigin::ProjectedEmoji { .. }))
+                    .cloned()
+                    .collect()
+            });
         if !self.engine.expand_initial_candidates()? {
             return Ok(false);
         }
         let snapshot = self.engine.snapshot()?;
         self.load_snapshot(snapshot);
         self.order_presentation();
+        if let Some(settled) = settled_prefix.filter(|v| !v.is_empty()) {
+            let mut expanded: Vec<Option<CandidateEntry>> =
+                std::mem::take(&mut self.cached.candidates)
+                    .into_iter()
+                    .map(Some)
+                    .collect();
+            let mut merged = Vec::with_capacity(settled.len() + expanded.len());
+            for prev in settled {
+                let match_idx = expanded
+                    .iter()
+                    .position(|slot| {
+                        slot.as_ref()
+                            .is_some_and(|c| c.text == prev.text && c.code == prev.code)
+                    })
+                    .or_else(|| {
+                        expanded
+                            .iter()
+                            .position(|slot| slot.as_ref().is_some_and(|c| c.text == prev.text))
+                    });
+                if let Some(idx) = match_idx {
+                    let mut entry = expanded[idx].take().expect("matched Some slot");
+                    if prev.tier1_neural_log_prob.is_some() {
+                        entry.tier1_neural_log_prob = prev.tier1_neural_log_prob;
+                    }
+                    merged.push(entry);
+                } else if matches!(prev.origin, CandidateOrigin::InjectedBeam) {
+                    merged.push(prev);
+                }
+            }
+            for mut entry in expanded.into_iter().flatten() {
+                if merged
+                    .iter()
+                    .any(|m| m.text == entry.text && m.code == entry.code)
+                {
+                    continue;
+                }
+                entry.stamp_generation(self.generation);
+                merged.push(entry);
+            }
+            self.cached.candidates = merged;
+        }
         self.apply_slot_allocator();
         self.bump_candidates_epoch();
         Ok(true)
@@ -2617,6 +2675,7 @@ impl<E: InputEngine> Runtime<E> {
         self.translations.clear();
         self.highlight_translations.clear();
         self.neural_pending_request = None;
+        self.neural_settled_epoch = None;
         let previous_highlight = self.highlighted;
         self.highlighted = 0;
         let snapshot = match self.engine.snapshot() {

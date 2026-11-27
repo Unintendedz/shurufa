@@ -6325,7 +6325,7 @@ fn unmeasured_dict_placeholder_gets_sentence_tail_collocation_without_mutating_s
         meta_empty.candidates[bing_idx].collocation_log_prob,
     );
 
-    // 4. 对照：已测频词典长词（`weight == 50000`）仍沿用整词搭配并保留 `stat_log_prob` 加成。
+    // 4. 对照：已测频词典长词（`weight == 50000`）按整词查询 `collocation_log_prob`，且 `stat_log_prob` 保持纯词典静态先验不被重复叠加。
     session.command(Command::Cancel);
     type_text(&mut session, "woshibing");
     let snapshot_measured = session.snapshot();
@@ -6343,8 +6343,8 @@ fn unmeasured_dict_placeholder_gets_sentence_tail_collocation_without_mutating_s
     assert!(
         measured_meta
             .stat_log_prob
-            .is_some_and(|s| s > baseline_stat + 1.0),
-        "已测频词典长词应按整词搭配同时叠加 stat_log_prob: {measured_meta:?}"
+            .is_some_and(|s| (s - baseline_stat).abs() < 1e-9),
+        "已测频词典长词 stat_log_prob 应保持纯静态先验，不与 collocation_log_prob 重复计分: {measured_meta:?}"
     );
 }
 

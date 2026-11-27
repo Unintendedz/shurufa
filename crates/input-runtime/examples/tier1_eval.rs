@@ -492,6 +492,12 @@ fn check_gates(results: &[SuiteResult]) -> Vec<String> {
                 suite.name, o.forbidden_hits
             ));
         }
+        if o.expand_wiped > 0 {
+            violations.push(format!(
+                "[{}] all_candidates()/paging wiped settled Tier 1 top1 {} time(s) (expected 0)",
+                suite.name, o.expand_wiped
+            ));
+        }
         if p90 > 120.0 {
             violations.push(format!(
                 "[{}] Tier 1 p90 latency {:.1} ms exceeds 120.0 ms ceiling",

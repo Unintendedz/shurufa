@@ -582,3 +582,115 @@ fn runtime_take_neural_request_rescues_first_deferred_typo_when_pool_has_no_typo
         req.candidates.iter().map(|c| &c.text).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn runtime_expand_all_candidates_preserves_settled_tier1_order_and_injected_beam() {
+    struct ExpandableStubEngine {
+        inner: StubNeuralEngine,
+        expanded: bool,
+    }
+
+    impl InputEngine for ExpandableStubEngine {
+        fn snapshot(&self) -> Result<EngineSnapshot, RuntimeError> {
+            self.inner.snapshot()
+        }
+        fn expand_initial_candidates(&mut self) -> Result<bool, RuntimeError> {
+            if self.expanded {
+                return Ok(false);
+            }
+            self.expanded = true;
+            for idx in 0..8 {
+                let mut tail = CandidateEntry::new(
+                    format!("后排扩充{idx}"),
+                    "ni'hao",
+                    CandidateSource::Database as u8,
+                );
+                tail.origin =
+                    msime_engine::CandidateOrigin::EngineRow(self.inner.snapshot.candidates.len());
+                self.inner.snapshot.candidates.push(tail);
+            }
+            Ok(true)
+        }
+        fn character(&mut self, value: u8, shifted: bool) -> Result<EngineResult, RuntimeError> {
+            self.inner.character(value, shifted)
+        }
+        fn command(&mut self, cmd: Command) -> Result<EngineResult, RuntimeError> {
+            self.inner.command(cmd)
+        }
+        fn select(&mut self, index: usize) -> Result<EngineResult, RuntimeError> {
+            self.inner.select(index)
+        }
+        fn select_edge(
+            &mut self,
+            index: usize,
+            edge: CandidateEdge,
+        ) -> Result<EngineResult, RuntimeError> {
+            self.inner.select_edge(index, edge)
+        }
+        fn finish(&mut self, index: usize) -> Result<EngineResult, RuntimeError> {
+            self.inner.finish(index)
+        }
+        fn punctuation(&mut self, value: u8) -> Result<EngineResult, RuntimeError> {
+            self.inner.punctuation(value)
+        }
+        fn neural_v2_metadata(&self) -> Option<msime_engine::neural_v2::EngineNeuralMetadata> {
+            self.inner.neural_v2_metadata()
+        }
+    }
+
+    let inner = StubNeuralEngine::composing(
+        "nihao",
+        "ni'hao",
+        &[("拟好", true, Some(-6_000)), ("你好", true, Some(-5_500))],
+    );
+    let mut runtime = Runtime::new(
+        ExpandableStubEngine {
+            inner,
+            expanded: false,
+        },
+        6,
+    )
+    .unwrap();
+    runtime.focused = true;
+    runtime.set_neural_v2_enabled(true);
+    runtime.set_surrounding_context("早上见面说");
+
+    let req = runtime.take_neural_request().expect("应生成请求");
+    let outcome = runtime.apply_neural_response(
+        &NeuralDecodeResponse {
+            ok: true,
+            session: req.session,
+            generation: req.generation,
+            candidate_scores: vec![
+                NeuralScoredCandidate {
+                    text: "拟好".into(),
+                    neural_log_prob: -8.5,
+                },
+                NeuralScoredCandidate {
+                    text: "你好".into(),
+                    neural_log_prob: -0.6,
+                },
+            ],
+            beam_candidates: vec![NeuralBeamCandidate {
+                text: "泥好".into(),
+                neural_log_prob: -2.2,
+                path_index: 0,
+                token_count: 2,
+            }],
+        },
+        false,
+    );
+    assert!(outcome.applied && outcome.moved);
+    assert_eq!(runtime.view().candidates[0].text, "你好");
+
+    let expanded = runtime.all_candidates();
+    assert_eq!(expanded.candidates[0].text, "你好");
+    assert!(
+        expanded.candidates.iter().any(|c| c.text == "泥好"),
+        "受限束搜索注入项在翻页扩容后不得丢失"
+    );
+    assert!(
+        expanded.candidates.iter().any(|c| c.text == "后排扩充7"),
+        "翻页扩容后的新增尾项应正常追加"
+    );
+}

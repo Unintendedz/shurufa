@@ -1135,7 +1135,7 @@ impl InputSession {
 
             let stat_from_lattice = item.source == CandidateSource::Database
                 && item.lattice_log_prob_milli_nats.is_some();
-            let mut stat_log_prob = if let Some(ev) = item.static_evidence() {
+            let stat_log_prob = if let Some(ev) = item.static_evidence() {
                 Some(ev.log_prob_milli_nats as f64 / 1000.0)
             } else if item.source.is_dictionary() {
                 if (word_chars >= 3 && item.weight == 100)
@@ -1182,8 +1182,25 @@ impl InputSession {
                     if let Some(capped) =
                         capped_collocation_bonus(&self.engine, scheme, han_clause, &item.word)
                     {
-                        stat_log_prob = stat_log_prob.map(|s| s + capped);
                         collocation_log_prob = COLLOCATION_LOG_PROB_SCALE * capped;
+                    } else if han_clause.is_empty() && word_chars >= 3 {
+                        // 空上文下多字词典短语（如 `我是一个兵`）与 `Generated` 整句（如 `我是一个饼`）对称计算词内尾字 `.gram` 衔接，
+                        // 同时保持 `stat_log_prob` 严格为纯静态词频/词网格先验（不再向 `stat_log_prob` 重复叠加 `.gram`）。
+                        if let Some((split_idx, _)) = item.word.char_indices().next_back() {
+                            if split_idx > 0 && item.word[..split_idx].chars().count() >= 2 {
+                                let inner_prefix =
+                                    crate::text::last_characters(&item.word[..split_idx], 5);
+                                let final_char = &item.word[split_idx..];
+                                if let Some(capped) = capped_collocation_bonus(
+                                    &self.engine,
+                                    scheme,
+                                    inner_prefix,
+                                    final_char,
+                                ) {
+                                    collocation_log_prob = COLLOCATION_LOG_PROB_SCALE * capped;
+                                }
+                            }
+                        }
                     }
                 }
             }

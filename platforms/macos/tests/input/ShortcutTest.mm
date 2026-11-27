@@ -3800,6 +3800,9 @@ static NSUInteger ExpandedGridHighlightedTag(NSPanel *panel) {
 static NSEvent *ExpandedGridScrollEvent(CGFloat delta, NSEventPhase phase = NSEventPhaseChanged,
                                         NSEventPhase momentum = NSEventPhaseNone) {
     CGEventRef cg = CGEventCreateScrollWheelEvent(nullptr, kCGScrollEventUnitPixel, 1, (int32_t)delta);
+    // 固定滚轮事件坐标落在展开视口内，避免宿主真实鼠标停在屏幕别处时被 AppKit 手势命中测试忽略。
+    const CGFloat screenHeight = NSScreen.screens.firstObject ? NSHeight(NSScreen.screens.firstObject.frame) : 900.0;
+    CGEventSetLocation(cg, CGPointMake(40.0, screenHeight - 40.0));
     CGEventSetIntegerValueField(cg, kCGScrollWheelEventIsContinuous, 1);
     CGEventSetDoubleValueField(cg, kCGScrollWheelEventPointDeltaAxis1, delta);
     const int64_t scrollPhase = phase == NSEventPhaseBegan ? 1 : phase == NSEventPhaseChanged ? 2 :
